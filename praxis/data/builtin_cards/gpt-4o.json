@@ -1,0 +1,38 @@
+{
+  "id": "gpt-4o",
+  "family": "gpt",
+  "display_name": "GPT-4o",
+  "vendor": "OpenAI",
+  "tier": "balanced",
+  "context_window_tokens": 128000,
+  "strengths": [
+    "Native multimodal — text, vision, audio",
+    "Mature tool use and JSON mode"
+  ],
+  "weaknesses": [
+    "Older generation; superseded by GPT-5 family for new work"
+  ],
+  "prompting_quirks": [
+    "Image inputs work well with explicit instructions about what to look for",
+    "JSON mode is reliable but stricter than schema-based outputs in GPT-5"
+  ],
+  "best_for": [
+    "Multimodal workflows with images",
+    "Existing pipelines built around 4o where migration cost is high"
+  ],
+  "avoid_for": [
+    "New projects — GPT-5 mini is usually a better starting point"
+  ],
+  "notes": "Still useful for vision and existing pipelines.",
+  "sources": [
+    "https://platform.openai.com/docs/models/gpt-4o",
+    "https://openai.com/api/pricing/"
+  ],
+  "aliases": ["gpt-4o", "gpt-4o-2024", "gpt4o"],
+  "version": "1.0",
+  "input_per_million_usd": 2.5,
+  "output_per_million_usd": 10.0,
+  "pricing_last_verified": "2026-01-15",
+  "pricing_source": "https://openai.com/api/pricing/",
+  "pricing_notes": "Standard rate. Image inputs are billed separately based on tile count. Audio (4o-audio variants) is priced differently."
+}

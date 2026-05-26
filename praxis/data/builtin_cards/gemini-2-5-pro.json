@@ -1,0 +1,41 @@
+{
+  "id": "gemini-2-5-pro",
+  "family": "gemini",
+  "display_name": "Gemini 2.5 Pro",
+  "vendor": "Google",
+  "tier": "frontier",
+  "context_window_tokens": 1000000,
+  "strengths": [
+    "Very large context window — strong for whole-codebase or long-document reads",
+    "Native multimodal across text, image, audio, video"
+  ],
+  "weaknesses": [
+    "Tool use ergonomics differ from Anthropic/OpenAI patterns",
+    "Less mature ecosystem of structured-output libraries"
+  ],
+  "prompting_quirks": [
+    "Lean into the long context — feed whole repos, full transcripts",
+    "Function calling syntax differs; check Google AI docs",
+    "Performance on very long contexts is the differentiator"
+  ],
+  "best_for": [
+    "Long-document analysis at scale",
+    "Multimodal pipelines where video or audio is in scope",
+    "Whole-repo questions when you can't easily slice the context"
+  ],
+  "avoid_for": [
+    "Workflows where Anthropic/OpenAI tool patterns are already baked in"
+  ],
+  "notes": "The long-context specialist.",
+  "sources": [
+    "https://ai.google.dev/gemini-api/docs/models",
+    "https://ai.google.dev/pricing"
+  ],
+  "aliases": ["gemini-2-5-pro", "gemini-2.5-pro", "gemini-pro"],
+  "version": "1.0",
+  "input_per_million_usd": 1.25,
+  "output_per_million_usd": 10.0,
+  "pricing_last_verified": "2026-01-15",
+  "pricing_source": "https://ai.google.dev/pricing",
+  "pricing_notes": "Two-tier pricing: above 200k input tokens, input rises to ~$2.50/M and output to ~$15/M. Numbers shown are the lower tier. Verify on the pricing page."
+}

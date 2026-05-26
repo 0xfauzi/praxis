@@ -1,0 +1,48 @@
+{
+  "id": "claude-opus-4-7",
+  "family": "claude",
+  "display_name": "Claude Opus 4.7",
+  "vendor": "Anthropic",
+  "tier": "frontier",
+  "context_window_tokens": 200000,
+  "strengths": [
+    "Long-horizon agentic coding and multi-step planning",
+    "Nuanced reasoning across large codebases",
+    "Following detailed XML-structured prompts precisely",
+    "Self-critique and iterative refinement when asked"
+  ],
+  "weaknesses": [
+    "Can over-explain — may produce more prose than needed without instruction",
+    "Higher cost per token; not the right pick for high-volume cheap calls",
+    "Tendency toward thoroughness can slow latency-sensitive flows"
+  ],
+  "prompting_quirks": [
+    "Responds particularly well to XML tags for structured input (e.g. <document>, <instructions>)",
+    "Asking for chain-of-thought explicitly improves hard-reasoning tasks",
+    "Performs best when given an explicit role and acceptance criteria",
+    "Will push back honestly if asked; treat it as a colleague, not a yes-man"
+  ],
+  "best_for": [
+    "Architecture decisions and system design reviews",
+    "Agentic coding (Claude Code) — multi-file refactors, debugging at scale",
+    "Long-document analysis (RFCs, contracts, research papers)",
+    "Tasks where being wrong has high cost"
+  ],
+  "avoid_for": [
+    "Bulk classification or simple extraction (use Haiku or a smaller model)",
+    "Latency-critical interactive UIs without streaming",
+    "Single-line completions where a fast cheap model suffices"
+  ],
+  "notes": "The frontier model in the Claude 4 family. Treat it as a senior collaborator: it benefits from context, planning, and pushback, and is worth waiting for on hard problems.",
+  "sources": [
+    "https://docs.claude.com/en/docs/about-claude/models/overview",
+    "https://www.anthropic.com/pricing#api"
+  ],
+  "aliases": ["claude-opus-4-7", "claude-opus-4.7", "opus-4-7", "claude-opus", "claude-opus-4"],
+  "version": "1.0",
+  "input_per_million_usd": 15.0,
+  "output_per_million_usd": 75.0,
+  "pricing_last_verified": "2026-01-15",
+  "pricing_source": "https://www.anthropic.com/pricing#api",
+  "pricing_notes": "Standard rate. Prompt caching can reduce input cost ~90% on cached content; batch API ~50% off. Verify before using for budget planning."
+}

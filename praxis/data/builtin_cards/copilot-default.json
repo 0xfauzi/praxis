@@ -1,0 +1,41 @@
+{
+  "id": "copilot-default",
+  "family": "copilot",
+  "display_name": "GitHub Copilot Chat (default)",
+  "vendor": "GitHub / Microsoft",
+  "tier": "balanced",
+  "context_window_tokens": 128000,
+  "strengths": [
+    "Tight IDE integration — sees your open file and project context automatically",
+    "Strong for in-line code completion and quick fixes"
+  ],
+  "weaknesses": [
+    "Context window varies by model selection; less control than direct API",
+    "Behaviour shifts when GitHub updates the underlying model"
+  ],
+  "prompting_quirks": [
+    "Use #file, #selection, and other Copilot context references explicitly",
+    "Switching the underlying model (Claude / GPT options) materially changes behavior",
+    "Workspace indexing improves answers — invest in it for larger repos"
+  ],
+  "best_for": [
+    "In-editor completions and short refactors",
+    "Quick questions about the file in front of you"
+  ],
+  "avoid_for": [
+    "Long-horizon planning or multi-file architecture changes (use Claude Code or Codex CLI)",
+    "Anything where you need a stable, named model version"
+  ],
+  "notes": "Copilot routes to different underlying models. Check which model is configured — your scorecard will reflect the model in use, not an abstract 'Copilot' baseline.",
+  "sources": [
+    "https://docs.github.com/en/copilot",
+    "https://github.com/features/copilot/plans"
+  ],
+  "aliases": ["copilot", "github-copilot", "copilot-chat"],
+  "version": "1.0",
+  "input_per_million_usd": null,
+  "output_per_million_usd": null,
+  "pricing_last_verified": "2026-01-15",
+  "pricing_source": "https://github.com/features/copilot/plans",
+  "pricing_notes": "Subscription-based, not per-token. Plans (Free/Pro/Pro+/Business/Enterprise) vary by monthly request quota; cost per prompt depends on plan and underlying model. Use vendor pricing page for current rates."
+}

@@ -1,0 +1,41 @@
+{
+  "id": "claude-haiku-4-5",
+  "family": "claude",
+  "display_name": "Claude Haiku 4.5",
+  "vendor": "Anthropic",
+  "tier": "fast",
+  "context_window_tokens": 200000,
+  "strengths": [
+    "Very fast and cheap per token",
+    "Strong for classification, extraction, summarization at volume"
+  ],
+  "weaknesses": [
+    "Less capable on complex multi-step reasoning",
+    "Less robust agentic behavior than Sonnet/Opus"
+  ],
+  "prompting_quirks": [
+    "Keep prompts focused and specific — it does less heavy lifting on ambiguity",
+    "Few-shot examples particularly helpful for classification tasks"
+  ],
+  "best_for": [
+    "High-volume classification and extraction",
+    "Real-time UI helpers where latency matters",
+    "First-pass triage before escalating to a larger model"
+  ],
+  "avoid_for": [
+    "Architecture decisions or complex code generation",
+    "Tasks requiring chain-of-thought across many steps"
+  ],
+  "notes": "The fast tier. Use it for the 80% of calls that don't need a frontier model.",
+  "sources": [
+    "https://docs.claude.com/en/docs/about-claude/models/overview",
+    "https://www.anthropic.com/pricing#api"
+  ],
+  "aliases": ["claude-haiku-4-5", "claude-haiku-4.5", "haiku-4-5", "claude-haiku"],
+  "version": "1.0",
+  "input_per_million_usd": 1.0,
+  "output_per_million_usd": 5.0,
+  "pricing_last_verified": "2026-01-15",
+  "pricing_source": "https://www.anthropic.com/pricing#api",
+  "pricing_notes": "Standard rate. Verify before budgeting — rate may have shifted since Haiku 4.5 launch."
+}

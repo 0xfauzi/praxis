@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "praxis"
+version = "0.1.0"
+description = "Reads your Claude, Codex, and Copilot chat history and coaches you on how to use AI better."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "Praxis"}]
+license = {text = "Proprietary"}
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: End Users/Desktop",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+  "anthropic>=0.40.0",
+  "openai>=1.40.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+praxis = "praxis.cli.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["praxis*"]
+
+[tool.setuptools.package-data]
+praxis = ["data/builtin_cards/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"

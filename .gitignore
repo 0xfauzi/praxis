@@ -1,0 +1,35 @@
+# env + secrets
+.env
+.env.*
+!.env.example
+
+# Python build artifacts
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# macOS
+.DS_Store
+
+# Praxis runtime data
+synthetic_chat_home/
+*.db
+*.db-journal
+
+# Praxis HTML reports (generated)
+report.html
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# Claude Code session permission cache (machine-local, regenerated)
+.claude/settings.local.json

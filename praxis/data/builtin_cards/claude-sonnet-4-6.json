@@ -1,0 +1,43 @@
+{
+  "id": "claude-sonnet-4-6",
+  "family": "claude",
+  "display_name": "Claude Sonnet 4.6",
+  "vendor": "Anthropic",
+  "tier": "balanced",
+  "context_window_tokens": 200000,
+  "strengths": [
+    "Strong reasoning at a fraction of Opus cost",
+    "Good for production coding agents with cost constraints",
+    "Reliable structured output and tool use"
+  ],
+  "weaknesses": [
+    "Less robust on very long-horizon agentic tasks than Opus",
+    "Can miss subtle nuances Opus would catch on hard reasoning"
+  ],
+  "prompting_quirks": [
+    "XML structuring helps as with Opus",
+    "Benefits from explicit acceptance criteria",
+    "Good fit for parallel sub-agent patterns where many calls happen"
+  ],
+  "best_for": [
+    "Day-to-day coding assistance",
+    "Production AI features where cost matters",
+    "Sub-agents and parallel tool-using workflows"
+  ],
+  "avoid_for": [
+    "Tasks requiring the absolute best reasoning available",
+    "Novel research-grade problem-solving"
+  ],
+  "notes": "The workhorse tier. Most production Claude deployments live here.",
+  "sources": [
+    "https://docs.claude.com/en/docs/about-claude/models/overview",
+    "https://www.anthropic.com/pricing#api"
+  ],
+  "aliases": ["claude-sonnet-4-6", "claude-sonnet-4.6", "sonnet-4-6", "claude-sonnet", "claude-sonnet-4"],
+  "version": "1.0",
+  "input_per_million_usd": 3.0,
+  "output_per_million_usd": 15.0,
+  "pricing_last_verified": "2026-01-15",
+  "pricing_source": "https://www.anthropic.com/pricing#api",
+  "pricing_notes": "Standard rate. Prompt caching and batch discounts available."
+}
