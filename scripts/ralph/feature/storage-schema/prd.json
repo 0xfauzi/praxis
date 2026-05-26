@@ -1,0 +1,65 @@
+{
+  "branchName": "ralph/factory/storage-schema",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Create v0.2 tables and indexes",
+      "acceptanceCriteria": [
+        "moments table created with all columns per Section 14 including CHECK on severity",
+        "tasks table created with CHECK on label_source ('llm','fallback')",
+        "task_members table created with FK to tasks(task_id) ON DELETE CASCADE",
+        "weekly_digests table created with FK headline_moment_id REFERENCES moments(moment_id)",
+        "follow_ups table created with CHECK on outcome ('improved','unchanged','worse','pending')",
+        "idx_moments_session and idx_moments_created indexes exist after migration",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Drop daily_consolidations, keep session_scores and run_log",
+      "acceptanceCriteria": [
+        "daily_consolidations table no longer exists after first v0.2 run",
+        "session_scores table is unchanged in schema and row count",
+        "run_log table is unchanged in schema and row count",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Record schema_version=2 in run_log and make migration one-shot",
+      "acceptanceCriteria": [
+        "After successful migration a run_log row records schema_version=2",
+        "Re-running migration when schema_version=2 is already present is a no-op (no DDL executed)",
+        "Migration is detected from existing schema, not from a config flag",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Backup DB before migration; non-zero exit on partial failure",
+      "acceptanceCriteria": [
+        "Before any DDL runs, the live DB file is copied to a timestamped backup path",
+        "If any migration step fails, process exits with non-zero code",
+        "Failure message prints the absolute path of the backup file",
+        "DB is never left in a half-migrated state (transaction rolled back or restored from backup)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

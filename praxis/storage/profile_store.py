@@ -75,6 +75,64 @@ CREATE TABLE IF NOT EXISTS run_log (
     sessions_new INTEGER NOT NULL,
     notes TEXT
 );
+
+CREATE TABLE IF NOT EXISTS moments (
+    moment_id TEXT PRIMARY KEY,
+    session_stable_id TEXT NOT NULL,
+    dim_key TEXT NOT NULL,
+    turn_index INTEGER NOT NULL,
+    quoted_excerpt TEXT NOT NULL,
+    why_it_lost_score TEXT NOT NULL,
+    suggested_alternative TEXT NOT NULL,
+    dollar_impact_estimate REAL,
+    minutes_impact_estimate INTEGER,
+    severity TEXT NOT NULL CHECK (severity IN ('minor','moderate','major')),
+    created_at TEXT NOT NULL,
+    redacted INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_moments_session ON moments(session_stable_id);
+CREATE INDEX IF NOT EXISTS idx_moments_created ON moments(created_at);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    task_id TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    task_type TEXT NOT NULL,
+    project_hint TEXT,
+    started_at TEXT NOT NULL,
+    ended_at TEXT NOT NULL,
+    session_count INTEGER NOT NULL,
+    total_cost_estimate_usd REAL,
+    label_source TEXT NOT NULL CHECK (label_source IN ('llm','fallback'))
+);
+
+CREATE TABLE IF NOT EXISTS task_members (
+    task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+    session_stable_id TEXT NOT NULL,
+    PRIMARY KEY (task_id, session_stable_id)
+);
+
+CREATE TABLE IF NOT EXISTS weekly_digests (
+    week_iso TEXT PRIMARY KEY,
+    generated_at TEXT NOT NULL,
+    trajectory_label TEXT NOT NULL,
+    trajectory_headline TEXT NOT NULL,
+    headline_moment_id TEXT REFERENCES moments(moment_id),
+    cost_total_usd REAL,
+    cost_baseline_usd REAL,
+    snapshot_json TEXT NOT NULL,
+    html_path TEXT
+);
+
+CREATE TABLE IF NOT EXISTS follow_ups (
+    week_iso TEXT PRIMARY KEY,
+    dim_key TEXT NOT NULL,
+    commitment_text TEXT NOT NULL,
+    target_metric TEXT NOT NULL,
+    baseline_value REAL NOT NULL,
+    measured_value REAL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('improved','unchanged','worse','pending'))
+);
 """
 
 
