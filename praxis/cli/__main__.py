@@ -15,6 +15,7 @@ import webbrowser
 from pathlib import Path
 
 from praxis import __version__
+from praxis.config import ensure_config_file
 from praxis.orchestrator import run
 from praxis.reports.html_report import render as render_html
 from praxis.reports.terminal import render as render_terminal
@@ -268,6 +269,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    ensure_config_file()
     return args.func(args)
 
 
