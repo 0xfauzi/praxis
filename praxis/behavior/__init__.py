@@ -6,6 +6,14 @@ from praxis.behavior.trajectory import (
     TrajectoryLabel,
     assess,
 )
+from praxis.behavior.slope import (
+    SIGNIFICANCE_MIN_SLOPE_PER_WEEK,
+    SIGNIFICANCE_STDERR_MULTIPLIER,
+    SlopeFit,
+    WeeklyTrajectoryFit,
+    fit_metric,
+    fit_weekly_trajectory,
+)
 from praxis.behavior.weekly import (
     DEFAULT_WINDOW_DAYS,
     MIN_SESSIONS_FOR_FIT,
@@ -29,4 +37,10 @@ __all__ = [
     "bucket_sessions_by_iso_week",
     "iso_week_start",
     "iso_week_tag",
+    "SIGNIFICANCE_MIN_SLOPE_PER_WEEK",
+    "SIGNIFICANCE_STDERR_MULTIPLIER",
+    "SlopeFit",
+    "WeeklyTrajectoryFit",
+    "fit_metric",
+    "fit_weekly_trajectory",
 ]
