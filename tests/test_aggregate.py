@@ -1,18 +1,13 @@
 """Tests for score aggregation.
 
-Spec 9.6:
-  - _blend(heuristic, None) returns heuristic unchanged
-  - _blend(heuristic, judge) respects 0.3h + 0.7j
-  - _weighted_overall of all-5s returns 5.0 within float epsilon
-  - ProfileSnapshot.from_scores([]) returns valid empty snapshot
+The heuristic decision path (US-012) has been removed: the LLM judge is
+now the only source of dimension scores. These tests cover the remaining
+shape of the pipeline.
 """
 from __future__ import annotations
 
 from praxis.scoring.aggregate import (
-    HEURISTIC_WEIGHT,
-    JUDGE_WEIGHT,
     ProfileSnapshot,
-    _blend,
     _weighted_overall,
 )
 from praxis.scoring.rubric import RUBRIC
@@ -20,24 +15,6 @@ from praxis.scoring.rubric import RUBRIC
 
 def _all_keys(value: float) -> dict[str, float]:
     return {d.key: value for d in RUBRIC}
-
-
-def test_blend_no_judge_returns_heuristic():
-    h = _all_keys(3.0)
-    result = _blend(h, None)
-    assert result == h
-    # Should be a copy, not the same dict.
-    h["planning"] = 99.0
-    assert result["planning"] == 3.0
-
-
-def test_blend_with_judge_respects_weights():
-    h = _all_keys(2.0)
-    j = _all_keys(8.0)
-    result = _blend(h, j)
-    expected = HEURISTIC_WEIGHT * 2.0 + JUDGE_WEIGHT * 8.0
-    for v in result.values():
-        assert abs(v - expected) < 1e-9
 
 
 def test_weighted_overall_of_fives_is_five():

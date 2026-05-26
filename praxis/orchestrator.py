@@ -68,7 +68,6 @@ def _gather_sessions(since_days: int | None = None) -> list[Session]:
 
 
 def run(
-    use_judge: bool = True,
     since_days: int | None = 30,
     max_new_scored: int = 50,
     force_consolidate: bool = False,
@@ -76,7 +75,6 @@ def run(
     """Full pipeline. Idempotent: re-running won't re-score known sessions.
 
     Args:
-        use_judge: If True, call the LLM judge. If False, heuristics only.
         since_days: Only consider session files modified in the last N days.
         max_new_scored: Cap on how many newly-discovered sessions get the
             judge treatment in one run (protects API budgets).
@@ -88,8 +86,6 @@ def run(
 
     sessions = _gather_sessions(since_days=since_days)
     # Filter out sessions with no user turns (system-only / tool-only files).
-    # These would otherwise score 0.6/10 via the fit=5.0 fixed baseline, which
-    # drags the snapshot dimension means without representing real usage.
     sessions = [s for s in sessions if s.user_turns]
     new_sessions = [s for s in sessions if not store.has_session(s.stable_id)]
 
@@ -98,7 +94,11 @@ def run(
     to_score = new_sessions[:max_new_scored]
     scored_count = 0
     for session in to_score:
-        score = score_one_session(session, use_judge=use_judge)
+        score = score_one_session(session)
+        if score is None:
+            # No judge available (no API keys, or judge errored) - skip the
+            # session rather than substituting a fallback score.
+            continue
         store.save_session_score(score)
         scored_count += 1
 
@@ -148,7 +148,7 @@ def run(
         (s, extract_signals(s)) for s in sessions_in_window
     ]
 
-    trajectory = assess_trajectory(sessions_with_signals, prefer_llm=use_judge)
+    trajectory = assess_trajectory(sessions_with_signals)
 
     # Join behavior signals with this run's score rows so the model advisor
     # has overall scores per session where available.
@@ -156,10 +156,10 @@ def run(
     enriched_for_models: list[tuple[Session, BehavioralSignals, float | None]] = [
         (s, sig, score_by_stable_id.get(s.stable_id)) for s, sig in sessions_with_signals
     ]
-    model_profiles = build_profiles(enriched_for_models, use_llm=use_judge)
+    model_profiles = build_profiles(enriched_for_models)
 
     store.log_run(
-        kind="full" if use_judge else "heuristic",
+        kind="full",
         sessions_seen=len(sessions),
         sessions_new=len(new_sessions),
         notes=f"scored={scored_count}, consolidated={'y' if should_consolidate else 'n'}, "
@@ -190,18 +190,20 @@ def _snapshot_from_rows(rows: list[dict]) -> ProfileSnapshot:
     from praxis.scoring.judge import JudgeResult
 
     for row in rows:
+        if not row["judge_result"]:
+            # Sessions can only be persisted via the judge path; rows missing
+            # a judge result come from earlier builds and are not scoreable.
+            continue
         features = HeuristicFeatures(**row["features"])
-        judge: JudgeResult | None = None
-        if row["judge_result"]:
-            jr = row["judge_result"]
-            judge = JudgeResult(
-                dimension_scores=jr["dimension_scores"],
-                rationale=jr.get("rationale", {}),
-                standout_moments=jr.get("standout_moments", []),
-                failure_modes=jr.get("failure_modes", []),
-                overall_note=jr.get("overall_note", ""),
-                judge_model=jr.get("judge_model", ""),
-            )
+        jr = row["judge_result"]
+        judge = JudgeResult(
+            dimension_scores=jr["dimension_scores"],
+            rationale=jr.get("rationale", {}),
+            standout_moments=jr.get("standout_moments", []),
+            failure_modes=jr.get("failure_modes", []),
+            overall_note=jr.get("overall_note", ""),
+            judge_model=jr.get("judge_model", ""),
+        )
         scores.append(
             SessionScore(
                 session_stable_id=row["stable_id"],
@@ -209,7 +211,6 @@ def _snapshot_from_rows(rows: list[dict]) -> ProfileSnapshot:
                 started_at=datetime.fromisoformat(row["started_at"]),
                 dimension_scores=row["dimension_scores"],
                 overall=row["overall"],
-                heuristic_scores=row["heuristic_scores"],
                 judge_result=judge,
                 features=features,
                 source_path=row["source_path"],

@@ -24,7 +24,6 @@ from praxis.storage.profile_store import ProfileStore, resolve_home
 
 def cmd_scan(args: argparse.Namespace) -> int:
     summary = run(
-        use_judge=not args.no_judge,
         since_days=args.since_days,
         max_new_scored=args.max_new,
         force_consolidate=args.force_consolidate,
@@ -229,8 +228,6 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     scan = sub.add_parser("scan", help="Scan, score, and consolidate.")
-    scan.add_argument("--no-judge", action="store_true",
-                      help="Skip LLM judge calls; use heuristics only.")
     scan.add_argument("--since-days", type=int, default=30,
                       help="Only consider session files modified in the last N days.")
     scan.add_argument("--max-new", type=int, default=50,

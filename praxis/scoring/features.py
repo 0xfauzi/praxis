@@ -1,15 +1,16 @@
 """Heuristic feature extraction.
 
-Cheap signals computed without any API calls. They give us a baseline
-score that the LLM judge can refine. They also let us run the scorecard
-on machines where API keys aren't configured.
+Cheap signals computed without any API calls. These are inputs and
+metadata about a session (turn counts, marker hits, tool usage) -
+they are NOT scores or coaching decisions. The LLM judge owns
+scoring; this module owns the numbers the judge can be told about.
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 
-from praxis.models import Role, Session
+from praxis.models import Session
 
 
 # Patterns chosen for precision over recall — we'd rather miss a planning
@@ -113,39 +114,3 @@ def extract(session: Session) -> HeuristicFeatures:
         has_multi_turn=len(user_turns) >= 2,
         avg_context_richness=richness,
     )
-
-
-def heuristic_dimension_scores(features: HeuristicFeatures) -> dict[str, float]:
-    """Convert features into 0-10 scores per rubric dimension.
-
-    These are deliberately conservative — they cap at 7/10 so the LLM
-    judge has room to award the top tier based on quality, not just
-    presence of markers.
-    """
-
-    def clip(value: float, ceiling: float = 7.0) -> float:
-        return max(0.0, min(ceiling, value))
-
-    planning = clip(features.planning_density * 14.0)  # density of 0.5 -> 7.0
-    context = clip(features.avg_context_richness * 10.0)
-    # Multi-turn alone isn't iteration; require at least one iteration marker
-    # before crediting the multi-turn bonus. Otherwise a 4-turn chat where the
-    # user never pushed back gets a free +2.0 — exactly the kind of inflation
-    # the spec called out for the heuristic to avoid.
-    multi_turn_bonus = 2.0 if (features.has_multi_turn and features.iteration_rate > 0) else 0.0
-    iteration = clip(features.iteration_rate * 10.0 + multi_turn_bonus)
-    tools = clip(
-        min(7.0, features.tool_call_count / 2.0) + min(2.0, features.distinct_tools)
-    )
-    # Model fit can't be inferred from one session alone; neutral baseline.
-    fit = 5.0
-    verification = clip(features.verification_rate * 14.0)
-
-    return {
-        "planning": planning,
-        "context": context,
-        "iteration": iteration,
-        "tools": tools,
-        "fit": fit,
-        "verification": verification,
-    }

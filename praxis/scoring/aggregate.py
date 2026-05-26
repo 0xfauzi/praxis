@@ -1,13 +1,9 @@
 """Score aggregation.
 
-Combines heuristic and LLM-judge scores for one session, then rolls
-session scores up into daily, weekly, and overall profiles.
-
-Weighting choice: when the judge is available, judge weights are 0.7
-and heuristics 0.3 — judges catch nuance heuristics can't, but
-heuristics catch volume signals judges may miss with a truncated
-transcript. When no judge is available, heuristics carry the full
-weight.
+Wraps the LLM judge's per-session dimension scores into a SessionScore
+and rolls session scores up into daily, weekly, and overall profiles.
+The judge is the sole source of dimension scores; sessions that can't
+be judged (no API keys, judge errors) are not scored at all.
 """
 from __future__ import annotations
 
@@ -16,17 +12,9 @@ from datetime import datetime
 from statistics import mean
 
 from praxis.models import Session
-from praxis.scoring.features import (
-    HeuristicFeatures,
-    extract,
-    heuristic_dimension_scores,
-)
+from praxis.scoring.features import HeuristicFeatures, extract
 from praxis.scoring.judge import JudgeResult, score_session
 from praxis.scoring.rubric import RUBRIC
-
-
-JUDGE_WEIGHT = 0.7
-HEURISTIC_WEIGHT = 0.3
 
 
 @dataclass
@@ -34,25 +22,11 @@ class SessionScore:
     session_stable_id: str
     provider: str
     started_at: datetime
-    dimension_scores: dict[str, float]  # final blended 0-10
+    dimension_scores: dict[str, float]  # 0-10 per rubric dimension, from the judge
     overall: float                      # weighted /10
-    heuristic_scores: dict[str, float]
-    judge_result: JudgeResult | None
+    judge_result: JudgeResult
     features: HeuristicFeatures
     source_path: str
-
-
-def _blend(
-    heuristic: dict[str, float], judge: dict[str, float] | None
-) -> dict[str, float]:
-    if judge is None:
-        return dict(heuristic)
-    blended: dict[str, float] = {}
-    for d in RUBRIC:
-        h = heuristic.get(d.key, 5.0)
-        j = judge.get(d.key, h)
-        blended[d.key] = HEURISTIC_WEIGHT * h + JUDGE_WEIGHT * j
-    return blended
 
 
 def _weighted_overall(dimension_scores: dict[str, float]) -> float:
@@ -62,21 +36,25 @@ def _weighted_overall(dimension_scores: dict[str, float]) -> float:
     return round(total, 2)
 
 
-def score_one_session(session: Session, use_judge: bool = True) -> SessionScore:
+def score_one_session(session: Session) -> SessionScore | None:
+    """Score one session via the LLM judge.
+
+    Returns None if no judge is available (no API keys configured, or all
+    configured judges errored). Callers should treat None as "skip this
+    session" rather than substituting a default.
+    """
+    judge = score_session(session)
+    if judge is None:
+        return None
     features = extract(session)
-    heuristic = heuristic_dimension_scores(features)
-    judge: JudgeResult | None = None
-    if use_judge:
-        judge = score_session(session)
-    blended = _blend(heuristic, judge.dimension_scores if judge else None)
-    overall = _weighted_overall(blended)
+    dimension_scores = {d.key: judge.dimension_scores.get(d.key, 5.0) for d in RUBRIC}
+    overall = _weighted_overall(dimension_scores)
     return SessionScore(
         session_stable_id=session.stable_id,
         provider=session.provider.value,
         started_at=session.started_at,
-        dimension_scores=blended,
+        dimension_scores=dimension_scores,
         overall=overall,
-        heuristic_scores=heuristic,
         judge_result=judge,
         features=features,
         source_path=session.source_path,
