@@ -24,8 +24,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "_GENERIC_LABELED_SECRET regex: `(?i)(\\b(?:key|token|secret|password)\\b\\W*)[A-Za-z0-9_\\-]{20,}` with replacement `\\1[REDACTED]` keeps the label and separator and redacts only the tail. _PROVIDER_PATTERNS was generalized to _PATTERNS as a tuple of (pattern, replacement) pairs so the labeled-secret entry can carry its own backref-using replacement and still run inside the single fold in redact_secrets()."
     },
     {
       "id": "US-011",

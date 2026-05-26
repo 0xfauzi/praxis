@@ -41,13 +41,31 @@ _GITHUB_PAT = re.compile(
 # header) so we don't redact random dotted identifiers.
 _JWT = re.compile(r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+")
 
+# Labeled secret tails: a >= 20 char [A-Za-z0-9_-] sequence that
+# follows the literal word "key", "token", "secret", or "password"
+# (case-insensitive). `\b...\b` keeps us from matching the literal
+# inside a larger identifier like `keyboard`. `\W*` allows the
+# common separators (`=`, `:`, space, quotes, ...) between label
+# and value while still requiring the high-entropy tail to start
+# close to the label -- intervening English words like "is" break
+# `\W*` and so disqualify the match. The value class deliberately
+# excludes `[` and `]`, so an existing `[REDACTED]` marker can't
+# satisfy the {20,} length and a second pass is a no-op.
+_GENERIC_LABELED_SECRET = re.compile(
+    r"(?i)(\b(?:key|token|secret|password)\b\W*)[A-Za-z0-9_\-]{20,}"
+)
 
-_PROVIDER_PATTERNS: tuple[re.Pattern[str], ...] = (
-    _ANTHROPIC,
-    _OPENAI,
-    _AWS_ACCESS_KEY,
-    _GITHUB_PAT,
-    _JWT,
+
+# Each entry is (pattern, replacement) for re.sub. Provider patterns
+# redact the whole match; the labeled-secret pattern uses \1 to keep
+# the label + separator and redact only the high-entropy tail.
+_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (_ANTHROPIC, PLACEHOLDER),
+    (_OPENAI, PLACEHOLDER),
+    (_AWS_ACCESS_KEY, PLACEHOLDER),
+    (_GITHUB_PAT, PLACEHOLDER),
+    (_JWT, PLACEHOLDER),
+    (_GENERIC_LABELED_SECRET, r"\1" + PLACEHOLDER),
 )
 
 
@@ -55,9 +73,11 @@ def redact_secrets(text: str) -> str:
     """Replace known secret formats with [REDACTED].
 
     Covers Anthropic API keys, OpenAI API keys, AWS access key IDs,
-    GitHub personal access tokens, and JWT-shaped tokens. Safe to
-    call on already-redacted strings.
+    GitHub personal access tokens, JWT-shaped tokens, and any >= 20
+    character alnum/underscore/hyphen tail that follows a "key",
+    "token", "secret", or "password" label. Safe to call on
+    already-redacted strings.
     """
-    for pattern in _PROVIDER_PATTERNS:
-        text = pattern.sub(PLACEHOLDER, text)
+    for pattern, replacement in _PATTERNS:
+        text = pattern.sub(replacement, text)
     return text

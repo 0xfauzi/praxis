@@ -14,3 +14,16 @@
   - The codebase has no top-level mypy config in pyproject.toml. I interpreted "typecheck passes" as "new files have zero mypy errors" and verified that explicitly. Use the same standard for US-010/US-011.
   - Test file naming convention is test_*.py at tests/ (see pyproject.toml [tool.pytest.ini_options]); follow that for the next two stories.
 ---
+## Iteration 2 - US-010: Redact generic secret-like substrings
+- What I did: Added _GENERIC_LABELED_SECRET regex `(?i)(\b(?:key|token|secret|password)\b\W*)[A-Za-z0-9_\-]{20,}` to praxis/redactor.py and wired it into the redaction pipeline with replacement `\1[REDACTED]` so the label + separator survive and only the high-entropy tail is redacted. Generalized _PROVIDER_PATTERNS into _PATTERNS as a tuple of (pattern, replacement) pairs so the new entry can carry its own backref-using replacement while redact_secrets() remains a single fold. Added 9 tests covering all four labels (key/token/secret/password), case-insensitive matching, short-value non-match, label-inside-word non-match, intervening-word non-match, and a self-test that two passes produce the same output.
+- Files changed: praxis/redactor.py, tests/test_redactor.py, scripts/ralph/feature/secret-redaction/prd.json (US-010 -> passes:true).
+- Verification:
+  - uv run pytest -q  -> 54 passed (was 45; +9 new US-010 tests).
+  - uv run mypy praxis/redactor.py tests/test_redactor.py  -> Success: no issues.
+  - uv run mypy praxis  -> still 34 pre-existing errors in 6 files, zero new.
+- What the next iteration should know:
+  - Module-level pattern list is now `_PATTERNS: tuple[tuple[re.Pattern[str], str], ...]` (not `_PROVIDER_PATTERNS`). If US-011 wants to add another rule, append `(compiled_pattern, replacement_string)` to this tuple; the replacement may contain backrefs.
+  - Idempotence (US-011) is already de facto preserved: provider regexes have no `[` in their char classes, and the new _GENERIC_LABELED_SECRET value class also excludes `[` (and the {20,} length defeats the 8-char `REDACTED` body), so a second pass over `[REDACTED]` cannot match. Verified by test_generic_does_not_re_redact_placeholder. US-011 should add an explicit `redact_secrets(redact_secrets(x)) == redact_secrets(x)` test (and probably one with multiple secret types in the same string) to lock this in, but no code change is needed unless that test fails.
+  - The labeled-secret regex uses `\W*` (zero-or-more non-word chars) as the separator. This deliberately includes `\n`, so multi-line `key:\n  abc...` patterns are still redacted; but intervening English words (e.g., "password is wrong") break the match because the next `\w` stops `\W*` and the value class doesn't admit a leading letter-word. Keep this property when extending.
+  - The literal alternation is exactly `key|token|secret|password` -- singular, no plurals, no compound forms like `API_KEY` (since `\bKEY\b` does not match inside `API_KEY`). If a future story wants to cover compound env-var names, that is a new requirement; do not silently widen this regex.
+---
