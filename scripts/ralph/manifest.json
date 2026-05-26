@@ -1,0 +1,30 @@
+{
+  "version": "1",
+  "specFile": "PRAXIS_V0_2_SPEC.md",
+  "projectName": "praxis-v0-2",
+  "baseBranch": "main",
+  "singlePr": false,
+  "components": [
+    {
+      "id": "secret-redaction",
+      "title": "Secret redaction utility",
+      "description": "Pure utility that masks API keys and credential-like substrings in arbitrary text before persistence or rendering. Used by the moments engine.",
+      "dependencies": [],
+      "prdPath": "scripts/ralph/feature/secret-redaction/prd.json",
+      "branchName": "ralph/factory/secret-redaction",
+      "status": "completed",
+      "error": "",
+      "retries": 1,
+      "prNumber": null,
+      "prUrl": "",
+      "startedAt": "2026-05-26T22:38:42Z",
+      "completedAt": "",
+      "durationSeconds": 369.6397279579978,
+      "iterationCount": 1,
+      "verificationPassed": true,
+      "reviewPassed": true,
+      "reviewFindings": "## Review Findings\n\n**12 passed, 0 failed, 0 advisory**\n\n- [pass] Anthropic, OpenAI, AWS, GitHub PAT, and JWT-shaped tokens are replaced with [REDACTED]\n- [pass] Each provider regex is covered by at least one unit test with a representative key\n- [pass] Typecheck passes\n- [pass] Tests pass\n- [pass] Any sequence of >= 20 alnum/`_`/`-` characters appearing after the literals key, token, secret, or password (case-insensitive) is replaced with [REDACTED]\n- [pass] Plain English text containing those words but no high-entropy tail is left unchanged\n- [pass] Typecheck passes\n- [pass] Tests pass\n- [pass] Running the redactor twice on the same input produces the same output as one run\n- [pass] Already-redacted [REDACTED] markers are not duplicated or split\n- [pass] Typecheck passes\n- [pass] Tests pass\n\n**Notes**: All three stories are cleanly implemented in a single small module (praxis/redactor.py) with focused, well-named tests. The (pattern, replacement) tuple design lets the labeled-secret rule preserve the label via backref while keeping a single-pass fold. Idempotence is preserved as a structural invariant (value classes exclude `[`, tail length 20 > len('REDACTED')=8) rather than via post-processing, which is the right call.",
+      "scaffold": ""
+    }
+  ]
+}

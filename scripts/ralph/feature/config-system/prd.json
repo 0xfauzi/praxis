@@ -1,0 +1,59 @@
+{
+  "branchName": "ralph/factory/config-system",
+  "userStories": [
+    {
+      "id": "US-005",
+      "title": "Create default config on first run",
+      "acceptanceCriteria": [
+        "~/.praxis/config.toml is created on first invocation if absent",
+        "Default sections schedule, scan, judge, notification, privacy exist with the values specified in Section 12.2",
+        "privacy.redact_secrets defaults to true",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "praxis config opens file in $EDITOR",
+      "acceptanceCriteria": [
+        "Running `praxis config` without arguments opens the file in the value of $EDITOR",
+        "Exits 0 after the editor closes",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Programmatic --get and --set",
+      "acceptanceCriteria": [
+        "`praxis config --get schedule.day` prints the current value to stdout",
+        "`praxis config --set schedule.day=monday` updates the file and is reflected on the next --get",
+        "Invalid dotted keys exit non-zero with a clear message",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Config loader exposes typed values to the rest of the app",
+      "acceptanceCriteria": [
+        "A load_config() entry point returns a typed object (frozen dataclass or pydantic model) with the documented fields",
+        "Unknown sections or keys do not crash the loader but emit a warning",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

@@ -33,3 +33,6 @@ report.html
 
 # Claude Code session permission cache (machine-local, regenerated)
 .claude/settings.local.json
+
+# Ralph harness runtime state (worktrees, journals, regenerated per run)
+.ralph/

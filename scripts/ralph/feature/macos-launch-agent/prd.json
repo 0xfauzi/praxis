@@ -1,0 +1,74 @@
+{
+  "branchName": "ralph/factory/macos-launch-agent",
+  "userStories": [
+    {
+      "id": "US-079",
+      "title": "install-weekly creates and loads the plist",
+      "acceptanceCriteria": [
+        "On macOS, `praxis install-weekly` generates ~/Library/LaunchAgents/co.praxis.weekly.plist with the day/time from config and loads it via launchctl",
+        "The plist invokes `praxis week --notify`",
+        "Re-running install-weekly is idempotent",
+        "Exit code 4 is returned if launchd installation fails",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-080",
+      "title": "uninstall-weekly removes the plist",
+      "acceptanceCriteria": [
+        "`praxis uninstall-weekly` unloads and deletes the plist",
+        "Running uninstall-weekly when the job is absent exits 0",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-081",
+      "title": "macOS notification via osascript",
+      "acceptanceCriteria": [
+        "When `--notify` is passed, the run posts a notification via `osascript -e 'display notification ...'` after writing the HTML",
+        "Notification title is 'Praxis weekly read is ready'",
+        "Notification body mentions opening ~/.praxis/latest.html",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-082",
+      "title": "Notification includes trajectory label and never crashes the run",
+      "acceptanceCriteria": [
+        "The notification body includes the digest's trajectory label (e.g., 'Drifting this week')",
+        "If osascript fails for any reason, the run logs the failure and still exits 0",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-083",
+      "title": "Non-macOS prints snippet and exits cleanly",
+      "acceptanceCriteria": [
+        "On non-macOS platforms, install-weekly does not attempt to schedule anything",
+        "The equivalent systemd timer or Task Scheduler XML is printed to stdout and saved to ~/.praxis/install-weekly-snippet.txt",
+        "Exit code is 0",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

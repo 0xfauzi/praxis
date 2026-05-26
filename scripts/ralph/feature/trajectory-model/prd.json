@@ -1,0 +1,73 @@
+{
+  "branchName": "ralph/factory/trajectory-model",
+  "userStories": [
+    {
+      "id": "US-042",
+      "title": "Weekly buckets and per-bucket means",
+      "acceptanceCriteria": [
+        "Sessions in the last 90 days are bucketed by ISO week",
+        "Weekly mean is computed for engagement_rate, delegation_rate, independence_rate, and the 6 dim scores",
+        "Weeks with fewer than 2 sessions are excluded from the fit but retained for cost-ledger rendering",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-043",
+      "title": "Significant-slope gate using stderr",
+      "acceptanceCriteria": [
+        "Slope and standard error are computed via least-squares over weekly means",
+        "A slope is `significant` only if |slope| >= 1.5 * stderr AND |slope| >= 0.05 per week",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-044",
+      "title": "Label mapping per Section 7.2",
+      "acceptanceCriteria": [
+        "Labels Learning, Growing autonomy, Steady, Drifting, Atrophying, Reading are assigned exactly according to the table in Section 7.2",
+        "Reading is returned when fewer than 4 weekly buckets have data",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-045",
+      "title": "Hysteresis on label transitions",
+      "acceptanceCriteria": [
+        "A new label differs from the previous week's label only when |slope| >= 2.0 * stderr on the relevant axis",
+        "Otherwise the previous week's label is retained",
+        "On identical input, the label does not change between two consecutive runs",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-046",
+      "title": "LLM-generated headline sentence <= 180 chars",
+      "acceptanceCriteria": [
+        "One short LLM call takes label, slope numbers, and bucket count as inputs and returns a single sentence",
+        "Output is truncated to 180 chars",
+        "The label is not invented by the LLM: the prose is constrained to paraphrase the supplied label",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

@@ -1,0 +1,73 @@
+{
+  "branchName": "ralph/factory/cost-ledger",
+  "userStories": [
+    {
+      "id": "US-047",
+      "title": "Weekly spend and baseline",
+      "acceptanceCriteria": [
+        "Total USD spend across all priced models for the week is computed",
+        "90-day rolling weekly mean is computed alongside",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-048",
+      "title": "Biggest (model, task) line",
+      "acceptanceCriteria": [
+        "The (model, task) pair with the largest spend in the week is identified",
+        "Spend amount and session count are exposed to the renderer",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-049",
+      "title": "Tier-fit savings estimate",
+      "acceptanceCriteria": [
+        "Opus/GPT-5 sessions with user_turn_count <= 3 AND avg_prompt_chars <= 200 are counted",
+        "Savings estimate uses (frontier_cost - cheaper_tier_cost) per qualifying session, summed",
+        "The count and savings are exposed to the renderer",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-050",
+      "title": "dollar_impact_estimate per moment type",
+      "acceptanceCriteria": [
+        "verification moments: estimate equals the token cost of the next 2 turns after the lapse",
+        "fit (over-tier) moments: estimate equals (frontier_cost - cheaper_tier_cost) for the session",
+        "iteration moments: estimate equals the token cost of the assistant response the user accepted prematurely",
+        "planning/context/tools moments: estimate is None",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-051",
+      "title": "Renderer disclaimer once per digest",
+      "acceptanceCriteria": [
+        "The cost-ledger output emits the literal disclaimer 'rough estimate from token volume + tier pricing' once at the bottom of the digest",
+        "No moment is rendered as an invoiced cost",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

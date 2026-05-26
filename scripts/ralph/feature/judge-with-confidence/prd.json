@@ -1,0 +1,60 @@
+{
+  "branchName": "ralph/factory/judge-with-confidence",
+  "userStories": [
+    {
+      "id": "US-018",
+      "title": "Judge response includes confidence and confidence_reason",
+      "acceptanceCriteria": [
+        "Every judge response object contains confidence \u2208 {low, medium, high} and a confidence_reason string",
+        "The prompt embeds the calibration instructions from Section 9.3 verbatim or semantically equivalent",
+        "Parsing fails loudly if confidence is missing or out-of-range",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-019",
+      "title": "Batched call: 5 sessions per cheap-tier call",
+      "acceptanceCriteria": [
+        "Pass-1 batches contain at most 5 sessions per call",
+        "Each session block in the batched prompt is preceded by a `--- session ${session_id} ---` separator",
+        "Session order within a batch is randomized",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-020",
+      "title": "Batched response size validation and re-prompt",
+      "acceptanceCriteria": [
+        "If the returned array length does not equal the input batch size, the batch is re-prompted exactly once",
+        "If the second attempt also fails, the batch falls back to one-session-per-call",
+        "A `[scorer] batch length mismatch` log line is emitted on each mismatch",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-021",
+      "title": "Compressed transcript used in judge calls",
+      "acceptanceCriteria": [
+        "The judge prompt sends the output of the transcript compression utility, not the raw transcript",
+        "The full raw transcript is still available locally for downstream substring validation",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "branchName": "ralph/factory/weekly-orchestrator",
+  "userStories": [
+    {
+      "id": "US-070",
+      "title": "Pipeline ordering matches Section 9.4",
+      "acceptanceCriteria": [
+        "run_weekly executes steps in the order: scan, cluster, pass 1 batched, pass 2 frontier on low-confidence, moments validation, selector, follow-up, render",
+        "Each step's outputs feed only the documented downstream steps",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-071",
+      "title": "Persist weekly_digests row with snapshot_json",
+      "acceptanceCriteria": [
+        "A weekly_digests row is written for the current week_iso with generated_at, trajectory_label, trajectory_headline, headline_moment_id, cost_total_usd, cost_baseline_usd, snapshot_json, and html_path",
+        "snapshot_json contains the full ProfileSnapshot for the week",
+        "Re-running on the same week is idempotent (UPSERT semantics)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-072",
+      "title": "--dry-run computes without persisting",
+      "acceptanceCriteria": [
+        "A --dry-run flag wires through the orchestrator and prevents DB writes and file writes",
+        "Terminal output is still produced",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-073",
+      "title": "Performance target on 30-session week",
+      "acceptanceCriteria": [
+        "A 30-session synthetic fixture completes run_weekly in under 120 seconds wall time on the developer machine",
+        "Total LLM spend on that fixture is under $2",
+        "A perf test records the measurement",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

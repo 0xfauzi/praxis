@@ -1,0 +1,57 @@
+{
+  "branchName": "ralph/factory/terminal-digest-renderer",
+  "userStories": [
+    {
+      "id": "US-066",
+      "title": "Fits in <80 columns",
+      "acceptanceCriteria": [
+        "Every rendered line is at most 79 visible characters (excluding ANSI escapes)",
+        "Verified by a test that strips ANSI and asserts line widths",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-067",
+      "title": "Mandatory sections render",
+      "acceptanceCriteria": [
+        "Trajectory headline, headline moment, and follow-up panel are always rendered",
+        "If any input is missing, a clear placeholder is rendered for that section rather than crashing",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-068",
+      "title": "Compact cost ledger and tasks",
+      "acceptanceCriteria": [
+        "Cost ledger and Where The Week Went render in a compact form suitable for terminal width",
+        "Top-3 tasks are listed with label, session count, total cost, and worst dim",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-069",
+      "title": "Six-dim panel as footer",
+      "acceptanceCriteria": [
+        "The full six-dim panel is rendered as the last section",
+        "Each dim shows score, baseline, and significance-gated delta",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

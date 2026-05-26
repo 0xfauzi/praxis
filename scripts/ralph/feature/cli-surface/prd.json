@@ -1,0 +1,71 @@
+{
+  "branchName": "ralph/factory/cli-surface",
+  "userStories": [
+    {
+      "id": "US-074",
+      "title": "praxis week and its flags",
+      "acceptanceCriteria": [
+        "`praxis week`, `--week <iso>`, `--dry-run`, `--frontier-only`, `--explain-judging`, `--notify`, and `--write-html` are wired to the orchestrator with documented behavior",
+        "`--week` accepts ISO-week strings like 2026-W21 and renders a past week's data",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-075",
+      "title": "Auxiliary commands present",
+      "acceptanceCriteria": [
+        "`praxis re-score <session_stable_id>` re-runs the frontier judge for that session and updates session_scores",
+        "`praxis baseline`, `praxis follow-up`, `praxis history`, `praxis show <week_iso>` are wired to read-only operations and exit 0",
+        "`praxis scan` performs scan + score without rendering a digest",
+        "`praxis status`, `praxis rubric`, `praxis models` are preserved from v0.1",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-076",
+      "title": "Exit code 2 when no API key is configured",
+      "acceptanceCriteria": [
+        "When neither Anthropic nor OpenAI credentials are available, the CLI exits with code 2 and prints a clear message naming both env vars",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-077",
+      "title": "Exit code 3 when no sessions in the window",
+      "acceptanceCriteria": [
+        "If the scan returns zero in-window sessions, the CLI exits with code 3 and prints a clear message",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-078",
+      "title": "Removed commands and flags are gone",
+      "acceptanceCriteria": [
+        "`praxis install-daemon` (the v0.1 daily one) is absent",
+        "The `--no-judge` flag is absent",
+        "The v0.1 daily orchestrator entry point is not registered as a subcommand",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

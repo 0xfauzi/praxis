@@ -1,0 +1,70 @@
+{
+  "branchName": "ralph/factory/weekly-baseline",
+  "userStories": [
+    {
+      "id": "US-037",
+      "title": "90-day baseline excludes current week",
+      "acceptanceCriteria": [
+        "Baseline mean for each dim and signal is computed over the trailing 90 days, excluding the current ISO week",
+        "Baseline values are exposed alongside this week's values to the renderer",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-038",
+      "title": "Last-week panel only after 2+ weeks of data",
+      "acceptanceCriteria": [
+        "Last-week mean is computed and exposed only when the user has at least 2 distinct weeks of data",
+        "When unavailable, the field is None and the renderer omits it",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-039",
+      "title": "Significance gating below 0.3",
+      "acceptanceCriteria": [
+        "Deltas with absolute value < 0.3 on a /10 scale are tagged as `unchanged` and surfaced to the renderer as ~",
+        "Deltas with absolute value >= 0.3 are tagged with direction (up/down)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-040",
+      "title": "Baseline-forming message under 14 days of data",
+      "acceptanceCriteria": [
+        "When the user has fewer than 14 days of data, baseline values are returned as `--`",
+        "A flag is set so the renderer shows 'Baseline forming. Come back in 2 more weeks for week-over-week.'",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-041",
+      "title": "Outlier clipping for baseline contributions",
+      "acceptanceCriteria": [
+        "Each session's overall is clipped to [1.0, 9.0] before contributing to the baseline",
+        "All sessions are weighted equally regardless of length when computing the baseline",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

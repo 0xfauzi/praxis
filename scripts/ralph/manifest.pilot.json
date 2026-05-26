@@ -1,0 +1,30 @@
+{
+  "version": "1",
+  "specFile": "PRAXIS_V0_2_SPEC.md",
+  "projectName": "praxis-v0-2",
+  "baseBranch": "main",
+  "singlePr": false,
+  "components": [
+    {
+      "id": "secret-redaction",
+      "title": "Secret redaction utility",
+      "description": "Pure utility that masks API keys and credential-like substrings in arbitrary text before persistence or rendering. Used by the moments engine.",
+      "dependencies": [],
+      "prdPath": "scripts/ralph/feature/secret-redaction/prd.json",
+      "branchName": "ralph/factory/secret-redaction",
+      "status": "pending",
+      "error": "",
+      "retries": 0,
+      "prNumber": null,
+      "prUrl": "",
+      "startedAt": "",
+      "completedAt": "",
+      "durationSeconds": 0.0,
+      "iterationCount": 0,
+      "verificationPassed": null,
+      "reviewPassed": null,
+      "reviewFindings": "",
+      "scaffold": ""
+    }
+  ]
+}

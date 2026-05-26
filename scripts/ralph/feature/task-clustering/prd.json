@@ -1,0 +1,73 @@
+{
+  "branchName": "ralph/factory/task-clustering",
+  "userStories": [
+    {
+      "id": "US-032",
+      "title": "One clustering call per week with truncated first turns",
+      "acceptanceCriteria": [
+        "All in-window sessions are sent in a single LLM call to the cheap-tier model from the user's primary provider",
+        "Each session block includes session_id, first user turn truncated to 400 chars, project_hint, and started_at",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-033",
+      "title": "Coverage validation: each session_id appears exactly once",
+      "acceptanceCriteria": [
+        "If any input session_id is missing or duplicated in the response, the call is re-prompted once with the validation error",
+        "Invented session_ids that were not in the input are rejected and trigger the same re-prompt",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-034",
+      "title": "Singleton fallback on second protocol failure",
+      "acceptanceCriteria": [
+        "If the second attempt also fails validation, the system falls back to one task per session",
+        "Fallback labels are the first 5 words of each session's first user turn",
+        "Fallback tasks are persisted with label_source='fallback'",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-035",
+      "title": "Label and task_type validation",
+      "acceptanceCriteria": [
+        "Labels longer than 60 chars or containing 'I', 'you', 'the user', or 'the assistant' are rejected",
+        "task_type must be one of: debugging, refactoring, building_new, planning, learning, research, ops, other",
+        "Invalid labels or task_types trigger the re-prompt path",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-036",
+      "title": "Anti-collapse and anti-singleton re-prompts",
+      "acceptanceCriteria": [
+        "If the response has exactly one task and N > 6 sessions, the call is re-prompted once to split when work is genuinely distinct",
+        "If every task has exactly one session and N > 8, the call is re-prompted once",
+        "After the single retry, the response is accepted regardless of shape",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

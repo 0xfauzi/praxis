@@ -1,0 +1,72 @@
+{
+  "branchName": "ralph/factory/moments-engine",
+  "userStories": [
+    {
+      "id": "US-022",
+      "title": "Parse moments from judge response",
+      "acceptanceCriteria": [
+        "Each moment object emitted by the judge is parsed into a Moment dataclass with the fields listed in Section 4.1",
+        "moment_id is computed as sha256(session.stable_id + dim_key + str(turn_index))[:16]",
+        "Severity is one of minor, moderate, major",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-023",
+      "title": "Substring check against full transcript",
+      "acceptanceCriteria": [
+        "Before persistence, quoted_excerpt is verified as a whitespace-normalized substring of the full raw transcript",
+        "Moments that fail the check are discarded (not fuzzy-matched)",
+        "A `[scorer] moment failed substring check` log line is emitted for each discard",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-024",
+      "title": "Redaction runs before persistence and before render",
+      "acceptanceCriteria": [
+        "quoted_excerpt, why_it_lost_score, and suggested_alternative are run through the secret redactor before being written to the moments table",
+        "The redacted column is set to 1 when any field was modified by redaction",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-025",
+      "title": "At most one moment per dim per session",
+      "acceptanceCriteria": [
+        "If the judge returns more than one moment for the same (session, dim_key), only the first valid one is persisted",
+        "Subsequent ones are logged and discarded",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-026",
+      "title": "Persist to moments table",
+      "acceptanceCriteria": [
+        "Every accepted Moment is written as a row in moments with all fields populated per the schema",
+        "Re-running on a session whose moments already exist is idempotent on moment_id",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

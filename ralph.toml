@@ -1,0 +1,24 @@
+[agent]
+type = "claude"
+command = ""
+model = ""
+reasoning_effort = ""
+
+[run]
+max_iterations = 10
+sleep_seconds = 2
+interactive = false
+
+[paths]
+prompt = "scripts/ralph/prompt.md"
+prd = "scripts/ralph/prd.json"
+progress = "scripts/ralph/progress.txt"
+codebase_map = "scripts/ralph/codebase_map.md"
+allowed = []
+
+[git]
+branch = ""
+auto_checkout = true
+
+[ui]
+ascii = false

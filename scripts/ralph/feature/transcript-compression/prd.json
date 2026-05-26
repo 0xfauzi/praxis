@@ -1,0 +1,46 @@
+{
+  "branchName": "ralph/factory/transcript-compression",
+  "userStories": [
+    {
+      "id": "US-012",
+      "title": "User turns preserved verbatim",
+      "acceptanceCriteria": [
+        "Every user turn in the input transcript appears character-for-character in the compressed output",
+        "Ordering of user turns is preserved",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "Assistant turns truncated with summary marker",
+      "acceptanceCriteria": [
+        "Assistant turns longer than 200 chars are replaced with the first 200 chars followed by `...[+N more chars, M tool calls]`",
+        "N is the count of additional characters, M is the count of tool calls in that assistant turn",
+        "Assistant turns of 200 chars or fewer are preserved verbatim",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "Tool results dropped, tool calls trimmed",
+      "acceptanceCriteria": [
+        "Tool-result blocks are absent from the compressed output",
+        "Tool-call entries appear as `name(args)` where args is truncated to the first 80 characters",
+        "On a recorded 50-turn fixture the compressed length is at most 30% of the original",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

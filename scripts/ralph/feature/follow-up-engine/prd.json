@@ -1,0 +1,59 @@
+{
+  "branchName": "ralph/factory/follow-up-engine",
+  "userStories": [
+    {
+      "id": "US-057",
+      "title": "Persist commitment from previous headline moment",
+      "acceptanceCriteria": [
+        "On each weekly run, a FollowUp row is written for the current week_iso with commitment_text taken from the previous week's headline moment's suggested_alternative",
+        "target_metric is one of verification_rate, delegation_rate, or `<dim>_dim_mean`",
+        "baseline_value is the value of the target metric as of digest generation",
+        "outcome is set to pending on creation",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-058",
+      "title": "Outcome computed from data, not LLM",
+      "acceptanceCriteria": [
+        "Next week's run computes measured_value for the prior week's target_metric directly from session data",
+        "The outcome is determined by comparing measured_value to baseline_value without any LLM judgment",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-059",
+      "title": "Movement thresholds and delegation_rate inversion",
+      "acceptanceCriteria": [
+        "improved means measured_value > baseline_value + 0.5; worse means measured_value < baseline_value - 0.5; otherwise unchanged",
+        "For target_metric == delegation_rate, the inequality is inverted (lower is improved)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-060",
+      "title": "No prior commitment renders gracefully",
+      "acceptanceCriteria": [
+        "If no previous-week FollowUp exists, the follow-up panel renders a 'no prior commitment' message rather than failing",
+        "The current week still persists its own commitment for next week",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

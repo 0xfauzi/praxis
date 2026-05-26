@@ -1,0 +1,71 @@
+{
+  "branchName": "ralph/factory/html-digest-renderer",
+  "userStories": [
+    {
+      "id": "US-061",
+      "title": "Self-contained HTML with inline CSS",
+      "acceptanceCriteria": [
+        "Generated HTML contains no external CSS, JS, font, or image references",
+        "Double-clicking the file renders correctly in a default browser",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-062",
+      "title": "Section order per 6.1",
+      "acceptanceCriteria": [
+        "Sections appear in this order: trajectory headline + confidence band, This Week's Moment, Cost Ledger, Where The Week Went, The Six Dimensions, Follow-up From Last Week, One Thing To Try Next Week",
+        "The masthead does not lead with the overall /10",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-063",
+      "title": "v0.1 visual language preserved",
+      "acceptanceCriteria": [
+        "Color palette uses the v0.1 cream and terracotta values",
+        "Typography uses Libre Baskerville (or its inlined fallback) per v0.1",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-064",
+      "title": "Write to weeks directory and update latest.html symlink",
+      "acceptanceCriteria": [
+        "Output is written to ~/.praxis/weeks/<iso>.html, where <iso> is e.g. 2026-W21",
+        "~/.praxis/latest.html is a symlink (or platform equivalent) pointing to the most recent week's file",
+        "Re-running on the same week overwrites the file and updates the symlink",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-065",
+      "title": "No raw secrets, synthetic markers, or obvious PII in output",
+      "acceptanceCriteria": [
+        "No `<synthetic>` strings appear anywhere in the rendered HTML",
+        "No unredacted provider API keys appear (verified against the secret-redaction patterns)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

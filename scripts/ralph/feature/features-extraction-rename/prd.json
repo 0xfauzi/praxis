@@ -1,0 +1,45 @@
+{
+  "branchName": "ralph/factory/features-extraction-rename",
+  "userStories": [
+    {
+      "id": "US-015",
+      "title": "praxis/scoring/heuristics.py removed",
+      "acceptanceCriteria": [
+        "The file praxis/scoring/heuristics.py no longer exists",
+        "No code in the package imports from praxis.scoring.heuristics",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "Surviving feature extraction lives in features.py",
+      "acceptanceCriteria": [
+        "praxis/scoring/features.py exports the feature-extraction functions (turn count, prompt length, regex marker hits) that previously lived in heuristics.py",
+        "features.py contains no scoring functions and no rubric-dimension assignment",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "No heuristic scoring path remains",
+      "acceptanceCriteria": [
+        "The CLI has no --no-judge flag",
+        "There is no code path that assigns rubric dimension scores without an LLM call",
+        "A grep for `heuristic_score` or equivalent legacy entry points returns no results in the package",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

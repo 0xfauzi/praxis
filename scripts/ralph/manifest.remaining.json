@@ -1,0 +1,8 @@
+{
+  "version": "1",
+  "specFile": "PRAXIS_V0_2_SPEC.md",
+  "projectName": "praxis-v0-2",
+  "baseBranch": "main",
+  "singlePr": false,
+  "components": []
+}

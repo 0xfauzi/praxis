@@ -1,0 +1,70 @@
+{
+  "branchName": "ralph/factory/moments-selector",
+  "userStories": [
+    {
+      "id": "US-052",
+      "title": "Single LLM call sees all candidate moments",
+      "acceptanceCriteria": [
+        "All validated moments for the week are passed to one LLM selector call",
+        "Each candidate includes dim_key, quoted_excerpt, why_it_lost_score, suggested_alternative, severity, session_started_at, dollar_impact_estimate, and recurrence_count over the previous 3 weeks",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-053",
+      "title": "Validation against candidate set",
+      "acceptanceCriteria": [
+        "headline_moment_id and supporting_moment_ids must reference IDs from the input set",
+        "Invalid responses are re-prompted exactly once",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-054",
+      "title": "Fallback on protocol failure",
+      "acceptanceCriteria": [
+        "If the second attempt is still invalid, fallback picks the most-recent major-severity moment; if none, the most-recent moderate",
+        "Fallback is logged distinctly from successful selection",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-055",
+      "title": "Skip selector when only one candidate",
+      "acceptanceCriteria": [
+        "When exactly one validated moment exists, the selector call is skipped and that moment is the headline by default",
+        "supporting_moment_ids is an empty list in this case",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-056",
+      "title": "Hard cap of 3 rendered moments",
+      "acceptanceCriteria": [
+        "At most 1 headline + 2 supporting moments are passed to the renderer regardless of selector output",
+        "Excess supporting_moment_ids are truncated, not rendered",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

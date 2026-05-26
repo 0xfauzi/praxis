@@ -1,0 +1,72 @@
+{
+  "branchName": "ralph/factory/two-pass-judging",
+  "userStories": [
+    {
+      "id": "US-027",
+      "title": "Pass 1 runs on every session",
+      "acceptanceCriteria": [
+        "Every session in the weekly window receives a pass-1 judgment",
+        "There is no skip path that bypasses pass 1 based on heuristic features",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-028",
+      "title": "Low-confidence sessions escalate to pass 2",
+      "acceptanceCriteria": [
+        "Sessions whose pass-1 confidence is low are re-judged on the frontier model, one session per call",
+        "Pass-2 prompts do not include pass-1 outputs",
+        "Pass-2 scores, rationales, and moments override pass-1 for those sessions",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-029",
+      "title": "Both passes persisted with judge_pass column",
+      "acceptanceCriteria": [
+        "session_scores rows include a judge_pass column populated with 1 or 2",
+        "When pass 2 runs, both pass-1 and pass-2 rows are persisted (not overwritten)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-030",
+      "title": "Same-task exclusion within a pass-1 batch",
+      "acceptanceCriteria": [
+        "Pass-1 batches never contain two sessions that share a task assignment",
+        "Extras from a single oversized task roll into batches alone or with non-task-mates",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-031",
+      "title": "4-week confidence-distribution telemetry",
+      "acceptanceCriteria": [
+        "Each weekly run logs the pass-1 confidence distribution (counts of low/medium/high)",
+        "If the rolling 4-week share of `high` exceeds 90%, the calibration instruction in the prompt is auto-sharpened and the next digest includes a `calibration was off; re-tuned` line",
+        "If the rolling 4-week share of `low` exceeds 70%, the stricter low-confidence definition is applied",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "branchName": "ralph/factory/storage-schema-migration",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Create new v0.2 tables on first run",
+      "acceptanceCriteria": [
+        "CREATE TABLE statements for moments, tasks, task_members, weekly_digests, follow_ups execute successfully against an existing v0.1 SQLite DB",
+        "Indexes idx_moments_session and idx_moments_created exist after migration",
+        "CHECK constraints on severity, task_type label_source, and follow_up outcome are enforced",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Drop daily_consolidations and preserve session_scores",
+      "acceptanceCriteria": [
+        "daily_consolidations table is dropped after migration",
+        "session_scores rows are preserved unchanged across migration",
+        "run_log table is preserved unchanged",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Record schema_version row",
+      "acceptanceCriteria": [
+        "A schema_version row with value 2 is written to run_log after successful migration",
+        "Re-running migration on an already-v0.2 DB is a no-op",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Migration failure backs up DB and exits non-zero",
+      "acceptanceCriteria": [
+        "If any migration step fails, the process exits with a non-zero code",
+        "A backup of the pre-migration DB exists at a path printed to stderr",
+        "The half-migrated DB is not left in place for subsequent runs",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
