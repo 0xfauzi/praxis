@@ -7,11 +7,13 @@ backup) lives in US-002/003/004.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 
 import pytest
 
-from praxis.storage.profile_store import ProfileStore, resolve_home
+from praxis.storage import profile_store as profile_store_mod
+from praxis.storage.profile_store import MigrationError, ProfileStore, resolve_home
 
 
 def _open_db() -> sqlite3.Connection:
@@ -534,3 +536,222 @@ def test_marker_absent_on_v0_1_db_triggers_migration(tmp_home):
         rows_after = _schema_version_rows(conn)
     assert moments is not None
     assert len(rows_after) == 1
+
+
+# ---- US-004: backup before migration + non-zero exit on failure -------------
+
+
+def _list_backups(tmp_home) -> list:
+    return sorted((tmp_home / ".praxis").glob("profile.db.backup-*"))
+
+
+def test_backup_created_before_v0_1_to_v0_2_migration(tmp_home):
+    _seed_v0_1_db(tmp_home)
+    assert _list_backups(tmp_home) == []
+    ProfileStore(home=resolve_home())
+    backups = _list_backups(tmp_home)
+    assert len(backups) == 1, "exactly one backup file should appear"
+    # The backup must hold the v0.1 state: daily_consolidations table still
+    # present and seeded row preserved.
+    bconn = sqlite3.connect(backups[0])
+    try:
+        tables = {
+            r[0]
+            for r in bconn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        consolidation_rows = bconn.execute(
+            "SELECT consolidation_date FROM daily_consolidations"
+        ).fetchall()
+    finally:
+        bconn.close()
+    assert "daily_consolidations" in tables
+    assert consolidation_rows == [("2026-05-01",)]
+
+
+def test_backup_filename_is_timestamped(tmp_home):
+    _seed_v0_1_db(tmp_home)
+    ProfileStore(home=resolve_home())
+    backups = _list_backups(tmp_home)
+    assert len(backups) == 1
+    # Format: profile.db.backup-YYYYMMDDTHHMMSS<microseconds>Z
+    assert re.fullmatch(
+        r"profile\.db\.backup-\d{8}T\d{6}\d+Z", backups[0].name
+    ), f"unexpected backup name: {backups[0].name}"
+
+
+def test_no_backup_when_marker_already_present(tmp_home):
+    # First open: fresh DB, no pre-existing file, so no backup expected.
+    ProfileStore(home=resolve_home())
+    assert _list_backups(tmp_home) == []
+    # Second open: marker present, migration is a no-op, no backup.
+    ProfileStore(home=resolve_home())
+    assert _list_backups(tmp_home) == []
+
+
+def test_no_backup_on_fresh_db_install(tmp_home):
+    # Fresh install: profile.db does not exist before ProfileStore() runs,
+    # so there is no live DB to back up.
+    db_path = tmp_home / ".praxis" / "profile.db"
+    assert not db_path.exists()
+    ProfileStore(home=resolve_home())
+    assert _list_backups(tmp_home) == []
+
+
+def test_migration_failure_raises_migration_error(tmp_home, monkeypatch):
+    _seed_v0_1_db(tmp_home)
+
+    def fail(self, conn):
+        raise sqlite3.OperationalError("simulated DDL failure")
+
+    monkeypatch.setattr(ProfileStore, "_apply_v2_schema", fail)
+    with pytest.raises(MigrationError):
+        ProfileStore(home=resolve_home())
+
+
+def test_migration_failure_message_contains_absolute_backup_path(tmp_home, monkeypatch):
+    _seed_v0_1_db(tmp_home)
+
+    def fail(self, conn):
+        raise sqlite3.OperationalError("boom")
+
+    monkeypatch.setattr(ProfileStore, "_apply_v2_schema", fail)
+    with pytest.raises(MigrationError) as exc_info:
+        ProfileStore(home=resolve_home())
+    backups = _list_backups(tmp_home)
+    assert len(backups) == 1
+    abs_backup = str(backups[0].resolve())
+    msg = str(exc_info.value)
+    assert abs_backup in msg
+    # Sanity: the path embedded in the message is an absolute path.
+    assert abs_backup.startswith("/")
+
+
+def test_db_restored_from_backup_on_migration_failure(tmp_home, monkeypatch):
+    seeded = _seed_v0_1_db(tmp_home)
+    db_path = tmp_home / ".praxis" / "profile.db"
+
+    def fail(self, conn):
+        # Simulate partial progress: create one table successfully, then fail.
+        # The DB on disk now has a v0.2 table mixed with v0.1 tables, which
+        # is exactly the half-migrated state US-004 forbids.
+        conn.execute("CREATE TABLE moments (moment_id TEXT PRIMARY KEY)")
+        conn.commit()
+        raise sqlite3.OperationalError("aborting mid-migration")
+
+    monkeypatch.setattr(ProfileStore, "_apply_v2_schema", fail)
+    with pytest.raises(MigrationError):
+        ProfileStore(home=resolve_home())
+
+    # DB should be back to the v0.1 state: daily_consolidations present,
+    # moments absent, seeded row intact.
+    conn = sqlite3.connect(db_path)
+    try:
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        consolidations = conn.execute(
+            "SELECT consolidation_date FROM daily_consolidations"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert "daily_consolidations" in tables
+    assert "moments" not in tables
+    assert consolidations == [(seeded["daily_consolidations"][0]["consolidation_date"],)]
+
+
+def test_backup_happens_before_ddl_runs(tmp_home, monkeypatch):
+    # Verify ordering: the backup file must exist by the time _apply_v2_schema
+    # is called. We assert this from inside the patched apply method.
+    _seed_v0_1_db(tmp_home)
+    seen = {"backup_existed_at_apply_time": False}
+
+    def check_backup_then_fail(self, conn):
+        backups = _list_backups(tmp_home)
+        seen["backup_existed_at_apply_time"] = len(backups) == 1
+        raise sqlite3.OperationalError("stop after backup check")
+
+    monkeypatch.setattr(ProfileStore, "_apply_v2_schema", check_backup_then_fail)
+    with pytest.raises(MigrationError):
+        ProfileStore(home=resolve_home())
+    assert seen["backup_existed_at_apply_time"], (
+        "backup must exist before _apply_v2_schema is invoked"
+    )
+
+
+def test_failed_migration_then_retry_succeeds(tmp_home, monkeypatch):
+    # After a failed migration the DB is restored to v0.1 state; opening
+    # ProfileStore() again (with no patched failure) must complete migration.
+    _seed_v0_1_db(tmp_home)
+
+    def fail_once(self, conn):
+        raise sqlite3.OperationalError("first attempt fails")
+
+    monkeypatch.setattr(ProfileStore, "_apply_v2_schema", fail_once)
+    with pytest.raises(MigrationError):
+        ProfileStore(home=resolve_home())
+
+    monkeypatch.undo()
+    # Retry: migration should now succeed and the marker should be set.
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        rows = _schema_version_rows(conn)
+        moments = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'moments'"
+        ).fetchone()
+        daily = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'daily_consolidations'"
+        ).fetchone()
+    assert len(rows) == 1
+    assert moments is not None
+    assert daily is None
+
+
+def test_migration_error_chains_original_exception(tmp_home, monkeypatch):
+    _seed_v0_1_db(tmp_home)
+    original = sqlite3.OperationalError("root cause")
+
+    def fail(self, conn):
+        raise original
+
+    monkeypatch.setattr(ProfileStore, "_apply_v2_schema", fail)
+    with pytest.raises(MigrationError) as exc_info:
+        ProfileStore(home=resolve_home())
+    assert exc_info.value.__cause__ is original
+
+
+def test_migration_error_when_no_backup_makes_message_explicit(tmp_home, monkeypatch):
+    # Fresh DB (no live file): if DDL fails, there is no backup to restore.
+    # The message should still be coherent and identify the no-backup case.
+    db_path = tmp_home / ".praxis" / "profile.db"
+    assert not db_path.exists()
+
+    def fail(self, conn):
+        raise sqlite3.OperationalError("ddl boom")
+
+    monkeypatch.setattr(ProfileStore, "_apply_v2_schema", fail)
+    with pytest.raises(MigrationError) as exc_info:
+        ProfileStore(home=resolve_home())
+    msg = str(exc_info.value)
+    assert "no backup" in msg.lower()
+    # And of course no backup file was created.
+    assert _list_backups(tmp_home) == []
+
+
+def test_migration_error_is_runtime_error_subclass():
+    # Documenting the type for callers that catch broad RuntimeError.
+    assert issubclass(MigrationError, RuntimeError)
+    # Sanity: importing from the storage package exposes it too.
+    from praxis.storage import MigrationError as Exported
+
+    assert Exported is MigrationError
+
+
+def test_profile_store_module_exports_migration_error():
+    # Bind through the imported module to keep linters happy and to verify
+    # the symbol is reachable via praxis.storage.profile_store.
+    assert profile_store_mod.MigrationError is MigrationError

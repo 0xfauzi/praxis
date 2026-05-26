@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -23,6 +24,12 @@ from typing import Any
 def _utcnow() -> datetime:
     """Tz-aware UTC now. Wraps datetime.now(timezone.utc) for terseness."""
     return datetime.now(timezone.utc)
+
+
+class MigrationError(RuntimeError):
+    """Raised when the v0.2 schema migration fails. The message includes the
+    absolute path of the pre-migration backup so the user can recover."""
+
 
 from praxis.scoring.aggregate import ProfileSnapshot, SessionScore
 
@@ -140,11 +147,56 @@ class ProfileStore:
         self._init_schema()
 
     def _init_schema(self) -> None:
-        with self._conn() as conn:
-            if self._has_schema_v2_marker(conn):
-                return
-            conn.executescript(SCHEMA)
-            self._mark_schema_v2(conn)
+        # Check existence before opening a connection: sqlite3.connect creates
+        # the file as a side effect, which would hide whether this was a fresh
+        # install or an upgrade.
+        db_existed = self.db_path.exists()
+        if db_existed:
+            with self._conn() as conn:
+                if self._has_schema_v2_marker(conn):
+                    return
+
+        # Migration needed (either fresh DB or v0.1 DB without the marker).
+        # Per spec Appendix A.7: back up the live DB before any DDL, and on
+        # failure restore from backup so the DB is never half-migrated.
+        backup_path = self._backup_db_if_exists()
+        try:
+            with self._conn() as conn:
+                self._apply_v2_schema(conn)
+                self._mark_schema_v2(conn)
+        except Exception as exc:
+            if backup_path is not None:
+                self._restore_db_from_backup(backup_path)
+            raise MigrationError(
+                self._migration_failure_message(backup_path, exc)
+            ) from exc
+
+    def _apply_v2_schema(self, conn: sqlite3.Connection) -> None:
+        # Wrapped in a method so tests can monkeypatch it to inject failures
+        # without having to corrupt the SCHEMA constant.
+        conn.executescript(SCHEMA)
+
+    def _backup_db_if_exists(self) -> Path | None:
+        if not self.db_path.exists():
+            return None
+        ts = _utcnow().strftime("%Y%m%dT%H%M%S%fZ")
+        backup_path = self.db_path.parent / f"profile.db.backup-{ts}"
+        shutil.copy2(self.db_path, backup_path)
+        return backup_path
+
+    def _restore_db_from_backup(self, backup_path: Path) -> None:
+        shutil.copy2(backup_path, self.db_path)
+
+    @staticmethod
+    def _migration_failure_message(backup_path: Path | None, exc: Exception) -> str:
+        if backup_path is None:
+            return (
+                f"v0.2 schema migration failed (no backup made; fresh DB): {exc}"
+            )
+        return (
+            f"v0.2 schema migration failed: {exc}\n"
+            f"Database has been restored from backup at: {backup_path.resolve()}"
+        )
 
     @staticmethod
     def _has_schema_v2_marker(conn: sqlite3.Connection) -> bool:
