@@ -1,21 +1,51 @@
 """Tests for the LLM-as-judge response parsing.
 
 US-017 extends the judge to emit a structured `moments` array alongside
-scores and rationales. These tests cover the parser and the system
-prompt — they do NOT hit a live model. The Anthropic/OpenAI client
-codepaths are exercised separately.
+scores and rationales. US-018 adds a substring verifier that drops any
+moment whose excerpt the judge invented. These tests cover the parser,
+the system prompt, and the verifier - they do NOT hit a live model.
+The Anthropic/OpenAI client codepaths are exercised separately.
 """
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
-from praxis.models import Moment
+from praxis.models import Moment, Provider, Role, Session, Turn
 from praxis.scoring.judge import (
     JudgeResult,
     _build_system_prompt,
     _parse_moments,
     _parse_response,
+    verify_moment_substrings,
 )
+
+
+def _make_session(turns: list[tuple[Role, str]]) -> Session:
+    """Build a minimal Session with the given (role, content) turns."""
+    return Session(
+        provider=Provider.CLAUDE,
+        session_id="test-session",
+        started_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
+        turns=[Turn(role=r, content=c) for r, c in turns],
+        source_path="/tmp/fake.jsonl",
+    )
+
+
+def _make_moment(
+    excerpt: str,
+    *,
+    dim_key: str = "planning",
+    turn_index: int = 0,
+) -> Moment:
+    return Moment(
+        dim_key=dim_key,
+        turn_index=turn_index,
+        quoted_excerpt=excerpt,
+        why_it_lost_score="reason",
+        suggested_alternative="alt",
+        severity="minor",
+    )
 
 
 def _full_response_payload(moments: list[dict[str, object]] | None = None) -> str:
@@ -254,3 +284,158 @@ def test_parse_moments_rejects_non_list_input() -> None:
     assert _parse_moments({"not": "a list"}) == []
     assert _parse_moments("garbage") == []
     assert _parse_moments(None) == []
+
+
+# ---------------------------------------------------------------------------
+# US-018: verify_moment_substrings
+# ---------------------------------------------------------------------------
+
+
+def test_verify_keeps_exact_substring_match() -> None:
+    """AC: an excerpt copied verbatim from the transcript passes."""
+    session = _make_session(
+        [(Role.USER, "Please help me write a binary search tree in Python.")]
+    )
+    moments = [_make_moment("help me write a binary search tree")]
+    assert verify_moment_substrings(session, moments) == moments
+
+
+def test_verify_passes_when_only_whitespace_differs() -> None:
+    """AC: the substring check is whitespace-normalized.
+
+    The transcript has tabs / newlines / runs of spaces; the excerpt has
+    single spaces between the same words. After normalization they match.
+    """
+    session = _make_session(
+        [(Role.USER, "Please\n\thelp  me  write\n  a   tree")]
+    )
+    moments = [_make_moment("help me write a tree")]
+    assert verify_moment_substrings(session, moments) == moments
+
+
+def test_verify_drops_invented_excerpt_and_logs(
+    capsys: object,
+) -> None:
+    """AC: a moment whose excerpt is not in the transcript is discarded
+    and a `[scorer] moment failed substring check` log line is emitted."""
+    session = _make_session([(Role.USER, "I need help with my React app.")])
+    moments = [_make_moment("write a Django view", dim_key="planning")]
+    assert verify_moment_substrings(session, moments) == []
+    err = capsys.readouterr().err  # type: ignore[attr-defined]
+    assert "[scorer] moment failed substring check" in err
+
+
+def test_verify_no_fuzzy_match_fallback(capsys: object) -> None:
+    """AC: no fuzzy or approximate match is used.
+
+    A one-character difference (extra trailing 's') is enough to fail
+    the check. The wrong-quote moment must be dropped, not approximated.
+    """
+    session = _make_session([(Role.USER, "let's run the migration")])
+    moments = [_make_moment("let's run the migrations")]
+    assert verify_moment_substrings(session, moments) == []
+    err = capsys.readouterr().err  # type: ignore[attr-defined]
+    assert "[scorer] moment failed substring check" in err
+
+
+def test_verify_mixed_pass_and_fail_preserves_only_survivors(
+    capsys: object,
+) -> None:
+    """A batch with one valid and one invented moment: valid survives,
+    invented is dropped, and exactly one failure line is emitted."""
+    session = _make_session(
+        [(Role.USER, "Please verify the SQL before running the migration.")]
+    )
+    moments = [
+        _make_moment("verify the SQL", dim_key="verification"),
+        _make_moment("totally invented text", dim_key="planning"),
+    ]
+    survivors = verify_moment_substrings(session, moments)
+    assert len(survivors) == 1
+    assert survivors[0].dim_key == "verification"
+    err = capsys.readouterr().err  # type: ignore[attr-defined]
+    assert err.count("[scorer] moment failed substring check") == 1
+
+
+def test_verify_returns_empty_for_empty_input() -> None:
+    """No moments in, no moments out, no log line."""
+    session = _make_session([(Role.USER, "anything")])
+    assert verify_moment_substrings(session, []) == []
+
+
+def test_verify_accepts_excerpt_from_assistant_turn() -> None:
+    """Spec §4.1: the excerpt may be the assistant's words when that is
+    what shows the missed verification. The corpus covers all turns."""
+    session = _make_session(
+        [
+            (Role.USER, "Add an email column."),
+            (
+                Role.ASSISTANT,
+                "Done. I added the email column without backfilling existing rows.",
+            ),
+        ]
+    )
+    moments = [
+        _make_moment(
+            "added the email column without backfilling",
+            dim_key="verification",
+        )
+    ]
+    assert verify_moment_substrings(session, moments) == moments
+
+
+def test_verify_excerpt_can_span_turn_boundary() -> None:
+    """Turns are joined with a single space in the corpus, so an excerpt
+    that straddles two adjacent turns matches after normalization."""
+    session = _make_session(
+        [
+            (Role.USER, "Run the migration."),
+            (Role.ASSISTANT, "OK, applying."),
+        ]
+    )
+    moments = [_make_moment("migration. OK")]
+    assert verify_moment_substrings(session, moments) == moments
+
+
+def test_verify_drops_whitespace_only_excerpt(capsys: object) -> None:
+    """An excerpt that normalizes to an empty string must not vacuously
+    match (`'' in transcript` is always True)."""
+    session = _make_session([(Role.USER, "real content here")])
+    moments = [_make_moment("   \n\t  ")]
+    assert verify_moment_substrings(session, moments) == []
+    err = capsys.readouterr().err  # type: ignore[attr-defined]
+    assert "[scorer] moment failed substring check" in err
+
+
+def test_verify_log_line_includes_dim_and_turn_context(
+    capsys: object,
+) -> None:
+    """The exact prefix `[scorer] moment failed substring check` is
+    required; extra context after it makes failures debuggable."""
+    session = _make_session([(Role.USER, "actual transcript content")])
+    moments = [
+        _make_moment("invented quote", dim_key="iteration", turn_index=3)
+    ]
+    verify_moment_substrings(session, moments)
+    err = capsys.readouterr().err  # type: ignore[attr-defined]
+    assert "[scorer] moment failed substring check" in err
+    assert "iteration" in err
+    assert "turn=3" in err
+
+
+def test_verify_case_sensitive_match() -> None:
+    """Spec §4.4 specifies whitespace normalization only - case is NOT
+    normalized. An excerpt that differs only in case is not a substring."""
+    session = _make_session([(Role.USER, "Run the Migration")])
+    moments = [_make_moment("run the migration")]
+    assert verify_moment_substrings(session, moments) == []
+
+
+def test_verify_does_not_mutate_input_list() -> None:
+    """The verifier returns a new list and does not mutate moments in place."""
+    session = _make_session([(Role.USER, "good content")])
+    good = _make_moment("good content", dim_key="planning")
+    bad = _make_moment("invented", dim_key="iteration")
+    inputs = [good, bad]
+    verify_moment_substrings(session, inputs)
+    assert inputs == [good, bad]

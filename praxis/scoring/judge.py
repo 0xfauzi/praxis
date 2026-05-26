@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -27,6 +28,7 @@ _VALID_DIM_KEYS: frozenset[str] = frozenset(d.key for d in RUBRIC)
 _EXCERPT_MAX = 240
 _WHY_MAX = 180
 _ALT_MAX = 220
+_WHITESPACE_RE = re.compile(r"\s+")
 
 
 # Cap per session — empirically enough signal for nuanced judgment.
@@ -308,6 +310,52 @@ def _parse_moments(raw: Any) -> list[Moment]:
     return out
 
 
+def _normalize_whitespace(text: str) -> str:
+    """Collapse runs of whitespace to a single space and strip ends.
+
+    Spec §4.4 mandates whitespace-normalized substring verification: a
+    quoted_excerpt from the judge may differ from the transcript only in
+    its whitespace shape (newlines, tabs, runs of spaces), nothing else.
+    """
+    return _WHITESPACE_RE.sub(" ", text).strip()
+
+
+def _session_corpus(session: Session) -> str:
+    """Full-text corpus used to verify moment excerpts.
+
+    Joins every turn's content with a single space. The judge sees the
+    *compacted* transcript (per spec §9.2), but verification runs against
+    the full text stored locally - the judge is not allowed to quote
+    spans it never saw. Tool-call metadata is deliberately excluded:
+    the judge prompt directs the model to quote rendered text only.
+    """
+    return " ".join(turn.content for turn in session.turns)
+
+
+def verify_moment_substrings(session: Session, moments: list[Moment]) -> list[Moment]:
+    """Drop moments whose quoted_excerpt is not a substring of the transcript.
+
+    Per spec §4.4: the whitespace-normalized excerpt MUST be a substring
+    of the whitespace-normalized session transcript. On failure, emit a
+    `[scorer] moment failed substring check` log line and discard the
+    moment. There is no fuzzy or approximate match fallback - a wrong
+    quote is worse than no quote.
+    """
+    transcript = _normalize_whitespace(_session_corpus(session))
+    survivors: list[Moment] = []
+    for m in moments:
+        excerpt = _normalize_whitespace(m.quoted_excerpt)
+        if excerpt and excerpt in transcript:
+            survivors.append(m)
+            continue
+        print(
+            f"[scorer] moment failed substring check "
+            f"(dim={m.dim_key}, turn={m.turn_index})",
+            file=sys.stderr,
+        )
+    return survivors
+
+
 def score_with_claude(session: Session, model: str = "claude-opus-4-7") -> JudgeResult:
     """Score one session using Claude. Requires ANTHROPIC_API_KEY in env."""
     from anthropic import Anthropic  # type: ignore
@@ -328,7 +376,9 @@ def score_with_claude(session: Session, model: str = "claude-opus-4-7") -> Judge
     text = "".join(
         block.text for block in response.content if getattr(block, "type", None) == "text"
     )
-    return _parse_response(text, model)
+    result = _parse_response(text, model)
+    result.moments = verify_moment_substrings(session, result.moments)
+    return result
 
 
 def score_with_openai(session: Session, model: str = "gpt-5") -> JudgeResult:
@@ -349,7 +399,9 @@ def score_with_openai(session: Session, model: str = "gpt-5") -> JudgeResult:
         response_format={"type": "json_object"},
     )
     text = response.choices[0].message.content or ""
-    return _parse_response(text, model)
+    result = _parse_response(text, model)
+    result.moments = verify_moment_substrings(session, result.moments)
+    return result
 
 
 def score_session(session: Session, prefer: str = "claude") -> JudgeResult | None:
