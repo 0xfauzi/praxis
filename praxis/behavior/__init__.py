@@ -14,6 +14,12 @@ from praxis.behavior.slope import (
     fit_metric,
     fit_weekly_trajectory,
 )
+from praxis.behavior.labels import (
+    MIN_BUCKETS_FOR_LABEL,
+    WeeklyTrajectoryLabel,
+    label_from_fit,
+    label_trajectory,
+)
 from praxis.behavior.weekly import (
     DEFAULT_WINDOW_DAYS,
     MIN_SESSIONS_FOR_FIT,
@@ -43,4 +49,8 @@ __all__ = [
     "WeeklyTrajectoryFit",
     "fit_metric",
     "fit_weekly_trajectory",
+    "MIN_BUCKETS_FOR_LABEL",
+    "WeeklyTrajectoryLabel",
+    "label_from_fit",
+    "label_trajectory",
 ]
