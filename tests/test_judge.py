@@ -2,9 +2,10 @@
 
 US-017 extends the judge to emit a structured `moments` array alongside
 scores and rationales. US-018 adds a substring verifier that drops any
-moment whose excerpt the judge invented. These tests cover the parser,
-the system prompt, and the verifier - they do NOT hit a live model.
-The Anthropic/OpenAI client codepaths are exercised separately.
+moment whose excerpt the judge invented. US-019 adds a confidence
+self-flag and confidence_reason. These tests cover the parser, the
+system prompt, and the verifier - they do NOT hit a live model. The
+Anthropic/OpenAI client codepaths are exercised separately.
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from praxis.models import Moment, Provider, Role, Session, Turn
 from praxis.scoring.judge import (
     JudgeResult,
     _build_system_prompt,
+    _parse_confidence,
     _parse_moments,
     _parse_response,
     verify_moment_substrings,
@@ -48,8 +50,20 @@ def _make_moment(
     )
 
 
-def _full_response_payload(moments: list[dict[str, object]] | None = None) -> str:
-    """Return a JSON string matching the judge output contract."""
+_SENTINEL = object()
+
+
+def _full_response_payload(
+    moments: list[dict[str, object]] | None = None,
+    *,
+    confidence: object = _SENTINEL,
+    confidence_reason: object = _SENTINEL,
+) -> str:
+    """Return a JSON string matching the judge output contract.
+
+    Pass `_SENTINEL` (the default) to omit the key entirely; pass any
+    other value (including None) to include the key with that value.
+    """
     payload: dict[str, object] = {
         "scores": {
             "planning": 7,
@@ -73,6 +87,10 @@ def _full_response_payload(moments: list[dict[str, object]] | None = None) -> st
     }
     if moments is not None:
         payload["moments"] = moments
+    if confidence is not _SENTINEL:
+        payload["confidence"] = confidence
+    if confidence_reason is not _SENTINEL:
+        payload["confidence_reason"] = confidence_reason
     return json.dumps(payload)
 
 
@@ -439,3 +457,123 @@ def test_verify_does_not_mutate_input_list() -> None:
     inputs = [good, bad]
     verify_moment_substrings(session, inputs)
     assert inputs == [good, bad]
+
+
+# ---------------------------------------------------------------------------
+# US-019: confidence (low/medium/high) + confidence_reason
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_includes_confidence_calibration_section() -> None:
+    """AC: spec §9.3 calibration instructions are present in the prompt.
+
+    The prompt must instruct the model on what high/medium/low mean,
+    and request a one-sentence confidence_reason.
+    """
+    prompt = _build_system_prompt()
+    assert "confidence" in prompt.lower()
+    assert "confidence_reason" in prompt
+    for level in ("low", "medium", "high"):
+        assert level in prompt.lower(), f"confidence level {level!r} missing from prompt"
+    # The calibration anchors per spec §9.3.
+    assert "default to" in prompt.lower() or "default when uncertain" in prompt.lower()
+    assert "second" in prompt.lower(), "prompt should mention the 'second opinion' framing"
+
+
+def test_system_prompt_documents_confidence_in_output_shape() -> None:
+    """AC: the JSON output shape example shows confidence + confidence_reason."""
+    prompt = _build_system_prompt()
+    assert '"confidence"' in prompt
+    assert '"confidence_reason"' in prompt
+    assert "low|medium|high" in prompt or "low | medium | high" in prompt
+
+
+def test_parse_response_extracts_high_confidence() -> None:
+    text = _full_response_payload(
+        confidence="high",
+        confidence_reason="Six dims all had clear signal across 28 turns.",
+    )
+    result = _parse_response(text, model="claude-opus-4-7")
+    assert isinstance(result, JudgeResult)
+    assert result.confidence == "high"
+    assert result.confidence_reason == "Six dims all had clear signal across 28 turns."
+
+
+def test_parse_response_extracts_medium_confidence() -> None:
+    text = _full_response_payload(
+        confidence="medium",
+        confidence_reason="Tools dim is weak; everything else is solid.",
+    )
+    result = _parse_response(text, model="claude-opus-4-7")
+    assert result.confidence == "medium"
+    assert result.confidence_reason == "Tools dim is weak; everything else is solid."
+
+
+def test_parse_response_extracts_low_confidence() -> None:
+    text = _full_response_payload(
+        confidence="low",
+        confidence_reason="Transcript was a 2-turn fragment; nothing to ground rationale on.",
+    )
+    result = _parse_response(text, model="claude-opus-4-7")
+    assert result.confidence == "low"
+    assert "fragment" in result.confidence_reason
+
+
+def test_parse_response_missing_confidence_defaults_to_medium() -> None:
+    """A judge that omits confidence should not crash; default to medium so
+    a missing self-rating does not trigger pass 2 escalation."""
+    text = _full_response_payload()  # no confidence keys at all
+    result = _parse_response(text, model="claude-opus-4-7")
+    assert result.confidence == "medium"
+    assert result.confidence_reason == ""
+
+
+def test_parse_response_invalid_confidence_value_defaults_to_medium() -> None:
+    """Unknown enum value (e.g. 'very-high') falls back to medium."""
+    text = _full_response_payload(
+        confidence="very-high",
+        confidence_reason="bogus",
+    )
+    result = _parse_response(text, model="claude-opus-4-7")
+    assert result.confidence == "medium"
+    # confidence_reason is still kept; it's free-text, not enum-validated.
+    assert result.confidence_reason == "bogus"
+
+
+def test_parse_response_non_string_confidence_defaults_to_medium() -> None:
+    """A numeric or null confidence value should not crash."""
+    text = _full_response_payload(
+        confidence=3,
+        confidence_reason=None,
+    )
+    result = _parse_response(text, model="claude-opus-4-7")
+    assert result.confidence == "medium"
+    assert result.confidence_reason == ""
+
+
+def test_parse_confidence_unit() -> None:
+    """The _parse_confidence helper coerces raw judge output to a typed pair."""
+    assert _parse_confidence("low", "short transcript") == ("low", "short transcript")
+    assert _parse_confidence("medium", "") == ("medium", "")
+    assert _parse_confidence("high", "all clear") == ("high", "all clear")
+    # Invalid enum -> medium default.
+    assert _parse_confidence("MAYBE", "x") == ("medium", "x")
+    # Missing keys (None) -> medium + empty.
+    assert _parse_confidence(None, None) == ("medium", "")
+    # Non-string reason -> empty.
+    assert _parse_confidence("high", 42) == ("high", "")
+
+
+def test_judge_result_default_confidence_is_medium() -> None:
+    """A JudgeResult constructed without confidence defaults to medium / empty
+    reason, mirroring the parser's missing-key behavior."""
+    r = JudgeResult(
+        dimension_scores={},
+        rationale={},
+        standout_moments=[],
+        failure_modes=[],
+        overall_note="",
+        judge_model="m",
+    )
+    assert r.confidence == "medium"
+    assert r.confidence_reason == ""

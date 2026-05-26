@@ -19,15 +19,17 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from praxis.models import Moment, Session, Severity
+from praxis.models import Confidence, Moment, Session, Severity
 from praxis.scoring.rubric import RUBRIC
 
 
 _VALID_SEVERITIES: frozenset[str] = frozenset({"minor", "moderate", "major"})
+_VALID_CONFIDENCES: frozenset[str] = frozenset({"low", "medium", "high"})
 _VALID_DIM_KEYS: frozenset[str] = frozenset(d.key for d in RUBRIC)
 _EXCERPT_MAX = 240
 _WHY_MAX = 180
 _ALT_MAX = 220
+_CONFIDENCE_REASON_MAX = 240
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
@@ -46,6 +48,11 @@ class JudgeResult:
     overall_note: str
     judge_model: str
     moments: list[Moment] = field(default_factory=list)
+    # Spec §9.3: the judge self-rates whether its read deserves a second
+    # opinion. "medium" is the default when the model omits the field, so
+    # missing/invalid confidence does NOT trigger pass 2 escalation.
+    confidence: Confidence = "medium"
+    confidence_reason: str = ""
 
 
 def _compact_transcript(session: Session) -> str:
@@ -147,6 +154,16 @@ Each moment object has six required fields:
 - `suggested_alternative`: <= 220 chars, what to do next time. Concrete enough to act on.
 - `severity`: one of {{minor, moderate, major}}.
 
+# Confidence
+
+After scoring, self-rate how solid your read of this session is. Return a `confidence` field with one of three values, plus a one-sentence `confidence_reason`:
+
+- **high**: every dim has clear signal, no contradictions, the transcript is long enough to ground each rationale.
+- **medium**: most dims have clear signal but one or two are weak. Default to this when uncertain about an individual dim.
+- **low**: the transcript was ambiguous, very short, or you felt out of depth on the subject matter (for example, a deep-architecture session where you cannot reliably assess fit). A low rating triggers a second, more expensive pass; use it when you genuinely want a second opinion.
+
+This is your own judgment, not a rule. We trust your answer; do not inflate or deflate it.
+
 # Voice
 
 Be direct, warm, and practical. Write like a senior engineer giving honest feedback to a colleague — not like a corporate training module. Don't moralize. Don't use empty enthusiasm. Don't say "great job" unless something was genuinely great. Avoid corporate jargon ("delve", "showcase", "leverage" as a verb). Active voice. Numbers with context.
@@ -190,6 +207,8 @@ Return ONLY valid JSON, no preamble, no markdown fences, in exactly this shape:
       "severity": "<minor|moderate|major>"
     }}
   ],
+  "confidence": "<low|medium|high>",
+  "confidence_reason": "<one short sentence explaining your confidence>",
   "overall_note": "<2-3 sentences capturing the pattern>"
 }}
 
@@ -229,6 +248,11 @@ def _parse_response(text: str, model: str) -> JudgeResult:
         except (TypeError, ValueError):
             scores[k] = 5.0  # Spec §8.5: "insufficient signal" defaults to neutral.
 
+    confidence, confidence_reason = _parse_confidence(
+        payload.get("confidence"),
+        payload.get("confidence_reason"),
+    )
+
     return JudgeResult(
         dimension_scores=scores,
         rationale=dict(payload.get("rationale", {}) or {}),
@@ -237,7 +261,26 @@ def _parse_response(text: str, model: str) -> JudgeResult:
         overall_note=str(payload.get("overall_note", "") or ""),
         judge_model=model,
         moments=_parse_moments(payload.get("moments", []) or []),
+        confidence=confidence,
+        confidence_reason=confidence_reason,
     )
+
+
+def _parse_confidence(
+    raw_confidence: Any, raw_reason: Any
+) -> tuple[Confidence, str]:
+    """Coerce the judge's confidence fields per spec §9.3.
+
+    Missing or invalid `confidence` defaults to "medium" - a missing
+    self-rating should not trigger pass 2 escalation. The reason field
+    is truncated to a soft cap; it is free-text and not load-bearing.
+    """
+    if isinstance(raw_confidence, str) and raw_confidence in _VALID_CONFIDENCES:
+        confidence: Confidence = cast(Confidence, raw_confidence)
+    else:
+        confidence = "medium"
+    reason = raw_reason if isinstance(raw_reason, str) else ""
+    return confidence, reason[:_CONFIDENCE_REASON_MAX]
 
 
 def _parse_moments(raw: Any) -> list[Moment]:

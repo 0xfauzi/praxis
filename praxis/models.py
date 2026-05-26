@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 
 Severity = Literal["minor", "moderate", "major"]
+Confidence = Literal["low", "medium", "high"]
 
 
 class Provider(str, Enum):
