@@ -27,3 +27,15 @@
   - The labeled-secret regex uses `\W*` (zero-or-more non-word chars) as the separator. This deliberately includes `\n`, so multi-line `key:\n  abc...` patterns are still redacted; but intervening English words (e.g., "password is wrong") break the match because the next `\w` stops `\W*` and the value class doesn't admit a leading letter-word. Keep this property when extending.
   - The literal alternation is exactly `key|token|secret|password` -- singular, no plurals, no compound forms like `API_KEY` (since `\bKEY\b` does not match inside `API_KEY`). If a future story wants to cover compound env-var names, that is a new requirement; do not silently widen this regex.
 ---
+## Iteration 3 - US-011: Redaction is idempotent
+- What I did: Added 6 tests at the end of tests/test_redactor.py that lock in idempotence: a per-pattern double-run check across all 6 entries in _PATTERNS, a mixed-secrets double-run check, and four placeholder-stability checks (bare placeholder, placeholder in prose, two adjacent placeholders, placeholder right after a label). No change to praxis/redactor.py -- idempotence was already a design invariant of the existing regexes (value classes exclude `[`, labeled-secret tail requires >= 20 chars > len("REDACTED")=8, and "REDACTED" is not a label literal); the new tests just assert it.
+- Files changed: tests/test_redactor.py, scripts/ralph/feature/secret-redaction/prd.json (US-011 -> passes:true).
+- Verification:
+  - uv run pytest -q  -> 60 passed (was 54; +6 new US-011 tests).
+  - uv run mypy praxis/redactor.py tests/test_redactor.py  -> Success: no issues.
+  - uv run mypy praxis  -> still 34 pre-existing errors in 6 files, zero new.
+- What the next iteration should know:
+  - All three feature stories (US-009, US-010, US-011) now pass. If the PRD has no further stories, the loop should terminate.
+  - Idempotence is now a tested invariant, not just a design intent. If a future change to praxis/redactor.py adds a pattern, the new pattern MUST keep `[` out of its value class and its tail-length budget; otherwise test_bare_placeholder_is_unchanged / test_placeholder_in_prose_is_unchanged will fail loudly.
+  - The "redaction is idempotent" property is what lets the rest of the pipeline call redact_secrets() defensively at multiple stages (e.g., on read, on write, on render) without risk of corrupting already-redacted text. Spec section 4.4 calls for this; future code that wires redaction into persistence/rendering paths can rely on it.
+---

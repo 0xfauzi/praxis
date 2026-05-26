@@ -37,8 +37,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "No code change to praxis/redactor.py was needed. Idempotence falls out of three existing properties: (1) every value class excludes `[` so `[REDACTED]` can never start a match, (2) the labeled-secret rule requires >= 20 value-class chars after the label so the 8-char `REDACTED` body cannot satisfy the length, (3) the placeholder body `REDACTED` is not itself a label literal. Tests in tests/test_redactor.py (test_redact_is_idempotent_for_each_pattern, test_redact_is_idempotent_with_mixed_secrets_in_one_string, test_bare_placeholder_is_unchanged, test_placeholder_in_prose_is_unchanged, test_adjacent_placeholders_are_not_merged_or_split, test_placeholder_after_label_is_unchanged) lock these properties in. If a future story adds a pattern, it must keep `[` out of its value class and out of any tail-length budget."
     }
   ]
 }

@@ -145,3 +145,69 @@ def test_generic_does_not_re_redact_placeholder():
     once = redact_secrets("key=abcdefghij1234567890ABCDEFGH")
     twice = redact_secrets(once)
     assert once == twice == f"key={PLACEHOLDER}"
+
+
+# --- US-011: redaction is idempotent ---
+
+
+def test_redact_is_idempotent_for_each_pattern():
+    # For every individual pattern, two runs produce the same result
+    # as one run. Covers each entry in praxis.redactor._PATTERNS.
+    inputs = [
+        "key=sk-ant-api03-FAKEfake1234567890abcdefghij_-ABCDEFGHIJ",
+        "OPENAI_API_KEY=sk-proj-FAKEopenai1234567890ABCDEFabcdef_-XYZ09876",
+        "AWS_ACCESS_KEY_ID = AKIAIOSFODNN7EXAMPLE",
+        "https://ghp_abcdefghijklmnopqrstuvwxyz0123456789@github.com/me/repo",
+        "token=github_pat_" + ("A" * 22) + "_" + ("B" * 59),
+        (
+            "Authorization: Bearer "
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+            ".eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ"
+            ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        ),
+        "password = abcdefghij1234567890ABCDEFGH",
+    ]
+    for text in inputs:
+        once = redact_secrets(text)
+        twice = redact_secrets(once)
+        assert once == twice, f"not idempotent on {text!r}: {once!r} -> {twice!r}"
+
+
+def test_redact_is_idempotent_with_mixed_secrets_in_one_string():
+    # Several secret types in the same input must also be stable under
+    # a second pass; this catches regressions where one pattern's output
+    # accidentally feeds another pattern on the next run.
+    text = (
+        "ANTHROPIC=sk-ant-api03-FAKEfake1234567890abcdefghij_-ABCDEFGHIJ "
+        "OPENAI=sk-proj-FAKEopenai1234567890ABCDEFabcdef_-XYZ09876 "
+        "AWS=AKIAIOSFODNN7EXAMPLE "
+        "password=abcdefghij1234567890ABCDEFGH"
+    )
+    once = redact_secrets(text)
+    twice = redact_secrets(once)
+    assert once == twice
+
+
+def test_bare_placeholder_is_unchanged():
+    # The placeholder string itself is not matched by any pattern.
+    assert redact_secrets(PLACEHOLDER) == PLACEHOLDER
+
+
+def test_placeholder_in_prose_is_unchanged():
+    # An already-redacted marker embedded in surrounding text survives
+    # a pass untouched, neither duplicated nor split.
+    text = f"before {PLACEHOLDER} after"
+    assert redact_secrets(text) == text
+
+
+def test_adjacent_placeholders_are_not_merged_or_split():
+    # Two markers butted together stay as two distinct markers.
+    text = f"{PLACEHOLDER}{PLACEHOLDER}"
+    assert redact_secrets(text) == text
+    assert redact_secrets(text).count(PLACEHOLDER) == 2
+
+
+def test_placeholder_after_label_is_unchanged():
+    # `key=[REDACTED]` must not be re-matched by the labeled-secret rule.
+    text = f"key={PLACEHOLDER}"
+    assert redact_secrets(text) == text
