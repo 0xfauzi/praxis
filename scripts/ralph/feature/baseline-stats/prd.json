@@ -1,0 +1,62 @@
+{
+  "branchName": "ralph/factory/baseline-stats",
+  "userStories": [
+    {
+      "id": "US-033",
+      "title": "Compute 90-day rolling baseline per dim from session_scores",
+      "acceptanceCriteria": [
+        "Baseline is the mean of session scores over the last 90 days excluding the current ISO week",
+        "Baseline is computed for each of the 6 rubric dims and for engagement/delegation/independence rates",
+        "Sessions are weighted equally regardless of length",
+        "Each session's overall is clipped to [1.0, 9.0] before contributing",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-034",
+      "title": "Significance gating for displayed deltas",
+      "acceptanceCriteria": [
+        "Delta magnitudes < 0.3 on the /10 scale render as '~'",
+        "Delta magnitudes >= 0.3 render with up/down arrows and signed numeric value",
+        "Gating is applied uniformly to HTML and terminal renderers",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-035",
+      "title": "Handle <14 days of available data",
+      "acceptanceCriteria": [
+        "If less than 14 days of data exists, baseline values render as '--'",
+        "Deltas are not displayed and the panel shows 'Baseline forming. Come back in 2 more weeks for week-over-week.'",
+        "Last-week mean still renders if there is at least one prior week of data",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-036",
+      "title": "Last-week annotation rendered as secondary anchor",
+      "acceptanceCriteria": [
+        "When 2+ weeks of data are available, last week's mean is computed alongside the 90-day baseline",
+        "HTML digest renders last-week as a faded secondary annotation",
+        "Terminal digest omits the last-week annotation",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
