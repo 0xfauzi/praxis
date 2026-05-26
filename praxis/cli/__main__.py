@@ -155,6 +155,35 @@ WantedBy=timers.target
     return 0
 
 
+def cmd_config(args: argparse.Namespace) -> int:
+    from praxis.config_cli import (
+        ConfigCLIError,
+        get_value,
+        open_editor,
+        set_value,
+    )
+
+    try:
+        if args.get is not None:
+            print(get_value(args.get))
+            return 0
+        if args.set is not None:
+            if "=" not in args.set:
+                print(
+                    f"Invalid --set argument {args.set!r}: "
+                    f"expected 'key=value' (e.g., schedule.day=monday).",
+                    file=sys.stderr,
+                )
+                return 1
+            key, raw = args.set.split("=", 1)
+            set_value(key, raw)
+            return 0
+        return open_editor()
+    except ConfigCLIError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
 def cmd_models(args: argparse.Namespace) -> int:
     from praxis.models_advisor import load_all_cards
     from praxis.models_advisor.cards import find_card_for_model_hint
@@ -262,6 +291,17 @@ def build_parser() -> argparse.ArgumentParser:
     mod.add_argument("--show", type=str, default=None,
                      help="Show full details for one model card (by id or alias).")
     mod.set_defaults(func=cmd_models)
+
+    cfg = sub.add_parser("config",
+                         help="View, --get, or --set ~/.praxis/config.toml.")
+    cfg_action = cfg.add_mutually_exclusive_group()
+    cfg_action.add_argument("--get", type=str, default=None, metavar="KEY",
+                            help="Print the value of a dotted key "
+                                 "(e.g., schedule.day).")
+    cfg_action.add_argument("--set", type=str, default=None, metavar="KEY=VALUE",
+                            help="Set a dotted key, preserving the rest of "
+                                 "the file (e.g., schedule.day=monday).")
+    cfg.set_defaults(func=cmd_config)
 
     return p
 
