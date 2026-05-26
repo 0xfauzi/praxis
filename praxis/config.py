@@ -7,10 +7,17 @@ Subsequent runs never overwrite the file: users can edit it freely
 Spec section 12.2 defines the canonical schema; ``DEFAULT_CONFIG_TOML``
 below mirrors it verbatim, including comments, so the file the user
 opens looks exactly like the spec.
+
+``load_config()`` returns a typed :class:`Config` view of the file with
+documented defaults for any field the user omitted -- never raises on
+missing keys (Spec 12.2 says the file is user-editable).
 """
 from __future__ import annotations
 
+import tomllib
+from dataclasses import dataclass, field, fields
 from pathlib import Path
+from typing import Any
 
 from praxis.storage.profile_store import resolve_home
 
@@ -62,3 +69,83 @@ def ensure_config_file(home: Path | None = None) -> Path:
     if not path.exists():
         path.write_text(DEFAULT_CONFIG_TOML, encoding="utf-8")
     return path
+
+
+# Defaults below MUST match DEFAULT_CONFIG_TOML above. The string is
+# what the user reads/edits; the dataclasses are what code consumes.
+# Both copies exist so the file stays human-readable (with comments)
+# while typed access stays cheap (no parse on every attribute read).
+
+
+@dataclass(frozen=True)
+class ScheduleConfig:
+    day: str = "sunday"
+    hour: int = 18
+    minute: int = 0
+
+
+@dataclass(frozen=True)
+class ScanConfig:
+    since_days: int = 7
+    max_new: int = 200
+
+
+@dataclass(frozen=True)
+class JudgeConfig:
+    primary_provider: str = "anthropic"
+    frontier_model: str = "claude-opus-4-7"
+    cheap_model: str = "claude-haiku-4-5"
+
+
+@dataclass(frozen=True)
+class NotificationConfig:
+    enabled: bool = True
+    sound: str = "default"
+
+
+@dataclass(frozen=True)
+class PrivacyConfig:
+    redact_secrets: bool = True
+
+
+@dataclass(frozen=True)
+class Config:
+    schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
+    scan: ScanConfig = field(default_factory=ScanConfig)
+    judge: JudgeConfig = field(default_factory=JudgeConfig)
+    notification: NotificationConfig = field(default_factory=NotificationConfig)
+    privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
+
+
+def _section(cls: type, data: Any) -> Any:
+    """Build a section dataclass, ignoring unknown keys and defaulting missing ones.
+
+    The user's config.toml is allowed to drift from the spec (new keys
+    we don't know about yet, old keys removed). We only consume keys
+    the dataclass declares; anything else is silently ignored so the
+    loader never raises on a hand-edited file.
+    """
+    if not isinstance(data, dict):
+        return cls()
+    known = {f.name for f in fields(cls)}
+    kwargs = {k: v for k, v in data.items() if k in known}
+    return cls(**kwargs)
+
+
+def load_config(home: Path | None = None) -> Config:
+    """Return the parsed :class:`Config`, creating the file if missing.
+
+    Missing sections or fields fall back to the documented defaults
+    (see :data:`DEFAULT_CONFIG_TOML`). Unknown keys are ignored so the
+    loader survives forward/backward config drift without raising.
+    """
+    path = ensure_config_file(home)
+    with path.open("rb") as f:
+        raw = tomllib.load(f)
+    return Config(
+        schedule=_section(ScheduleConfig, raw.get("schedule")),
+        scan=_section(ScanConfig, raw.get("scan")),
+        judge=_section(JudgeConfig, raw.get("judge")),
+        notification=_section(NotificationConfig, raw.get("notification")),
+        privacy=_section(PrivacyConfig, raw.get("privacy")),
+    )
