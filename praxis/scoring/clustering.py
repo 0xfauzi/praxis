@@ -136,42 +136,110 @@ def _parse_response(text: str) -> list[Task]:
     return tasks
 
 
+def _validate_coverage(tasks: list[Task], expected_ids: set[str]) -> str | None:
+    """Spec 5.3: every input session_id must appear in exactly one task.
+
+    Returns None on success. Otherwise returns a human-readable error string
+    naming the missing, duplicated, and/or invented (spec 5.6) session_ids,
+    which is appended to the re-prompt so the model knows what to fix.
+    """
+    all_ids: list[str] = []
+    for t in tasks:
+        all_ids.extend(t.session_ids)
+
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for sid in all_ids:
+        if sid in seen:
+            if sid not in duplicates:
+                duplicates.append(sid)
+        else:
+            seen.add(sid)
+
+    invented = sorted(sid for sid in seen if sid not in expected_ids)
+    missing = sorted(sid for sid in expected_ids if sid not in seen)
+
+    errors: list[str] = []
+    if missing:
+        errors.append(f"missing session_ids: {missing}")
+    if duplicates:
+        errors.append(f"duplicated session_ids: {sorted(duplicates)}")
+    if invented:
+        errors.append(f"invented session_ids not in input: {invented}")
+
+    if errors:
+        return "; ".join(errors)
+    return None
+
+
+def _build_retry_message(original_prompt: str, validation_error: str) -> str:
+    """Spec 5.3: re-prompt once with the validation error appended."""
+    return (
+        f"{original_prompt}\n\n"
+        f"Your previous response failed validation: {validation_error}\n"
+        f"Please return a corrected JSON response in the same shape, using only "
+        f"the session_ids from the input above, each appearing in exactly one task."
+    )
+
+
 def cluster_with_anthropic(
     sessions: list[Session], model: str = ANTHROPIC_CHEAP_MODEL
 ) -> list[Task]:
-    """One clustering call against the Anthropic cheap-tier model."""
+    """One clustering call against the Anthropic cheap-tier model, with a single
+    coverage-validation re-prompt (spec 5.3) on missing, duplicated, or invented
+    session_ids."""
     from anthropic import Anthropic  # type: ignore
 
     client = Anthropic()
     prompt = build_prompt(sessions)
-    response = client.messages.create(
-        model=model,
-        max_tokens=4000,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    text = "".join(
-        getattr(block, "text", "")
-        for block in response.content
-        if getattr(block, "type", None) == "text"
-    )
-    return _parse_response(text)
+    expected_ids = {s.stable_id for s in sessions}
+
+    def _call(content: str) -> list[Task]:
+        response = client.messages.create(
+            model=model,
+            max_tokens=4000,
+            messages=[{"role": "user", "content": content}],
+        )
+        text = "".join(
+            getattr(block, "text", "")
+            for block in response.content
+            if getattr(block, "type", None) == "text"
+        )
+        return _parse_response(text)
+
+    tasks = _call(prompt)
+    error = _validate_coverage(tasks, expected_ids)
+    if error is None:
+        return tasks
+    return _call(_build_retry_message(prompt, error))
 
 
 def cluster_with_openai(
     sessions: list[Session], model: str = OPENAI_CHEAP_MODEL
 ) -> list[Task]:
-    """One clustering call against the OpenAI cheap-tier model."""
+    """One clustering call against the OpenAI cheap-tier model, with a single
+    coverage-validation re-prompt (spec 5.3) on missing, duplicated, or invented
+    session_ids."""
     from openai import OpenAI  # type: ignore
 
     client = OpenAI()
     prompt = build_prompt(sessions)
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"},
-    )
-    text = response.choices[0].message.content or ""
-    return _parse_response(text)
+    expected_ids = {s.stable_id for s in sessions}
+
+    def _call(content: str) -> list[Task]:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": content}],
+            response_format={"type": "json_object"},
+        )
+        text = response.choices[0].message.content or ""
+        return _parse_response(text)
+
+    tasks = _call(prompt)
+    error = _validate_coverage(tasks, expected_ids)
+    if error is None:
+        return tasks
+    return _call(_build_retry_message(prompt, error))
 
 
 def cluster_sessions(

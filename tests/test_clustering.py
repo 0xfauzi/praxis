@@ -55,15 +55,23 @@ class _FakeAnthropicResponse:
 
 
 class _CallRecorder:
-    """Captures the kwargs of the single LLM call so the test can assert on them."""
+    """Captures the kwargs of each LLM call so the test can assert on them.
 
-    def __init__(self, reply_text: str) -> None:
-        self.reply_text = reply_text
+    Accepts either a single reply string (returned for every call) or a list
+    of reply strings (returned in order, with the last one repeated if more
+    calls happen than replies were provided). The list form is what US-033
+    retry tests use to differentiate the first (invalid) reply from the
+    second (corrected) reply.
+    """
+
+    def __init__(self, replies: str | list[str]) -> None:
+        self._replies: list[str] = [replies] if isinstance(replies, str) else list(replies)
         self.calls: list[dict[str, Any]] = []
 
     def messages_create(self, **kwargs: Any) -> _FakeAnthropicResponse:
         self.calls.append(kwargs)
-        return _FakeAnthropicResponse(self.reply_text)
+        idx = min(len(self.calls) - 1, len(self._replies) - 1)
+        return _FakeAnthropicResponse(self._replies[idx])
 
 
 def _install_fake_anthropic(monkeypatch: pytest.MonkeyPatch, recorder: _CallRecorder) -> None:
@@ -97,13 +105,16 @@ class _OpenAIResponse:
 
 
 class _OpenAIRecorder:
-    def __init__(self, reply_text: str) -> None:
-        self.reply_text = reply_text
+    """OpenAI counterpart of _CallRecorder; same str-or-list-of-str contract."""
+
+    def __init__(self, replies: str | list[str]) -> None:
+        self._replies: list[str] = [replies] if isinstance(replies, str) else list(replies)
         self.calls: list[dict[str, Any]] = []
 
     def chat_create(self, **kwargs: Any) -> _OpenAIResponse:
         self.calls.append(kwargs)
-        return _OpenAIResponse(self.reply_text)
+        idx = min(len(self.calls) - 1, len(self._replies) - 1)
+        return _OpenAIResponse(self._replies[idx])
 
 
 def _install_fake_openai(monkeypatch: pytest.MonkeyPatch, recorder: _OpenAIRecorder) -> None:
@@ -334,3 +345,175 @@ def test_cluster_sessions_empty_input_returns_empty_list_and_makes_no_call(monke
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
     assert clustering.cluster_sessions([]) == []
     assert recorder.calls == []
+
+
+# --- US-033: coverage validation + single re-prompt -------------------------
+
+
+def test_validate_coverage_returns_none_when_each_id_appears_exactly_once():
+    tasks = [
+        clustering.Task(label="a", task_type="other", session_ids=["x", "y"], rationale="."),
+        clustering.Task(label="b", task_type="other", session_ids=["z"], rationale="."),
+    ]
+    assert clustering._validate_coverage(tasks, {"x", "y", "z"}) is None
+
+
+def test_validate_coverage_detects_missing_session_ids():
+    tasks = [
+        clustering.Task(label="a", task_type="other", session_ids=["x"], rationale="."),
+    ]
+    error = clustering._validate_coverage(tasks, {"x", "y", "z"})
+    assert error is not None
+    assert "missing" in error
+    assert "y" in error and "z" in error
+
+
+def test_validate_coverage_detects_duplicated_session_ids():
+    # Same session_id used in two different tasks.
+    tasks = [
+        clustering.Task(label="a", task_type="other", session_ids=["x"], rationale="."),
+        clustering.Task(label="b", task_type="other", session_ids=["x", "y"], rationale="."),
+    ]
+    error = clustering._validate_coverage(tasks, {"x", "y"})
+    assert error is not None
+    assert "duplicated" in error
+    assert "x" in error
+
+
+def test_validate_coverage_detects_invented_session_ids():
+    tasks = [
+        clustering.Task(
+            label="a", task_type="other", session_ids=["x", "FAKE"], rationale="."
+        ),
+    ]
+    error = clustering._validate_coverage(tasks, {"x"})
+    assert error is not None
+    assert "invented" in error
+    assert "FAKE" in error
+
+
+def _ok_reply(session_ids: list[str], label: str = "x y z") -> str:
+    return json.dumps(
+        {
+            "tasks": [
+                {
+                    "label": label,
+                    "task_type": "other",
+                    "session_ids": session_ids,
+                    "rationale": ".",
+                }
+            ]
+        }
+    )
+
+
+def test_anthropic_retries_once_when_response_is_missing_an_id(monkeypatch):
+    s1 = _make_session("s1", "alpha")
+    s2 = _make_session("s2", "beta")
+    invalid = _ok_reply([s1.stable_id], label="missing-s2")  # s2 missing
+    corrected = _ok_reply([s1.stable_id, s2.stable_id], label="fixed")
+    recorder = _CallRecorder([invalid, corrected])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_anthropic([s1, s2])
+
+    assert len(recorder.calls) == 2
+    assert len(tasks) == 1
+    assert tasks[0].label == "fixed"
+    assert set(tasks[0].session_ids) == {s1.stable_id, s2.stable_id}
+
+
+def test_anthropic_retries_once_when_response_has_duplicate_id(monkeypatch):
+    s1 = _make_session("s1", "alpha")
+    s2 = _make_session("s2", "beta")
+    duplicated = json.dumps(
+        {
+            "tasks": [
+                {"label": "a", "task_type": "other",
+                 "session_ids": [s1.stable_id], "rationale": "."},
+                {"label": "b", "task_type": "other",
+                 "session_ids": [s1.stable_id, s2.stable_id], "rationale": "."},
+            ]
+        }
+    )
+    corrected = _ok_reply([s1.stable_id, s2.stable_id])
+    recorder = _CallRecorder([duplicated, corrected])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    clustering.cluster_with_anthropic([s1, s2])
+
+    assert len(recorder.calls) == 2
+
+
+def test_anthropic_retries_once_when_response_has_invented_id(monkeypatch):
+    s1 = _make_session("s1", "alpha")
+    # Response includes s1 but also a made-up id that wasn't in input.
+    invented = _ok_reply([s1.stable_id, "TOTALLY-FAKE-ID"])
+    corrected = _ok_reply([s1.stable_id])
+    recorder = _CallRecorder([invented, corrected])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    clustering.cluster_with_anthropic([s1])
+
+    assert len(recorder.calls) == 2
+
+
+def test_anthropic_retry_prompt_contains_the_validation_error(monkeypatch):
+    s1 = _make_session("s1", "alpha")
+    s2 = _make_session("s2", "beta")
+    invalid = _ok_reply([s1.stable_id])  # s2 missing
+    corrected = _ok_reply([s1.stable_id, s2.stable_id])
+    recorder = _CallRecorder([invalid, corrected])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    clustering.cluster_with_anthropic([s1, s2])
+
+    second_prompt = recorder.calls[1]["messages"][0]["content"]
+    # The retry message carries the validation error verbatim.
+    assert "validation" in second_prompt.lower()
+    assert "missing" in second_prompt.lower()
+    # And the missing session_id itself is named so the model knows what to add back.
+    assert s2.stable_id in second_prompt
+
+
+def test_anthropic_no_retry_when_first_response_is_valid(monkeypatch):
+    s1 = _make_session("s1", "alpha")
+    s2 = _make_session("s2", "beta")
+    valid = _ok_reply([s1.stable_id, s2.stable_id])
+    # Only one reply provided; a second call would re-use it, but we assert
+    # the second call never happens at all.
+    recorder = _CallRecorder([valid])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    clustering.cluster_with_anthropic([s1, s2])
+
+    assert len(recorder.calls) == 1
+
+
+def test_openai_retries_once_when_response_is_missing_an_id(monkeypatch):
+    s1 = _make_session("s1", "alpha")
+    s2 = _make_session("s2", "beta")
+    invalid = _ok_reply([s1.stable_id])
+    corrected = _ok_reply([s1.stable_id, s2.stable_id], label="fixed")
+    recorder = _OpenAIRecorder([invalid, corrected])
+    _install_fake_openai(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_openai([s1, s2])
+
+    assert len(recorder.calls) == 2
+    assert tasks[0].label == "fixed"
+
+
+def test_openai_retry_prompt_contains_the_validation_error(monkeypatch):
+    s1 = _make_session("s1", "alpha")
+    invented = _ok_reply([s1.stable_id, "BOGUS"])
+    corrected = _ok_reply([s1.stable_id])
+    recorder = _OpenAIRecorder([invented, corrected])
+    _install_fake_openai(monkeypatch, recorder)
+
+    clustering.cluster_with_openai([s1])
+
+    assert len(recorder.calls) == 2
+    second_prompt = recorder.calls[1]["messages"][0]["content"]
+    assert "invented" in second_prompt.lower()
+    assert "BOGUS" in second_prompt
