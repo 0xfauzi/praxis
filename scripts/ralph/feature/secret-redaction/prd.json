@@ -1,0 +1,44 @@
+{
+  "branchName": "ralph/factory/secret-redaction",
+  "userStories": [
+    {
+      "id": "US-009",
+      "title": "Redact known provider key formats",
+      "acceptanceCriteria": [
+        "Anthropic, OpenAI, AWS, GitHub PAT, and JWT-shaped tokens are replaced with [REDACTED]",
+        "Each provider regex is covered by at least one unit test with a representative key",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "praxis/redactor.py exposes redact_secrets(text) and PLACEHOLDER='[REDACTED]'. Patterns: _ANTHROPIC, _OPENAI, _AWS_ACCESS_KEY, _GITHUB_PAT, _JWT (composed in _PROVIDER_PATTERNS). Future stories should reuse PLACEHOLDER and extend _PROVIDER_PATTERNS rather than introducing a parallel constant."
+    },
+    {
+      "id": "US-010",
+      "title": "Redact generic secret-like substrings",
+      "acceptanceCriteria": [
+        "Any sequence of >= 20 alnum/`_`/`-` characters appearing after the literals key, token, secret, or password (case-insensitive) is replaced with [REDACTED]",
+        "Plain English text containing those words but no high-entropy tail is left unchanged",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Redaction is idempotent",
+      "acceptanceCriteria": [
+        "Running the redactor twice on the same input produces the same output as one run",
+        "Already-redacted [REDACTED] markers are not duplicated or split",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

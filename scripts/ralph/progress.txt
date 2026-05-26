@@ -1,0 +1,16 @@
+## Iteration 1 - US-009: Redact known provider key formats
+- What I did: Added praxis/redactor.py with redact_secrets(text) plus regexes for Anthropic (sk-ant-), OpenAI (sk-/sk-proj-), AWS access key IDs (AKIA/ASIA/AROA/AIDA), GitHub PATs (gh[oprsu]_ + github_pat_), and JWTs (eyJ.X.Y). Added tests/test_redactor.py covering each provider plus an Anthropic/OpenAI non-collision case and a "prose is unchanged" case.
+- Files changed: praxis/redactor.py (new), tests/test_redactor.py (new), scripts/ralph/feature/secret-redaction/prd.json (US-009 -> passes:true).
+- Verification:
+  - uv run pytest -q            -> 45 passed (was 36 before; 9 new redactor tests).
+  - uv run mypy praxis/redactor.py tests/test_redactor.py -> Success: no issues.
+  - uv run mypy praxis          -> still 34 pre-existing errors in 6 files, zero new errors introduced by this change.
+- What the next iteration should know:
+  - Public API surface: from praxis.redactor import redact_secrets, PLACEHOLDER. PLACEHOLDER == "[REDACTED]".
+  - The OpenAI regex uses a negative lookahead (?!ant-) so it does NOT swallow Anthropic keys; both can appear in the same string and get redacted distinctly. Keep this ordering / lookahead intact if you add more sk-* providers.
+  - Patterns live in _PROVIDER_PATTERNS (tuple). US-010 (generic key/token/secret/password tail) should append a new compiled pattern to that tuple rather than introducing a parallel pipeline -- this keeps redact_secrets() a single fold and preserves idempotence for US-011.
+  - Idempotence for US-011: today the regexes do not match "[REDACTED]" (no '[' in any char class), so two passes already equal one pass. Keep this property when adding the generic tail rule -- e.g. exclude '[' from the captured set, or anchor the tail so it can't extend into '[REDACTED]'.
+  - Pre-existing mypy errors in praxis/scoring/coach.py, praxis/models_advisor/advisor.py, praxis/cli/__main__.py are not from this feature; do not try to "fix" them as part of redaction stories.
+  - The codebase has no top-level mypy config in pyproject.toml. I interpreted "typecheck passes" as "new files have zero mypy errors" and verified that explicitly. Use the same standard for US-010/US-011.
+  - Test file naming convention is test_*.py at tests/ (see pyproject.toml [tool.pytest.ini_options]); follow that for the next two stories.
+---
