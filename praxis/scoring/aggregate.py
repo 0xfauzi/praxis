@@ -12,7 +12,7 @@ from datetime import datetime
 from statistics import mean
 
 from praxis.models import Session
-from praxis.scoring.features import HeuristicFeatures, extract
+from praxis.scoring.features import SessionFeatures, extract
 from praxis.scoring.judge import JudgeResult, score_session
 from praxis.scoring.rubric import RUBRIC
 
@@ -25,7 +25,7 @@ class SessionScore:
     dimension_scores: dict[str, float]  # 0-10 per rubric dimension, from the judge
     overall: float                      # weighted /10
     judge_result: JudgeResult
-    features: HeuristicFeatures
+    features: SessionFeatures
     source_path: str
 
 

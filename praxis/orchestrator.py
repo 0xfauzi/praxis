@@ -186,7 +186,7 @@ def _snapshot_from_rows(rows: list[dict]) -> ProfileSnapshot:
         return ProfileSnapshot.from_scores([])
 
     scores: list[SessionScore] = []
-    from praxis.scoring.features import HeuristicFeatures
+    from praxis.scoring.features import SessionFeatures
     from praxis.scoring.judge import JudgeResult
 
     for row in rows:
@@ -194,7 +194,7 @@ def _snapshot_from_rows(rows: list[dict]) -> ProfileSnapshot:
             # Sessions can only be persisted via the judge path; rows missing
             # a judge result come from earlier builds and are not scoreable.
             continue
-        features = HeuristicFeatures(**row["features"])
+        features = SessionFeatures(**row["features"])
         jr = row["judge_result"]
         judge = JudgeResult(
             dimension_scores=jr["dimension_scores"],
