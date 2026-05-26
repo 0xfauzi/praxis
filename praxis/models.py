@@ -10,7 +10,10 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
+
+
+Severity = Literal["minor", "moderate", "major"]
 
 
 class Provider(str, Enum):
@@ -67,3 +70,26 @@ class Session:
     @property
     def turn_count(self) -> int:
         return len(self.turns)
+
+
+@dataclass(frozen=True)
+class Moment:
+    """Structured pointer to a transcript span where one rubric dim dropped.
+
+    Created by the judge (spec §4.2). The fields below `severity` are
+    populated downstream: moment_id, session_stable_id, and created_at
+    by the persistence layer (§4.1, §14); dollar_impact_estimate and
+    minutes_impact_estimate by the cost-attribution pass (§10.2).
+    """
+
+    dim_key: str
+    turn_index: int
+    quoted_excerpt: str
+    why_it_lost_score: str
+    suggested_alternative: str
+    severity: Severity
+    moment_id: str | None = None
+    session_stable_id: str | None = None
+    created_at: datetime | None = None
+    dollar_impact_estimate: float | None = None
+    minutes_impact_estimate: int | None = None

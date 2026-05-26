@@ -15,10 +15,18 @@ from __future__ import annotations
 import json
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any, cast
 
-from praxis.models import Session
+from praxis.models import Moment, Session, Severity
 from praxis.scoring.rubric import RUBRIC
+
+
+_VALID_SEVERITIES: frozenset[str] = frozenset({"minor", "moderate", "major"})
+_VALID_DIM_KEYS: frozenset[str] = frozenset(d.key for d in RUBRIC)
+_EXCERPT_MAX = 240
+_WHY_MAX = 180
+_ALT_MAX = 220
 
 
 # Cap per session — empirically enough signal for nuanced judgment.
@@ -35,6 +43,7 @@ class JudgeResult:
     failure_modes: list[str]            # specific things to improve
     overall_note: str
     judge_model: str
+    moments: list[Moment] = field(default_factory=list)
 
 
 def _compact_transcript(session: Session) -> str:
@@ -117,6 +126,25 @@ Vague rationale is useless. Two examples:
 
 Aim for specific. Quote or paraphrase what you actually saw.
 
+# Moments
+
+Alongside the dim scores, return a `moments` array: structured pointers to specific transcript spans where one rubric dimension dropped, with a concrete suggested alternative.
+
+Rules:
+
+- Emit AT MOST ONE moment per `dim_key` per session. Many sessions will have zero moments. That is fine.
+- Only emit a moment when you actually saw a specific coachable lapse in the transcript. The judge decides this, not a score threshold. Do not emit a moment for a dim where you have nothing specific to coach on. A score of 5 with no specific lapse is not a moment; a score of 7 with one clearly avoidable mistake is. Use your judgment.
+- If the session contains no specific coachable lapse, return an empty `moments` array (`"moments": []`).
+
+Each moment object has six required fields:
+
+- `dim_key`: one of {{planning, context, iteration, tools, fit, verification}}.
+- `turn_index`: integer, the 0-indexed user turn where the lapse occurred.
+- `quoted_excerpt`: <= 240 chars, copied VERBATIM from the transcript (usually the user's own words; may be the assistant's words if that is what shows the missed verification). Substring-faithfulness is non-negotiable; do not paraphrase here.
+- `why_it_lost_score`: <= 180 chars, one specific sentence naming what was missing or wrong.
+- `suggested_alternative`: <= 220 chars, what to do next time. Concrete enough to act on.
+- `severity`: one of {{minor, moderate, major}}.
+
 # Voice
 
 Be direct, warm, and practical. Write like a senior engineer giving honest feedback to a colleague — not like a corporate training module. Don't moralize. Don't use empty enthusiasm. Don't say "great job" unless something was genuinely great. Avoid corporate jargon ("delve", "showcase", "leverage" as a verb). Active voice. Numbers with context.
@@ -150,10 +178,20 @@ Return ONLY valid JSON, no preamble, no markdown fences, in exactly this shape:
     "<specific behavior to improve>",
     "..."
   ],
+  "moments": [
+    {{
+      "dim_key": "<one of planning|context|iteration|tools|fit|verification>",
+      "turn_index": <int, 0-indexed user turn>,
+      "quoted_excerpt": "<verbatim substring from the transcript, <= 240 chars>",
+      "why_it_lost_score": "<one specific sentence, <= 180 chars>",
+      "suggested_alternative": "<concrete next-time action, <= 220 chars>",
+      "severity": "<minor|moderate|major>"
+    }}
+  ],
   "overall_note": "<2-3 sentences capturing the pattern>"
 }}
 
-standout_moments and failure_modes should each have 1-3 entries."""
+standout_moments and failure_modes should each have 1-3 entries. The moments array is empty if you saw no specific coachable lapse; otherwise it has at most one entry per dim_key."""
 
 
 def _parse_response(text: str, model: str) -> JudgeResult:
@@ -196,7 +234,78 @@ def _parse_response(text: str, model: str) -> JudgeResult:
         failure_modes=list(payload.get("failure_modes", []) or []),
         overall_note=str(payload.get("overall_note", "") or ""),
         judge_model=model,
+        moments=_parse_moments(payload.get("moments", []) or []),
     )
+
+
+def _parse_moments(raw: Any) -> list[Moment]:
+    """Build Moment objects from the judge's `moments` JSON array.
+
+    Drops moments with missing or malformed required fields, unknown
+    dim_key, invalid severity, or quoted_excerpt longer than 240 chars
+    (truncating an excerpt would break the substring check in US-018).
+    why_it_lost_score and suggested_alternative are length-capped by
+    truncation since they are free-text explanations, not anchors.
+
+    Caps to one moment per dim_key (spec §4.2). Later entries for the
+    same dim_key are dropped with a log line.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[Moment] = []
+    seen_dims: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            print("[scorer] moment dropped: not a JSON object", file=sys.stderr)
+            continue
+        dim_key = item.get("dim_key")
+        if not isinstance(dim_key, str) or dim_key not in _VALID_DIM_KEYS:
+            print(f"[scorer] moment dropped: invalid dim_key {dim_key!r}", file=sys.stderr)
+            continue
+        if dim_key in seen_dims:
+            print(
+                f"[scorer] moment dropped: duplicate dim_key {dim_key!r} in same session",
+                file=sys.stderr,
+            )
+            continue
+        turn_index = item.get("turn_index")
+        if not isinstance(turn_index, int) or isinstance(turn_index, bool) or turn_index < 0:
+            print(f"[scorer] moment dropped: invalid turn_index {turn_index!r}", file=sys.stderr)
+            continue
+        excerpt = item.get("quoted_excerpt")
+        if not isinstance(excerpt, str) or not excerpt:
+            print("[scorer] moment dropped: missing quoted_excerpt", file=sys.stderr)
+            continue
+        if len(excerpt) > _EXCERPT_MAX:
+            print(
+                f"[scorer] moment dropped: quoted_excerpt exceeds {_EXCERPT_MAX} chars",
+                file=sys.stderr,
+            )
+            continue
+        why = item.get("why_it_lost_score")
+        if not isinstance(why, str) or not why:
+            print("[scorer] moment dropped: missing why_it_lost_score", file=sys.stderr)
+            continue
+        alt = item.get("suggested_alternative")
+        if not isinstance(alt, str) or not alt:
+            print("[scorer] moment dropped: missing suggested_alternative", file=sys.stderr)
+            continue
+        severity = item.get("severity")
+        if not isinstance(severity, str) or severity not in _VALID_SEVERITIES:
+            print(f"[scorer] moment dropped: invalid severity {severity!r}", file=sys.stderr)
+            continue
+        out.append(
+            Moment(
+                dim_key=dim_key,
+                turn_index=turn_index,
+                quoted_excerpt=excerpt,
+                why_it_lost_score=why[:_WHY_MAX],
+                suggested_alternative=alt[:_ALT_MAX],
+                severity=cast(Severity, severity),
+            )
+        )
+        seen_dims.add(dim_key)
+    return out
 
 
 def score_with_claude(session: Session, model: str = "claude-opus-4-7") -> JudgeResult:
