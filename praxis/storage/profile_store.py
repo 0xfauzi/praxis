@@ -141,7 +141,33 @@ class ProfileStore:
 
     def _init_schema(self) -> None:
         with self._conn() as conn:
+            if self._has_schema_v2_marker(conn):
+                return
             conn.executescript(SCHEMA)
+            self._mark_schema_v2(conn)
+
+    @staticmethod
+    def _has_schema_v2_marker(conn: sqlite3.Connection) -> bool:
+        # Detection is from existing schema state, not from a config flag:
+        # fresh DBs have no run_log table at all, and v0.1 DBs have run_log
+        # without a schema_version row. Either case means migration is needed.
+        cur = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'run_log'"
+        )
+        if cur.fetchone() is None:
+            return False
+        cur = conn.execute(
+            "SELECT 1 FROM run_log WHERE kind = 'schema_version' AND notes = '2' LIMIT 1"
+        )
+        return cur.fetchone() is not None
+
+    @staticmethod
+    def _mark_schema_v2(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "INSERT INTO run_log (run_at, kind, sessions_seen, sessions_new, notes) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (_utcnow().isoformat(), "schema_version", 0, 0, "2"),
+        )
 
     @contextmanager
     def _conn(self):

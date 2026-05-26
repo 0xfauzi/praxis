@@ -397,7 +397,15 @@ def test_run_log_rows_preserved_across_v0_2_migration(tmp_home):
     seeded = _seed_v0_1_db(tmp_home)
     ProfileStore(home=resolve_home())
     with _open_db() as conn:
-        rows = [dict(r) for r in conn.execute("SELECT * FROM run_log").fetchall()]
+        # US-003 adds a schema_version='2' marker row during migration;
+        # filter it out so the assertion still expresses "v0.1 rows survive".
+        rows = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT * FROM run_log WHERE kind != 'schema_version' "
+                "ORDER BY run_id ASC"
+            ).fetchall()
+        ]
     assert len(rows) == len(seeded["run_log"])
     assert rows[0]["notes"] == "v0.1 row"
     assert rows[0]["kind"] == "full"
@@ -425,3 +433,104 @@ def test_drop_is_idempotent_on_fresh_v0_2_db(tmp_home):
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'daily_consolidations'"
         ).fetchone()
     assert present is None
+
+
+# ---- US-003: schema_version=2 marker + one-shot migration -------------------
+
+
+def _schema_version_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM run_log WHERE kind = 'schema_version' AND notes = '2'"
+    ).fetchall()
+
+
+def test_fresh_db_records_schema_version_2_in_run_log(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        rows = _schema_version_rows(conn)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["kind"] == "schema_version"
+    assert row["notes"] == "2"
+    assert row["sessions_seen"] == 0
+    assert row["sessions_new"] == 0
+    assert row["run_at"]  # ISO timestamp, non-empty
+
+
+def test_v0_1_migration_records_schema_version_2_marker(tmp_home):
+    _seed_v0_1_db(tmp_home)
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        rows = _schema_version_rows(conn)
+    assert len(rows) == 1
+    assert rows[0]["notes"] == "2"
+
+
+def test_reopen_when_marker_present_is_a_no_op(tmp_home):
+    # First open creates v0.2 schema and marker.
+    ProfileStore(home=resolve_home())
+    db_path = ProfileStore(home=resolve_home()).db_path
+    # Drop a v0.2 table by hand. If a subsequent open re-executed SCHEMA,
+    # CREATE TABLE IF NOT EXISTS would resurrect it.
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DROP TABLE moments")
+        conn.commit()
+    finally:
+        conn.close()
+    # Reopen. The marker is present, so SCHEMA must not run.
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        present = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'moments'"
+        ).fetchone()
+    assert present is None, "reopen with marker present must not execute DDL"
+
+
+def test_repeated_opens_do_not_duplicate_schema_version_marker(tmp_home):
+    for _ in range(5):
+        ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        rows = _schema_version_rows(conn)
+    assert len(rows) == 1
+
+
+def test_migration_detected_from_schema_not_config(tmp_home, monkeypatch):
+    # No PRAXIS_* config flags, no config files: detection must come from
+    # the on-disk DB alone. We deliberately clear any incidental env vars
+    # that future code might key off and assert the marker is still written.
+    for var in ("PRAXIS_SCHEMA_VERSION", "PRAXIS_MIGRATE", "PRAXIS_FORCE_MIGRATE"):
+        monkeypatch.delenv(var, raising=False)
+    _seed_v0_1_db(tmp_home)
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        rows = _schema_version_rows(conn)
+        present = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'daily_consolidations'"
+        ).fetchone()
+    assert len(rows) == 1
+    assert present is None  # v0.1 detection + drop happened with no config input
+
+
+def test_marker_absent_on_v0_1_db_triggers_migration(tmp_home):
+    # Seed a v0.1 DB and confirm the marker is absent before ProfileStore opens.
+    _seed_v0_1_db(tmp_home)
+    db_path = tmp_home / ".praxis" / "profile.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        rows_before = conn.execute(
+            "SELECT 1 FROM run_log WHERE kind = 'schema_version'"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows_before == []
+    # Now open via ProfileStore: marker absent means SCHEMA runs.
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        # New v0.2 tables now exist (proof DDL ran).
+        moments = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'moments'"
+        ).fetchone()
+        rows_after = _schema_version_rows(conn)
+    assert moments is not None
+    assert len(rows_after) == 1
