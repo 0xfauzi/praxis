@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 
@@ -39,6 +40,34 @@ LABEL_SOURCE_FALLBACK = "fallback"
 # Spec 5.3: "fall back to one task per session, deterministically labeled from
 # the first 5 words of the session's first user turn."
 SINGLETON_FALLBACK_LABEL_WORDS = 5
+
+
+# Spec 5.3 label / task_type validation.
+# "Labels reject as invalid if they exceed 60 chars or contain the literal
+# strings 'I', 'you', 'the user', 'the assistant'. task_type must be one of
+# the eight enumerated values."
+LABEL_MAX_CHARS = 60
+
+LABEL_FORBIDDEN_TOKENS: tuple[str, ...] = ("I", "you", "the user", "the assistant")
+
+ALLOWED_TASK_TYPES: tuple[str, ...] = (
+    "debugging",
+    "refactoring",
+    "building_new",
+    "planning",
+    "learning",
+    "research",
+    "ops",
+    "other",
+)
+
+# Word-boundary, case-insensitive match for the forbidden tokens. Boundaries
+# ensure "Iteration" does not trigger "I" and "your" does not trigger "you";
+# case-insensitivity catches "You should fix X" alongside "you should fix X".
+_LABEL_FORBIDDEN_PATTERN = re.compile(
+    r"\b(?:" + "|".join(re.escape(t) for t in LABEL_FORBIDDEN_TOKENS) + r")\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -184,6 +213,50 @@ def _validate_coverage(tasks: list[Task], expected_ids: set[str]) -> str | None:
     return None
 
 
+def _validate_labels_and_types(tasks: list[Task]) -> str | None:
+    """Spec 5.3: labels must be <= LABEL_MAX_CHARS and must not contain (with
+    word-boundary, case-insensitive matching) any of LABEL_FORBIDDEN_TOKENS.
+    task_type must be one of ALLOWED_TASK_TYPES.
+
+    Returns None on success. Otherwise returns a human-readable error string
+    naming the offending labels and types, which is appended to the re-prompt
+    so the model knows what to fix.
+
+    Word-boundary matching means "Iteration" does not trigger "I", "your" does
+    not trigger "you", and "the users" does not trigger "the user". The spec's
+    forbidden tokens are intended as the persona pronouns / referents, not as
+    substrings buried inside longer words.
+    """
+    long_labels: list[str] = []
+    persona_labels: list[str] = []
+    invalid_types: list[str] = []
+
+    for t in tasks:
+        if len(t.label) > LABEL_MAX_CHARS:
+            long_labels.append(t.label)
+        if _LABEL_FORBIDDEN_PATTERN.search(t.label):
+            persona_labels.append(t.label)
+        if t.task_type not in ALLOWED_TASK_TYPES:
+            invalid_types.append(t.task_type)
+
+    errors: list[str] = []
+    if long_labels:
+        errors.append(f"labels exceed {LABEL_MAX_CHARS} chars: {long_labels}")
+    if persona_labels:
+        errors.append(
+            f"labels contain forbidden tokens "
+            f"({list(LABEL_FORBIDDEN_TOKENS)}): {persona_labels}"
+        )
+    if invalid_types:
+        errors.append(
+            f"task_type values not in {list(ALLOWED_TASK_TYPES)}: {invalid_types}"
+        )
+
+    if errors:
+        return "; ".join(errors)
+    return None
+
+
 def _build_retry_message(original_prompt: str, validation_error: str) -> str:
     """Spec 5.3: re-prompt once with the validation error appended."""
     return (
@@ -233,9 +306,13 @@ def cluster_with_anthropic(
     sessions: list[Session], model: str = ANTHROPIC_CHEAP_MODEL
 ) -> list[Task]:
     """One clustering call against the Anthropic cheap-tier model, with a single
-    coverage-validation re-prompt (spec 5.3) on missing, duplicated, or invented
-    session_ids. If the re-prompt also fails (validation error or unparseable
-    response), fall back to one task per session (spec 5.3 singleton fallback).
+    validation re-prompt (spec 5.3) on any of:
+      - missing, duplicated, or invented session_ids (coverage)
+      - labels exceeding LABEL_MAX_CHARS or containing LABEL_FORBIDDEN_TOKENS
+      - task_type values outside ALLOWED_TASK_TYPES
+
+    If the re-prompt also fails (any validation error or unparseable response),
+    fall back to one task per session (spec 5.3 singleton fallback).
     """
     from anthropic import Anthropic  # type: ignore
 
@@ -257,14 +334,18 @@ def cluster_with_anthropic(
         return _parse_response(text)
 
     tasks = _call(prompt)
-    error = _validate_coverage(tasks, expected_ids)
+    error = _validate_coverage(tasks, expected_ids) or _validate_labels_and_types(tasks)
     if error is None:
         return tasks
     try:
         retried = _call(_build_retry_message(prompt, error))
     except ValueError:
         return _singleton_fallback(sessions)
-    if _validate_coverage(retried, expected_ids) is None:
+    retry_error = (
+        _validate_coverage(retried, expected_ids)
+        or _validate_labels_and_types(retried)
+    )
+    if retry_error is None:
         return retried
     return _singleton_fallback(sessions)
 
@@ -273,9 +354,13 @@ def cluster_with_openai(
     sessions: list[Session], model: str = OPENAI_CHEAP_MODEL
 ) -> list[Task]:
     """One clustering call against the OpenAI cheap-tier model, with a single
-    coverage-validation re-prompt (spec 5.3) on missing, duplicated, or invented
-    session_ids. If the re-prompt also fails (validation error or unparseable
-    response), fall back to one task per session (spec 5.3 singleton fallback).
+    validation re-prompt (spec 5.3) on any of:
+      - missing, duplicated, or invented session_ids (coverage)
+      - labels exceeding LABEL_MAX_CHARS or containing LABEL_FORBIDDEN_TOKENS
+      - task_type values outside ALLOWED_TASK_TYPES
+
+    If the re-prompt also fails (any validation error or unparseable response),
+    fall back to one task per session (spec 5.3 singleton fallback).
     """
     from openai import OpenAI  # type: ignore
 
@@ -293,14 +378,18 @@ def cluster_with_openai(
         return _parse_response(text)
 
     tasks = _call(prompt)
-    error = _validate_coverage(tasks, expected_ids)
+    error = _validate_coverage(tasks, expected_ids) or _validate_labels_and_types(tasks)
     if error is None:
         return tasks
     try:
         retried = _call(_build_retry_message(prompt, error))
     except ValueError:
         return _singleton_fallback(sessions)
-    if _validate_coverage(retried, expected_ids) is None:
+    retry_error = (
+        _validate_coverage(retried, expected_ids)
+        or _validate_labels_and_types(retried)
+    )
+    if retry_error is None:
         return retried
     return _singleton_fallback(sessions)
 
@@ -338,8 +427,11 @@ def cluster_sessions(
 
 
 __all__ = [
+    "ALLOWED_TASK_TYPES",
     "ANTHROPIC_CHEAP_MODEL",
     "FIRST_TURN_MAX_CHARS",
+    "LABEL_FORBIDDEN_TOKENS",
+    "LABEL_MAX_CHARS",
     "LABEL_SOURCE_FALLBACK",
     "LABEL_SOURCE_LLM",
     "OPENAI_CHEAP_MODEL",

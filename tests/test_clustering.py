@@ -691,3 +691,364 @@ def test_openai_falls_back_when_retry_response_is_unparseable(monkeypatch):
     assert len(tasks) == 1
     assert tasks[0].label_source == clustering.LABEL_SOURCE_FALLBACK
     assert tasks[0].label == "alpha task"
+
+
+# --- US-035: label and task_type validation ---------------------------------
+
+
+def _reply_with_task(
+    session_ids: list[str], label: str = "x y z", task_type: str = "other"
+) -> str:
+    """Like _ok_reply but lets the test pin label and task_type explicitly,
+    so we can drive label / task_type validation."""
+    return json.dumps(
+        {
+            "tasks": [
+                {
+                    "label": label,
+                    "task_type": task_type,
+                    "session_ids": session_ids,
+                    "rationale": ".",
+                }
+            ]
+        }
+    )
+
+
+def test_label_max_chars_is_60():
+    assert clustering.LABEL_MAX_CHARS == 60
+
+
+def test_label_forbidden_tokens_are_the_spec_four():
+    assert clustering.LABEL_FORBIDDEN_TOKENS == (
+        "I",
+        "you",
+        "the user",
+        "the assistant",
+    )
+
+
+def test_allowed_task_types_are_the_eight_enum_values():
+    assert clustering.ALLOWED_TASK_TYPES == (
+        "debugging",
+        "refactoring",
+        "building_new",
+        "planning",
+        "learning",
+        "research",
+        "ops",
+        "other",
+    )
+
+
+def test_validate_labels_and_types_passes_for_clean_tasks():
+    tasks = [
+        clustering.Task(
+            label="auth migration debugging",
+            task_type="debugging",
+            session_ids=["x"],
+            rationale=".",
+        ),
+        clustering.Task(
+            label="deckgen UI polish",
+            task_type="refactoring",
+            session_ids=["y"],
+            rationale=".",
+        ),
+    ]
+    assert clustering._validate_labels_and_types(tasks) is None
+
+
+def test_validate_labels_rejects_label_longer_than_60_chars():
+    too_long = "x" * 61
+    tasks = [
+        clustering.Task(
+            label=too_long, task_type="other", session_ids=["x"], rationale="."
+        ),
+    ]
+    error = clustering._validate_labels_and_types(tasks)
+    assert error is not None
+    assert "60" in error  # the limit appears in the error string
+    assert too_long in error
+
+
+def test_validate_labels_accepts_label_exactly_60_chars():
+    # Boundary check: 60 is OK, 61 is not (covered above).
+    edge = "y" * 60
+    tasks = [
+        clustering.Task(label=edge, task_type="other", session_ids=["x"], rationale="."),
+    ]
+    assert clustering._validate_labels_and_types(tasks) is None
+
+
+def test_validate_labels_rejects_label_containing_I_as_word():
+    tasks = [
+        clustering.Task(
+            label="I want auth fix",
+            task_type="other",
+            session_ids=["x"],
+            rationale=".",
+        ),
+    ]
+    error = clustering._validate_labels_and_types(tasks)
+    assert error is not None
+    assert "forbidden" in error
+    assert "I want auth fix" in error
+
+
+def test_validate_labels_does_not_reject_Iteration_word_boundary():
+    # "Iteration" starts with "I" but is not the standalone pronoun.
+    tasks = [
+        clustering.Task(
+            label="Iteration polish pass",
+            task_type="other",
+            session_ids=["x"],
+            rationale=".",
+        ),
+    ]
+    assert clustering._validate_labels_and_types(tasks) is None
+
+
+def test_validate_labels_rejects_label_containing_you_as_word():
+    tasks = [
+        clustering.Task(
+            label="you should fix bug",
+            task_type="other",
+            session_ids=["x"],
+            rationale=".",
+        ),
+    ]
+    error = clustering._validate_labels_and_types(tasks)
+    assert error is not None
+    assert "forbidden" in error
+
+
+def test_validate_labels_does_not_reject_your_word_boundary():
+    # "your" contains "you" but is a different word.
+    tasks = [
+        clustering.Task(
+            label="your auth code",
+            task_type="other",
+            session_ids=["x"],
+            rationale=".",
+        ),
+    ]
+    assert clustering._validate_labels_and_types(tasks) is None
+
+
+def test_validate_labels_rejects_label_containing_the_user():
+    tasks = [
+        clustering.Task(
+            label="the user wanted X",
+            task_type="other",
+            session_ids=["x"],
+            rationale=".",
+        ),
+    ]
+    error = clustering._validate_labels_and_types(tasks)
+    assert error is not None
+    assert "forbidden" in error
+
+
+def test_validate_labels_does_not_reject_the_users_word_boundary():
+    # "the users guide" is a real noun phrase, not a persona reference.
+    tasks = [
+        clustering.Task(
+            label="the users guide",
+            task_type="other",
+            session_ids=["x"],
+            rationale=".",
+        ),
+    ]
+    assert clustering._validate_labels_and_types(tasks) is None
+
+
+def test_validate_labels_rejects_label_containing_the_assistant():
+    tasks = [
+        clustering.Task(
+            label="the assistant replied",
+            task_type="other",
+            session_ids=["x"],
+            rationale=".",
+        ),
+    ]
+    error = clustering._validate_labels_and_types(tasks)
+    assert error is not None
+    assert "forbidden" in error
+
+
+def test_validate_labels_forbidden_tokens_are_case_insensitive():
+    # "You" capitalized at start of label should still trigger.
+    tasks = [
+        clustering.Task(
+            label="You broke the build",
+            task_type="other",
+            session_ids=["x"],
+            rationale=".",
+        ),
+    ]
+    assert clustering._validate_labels_and_types(tasks) is not None
+
+
+def test_validate_types_rejects_task_type_not_in_enum():
+    tasks = [
+        clustering.Task(
+            label="auth fix",
+            task_type="not_a_real_type",
+            session_ids=["x"],
+            rationale=".",
+        ),
+    ]
+    error = clustering._validate_labels_and_types(tasks)
+    assert error is not None
+    assert "task_type" in error
+    assert "not_a_real_type" in error
+
+
+def test_validate_types_accepts_each_of_the_eight_enum_values():
+    # Every value in ALLOWED_TASK_TYPES must be accepted, with a clean label.
+    for tt in clustering.ALLOWED_TASK_TYPES:
+        tasks = [
+            clustering.Task(
+                label="auth fix", task_type=tt, session_ids=["x"], rationale="."
+            ),
+        ]
+        assert clustering._validate_labels_and_types(tasks) is None
+
+
+def test_validate_combines_label_and_type_errors():
+    # Both a too-long label AND an invalid task_type should be reported.
+    tasks = [
+        clustering.Task(
+            label="z" * 61,
+            task_type="nope",
+            session_ids=["x"],
+            rationale=".",
+        ),
+    ]
+    error = clustering._validate_labels_and_types(tasks)
+    assert error is not None
+    assert "60" in error
+    assert "task_type" in error
+
+
+def test_anthropic_retries_once_when_label_is_too_long(monkeypatch):
+    s1 = _make_session("s1", "alpha")
+    too_long_label = "q" * 61
+    invalid = _reply_with_task([s1.stable_id], label=too_long_label)
+    corrected = _reply_with_task([s1.stable_id], label="short label")
+    recorder = _CallRecorder([invalid, corrected])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_anthropic([s1])
+
+    assert len(recorder.calls) == 2
+    assert len(tasks) == 1
+    assert tasks[0].label == "short label"
+    assert tasks[0].label_source == clustering.LABEL_SOURCE_LLM
+
+
+def test_anthropic_retries_once_when_label_contains_forbidden_token(monkeypatch):
+    s1 = _make_session("s1", "alpha")
+    invalid = _reply_with_task([s1.stable_id], label="you broke it")
+    corrected = _reply_with_task([s1.stable_id], label="login redirect fix")
+    recorder = _CallRecorder([invalid, corrected])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_anthropic([s1])
+
+    assert len(recorder.calls) == 2
+    assert tasks[0].label == "login redirect fix"
+
+
+def test_anthropic_retries_once_when_task_type_is_invalid(monkeypatch):
+    s1 = _make_session("s1", "alpha")
+    invalid = _reply_with_task([s1.stable_id], task_type="not_real")
+    corrected = _reply_with_task([s1.stable_id], task_type="debugging")
+    recorder = _CallRecorder([invalid, corrected])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_anthropic([s1])
+
+    assert len(recorder.calls) == 2
+    assert tasks[0].task_type == "debugging"
+
+
+def test_anthropic_retry_prompt_carries_label_validation_error(monkeypatch):
+    s1 = _make_session("s1", "alpha")
+    too_long_label = "p" * 61
+    invalid = _reply_with_task([s1.stable_id], label=too_long_label)
+    corrected = _reply_with_task([s1.stable_id], label="short label")
+    recorder = _CallRecorder([invalid, corrected])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    clustering.cluster_with_anthropic([s1])
+
+    second_prompt = recorder.calls[1]["messages"][0]["content"]
+    # The retry message names the validation failure clearly.
+    assert "validation" in second_prompt.lower()
+    assert "60" in second_prompt
+    # And it includes the offending label so the model can see what was wrong.
+    assert too_long_label in second_prompt
+
+
+def test_anthropic_falls_back_when_retry_label_is_still_invalid(monkeypatch):
+    s1 = _make_session("s1", "first call alpha")
+    s2 = _make_session("s2", "second call beta")
+    invalid_first = _reply_with_task(
+        [s1.stable_id, s2.stable_id], label="you should fix this"
+    )
+    invalid_second = _reply_with_task(
+        [s1.stable_id, s2.stable_id], label="I will rewrite this"
+    )
+    recorder = _CallRecorder([invalid_first, invalid_second])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_anthropic([s1, s2])
+
+    # 2 calls (original + retry), then singleton fallback.
+    assert len(recorder.calls) == 2
+    assert len(tasks) == 2
+    assert all(t.label_source == clustering.LABEL_SOURCE_FALLBACK for t in tasks)
+    assert tasks[0].label == "first call alpha"
+    assert tasks[1].label == "second call beta"
+
+
+def test_anthropic_no_retry_when_label_and_type_are_valid(monkeypatch):
+    s1 = _make_session("s1", "alpha")
+    valid = _reply_with_task([s1.stable_id], label="clean label", task_type="other")
+    recorder = _CallRecorder([valid])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_anthropic([s1])
+
+    assert len(recorder.calls) == 1
+    assert tasks[0].label_source == clustering.LABEL_SOURCE_LLM
+
+
+def test_openai_retries_once_when_task_type_is_invalid(monkeypatch):
+    s1 = _make_session("s1", "alpha")
+    invalid = _reply_with_task([s1.stable_id], task_type="unknown")
+    corrected = _reply_with_task([s1.stable_id], task_type="planning")
+    recorder = _OpenAIRecorder([invalid, corrected])
+    _install_fake_openai(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_openai([s1])
+
+    assert len(recorder.calls) == 2
+    assert tasks[0].task_type == "planning"
+
+
+def test_openai_falls_back_when_retry_label_is_still_invalid(monkeypatch):
+    s1 = _make_session("s1", "alpha solo work")
+    invalid_first = _reply_with_task([s1.stable_id], label="you broke build")
+    invalid_second = _reply_with_task([s1.stable_id], label="the user told me")
+    recorder = _OpenAIRecorder([invalid_first, invalid_second])
+    _install_fake_openai(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_openai([s1])
+
+    assert len(recorder.calls) == 2
+    assert len(tasks) == 1
+    assert tasks[0].label_source == clustering.LABEL_SOURCE_FALLBACK
+    assert tasks[0].label == "alpha solo work"
