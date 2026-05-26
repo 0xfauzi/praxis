@@ -15,7 +15,7 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -59,13 +59,7 @@ CREATE TABLE IF NOT EXISTS session_scores (
 CREATE INDEX IF NOT EXISTS idx_session_started_at ON session_scores(started_at);
 CREATE INDEX IF NOT EXISTS idx_session_provider ON session_scores(provider);
 
-CREATE TABLE IF NOT EXISTS daily_consolidations (
-    consolidation_date TEXT PRIMARY KEY,
-    snapshot_json TEXT NOT NULL,
-    coaching_json TEXT NOT NULL,
-    sessions_in_window INTEGER NOT NULL,
-    generated_at TEXT NOT NULL
-);
+DROP TABLE IF EXISTS daily_consolidations;
 
 CREATE TABLE IF NOT EXISTS run_log (
     run_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -228,17 +222,11 @@ class ProfileStore:
             )
         return rows
 
-    # ---- daily consolidation --------------------------------------------
+    # ---- daily consolidation (v0.2: table dropped; stubs keep callers alive
+    #      until the orchestrator/CLI/reports refactor lands) ----
 
     def latest_consolidation_date(self) -> date | None:
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT consolidation_date FROM daily_consolidations "
-                "ORDER BY consolidation_date DESC LIMIT 1"
-            ).fetchone()
-        if row is None:
-            return None
-        return date.fromisoformat(row["consolidation_date"])
+        return None
 
     def save_consolidation(
         self,
@@ -247,67 +235,13 @@ class ProfileStore:
         coaching: dict,
         sessions_in_window: int,
     ) -> None:
-        with self._conn() as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO daily_consolidations
-                (consolidation_date, snapshot_json, coaching_json,
-                 sessions_in_window, generated_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    for_date.isoformat(),
-                    json.dumps(
-                        {
-                            "overall": snapshot.overall,
-                            "dimension_means": snapshot.dimension_means,
-                            "session_count": snapshot.session_count,
-                            "provider_breakdown": snapshot.provider_breakdown,
-                            "strongest_dimension": snapshot.strongest_dimension,
-                            "weakest_dimension": snapshot.weakest_dimension,
-                            "standout_moments": snapshot.standout_moments,
-                            "failure_modes": snapshot.failure_modes,
-                        }
-                    ),
-                    json.dumps(coaching),
-                    sessions_in_window,
-                    _utcnow().isoformat(),
-                ),
-            )
+        return None
 
     def load_consolidation(self, for_date: date) -> dict | None:
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM daily_consolidations WHERE consolidation_date = ?",
-                (for_date.isoformat(),),
-            ).fetchone()
-        if row is None:
-            return None
-        return {
-            "consolidation_date": row["consolidation_date"],
-            "snapshot": json.loads(row["snapshot_json"]),
-            "coaching": json.loads(row["coaching_json"]),
-            "sessions_in_window": row["sessions_in_window"],
-            "generated_at": row["generated_at"],
-        }
+        return None
 
     def consolidation_history(self, days: int = 30) -> list[dict]:
-        cutoff = (_utcnow().date() - timedelta(days=days)).isoformat()
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM daily_consolidations "
-                "WHERE consolidation_date >= ? "
-                "ORDER BY consolidation_date ASC",
-                (cutoff,),
-            ).fetchall()
-        return [
-            {
-                "consolidation_date": r["consolidation_date"],
-                "snapshot": json.loads(r["snapshot_json"]),
-                "sessions_in_window": r["sessions_in_window"],
-            }
-            for r in rows
-        ]
+        return []
 
     # ---- run log --------------------------------------------------------
 

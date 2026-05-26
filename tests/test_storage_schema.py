@@ -248,3 +248,180 @@ def test_follow_ups_outcome_check_accepts_all_four_values(tmp_home):
         conn.commit()
         count = conn.execute("SELECT COUNT(*) AS c FROM follow_ups").fetchone()["c"]
         assert count == 4
+
+
+# ---- US-002: drop daily_consolidations, preserve session_scores and run_log -
+
+# v0.1 schema literal, used to seed a pre-migration DB. Kept inline (not
+# imported) so this test still asserts the v0.2 migration even if the v0.1
+# DDL is later removed from the live code path.
+_V0_1_SCHEMA = """
+CREATE TABLE session_scores (
+    stable_id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    scored_at TEXT NOT NULL,
+    overall REAL NOT NULL,
+    dimension_scores_json TEXT NOT NULL,
+    heuristic_scores_json TEXT NOT NULL,
+    judge_result_json TEXT,
+    features_json TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    judge_model TEXT
+);
+CREATE INDEX idx_session_started_at ON session_scores(started_at);
+CREATE INDEX idx_session_provider ON session_scores(provider);
+
+CREATE TABLE daily_consolidations (
+    consolidation_date TEXT PRIMARY KEY,
+    snapshot_json TEXT NOT NULL,
+    coaching_json TEXT NOT NULL,
+    sessions_in_window INTEGER NOT NULL,
+    generated_at TEXT NOT NULL
+);
+
+CREATE TABLE run_log (
+    run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    sessions_seen INTEGER NOT NULL,
+    sessions_new INTEGER NOT NULL,
+    notes TEXT
+);
+"""
+
+
+def _seed_v0_1_db(tmp_home) -> dict[str, list[dict]]:
+    """Build a v0.1 profile.db at the path ProfileStore would open. Returns
+    the seeded rows keyed by table for later comparison."""
+    db_path = tmp_home / ".praxis" / "profile.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    seeded = {
+        "session_scores": [
+            {
+                "stable_id": "claude:abc:1",
+                "provider": "claude",
+                "started_at": "2026-05-01T10:00:00+00:00",
+                "scored_at": "2026-05-01T10:05:00+00:00",
+                "overall": 7.2,
+                "dimension_scores_json": "{}",
+                "heuristic_scores_json": "{}",
+                "judge_result_json": None,
+                "features_json": "{}",
+                "source_path": "/tmp/abc.jsonl",
+                "judge_model": None,
+            }
+        ],
+        "daily_consolidations": [
+            {
+                "consolidation_date": "2026-05-01",
+                "snapshot_json": "{}",
+                "coaching_json": "{}",
+                "sessions_in_window": 1,
+                "generated_at": "2026-05-01T18:30:00+00:00",
+            }
+        ],
+        "run_log": [
+            {
+                "run_at": "2026-05-01T18:30:00+00:00",
+                "kind": "full",
+                "sessions_seen": 1,
+                "sessions_new": 1,
+                "notes": "v0.1 row",
+            }
+        ],
+    }
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(_V0_1_SCHEMA)
+        for row in seeded["session_scores"]:
+            conn.execute(
+                "INSERT INTO session_scores (stable_id, provider, started_at, scored_at, "
+                "overall, dimension_scores_json, heuristic_scores_json, judge_result_json, "
+                "features_json, source_path, judge_model) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(row.values()),
+            )
+        for row in seeded["daily_consolidations"]:
+            conn.execute(
+                "INSERT INTO daily_consolidations VALUES (?, ?, ?, ?, ?)",
+                tuple(row.values()),
+            )
+        for row in seeded["run_log"]:
+            conn.execute(
+                "INSERT INTO run_log (run_at, kind, sessions_seen, sessions_new, notes) "
+                "VALUES (?, ?, ?, ?, ?)",
+                tuple(row.values()),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return seeded
+
+
+def test_daily_consolidations_dropped_after_v0_2_open(tmp_home):
+    _seed_v0_1_db(tmp_home)
+    # Triggers the migration via SCHEMA -> executescript.
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        present = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'daily_consolidations'"
+        ).fetchone()
+    assert present is None
+
+
+def test_session_scores_rows_preserved_across_v0_2_migration(tmp_home):
+    seeded = _seed_v0_1_db(tmp_home)
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        rows = [dict(r) for r in conn.execute("SELECT * FROM session_scores").fetchall()]
+    assert len(rows) == len(seeded["session_scores"])
+    assert rows[0]["stable_id"] == seeded["session_scores"][0]["stable_id"]
+    assert rows[0]["overall"] == seeded["session_scores"][0]["overall"]
+
+
+def test_session_scores_schema_unchanged_across_v0_2_migration(tmp_home):
+    _seed_v0_1_db(tmp_home)
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        cols = _table_columns(conn, "session_scores")
+    assert set(cols.keys()) == {
+        "stable_id", "provider", "started_at", "scored_at", "overall",
+        "dimension_scores_json", "heuristic_scores_json", "judge_result_json",
+        "features_json", "source_path", "judge_model",
+    }
+    assert cols["stable_id"]["pk"] == 1
+
+
+def test_run_log_rows_preserved_across_v0_2_migration(tmp_home):
+    seeded = _seed_v0_1_db(tmp_home)
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        rows = [dict(r) for r in conn.execute("SELECT * FROM run_log").fetchall()]
+    assert len(rows) == len(seeded["run_log"])
+    assert rows[0]["notes"] == "v0.1 row"
+    assert rows[0]["kind"] == "full"
+
+
+def test_run_log_schema_unchanged_across_v0_2_migration(tmp_home):
+    _seed_v0_1_db(tmp_home)
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        cols = _table_columns(conn, "run_log")
+    assert set(cols.keys()) == {
+        "run_id", "run_at", "kind", "sessions_seen", "sessions_new", "notes",
+    }
+    assert cols["run_id"]["pk"] == 1
+
+
+def test_drop_is_idempotent_on_fresh_v0_2_db(tmp_home):
+    # No v0.1 seed: the DB starts empty and the SCHEMA's DROP TABLE IF EXISTS
+    # must not raise on a fresh install.
+    ProfileStore(home=resolve_home())
+    # A second open is also a no-op.
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        present = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'daily_consolidations'"
+        ).fetchone()
+    assert present is None
