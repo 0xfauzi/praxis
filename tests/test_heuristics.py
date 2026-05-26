@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from praxis.models import Provider, Role, Session, Turn
-from praxis.scoring.heuristics import extract, heuristic_dimension_scores
+from praxis.scoring.features import extract, heuristic_dimension_scores
 from praxis.scoring.rubric import RUBRIC
 
 

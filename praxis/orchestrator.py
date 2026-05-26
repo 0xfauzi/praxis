@@ -186,7 +186,7 @@ def _snapshot_from_rows(rows: list[dict]) -> ProfileSnapshot:
         return ProfileSnapshot.from_scores([])
 
     scores: list[SessionScore] = []
-    from praxis.scoring.heuristics import HeuristicFeatures
+    from praxis.scoring.features import HeuristicFeatures
     from praxis.scoring.judge import JudgeResult
 
     for row in rows:

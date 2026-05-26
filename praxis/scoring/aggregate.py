@@ -16,7 +16,7 @@ from datetime import datetime
 from statistics import mean
 
 from praxis.models import Session
-from praxis.scoring.heuristics import (
+from praxis.scoring.features import (
     HeuristicFeatures,
     extract,
     heuristic_dimension_scores,
