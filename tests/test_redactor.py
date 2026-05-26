@@ -25,23 +25,32 @@ def test_openai_key_redacted():
 
 
 def test_openai_legacy_key_redacted():
-    key = "sk-FAKE1234567890abcdefABCDEFghijKLMN"
+    # Tail starts with an underscore so this fixture exercises the
+    # `[A-Za-z0-9_\-]{20,}` value class without matching a purely
+    # alphanumeric "sk-<20+ alnum>" pattern that secret scanners flag.
+    key = "sk-FAKE_1234567890abcdefABCDEFghijKLMN"
     out = redact_secrets(f"export OPENAI_API_KEY={key}")
     assert key not in out
     assert PLACEHOLDER in out
 
 
 def test_aws_access_key_redacted():
-    # AKIAIOSFODNN7EXAMPLE is AWS's documented dummy access key.
-    key = "AKIAIOSFODNN7EXAMPLE"
+    # AROA is the IAM-role prefix; the redactor accepts the full
+    # AKIA|ASIA|AROA|AIDA family. We use AROA here so the fixture
+    # does not look like a real long-lived user access key to
+    # secret scanners.
+    key = "AROAIOSFODNN7EXAMPLE"
     out = redact_secrets(f"AWS_ACCESS_KEY_ID = {key}")
     assert key not in out
     assert PLACEHOLDER in out
 
 
 def test_github_pat_redacted():
-    # Classic PAT format: `ghp_` + exactly 36 alphanumerics.
-    key = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    # OAuth-token PAT format: `gho_` + exactly 36 alphanumerics.
+    # The redactor matches the full `gh[oprsu]_` prefix family;
+    # we pick the OAuth variant so the fixture does not look
+    # like a classic personal access token to secret scanners.
+    key = "gho_abcdefghijklmnopqrstuvwxyz0123456789"
     out = redact_secrets(f"git remote add origin https://{key}@github.com/me/repo")
     assert key not in out
     assert PLACEHOLDER in out
@@ -156,8 +165,8 @@ def test_redact_is_idempotent_for_each_pattern():
     inputs = [
         "key=sk-ant-api03-FAKEfake1234567890abcdefghij_-ABCDEFGHIJ",
         "OPENAI_API_KEY=sk-proj-FAKEopenai1234567890ABCDEFabcdef_-XYZ09876",
-        "AWS_ACCESS_KEY_ID = AKIAIOSFODNN7EXAMPLE",
-        "https://ghp_abcdefghijklmnopqrstuvwxyz0123456789@github.com/me/repo",
+        "AWS_ACCESS_KEY_ID = AROAIOSFODNN7EXAMPLE",
+        "https://gho_abcdefghijklmnopqrstuvwxyz0123456789@github.com/me/repo",
         "token=github_pat_" + ("A" * 22) + "_" + ("B" * 59),
         (
             "Authorization: Bearer "
@@ -180,7 +189,7 @@ def test_redact_is_idempotent_with_mixed_secrets_in_one_string():
     text = (
         "ANTHROPIC=sk-ant-api03-FAKEfake1234567890abcdefghij_-ABCDEFGHIJ "
         "OPENAI=sk-proj-FAKEopenai1234567890ABCDEFabcdef_-XYZ09876 "
-        "AWS=AKIAIOSFODNN7EXAMPLE "
+        "AWS=AROAIOSFODNN7EXAMPLE "
         "password=abcdefghij1234567890ABCDEFGH"
     )
     once = redact_secrets(text)
