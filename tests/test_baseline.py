@@ -16,10 +16,14 @@ from praxis.scoring.baseline import (
     BASELINE_WINDOW_DAYS,
     Baseline,
     BaselineInputSession,
+    MIN_DAYS_FOR_BASELINE,
     OVERALL_CLIP_HIGH,
     OVERALL_CLIP_LOW,
     _iso_week_start,
     compute_baseline,
+    data_span_days,
+    has_prior_week_sessions,
+    is_baseline_forming,
 )
 from praxis.scoring.rubric import RUBRIC
 
@@ -207,3 +211,114 @@ def test_baseline_is_immutable():
     except Exception:
         return
     raise AssertionError("Baseline should be frozen")
+
+
+# ---------------------------------------------------------------------- US-035
+
+def test_min_days_for_baseline_matches_spec():
+    """Spec section 8.4: under 14 days of data, baseline is 'forming'."""
+    assert MIN_DAYS_FOR_BASELINE == 14
+
+
+def test_data_span_days_empty_is_zero():
+    assert data_span_days([], as_of=AS_OF) == 0
+
+
+def test_data_span_days_today_only_is_zero():
+    """A single session today is 0 days of data (today is day 0)."""
+    s = _session(days_ago=0)
+    assert data_span_days([s], as_of=AS_OF) == 0
+
+
+def test_data_span_days_yesterday_only_is_one():
+    s = _session(days_ago=1)
+    assert data_span_days([s], as_of=AS_OF) == 1
+
+
+def test_data_span_days_uses_earliest_session():
+    """The span is from the EARLIEST session, not the count of sessions."""
+    a = _session(days_ago=20)
+    b = _session(days_ago=2)
+    c = _session(days_ago=10)
+    assert data_span_days([a, b, c], as_of=AS_OF) == 20
+
+
+def test_data_span_days_includes_sessions_outside_baseline_window():
+    """Sessions older than 90 days still count toward the calendar span.
+
+    A user who used the tool once 200 days ago and is back this week
+    has 200 days of data, even though the 200-day-old session does not
+    contribute to the 90-day mean. The 'baseline forming' signal is
+    about how long the user has been around, not about how many sessions
+    fall in the 90-day window.
+    """
+    ancient = _session(days_ago=200)
+    recent = _session(days_ago=5)
+    assert data_span_days([ancient, recent], as_of=AS_OF) == 200
+
+
+def test_is_baseline_forming_under_14_days():
+    """13 days of data: still forming."""
+    sessions = [_session(days_ago=0), _session(days_ago=13)]
+    assert is_baseline_forming(sessions, as_of=AS_OF) is True
+
+
+def test_is_baseline_forming_at_14_days_is_not_forming():
+    """Exactly 14 days of data: boundary is inclusive (NOT forming).
+
+    The spec gate is '< 14 days'. A user whose earliest session was
+    14 days ago has 14 days of data, which is not less than 14, so
+    the baseline is considered formed.
+    """
+    sessions = [_session(days_ago=14)]
+    assert is_baseline_forming(sessions, as_of=AS_OF) is False
+
+
+def test_is_baseline_forming_over_14_days_is_not_forming():
+    sessions = [_session(days_ago=30)]
+    assert is_baseline_forming(sessions, as_of=AS_OF) is False
+
+
+def test_is_baseline_forming_empty_input_is_forming():
+    """No data at all: definitely forming."""
+    assert is_baseline_forming([], as_of=AS_OF) is True
+
+
+def test_has_prior_week_sessions_empty_is_false():
+    assert has_prior_week_sessions([], as_of=AS_OF) is False
+
+
+def test_has_prior_week_sessions_only_current_week_is_false():
+    """A user whose entire history is in the current ISO week has no prior week."""
+    # AS_OF is Wednesday 2026-05-27. Monday of that week is 2026-05-25.
+    # All these sessions are >= Monday, so all are in the current week.
+    sessions = [_session(days_ago=0), _session(days_ago=1), _session(days_ago=2)]
+    assert has_prior_week_sessions(sessions, as_of=AS_OF) is False
+
+
+def test_has_prior_week_sessions_last_week_is_true():
+    """A session in the immediately prior ISO week counts as 'prior week'."""
+    # days_ago=3 from Wed 2026-05-27 -> Sun 2026-05-24 (prior week).
+    sessions = [_session(days_ago=3)]
+    assert has_prior_week_sessions(sessions, as_of=AS_OF) is True
+
+
+def test_has_prior_week_sessions_far_prior_week_is_true():
+    """Any session before the current ISO week's Monday qualifies."""
+    sessions = [_session(days_ago=60)]
+    assert has_prior_week_sessions(sessions, as_of=AS_OF) is True
+
+
+def test_forming_and_prior_week_can_both_be_true():
+    """The 'last-week mean still renders if there is at least one prior week of data' case.
+
+    A user who started 8 days ago has <14 days of data (forming=True)
+    but also has at least one prior-week session (Monday 2 days before
+    AS_OF is the boundary; days_ago=3 lands on Sunday 2026-05-24, which
+    is in last week). Renderers must therefore still show last-week
+    mean even though the baseline reads '--'.
+    """
+    # AS_OF is Wed 2026-05-27. days_ago=3 -> Sun 2026-05-24 (last week, prior).
+    sessions = [_session(days_ago=0), _session(days_ago=3)]
+    assert is_baseline_forming(sessions, as_of=AS_OF) is True
+    assert has_prior_week_sessions(sessions, as_of=AS_OF) is True

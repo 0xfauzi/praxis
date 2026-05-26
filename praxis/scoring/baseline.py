@@ -26,6 +26,13 @@ OVERALL_CLIP_HIGH = 9.0
 
 BASELINE_WINDOW_DAYS = 90
 
+# Spec section 8.4: when the user has less than this many days of data,
+# the baseline does not yet exist. Renderers show "--" in place of the
+# baseline number and skip deltas; a "Baseline forming" note replaces
+# the per-dim annotation. 14 days = 2 weeks, matching the "Come back in
+# 2 more weeks for week-over-week" copy in the panel.
+MIN_DAYS_FOR_BASELINE = 14
+
 
 @dataclass(frozen=True)
 class BaselineInputSession:
@@ -131,3 +138,65 @@ def compute_baseline(
         window_start=window_start,
         window_end=window_end,
     )
+
+
+def data_span_days(
+    sessions: list[BaselineInputSession],
+    as_of: datetime | None = None,
+) -> int:
+    """Calendar-day span from the earliest session to `as_of`.
+
+    Returns 0 if no sessions. Otherwise returns the number of calendar
+    days between the earliest session's date and `as_of`'s date. A user
+    whose earliest session is today has a span of 0; yesterday is 1; two
+    weeks ago is 14. This is the signal spec section 8.4 keys off when
+    deciding whether the baseline is still "forming".
+
+    The span uses ALL sessions in the input, not just those inside the
+    90-day baseline window. A user with one session 200 days ago and
+    nothing since still has 200 days of data, even though that session
+    will not contribute to the baseline mean.
+    """
+    if not sessions:
+        return 0
+    if as_of is None:
+        as_of = datetime.now(timezone.utc)
+    earliest_date = min(s.started_at.date() for s in sessions)
+    return max(0, (as_of.date() - earliest_date).days)
+
+
+def is_baseline_forming(
+    sessions: list[BaselineInputSession],
+    as_of: datetime | None = None,
+) -> bool:
+    """True iff the user has less than 14 days of data (spec section 8.4).
+
+    When True, callers MUST render the baseline value as "--" and MUST
+    NOT render a delta. The "Baseline forming. Come back in 2 more
+    weeks for week-over-week." note (see
+    `praxis.reports.baseline_panel.BASELINE_FORMING_MESSAGE`) replaces
+    the per-dim baseline annotation. The last-week mean still renders if
+    `has_prior_week_sessions` is True for the same input.
+    """
+    return data_span_days(sessions, as_of) < MIN_DAYS_FOR_BASELINE
+
+
+def has_prior_week_sessions(
+    sessions: list[BaselineInputSession],
+    as_of: datetime | None = None,
+) -> bool:
+    """True iff at least one session occurred before `as_of`'s ISO week.
+
+    Per spec section 8.4, even when the baseline is forming the last-week
+    mean MUST still render "if there is at least one prior week of
+    data". This helper makes that condition explicit so renderers can
+    decide independently of `is_baseline_forming`: a user can have <14
+    days of data AND a prior-week session (e.g., started using the tool
+    8 days ago).
+    """
+    if not sessions:
+        return False
+    if as_of is None:
+        as_of = datetime.now(timezone.utc)
+    current_week_start = _iso_week_start(as_of.date())
+    return any(s.started_at.date() < current_week_start for s in sessions)
