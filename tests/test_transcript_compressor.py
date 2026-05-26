@@ -3,13 +3,19 @@
 US-012 contract: every user turn in the input Session appears
 character-for-character in the compressed output, and the order of
 user turns is preserved.
+
+US-013 contract: assistant turns of 200 chars or fewer are preserved
+verbatim; longer assistant turns are replaced with their first 200
+chars followed by `...[+N more chars, M tool calls]`, where N counts
+the dropped trailing characters and M counts the assistant turn's
+tool calls.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
 from praxis.models import Provider, Role, Session, Turn
-from praxis.transcript_compressor import compress_transcript
+from praxis.transcript_compressor import ASSISTANT_TRUNCATE_LIMIT, compress_transcript
 
 
 def _session(turns: list[Turn]) -> Session:
@@ -97,3 +103,94 @@ def test_synthetic_session_user_turns_appear_verbatim(synthetic_session_object):
     out = compress_transcript(synthetic_session_object)
     for ut in synthetic_session_object.user_turns:
         assert ut.content in out
+
+
+# US-013 tests --------------------------------------------------------
+
+
+def test_short_assistant_turn_is_preserved_verbatim():
+    content = "Short answer: yes."
+    out = compress_transcript(_session([Turn(role=Role.ASSISTANT, content=content)]))
+    assert content in out
+    assert "more chars" not in out
+
+
+def test_assistant_turn_at_exactly_limit_is_preserved_verbatim():
+    # Boundary: exactly ASSISTANT_TRUNCATE_LIMIT chars must NOT be truncated.
+    content = "a" * ASSISTANT_TRUNCATE_LIMIT
+    out = compress_transcript(_session([Turn(role=Role.ASSISTANT, content=content)]))
+    assert content in out
+    assert "more chars" not in out
+
+
+def test_assistant_turn_one_over_limit_is_truncated_with_marker():
+    # Boundary: one char past the limit truncates and shows N=1.
+    content = "a" * (ASSISTANT_TRUNCATE_LIMIT + 1)
+    out = compress_transcript(_session([Turn(role=Role.ASSISTANT, content=content)]))
+    assert "...[+1 more chars, 0 tool calls]" in out
+    # The whole content should NOT appear (it was truncated).
+    assert content not in out
+
+
+def test_long_assistant_turn_marker_reports_extra_chars():
+    # 350-char content with no tool calls: N = 150, M = 0.
+    content = "b" * 350
+    out = compress_transcript(_session([Turn(role=Role.ASSISTANT, content=content)]))
+    head = "b" * ASSISTANT_TRUNCATE_LIMIT
+    assert f"{head}...[+150 more chars, 0 tool calls]" in out
+
+
+def test_long_assistant_turn_marker_reports_tool_call_count():
+    # Truncated turn must report M = number of tool_calls on the turn.
+    content = "c" * 500
+    tool_calls = [
+        {"name": "Read", "input": {"path": "a.py"}},
+        {"name": "Edit", "input": {"path": "a.py", "old": "x", "new": "y"}},
+        {"name": "Bash", "input": {"command": "pytest"}},
+    ]
+    out = compress_transcript(_session([
+        Turn(role=Role.ASSISTANT, content=content, tool_calls=tool_calls),
+    ]))
+    assert "...[+300 more chars, 3 tool calls]" in out
+
+
+def test_short_assistant_turn_with_tool_calls_stays_verbatim():
+    # Short content -> verbatim, even if there are tool calls. The
+    # `M tool calls` marker only appears on the truncated branch.
+    content = "Calling read."
+    tool_calls = [{"name": "Read", "input": {"path": "x.py"}}]
+    out = compress_transcript(_session([
+        Turn(role=Role.ASSISTANT, content=content, tool_calls=tool_calls),
+    ]))
+    assert content in out
+    assert "tool calls]" not in out
+    assert "more chars" not in out
+
+
+def test_assistant_truncation_does_not_disturb_user_order():
+    # A long, truncated assistant turn sandwiched between user turns
+    # must not break US-012's ordering invariant for user content.
+    first = "USER_FIRST_alpha"
+    second = "USER_SECOND_beta"
+    long_assistant = "z" * 1000
+    out = compress_transcript(_session([
+        Turn(role=Role.USER, content=first),
+        Turn(role=Role.ASSISTANT, content=long_assistant),
+        Turn(role=Role.USER, content=second),
+    ]))
+    assert first in out
+    assert second in out
+    assert out.index(first) < out.index(second)
+    # And the assistant turn between them was truncated.
+    assert "...[+800 more chars, 0 tool calls]" in out
+
+
+def test_first_200_chars_of_assistant_turn_are_exact_prefix():
+    # The truncated body must be the FIRST 200 characters of the input,
+    # not some other slice or whitespace-stripped version.
+    head = "".join(chr(ord("a") + (i % 26)) for i in range(ASSISTANT_TRUNCATE_LIMIT))
+    tail = "TAIL_THAT_SHOULD_BE_GONE_" * 5  # 125 chars
+    content = head + tail
+    out = compress_transcript(_session([Turn(role=Role.ASSISTANT, content=content)]))
+    assert f"{head}...[+{len(tail)} more chars, 0 tool calls]" in out
+    assert "TAIL_THAT_SHOULD_BE_GONE" not in out
