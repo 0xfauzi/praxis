@@ -30,14 +30,26 @@ ANTHROPIC_CHEAP_MODEL = "claude-haiku-4-5"
 OPENAI_CHEAP_MODEL = "gpt-5-mini"
 
 
+# Spec 5.3 / spec 14 schema: label_source distinguishes LLM-produced tasks
+# ("llm") from singleton-fallback tasks ("fallback") created when the model's
+# clustering response fails coverage validation twice in a row.
+LABEL_SOURCE_LLM = "llm"
+LABEL_SOURCE_FALLBACK = "fallback"
+
+# Spec 5.3: "fall back to one task per session, deterministically labeled from
+# the first 5 words of the session's first user turn."
+SINGLETON_FALLBACK_LABEL_WORDS = 5
+
+
 @dataclass
 class Task:
-    """One task cluster returned by the LLM."""
+    """One task cluster returned by the LLM (or built by singleton fallback)."""
 
     label: str
     task_type: str
     session_ids: list[str]
     rationale: str
+    label_source: str = LABEL_SOURCE_LLM
 
 
 def _first_user_turn_truncated(session: Session) -> str:
@@ -182,12 +194,49 @@ def _build_retry_message(original_prompt: str, validation_error: str) -> str:
     )
 
 
+def _singleton_fallback_label(session: Session) -> str:
+    """First N words of `session`'s first user turn, where N is
+    SINGLETON_FALLBACK_LABEL_WORDS. Uses the raw first user turn, not the
+    400-char-truncated send-form, so the label is the speaker's actual words.
+    Returns "" if the session has no user turn (defensive; the parser already
+    filters non-USER turns when building sessions).
+    """
+    user_turns = session.user_turns
+    if not user_turns:
+        return ""
+    return " ".join(user_turns[0].content.split()[:SINGLETON_FALLBACK_LABEL_WORDS])
+
+
+def _singleton_fallback(sessions: list[Session]) -> list[Task]:
+    """Spec 5.3: when both LLM attempts fail coverage validation, return one
+    task per session with a deterministic label from the first 5 words of that
+    session's first user turn. Tasks carry label_source='fallback' so the
+    persistence layer (spec section 14 tasks.label_source) can distinguish
+    them from LLM-labeled tasks.
+
+    This is graceful degradation for LLM protocol failure, not a heuristic
+    substitute for clustering.
+    """
+    return [
+        Task(
+            label=_singleton_fallback_label(s),
+            task_type="other",
+            session_ids=[s.stable_id],
+            rationale="",
+            label_source=LABEL_SOURCE_FALLBACK,
+        )
+        for s in sessions
+    ]
+
+
 def cluster_with_anthropic(
     sessions: list[Session], model: str = ANTHROPIC_CHEAP_MODEL
 ) -> list[Task]:
     """One clustering call against the Anthropic cheap-tier model, with a single
     coverage-validation re-prompt (spec 5.3) on missing, duplicated, or invented
-    session_ids."""
+    session_ids. If the re-prompt also fails (validation error or unparseable
+    response), fall back to one task per session (spec 5.3 singleton fallback).
+    """
     from anthropic import Anthropic  # type: ignore
 
     client = Anthropic()
@@ -211,7 +260,13 @@ def cluster_with_anthropic(
     error = _validate_coverage(tasks, expected_ids)
     if error is None:
         return tasks
-    return _call(_build_retry_message(prompt, error))
+    try:
+        retried = _call(_build_retry_message(prompt, error))
+    except ValueError:
+        return _singleton_fallback(sessions)
+    if _validate_coverage(retried, expected_ids) is None:
+        return retried
+    return _singleton_fallback(sessions)
 
 
 def cluster_with_openai(
@@ -219,7 +274,9 @@ def cluster_with_openai(
 ) -> list[Task]:
     """One clustering call against the OpenAI cheap-tier model, with a single
     coverage-validation re-prompt (spec 5.3) on missing, duplicated, or invented
-    session_ids."""
+    session_ids. If the re-prompt also fails (validation error or unparseable
+    response), fall back to one task per session (spec 5.3 singleton fallback).
+    """
     from openai import OpenAI  # type: ignore
 
     client = OpenAI()
@@ -239,7 +296,13 @@ def cluster_with_openai(
     error = _validate_coverage(tasks, expected_ids)
     if error is None:
         return tasks
-    return _call(_build_retry_message(prompt, error))
+    try:
+        retried = _call(_build_retry_message(prompt, error))
+    except ValueError:
+        return _singleton_fallback(sessions)
+    if _validate_coverage(retried, expected_ids) is None:
+        return retried
+    return _singleton_fallback(sessions)
 
 
 def cluster_sessions(
@@ -277,7 +340,10 @@ def cluster_sessions(
 __all__ = [
     "ANTHROPIC_CHEAP_MODEL",
     "FIRST_TURN_MAX_CHARS",
+    "LABEL_SOURCE_FALLBACK",
+    "LABEL_SOURCE_LLM",
     "OPENAI_CHEAP_MODEL",
+    "SINGLETON_FALLBACK_LABEL_WORDS",
     "Task",
     "build_prompt",
     "build_session_blocks",

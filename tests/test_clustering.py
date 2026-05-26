@@ -517,3 +517,177 @@ def test_openai_retry_prompt_contains_the_validation_error(monkeypatch):
     second_prompt = recorder.calls[1]["messages"][0]["content"]
     assert "invented" in second_prompt.lower()
     assert "BOGUS" in second_prompt
+
+
+# --- US-034: singleton fallback on second protocol failure ------------------
+
+
+def test_task_default_label_source_is_llm():
+    # The dataclass default keeps US-032/US-033 callsites - which construct
+    # Task without label_source - on the 'llm' branch.
+    t = clustering.Task(
+        label="x", task_type="other", session_ids=["a"], rationale="."
+    )
+    assert t.label_source == clustering.LABEL_SOURCE_LLM
+    assert clustering.LABEL_SOURCE_LLM == "llm"
+    assert clustering.LABEL_SOURCE_FALLBACK == "fallback"
+
+
+def test_singleton_fallback_label_takes_first_five_words():
+    s = _make_session("s1", "fix the bug in our login redirect handler")
+    assert (
+        clustering._singleton_fallback_label(s) == "fix the bug in our"
+    )
+
+
+def test_singleton_fallback_label_short_turn_is_unchanged():
+    s = _make_session("s1", "do thing")
+    assert clustering._singleton_fallback_label(s) == "do thing"
+
+
+def test_singleton_fallback_label_normalises_whitespace():
+    # Multiple/odd whitespace shouldn't leak into the label.
+    s = _make_session("s1", "   add   tests   for   the   redactor   please   ")
+    # split() with no args splits on runs of whitespace AND drops empty edges,
+    # so we expect a clean single-space join.
+    assert (
+        clustering._singleton_fallback_label(s) == "add tests for the redactor"
+    )
+
+
+def test_singleton_fallback_label_empty_when_no_user_turn():
+    when = datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc)
+    s = Session(
+        provider=Provider.CLAUDE,
+        session_id="no-user",
+        started_at=when,
+        turns=[Turn(role=Role.ASSISTANT, content="hi")],
+        source_path="/tmp/x.jsonl",
+    )
+    assert clustering._singleton_fallback_label(s) == ""
+
+
+def test_singleton_fallback_returns_one_task_per_session():
+    sessions = [
+        _make_session("s1", "alpha task one"),
+        _make_session("s2", "beta task two"),
+        _make_session("s3", "gamma task three"),
+    ]
+    tasks = clustering._singleton_fallback(sessions)
+    assert len(tasks) == 3
+    for task, s in zip(tasks, sessions):
+        assert task.session_ids == [s.stable_id]
+        assert task.label_source == clustering.LABEL_SOURCE_FALLBACK
+        assert task.task_type == "other"
+
+
+def test_singleton_fallback_labels_match_first_five_words():
+    sessions = [
+        _make_session("s1", "fix the bug in our login redirect handler"),
+        _make_session("s2", "short two"),
+    ]
+    tasks = clustering._singleton_fallback(sessions)
+    assert tasks[0].label == "fix the bug in our"
+    assert tasks[1].label == "short two"
+
+
+def test_anthropic_falls_back_to_singletons_when_retry_also_fails(monkeypatch):
+    s1 = _make_session("s1", "alpha task one big")
+    s2 = _make_session("s2", "beta task two big")
+    # Both calls miss s2 -> coverage validation fails twice -> fallback fires.
+    first_invalid = _ok_reply([s1.stable_id])
+    second_invalid = _ok_reply([s1.stable_id])
+    recorder = _CallRecorder([first_invalid, second_invalid])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_anthropic([s1, s2])
+
+    # Exactly 2 calls (original + 1 retry), then fallback.
+    assert len(recorder.calls) == 2
+    # Fallback: one task per session, with the deterministic label.
+    assert len(tasks) == 2
+    assert tasks[0].session_ids == [s1.stable_id]
+    assert tasks[1].session_ids == [s2.stable_id]
+    assert tasks[0].label == "alpha task one big"  # 4 words, all of them
+    assert tasks[1].label == "beta task two big"
+    assert all(t.label_source == clustering.LABEL_SOURCE_FALLBACK for t in tasks)
+    assert all(t.task_type == "other" for t in tasks)
+
+
+def test_anthropic_falls_back_when_retry_response_is_unparseable(monkeypatch):
+    s1 = _make_session("s1", "alpha task one")
+    s2 = _make_session("s2", "beta task two")
+    first_invalid = _ok_reply([s1.stable_id])  # missing s2
+    second_garbage = "this is not JSON at all"
+    recorder = _CallRecorder([first_invalid, second_garbage])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_anthropic([s1, s2])
+
+    assert len(recorder.calls) == 2
+    assert len(tasks) == 2
+    assert all(t.label_source == clustering.LABEL_SOURCE_FALLBACK for t in tasks)
+    # Order matches input order.
+    assert [t.session_ids[0] for t in tasks] == [s1.stable_id, s2.stable_id]
+
+
+def test_anthropic_no_fallback_when_retry_succeeds(monkeypatch):
+    s1 = _make_session("s1", "alpha")
+    s2 = _make_session("s2", "beta")
+    invalid = _ok_reply([s1.stable_id])  # missing s2
+    corrected = _ok_reply([s1.stable_id, s2.stable_id], label="recovered")
+    recorder = _CallRecorder([invalid, corrected])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_anthropic([s1, s2])
+
+    # The corrected reply wins; no fallback.
+    assert len(recorder.calls) == 2
+    assert len(tasks) == 1
+    assert tasks[0].label == "recovered"
+    assert tasks[0].label_source == clustering.LABEL_SOURCE_LLM
+
+
+def test_anthropic_no_retry_no_fallback_when_first_response_is_valid(monkeypatch):
+    s1 = _make_session("s1", "alpha")
+    valid = _ok_reply([s1.stable_id])
+    recorder = _CallRecorder([valid])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_anthropic([s1])
+
+    assert len(recorder.calls) == 1
+    assert tasks[0].label_source == clustering.LABEL_SOURCE_LLM
+
+
+def test_openai_falls_back_to_singletons_when_retry_also_fails(monkeypatch):
+    s1 = _make_session("s1", "alpha task")
+    s2 = _make_session("s2", "beta task")
+    first_invalid = _ok_reply([s1.stable_id])
+    # Second response invents an id that wasn't in the input.
+    second_invalid = _ok_reply([s1.stable_id, s2.stable_id, "GHOST"])
+    recorder = _OpenAIRecorder([first_invalid, second_invalid])
+    _install_fake_openai(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_openai([s1, s2])
+
+    assert len(recorder.calls) == 2
+    assert len(tasks) == 2
+    assert tasks[0].label == "alpha task"
+    assert tasks[1].label == "beta task"
+    assert all(t.label_source == clustering.LABEL_SOURCE_FALLBACK for t in tasks)
+
+
+def test_openai_falls_back_when_retry_response_is_unparseable(monkeypatch):
+    s1 = _make_session("s1", "alpha task")
+    first_invalid = _ok_reply([s1.stable_id, "INVENTED"])
+    second_garbage = "still no JSON here"
+    recorder = _OpenAIRecorder([first_invalid, second_garbage])
+    _install_fake_openai(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_openai([s1])
+
+    assert len(recorder.calls) == 2
+    assert len(tasks) == 1
+    assert tasks[0].label_source == clustering.LABEL_SOURCE_FALLBACK
+    assert tasks[0].label == "alpha task"
