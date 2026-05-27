@@ -14,6 +14,11 @@ from praxis.behavior.slope import (
     fit_metric,
     fit_weekly_trajectory,
 )
+from praxis.behavior.headline import (
+    HEADLINE_MAX_CHARS,
+    fallback_headline,
+    generate_headline,
+)
 from praxis.behavior.labels import (
     HYSTERESIS_STDERR_MULTIPLIER,
     MIN_BUCKETS_FOR_LABEL,
@@ -61,4 +66,7 @@ __all__ = [
     "apply_hysteresis",
     "is_strongly_significant",
     "label_trajectory_with_hysteresis",
+    "HEADLINE_MAX_CHARS",
+    "fallback_headline",
+    "generate_headline",
 ]
