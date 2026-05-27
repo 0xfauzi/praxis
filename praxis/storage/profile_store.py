@@ -343,3 +343,27 @@ class ProfileStore:
             measured_value=row["measured_value"],
             outcome=outcome,
         )
+
+    def latest_follow_up(self) -> FollowUp | None:
+        """Return the most recent follow_up by week_iso, or None if the table is empty.
+
+        Same lexical-equals-chronological argument as `prior_follow_up`.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT week_iso, dim_key, commitment_text, target_metric, "
+                "       baseline_value, measured_value, outcome "
+                "FROM follow_ups ORDER BY week_iso DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        outcome: Outcome = row["outcome"]
+        return FollowUp(
+            week_iso=row["week_iso"],
+            dim_key=row["dim_key"],
+            commitment_text=row["commitment_text"],
+            target_metric=row["target_metric"],
+            baseline_value=row["baseline_value"],
+            measured_value=row["measured_value"],
+            outcome=outcome,
+        )

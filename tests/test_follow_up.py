@@ -597,6 +597,73 @@ def test_prior_follow_up_skips_the_query_week_itself(tmp_home):
 # ---- end-to-end: close prior week and persist --------------------------
 
 
+# ---- ProfileStore.latest_follow_up -------------------------------------
+
+
+def test_latest_follow_up_returns_none_when_store_empty(tmp_home):
+    store = ProfileStore()
+    assert store.latest_follow_up() is None
+
+
+def test_latest_follow_up_returns_single_row(tmp_home):
+    store = ProfileStore()
+    store.save_follow_up(
+        FollowUp(
+            week_iso="2026-W21",
+            dim_key="verification",
+            commitment_text="only week",
+            target_metric="verification_rate",
+            baseline_value=0.4,
+        )
+    )
+    latest = store.latest_follow_up()
+    assert latest is not None
+    assert latest.week_iso == "2026-W21"
+
+
+def test_latest_follow_up_returns_most_recent_by_week_iso(tmp_home):
+    store = ProfileStore()
+    for week_iso in ["2026-W19", "2026-W21", "2026-W20"]:  # out of insertion order
+        store.save_follow_up(
+            FollowUp(
+                week_iso=week_iso,
+                dim_key="verification",
+                commitment_text=f"commitment for {week_iso}",
+                target_metric="verification_rate",
+                baseline_value=0.4,
+            )
+        )
+    latest = store.latest_follow_up()
+    assert latest is not None
+    assert latest.week_iso == "2026-W21"
+
+
+def test_latest_follow_up_handles_year_boundary(tmp_home):
+    """Zero-padded ISO week strings sort chronologically under lexical DESC."""
+    store = ProfileStore()
+    store.save_follow_up(
+        FollowUp(
+            week_iso="2025-W52",
+            dim_key="verification",
+            commitment_text="end of 2025",
+            target_metric="verification_rate",
+            baseline_value=0.4,
+        )
+    )
+    store.save_follow_up(
+        FollowUp(
+            week_iso="2026-W01",
+            dim_key="verification",
+            commitment_text="start of 2026",
+            target_metric="verification_rate",
+            baseline_value=0.5,
+        )
+    )
+    latest = store.latest_follow_up()
+    assert latest is not None
+    assert latest.week_iso == "2026-W01"
+
+
 def test_close_and_persist_updates_existing_row_in_place(tmp_home):
     """AC: on the next weekly run, the prior week's row is updated (not duplicated)."""
     store = ProfileStore()
