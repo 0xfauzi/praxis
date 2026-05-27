@@ -11,8 +11,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "praxis/scoring/cost_ledger.py: pure aggregator (compute_cost_ledger) + card-resolution helper (estimate_session_cost_usd). Baseline = mean of per-ISO-week totals over weeks with >=1 priced session (quiet weeks not zero-padded). Cost constants (4 chars/token, 1.5x output) match models_advisor/advisor.py._estimate_cost. Unpriced sessions (no card or null pricing -- e.g. Copilot) skipped, not zeroed."
     },
     {
       "id": "US-048",

@@ -1,1 +1,21 @@
 # progress.txt: union of factory component logs
+
+## Iteration 1 - US-047: Weekly spend and baseline
+- What I did: Added praxis/scoring/cost_ledger.py with a pure aggregator (compute_cost_ledger) that sums per-session USD into a current-week total + a 90-day rolling weekly mean, plus a card-resolution helper (estimate_session_cost_usd) that mirrors models_advisor/advisor.py._estimate_cost. Backed by tests/test_cost_ledger.py (19 tests).
+- Files changed: praxis/scoring/cost_ledger.py (new), tests/test_cost_ledger.py (new), scripts/ralph/feature/cost-ledger/prd.json
+- Verification:
+  - python -m pytest tests/test_cost_ledger.py -v -> 19 passed
+  - python -m pytest -q -> all passed
+  - pyright praxis/scoring/cost_ledger.py tests/test_cost_ledger.py -> 0 errors
+  - mypy praxis/scoring/cost_ledger.py tests/test_cost_ledger.py -> 0 errors in the new files (pre-existing errors in advisor.py / aggregate.py / coach.py / cli/__main__.py are unrelated and were present before this iteration)
+- What the next iteration should know:
+  - The aggregator is pure: pre-computed `cost_usd` in, ledger out. No disk I/O. Card lookup is isolated to `estimate_session_cost_usd`, which calls `find_card_for_model_hint` (matches the advisor pattern). Tests of the aggregator don't need `tmp_home`; helper tests do.
+  - Baseline rule: mean of per-ISO-week spend totals over weeks with at least one priced session. Quiet weeks are NOT zero-padded -- locked in by `test_baseline_excludes_zero_weeks`. Rationale: a user who took time off shouldn't see an artificially low baseline that makes every active week read as "over baseline".
+  - `cost_usd=None` marks unpriced sessions (no card on file, or subscription-only models like Copilot whose pricing fields are null). They are skipped, not counted as zero, so the weekly total and the baseline both reflect "priced spend" only. `weekly_session_count` and `baseline_session_count` are priced-session counts. If a future story needs total-session counts (priced + unpriced), pull them from the orchestrator/cluster panel, not from CostLedger.
+  - Window mirrors `praxis.scoring.baseline.compute_baseline`: `[as_of_date - 90 days, current ISO week Monday)`. Current ISO week is excluded from the baseline (same logic, same Monday boundary).
+  - Cost-estimate constants (`COST_CHARS_PER_TOKEN=4.0`, `COST_OUTPUT_TO_INPUT_RATIO=1.5`) match `models_advisor/advisor.py._estimate_cost`. A future story that consolidates cost estimation should keep them aligned in one place; the constants test (`test_estimate_session_cost_constants_match_advisor`) is the canary.
+  - US-048 (biggest (model, task) line) needs per-session model_hint and task_id. Those are NOT on CostLedgerInputSession yet -- US-048 will need a richer input dataclass (or a separate function) that carries the model + task identity per session. Suggest: keep `compute_cost_ledger` minimal for the top-line numbers, add a sibling `compute_top_line` (or similar) that takes a richer input.
+  - US-049 (tier-fit savings) needs `user_turn_count` and `avg_prompt_chars` per session plus the cheaper-tier card lookup. The helper `_find_fast_tier_card_in_family` already exists in `models_advisor/advisor.py` -- consider extracting it to `praxis/models_advisor/cards.py` if multiple modules will need it.
+  - US-050 (dollar_impact_estimate per moment) modifies the Moment dataclass / persistence path; cost_ledger.py is upstream of moments rendering, so the two stories don't share much code. Use the same chars-per-token + output-multiplier constants for consistency.
+  - US-051 (renderer disclaimer) is a reports-layer change. The cost ledger module already enforces the "rough estimate" framing via the dataclass field naming and docstrings; the actual disclaimer text lives in the renderer that consumes CostLedger.
+---
