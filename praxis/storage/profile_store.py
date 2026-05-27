@@ -377,7 +377,12 @@ class ProfileStore:
         return list(by_session.values())
 
     def load_one_session_score(self, stable_id: str) -> dict[str, Any] | None:
-        """Return one row of session_scores by stable_id, or None.
+        """Return the authoritative row of session_scores for stable_id, or None.
+
+        With the (stable_id, judge_pass) composite PK (US-029), a session
+        can have both a pass-1 and a pass-2 row. The pass-2 row is the
+        frontier judgment and overrides pass-1, so this function returns
+        the highest-pass row available.
 
         Used by ``praxis re-score`` to look up the source_path/provider for a
         single session before re-running the judge against it (spec section
@@ -385,7 +390,8 @@ class ProfileStore:
         """
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT * FROM session_scores WHERE stable_id = ?",
+                "SELECT * FROM session_scores WHERE stable_id = ? "
+                "ORDER BY judge_pass DESC LIMIT 1",
                 (stable_id,),
             ).fetchone()
         if row is None:

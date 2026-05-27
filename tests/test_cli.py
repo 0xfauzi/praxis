@@ -371,14 +371,17 @@ def _write_minimal_claude_session(tmp_home: Path, session_id: str) -> Path:
 
 @pytest.fixture
 def fake_frontier_judge(monkeypatch):
-    """Replace ``score_session`` with a deterministic stub returning 7.5.
+    """Replace pass-2 judge with a deterministic stub returning 7.5.
 
     Mirrors test_orchestrator.fake_judge but locks the score so the
     re-score test can assert the row was overwritten by the new judge
-    output (the seed row uses 4.0 so any change is detectable).
+    output (the seed row uses 4.0 so any change is detectable). Also
+    sets ANTHROPIC_API_KEY so the CLI's judge-gate (US-076) lets
+    `praxis re-score` proceed; the key is never used since the judge
+    itself is stubbed.
     """
 
-    def _fake(session, prefer="claude"):  # noqa: ARG001
+    def _fake(session, prefer="claude", **kwargs):  # noqa: ARG001
         return JudgeResult(
             dimension_scores={d.key: 7.5 for d in RUBRIC},
             rationale={d.key: "re-scored fixture" for d in RUBRIC},
@@ -388,7 +391,8 @@ def fake_frontier_judge(monkeypatch):
             judge_model="fixture-frontier",
         )
 
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session", _fake)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _fake)
     return _fake
 
 

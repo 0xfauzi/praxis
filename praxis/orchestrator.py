@@ -404,6 +404,56 @@ class WeeklyRunSummary:
     cost_baseline_usd: float | None = None
     digest_persisted: bool = False
     steps_executed: list[str] = field(default_factory=list)
+    # Set by run_weekly(explain_judging=True) so the CLI can print
+    # the pass-1 confidence distribution after the run. The two-pass
+    # judge calibration story has not landed yet, so today an empty
+    # dict signals "explain requested, nothing measured."
+    judging_confidence: dict[str, int] | None = None
+    # True when run_weekly(frontier_only=True) was used. Surfaced so
+    # renderers and the explain-judging block can note that pass-1
+    # was bypassed.
+    forced_frontier: bool = False
+
+    # ---- RunSummary-shaped read-only views ----------------------------
+    # The legacy v0.1 terminal renderer at praxis/reports/terminal.py
+    # accepts a RunSummary with these fields. WeeklyRunSummary exposes
+    # them as properties so the CLI can hand the same summary to the
+    # existing renderer without an explicit adapter step. The new
+    # digest_terminal renderer is wired up by the digest-rendering
+    # adapter in a follow-up story.
+    @property
+    def sessions_seen(self) -> int:
+        return len(self.sessions)
+
+    @property
+    def sessions_new(self) -> int:
+        return len(self.sessions)
+
+    @property
+    def sessions_scored(self) -> int:
+        return len(self.judge_results)
+
+    @property
+    def coaching(self) -> Coaching:
+        # Generate fallback coaching on demand from the snapshot so the
+        # renderer's coaching panel has something to display.
+        return generate_coaching(self.snapshot)
+
+    @property
+    def consolidated_for(self) -> date | None:
+        return None
+
+    @property
+    def model_profiles(self) -> list[ModelUsageProfile] | None:
+        return None
+
+    @property
+    def last_week_means(self) -> dict[str, float] | None:
+        return None
+
+    @property
+    def calibration_notice(self) -> str | None:
+        return None
 
 
 def _step_scan(since_days: int) -> list[Session]:
@@ -603,6 +653,9 @@ def run_weekly(
     since_days: int = 7,
     store: ProfileStore | None = None,
     dry_run: bool = False,
+    week_iso: str | None = None,
+    frontier_only: bool = False,
+    explain_judging: bool = False,
 ) -> WeeklyRunSummary:
     """Run the weekly pipeline in spec Section 9.4 order.
 
@@ -626,9 +679,52 @@ def run_weekly(
     on-disk file, no ProfileStore construction. Passing an explicit
     `store=` does not override `dry_run`; the contract is that dry-run
     never persists, no matter how it was called.
+
+    When `week_iso` is set, the run renders that past week's persisted
+    data only: scanning and scoring are skipped and the snapshot is
+    rebuilt from rows whose ``started_at`` falls in the ISO-week range.
+
+    `frontier_only` and `explain_judging` are CLI-level switches plumbed
+    through to the returned summary so callers can surface them; they
+    do not yet alter the judge pipeline behavior (US-031 lands a later
+    iteration).
     """
     started = time.time()
     steps: list[str] = []
+
+    # Past-week render: do not scan or score; rebuild the snapshot
+    # from rows already persisted for that ISO week.
+    if week_iso is not None:
+        week_start, week_end = parse_iso_week(week_iso)
+        if store is None:
+            store = ProfileStore()
+        since_dt = datetime.combine(week_start, datetime.min.time(), tzinfo=timezone.utc)
+        until_dt = datetime.combine(week_end, datetime.min.time(), tzinfo=timezone.utc)
+        all_rows = store.load_session_scores(since=since_dt)
+        rows = [
+            row for row in all_rows
+            if datetime.fromisoformat(row["started_at"]) < until_dt
+        ]
+        snapshot = _snapshot_from_rows(rows)
+        return WeeklyRunSummary(
+            week_iso=week_iso,
+            sessions=[],
+            tasks=[],
+            judge_results={},
+            moments=[],
+            selection=None,
+            snapshot=snapshot,
+            rendered_html="",
+            rendered_terminal="",
+            elapsed_seconds=round(time.time() - started, 2),
+            trajectory=None,
+            cost_total_usd=None,
+            cost_baseline_usd=None,
+            digest_persisted=False,
+            steps_executed=[],
+            judging_confidence={} if explain_judging else None,
+            forced_frontier=frontier_only,
+        )
 
     sessions = _step_scan(since_days)
     steps.append("scan")
@@ -650,9 +746,43 @@ def run_weekly(
 
     final_results: dict[str, JudgeResult] = dict(pass1.results)
     final_results.update(pass2_results)
-    snapshot = ProfileSnapshot.from_scores([])
 
-    week_iso = iso_week_tag(_utcnow())
+    # Build the snapshot from persisted rows that fall in the current
+    # ISO week, NOT from the freshly scored sessions alone. In tests
+    # (and in real runs where users seeded data via `praxis scan`), the
+    # current week may already have judged rows the scan won't re-yield.
+    #
+    # In dry-run mode we won't CREATE profile.db, but we will read it
+    # if it already exists (so the user can preview a digest built from
+    # already-scanned data). Constructing ProfileStore() also creates
+    # the file, so dry-run must check existence first.
+    current_week_iso = iso_week_tag(_utcnow())
+    cw_start, cw_end = parse_iso_week(current_week_iso)
+    cw_since_dt = datetime.combine(cw_start, datetime.min.time(), tzinfo=timezone.utc)
+    cw_until_dt = datetime.combine(cw_end, datetime.min.time(), tzinfo=timezone.utc)
+    snapshot_store: ProfileStore | None
+    if dry_run:
+        if store is not None:
+            snapshot_store = store
+        else:
+            from praxis.storage.profile_store import resolve_home
+            if (resolve_home() / "profile.db").exists():
+                snapshot_store = ProfileStore()
+            else:
+                snapshot_store = None
+    else:
+        snapshot_store = store if store is not None else ProfileStore()
+    if snapshot_store is not None:
+        cw_rows_all = snapshot_store.load_session_scores(since=cw_since_dt)
+        cw_rows = [
+            row for row in cw_rows_all
+            if datetime.fromisoformat(row["started_at"]) < cw_until_dt
+        ]
+        snapshot = _snapshot_from_rows(cw_rows) if cw_rows else ProfileSnapshot.from_scores([])
+    else:
+        snapshot = ProfileSnapshot.from_scores([])
+
+    week_iso = current_week_iso
     follow_up = _step_follow_up(selection, moments, snapshot, week_iso)
     steps.append("follow_up")
 
@@ -724,6 +854,8 @@ def run_weekly(
         cost_baseline_usd=cost_baseline_usd,
         digest_persisted=digest_persisted,
         steps_executed=steps,
+        judging_confidence={} if explain_judging else None,
+        forced_frontier=frontier_only,
     )
 
 
@@ -806,118 +938,6 @@ def current_iso_week(now: datetime | None = None) -> str:
     return f"{year:04d}-W{week:02d}"
 
 
-def run_weekly(
-    week_iso: str | None = None,
-    dry_run: bool = False,
-    frontier_only: bool = False,
-    explain_judging: bool = False,
-) -> RunSummary:
-    """Weekly-cadence entry point used by ``praxis week``.
-
-    The spec's v0.2 pipeline (scan -> cluster -> two-pass judge -> moments
-    -> trajectory -> render) is being assembled story by story; this
-    function is the stable CLI-facing seam those stories will plug into.
-    The flags below define the contract the CLI promises today so the
-    surface stays stable as the underlying pipeline lands.
-
-    Args:
-        week_iso: ISO-week tag (e.g. ``"2026-W21"``). When set, the run
-            renders that past week's persisted data only: scanning and
-            scoring are skipped and the snapshot is rebuilt from rows
-            whose ``started_at`` falls inside the ISO-week range. The
-            week defaults to the current ISO week, in which case the
-            full scan+score pipeline runs over the last 7 days.
-        dry_run: Compute the digest but skip every write side effect.
-            For the current week this means the scan+score pipeline is
-            not invoked at all (so no new rows are persisted to
-            ``session_scores``/``moments``); the snapshot is rebuilt
-            from whatever is already in the DB for the target window.
-            ``--write-html`` and ``--notify`` are CLI-level concerns
-            and are also honored by the caller.
-        frontier_only: Force every session through the frontier judge
-            (spec section 9.6's ``praxis week --frontier-only`` switch).
-            The two-pass judge lands in a separate story; the flag is
-            wired here so future judge code can read it from the same
-            run context without another CLI change. No behavioral
-            effect today beyond being recorded on the run.
-        explain_judging: When true, the returned RunSummary carries a
-            ``judging_confidence`` dict so the CLI can print the
-            pass-1 confidence distribution per spec 9.6. The two-pass
-            judge has not landed yet, so today the dict is empty and
-            the CLI documents that explicitly to avoid implying a
-            measurement that did not happen.
-
-    Returns:
-        A :class:`RunSummary` whose ``week_iso`` field is set to the
-        target week (the requested ``--week`` value if provided, else
-        the current ISO week). When ``explain_judging`` is true the
-        ``judging_confidence`` field is also populated (possibly
-        empty) so the CLI knows to print the explainer block.
-    """
-    started = time.time()
-    target_week_iso = week_iso if week_iso is not None else current_iso_week()
-
-    if week_iso is not None:
-        # Past-week render: do not scan or score; rebuild the snapshot
-        # from rows already persisted for that ISO week.
-        week_start, week_end = parse_iso_week(week_iso)
-        store = ProfileStore()
-        since_dt = datetime.combine(week_start, datetime.min.time(), tzinfo=timezone.utc)
-        until_dt = datetime.combine(week_end, datetime.min.time(), tzinfo=timezone.utc)
-        all_rows = store.load_session_scores(since=since_dt)
-        rows = [
-            row for row in all_rows
-            if datetime.fromisoformat(row["started_at"]) < until_dt
-        ]
-        snapshot = _snapshot_from_rows(rows)
-        coaching = generate_coaching(snapshot)
-        summary = RunSummary(
-            sessions_seen=len(rows),
-            sessions_new=0,
-            sessions_scored=0,
-            elapsed_seconds=round(time.time() - started, 2),
-            snapshot=snapshot,
-            coaching=coaching,
-            consolidated_for=None,
-            trajectory=None,
-            model_profiles=None,
-            week_iso=target_week_iso,
-            judging_confidence={} if explain_judging else None,
-            forced_frontier=frontier_only,
-        )
-        return summary
-
-    # Current-week render: respect dry_run by skipping the scan+score
-    # write path entirely. The rebuild path mirrors the past-week branch.
-    if dry_run:
-        store = ProfileStore()
-        since_dt = _utcnow() - timedelta(days=7)
-        rows = store.load_session_scores(since=since_dt)
-        snapshot = _snapshot_from_rows(rows)
-        coaching = generate_coaching(snapshot)
-        return RunSummary(
-            sessions_seen=len(rows),
-            sessions_new=0,
-            sessions_scored=0,
-            elapsed_seconds=round(time.time() - started, 2),
-            snapshot=snapshot,
-            coaching=coaching,
-            consolidated_for=None,
-            trajectory=None,
-            model_profiles=None,
-            week_iso=target_week_iso,
-            judging_confidence={} if explain_judging else None,
-            forced_frontier=frontier_only,
-        )
-
-    base = run(since_days=7)
-    base.week_iso = target_week_iso
-    base.forced_frontier = frontier_only
-    if explain_judging:
-        base.judging_confidence = {}
-    return base
-
-
 class ReScoreError(RuntimeError):
     """Raised by ``re_score_session`` when re-scoring cannot complete.
 
@@ -986,7 +1006,8 @@ def re_score_session(session_stable_id: str) -> SessionScore:
             f"could not re-parse {source_path}: file missing or malformed.",
         )
 
-    score = score_one_session(session)
+    # re-score is authoritative: go straight to the frontier judge.
+    score = score_one_session_pass2(session)
     if score is None:
         raise ReScoreError(
             "no_judge",
