@@ -385,8 +385,9 @@ def test_session_scores_rows_preserved_across_v0_2_migration(tmp_home):
 def test_session_scores_schema_unchanged_across_v0_2_migration(tmp_home):
     """v0.3 (US-029): session_scores gains a ``judge_pass`` column and a
     composite (stable_id, judge_pass) primary key so pass-1 and pass-2 rows
-    coexist. The v0.1 ``heuristic_scores_json`` column is also dropped as
-    part of the table recreation (it has no live writer or reader)."""
+    coexist. v0.3.1 adds ``signals_json`` for the weekly-bucketed trajectory
+    (spec section 7). The v0.1 ``heuristic_scores_json`` column is also
+    dropped as part of the table recreation."""
     _seed_v0_1_db(tmp_home)
     ProfileStore(home=resolve_home())
     with _open_db() as conn:
@@ -395,6 +396,7 @@ def test_session_scores_schema_unchanged_across_v0_2_migration(tmp_home):
         "stable_id", "provider", "started_at", "scored_at", "overall",
         "dimension_scores_json", "judge_result_json",
         "features_json", "source_path", "judge_model", "judge_pass",
+        "signals_json",
     }
     # Composite PK on (stable_id, judge_pass): pk indices reflect column order.
     assert cols["stable_id"]["pk"] == 1

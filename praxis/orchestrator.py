@@ -10,6 +10,7 @@ re-runs are idempotent and cheap.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -25,6 +26,7 @@ def _utcnow() -> datetime:
 from praxis.behavior import (
     BehavioralSignals,
     TrajectoryAssessment,
+    TrajectoryLabel,
     assess as assess_trajectory,
     extract as extract_signals,
     iso_week_tag,
@@ -493,22 +495,48 @@ def _step_pass1(sessions: list[Session], tasks: list[Task]) -> Pass1Output:
 
     Output feeds: pass2 (low-confidence subset only), validate.
     """
-    _ = tasks  # batching mechanic lands in a follow-up story.
+    _ = tasks  # spec-true 5-session batched prompt lands later; for now
+    # we fan out single-session judge calls in parallel to get the same
+    # wall-time win (5x), at the same per-call cost. Real batching gives
+    # both wall-time AND cost reductions; this version only gets the
+    # wall-time half. The same-task exclusion from build_pass1_batches
+    # is moot here because each session goes to its own LLM call.
     results: dict[str, JudgeResult] = {}
     low_confidence: list[str] = []
-    # Persist each session score as we go so a crash mid-week doesn't lose
-    # everything and the snapshot rebuild later in run_weekly can read
-    # the rows. The composite PK (stable_id, judge_pass) keeps pass-2
-    # overrides distinct.
     store = ProfileStore()
-    for session in sessions:
-        score = score_one_session_pass1(session)
-        if score is None or score.judge_result is None:
-            continue
-        store.save_session_score(score)
-        results[session.stable_id] = score.judge_result
-        if score.judge_result.confidence == "low":
-            low_confidence.append(session.stable_id)
+    if not sessions:
+        return Pass1Output(results=results, low_confidence_session_ids=low_confidence)
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    # 5 workers matches PASS1_BATCH_SIZE = 5 from the spec. Each thread
+    # holds one in-flight OpenAI/Anthropic HTTP request; the SDK's own
+    # connection pool handles concurrency safely.
+    max_workers = min(5, len(sessions))
+    futures = {}
+    # Pre-compute behavioral signals so persistence carries them for the
+    # weekly-bucketed trajectory model (spec §7).
+    signals_by_id = {s.stable_id: extract_signals(s) for s in sessions}
+    from dataclasses import asdict as _dc_asdict
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for s in sessions:
+            futures[pool.submit(score_one_session_pass1, s)] = s
+        for fut in as_completed(futures):
+            session = futures[fut]
+            try:
+                score = fut.result()
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[orchestrator] pass-1 failed for {session.stable_id}: {exc!r}",
+                    file=sys.stderr,
+                )
+                continue
+            if score is None or score.judge_result is None:
+                continue
+            signals_dict = _dc_asdict(signals_by_id[session.stable_id])
+            store.save_session_score(score, signals=signals_dict)
+            results[session.stable_id] = score.judge_result
+            if score.judge_result.confidence == "low":
+                low_confidence.append(session.stable_id)
     return Pass1Output(results=results, low_confidence_session_ids=low_confidence)
 
 
@@ -572,16 +600,52 @@ def _step_validate_moments(
     return survivors
 
 
+def _recent_headline_alternatives(
+    store: ProfileStore, current_week_iso: str, lookback: int = 3
+) -> list[str]:
+    """Suggested_alternative strings from the previous N weeks' headline moments.
+
+    Spec section 4.3 input: 'whether this same suggested_alternative was
+    flagged in any of the previous 3 weeks (recurrence_count)'. Returns
+    the list (oldest first) so the selector can count per-candidate matches.
+    Empty when no prior digests exist.
+    """
+    alternatives: list[str] = []
+    iso = current_week_iso
+    for _ in range(lookback):
+        iso = _prior_iso_week(iso)
+        digest = store.load_weekly_digest(iso)
+        if digest is None:
+            continue
+        moment_id = digest.get("headline_moment_id")
+        if not moment_id:
+            continue
+        moment = store.load_moment_by_id(moment_id)
+        if moment is None:
+            continue
+        alt = moment.get("suggested_alternative") or ""
+        if alt:
+            alternatives.append(alt)
+    return alternatives
+
+
 def _step_select_moments(
-    sessions: list[Session], moments: list[JudgeMoment]
+    sessions: list[Session],
+    moments: list[JudgeMoment],
+    recurrence_alternatives: list[str] | None = None,
 ) -> MomentSelection | None:
     """Step 6: one LLM call picks headline + up to two supporting moments.
+
+    `recurrence_alternatives` carries the headline suggested_alternative
+    strings from the previous up-to-3 weeks. Spec section 4.3 uses this
+    to escalate framing when the same lapse recurs.
 
     Output feeds: follow_up (commitment derives from headline), render.
     """
     if not moments:
         return None
     started_by_id = {s.stable_id: s.started_at for s in sessions}
+    past_alts = recurrence_alternatives or []
     candidates: list[MomentCandidate] = []
     for jm in moments:
         sid = jm.session_stable_id or ""
@@ -601,11 +665,15 @@ def _step_select_moments(
             dollar_impact_estimate=jm.dollar_impact_estimate,
             minutes_impact_estimate=jm.minutes_impact_estimate,
         )
+        # Count how many prior weeks had a headline with the same alt text.
+        recurrence_count = sum(
+            1 for alt in past_alts if alt == jm.suggested_alternative
+        )
         candidates.append(
             MomentCandidate(
                 moment=selector_moment,
                 session_started_at=started,
-                recurrence_count=0,
+                recurrence_count=recurrence_count,
             )
         )
     if not candidates:
@@ -660,6 +728,93 @@ def _step_follow_up(
         snapshot=snapshot,
         verification_rate=verification_rate,
         delegation_rate=delegation_rate,
+    )
+
+
+_WEEKLY_LABEL_MAP = {
+    "Learning": TrajectoryLabel.LEARNING,
+    "Growing autonomy": TrajectoryLabel.GROWING_AUTONOMY,
+    "Steady": TrajectoryLabel.STEADY,
+    "Drifting": TrajectoryLabel.DRIFTING,
+    "Atrophying": TrajectoryLabel.ATROPHYING,
+    "Reading": TrajectoryLabel.READING,
+}
+
+
+def assess_trajectory_weekly(
+    store: ProfileStore,
+    current_week_iso: str,
+    sessions_with_signals: list[tuple[Session, BehavioralSignals]],
+) -> TrajectoryAssessment:
+    """Spec section 7 trajectory: weekly buckets + hysteresis-gated label.
+
+    Loads up to 90 days of persisted session_scores + signals_json,
+    converts to WeeklySessionInputs, buckets them by ISO week, and runs
+    the spec-compliant label_trajectory_with_hysteresis. The prior
+    week's persisted trajectory_label feeds hysteresis.
+
+    Falls back to the legacy per-session `assess_trajectory_heuristic`
+    when no signals are on file (fresh DB, or all rows pre-date the
+    signals_json migration). That preserves a useful headline for
+    week one until the weekly model has 4+ buckets.
+    """
+    from praxis.behavior.weekly import (
+        WeeklySessionInput,
+        bucket_sessions_by_iso_week,
+    )
+    from praxis.behavior.labels import label_trajectory_with_hysteresis
+    from praxis.behavior.trajectory import assess_trajectory_heuristic
+
+    # Read 90-day window
+    since_dt = _utcnow() - timedelta(days=90)
+    rows = store.load_session_scores(since=since_dt)
+    inputs: list[WeeklySessionInput] = []
+    for row in rows:
+        raw_signals = row.get("signals_json")
+        if not raw_signals:
+            continue
+        try:
+            sig = json.loads(raw_signals)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        inputs.append(WeeklySessionInput(
+            started_at=datetime.fromisoformat(row["started_at"]),
+            engagement_rate=float(sig.get("engagement_rate", 0.0)),
+            delegation_rate=float(sig.get("delegation_rate", 0.0)),
+            independence_rate=float(sig.get("independence_rate", 0.0)),
+            dim_scores=row.get("dimension_scores") or {},
+        ))
+
+    # Always run legacy heuristic for engagement/delegation slope + headline.
+    legacy = assess_trajectory_heuristic(sessions_with_signals)
+
+    if not inputs:
+        return legacy
+
+    buckets = bucket_sessions_by_iso_week(inputs)
+    # Hysteresis input: last week's persisted label (if any).
+    prior_label_str: str | None = None
+    prior_digest = store.load_weekly_digest(_prior_iso_week(current_week_iso))
+    if prior_digest:
+        prior_label_str = prior_digest.get("trajectory_label")
+    from praxis.behavior.labels import WeeklyTrajectoryLabel as _WTL
+    prior_wlabel = None
+    if prior_label_str:
+        try:
+            prior_wlabel = _WTL(prior_label_str)
+        except ValueError:
+            prior_wlabel = None
+    weekly_label = label_trajectory_with_hysteresis(buckets, prior_wlabel)
+
+    new_label = _WEEKLY_LABEL_MAP.get(weekly_label.value, legacy.label)
+    return TrajectoryAssessment(
+        label=new_label,
+        engagement_slope=legacy.engagement_slope,
+        delegation_slope=legacy.delegation_slope,
+        headline=legacy.headline,
+        evidence=legacy.evidence,
+        risks=legacy.risks,
+        interventions=legacy.interventions,
     )
 
 
@@ -879,7 +1034,28 @@ def run_weekly(
     moments = _step_validate_moments(sessions, pass1, pass2_results)
     steps.append("validate_moments")
 
-    selection = _step_select_moments(sessions, moments)
+    # Spec section 4.3 selector input: which suggested_alternative strings
+    # were headlines in the previous up-to-3 weeks. Gate on having a store
+    # (or an existing DB file under dry_run); the dry-run test asserts we
+    # do NOT create profile.db, so a missing file means we skip lookup.
+    recurrence_alts: list[str] = []
+    _prior_store: ProfileStore | None = store
+    if _prior_store is None and not dry_run:
+        _prior_store = ProfileStore()
+    elif _prior_store is None and dry_run:
+        from praxis.storage.profile_store import resolve_home as _rh
+        if (_rh() / "profile.db").exists():
+            _prior_store = ProfileStore()
+    if _prior_store is not None:
+        try:
+            recurrence_alts = _recent_headline_alternatives(
+                _prior_store, iso_week_tag(_utcnow())
+            )
+        except Exception:  # noqa: BLE001
+            recurrence_alts = []
+    selection = _step_select_moments(
+        sessions, moments, recurrence_alternatives=recurrence_alts
+    )
     steps.append("select")
 
     final_results: dict[str, JudgeResult] = dict(pass1.results)
@@ -929,12 +1105,22 @@ def run_weekly(
     )
     steps.append("follow_up")
 
-    # Trajectory is computed off the scanned sessions, NOT off any step's
-    # output: it is summary metadata for the digest row, not part of the
-    # spec 9.4 pipeline. Compute it here so the render step can include
-    # it and the digest write can populate trajectory_label.
+    # Trajectory is summary metadata, not a numbered pipeline step. Spec
+    # section 7 uses the weekly-bucketed model with hysteresis when 4+
+    # weeks of data are on file; below that, the legacy per-session
+    # heuristic provides a useful headline and slope.
     sessions_with_signals = [(s, extract_signals(s)) for s in sessions]
-    trajectory = assess_trajectory(sessions_with_signals)
+    _traj_store: ProfileStore | None = None
+    if not dry_run:
+        _traj_store = store if store is not None else ProfileStore()
+    elif snapshot_store is not None:
+        _traj_store = snapshot_store
+    if _traj_store is not None:
+        trajectory = assess_trajectory_weekly(
+            _traj_store, week_iso, sessions_with_signals
+        )
+    else:
+        trajectory = assess_trajectory(sessions_with_signals)
 
     # Spec 10.1: cost_total_usd is praxis's own LLM spend on this week's
     # pipeline. None means no priced calls happened.
@@ -1000,6 +1186,22 @@ def run_weekly(
         if follow_up is not None:
             store.save_follow_up(follow_up)
 
+    # Spec section 8.1: load the prior ISO week's snapshot so the renderer
+    # can show "Planning 6.7 (baseline 5.4)" annotations. None when no
+    # prior week is on file - the renderer treats that as "baseline forming".
+    last_week_means: dict[str, float] | None = None
+    if not dry_run or snapshot_store is not None:
+        ws = snapshot_store if snapshot_store is not None else (
+            store if store is not None else ProfileStore()
+        )
+        prior_week_iso = _prior_iso_week(week_iso)
+        prior_digest = ws.load_weekly_digest(prior_week_iso)
+        if prior_digest and prior_digest.get("snapshot"):
+            prior_snap = prior_digest["snapshot"]
+            prior_dim_means = prior_snap.get("dimension_means") or {}
+            if prior_dim_means:
+                last_week_means = {k: float(v) for k, v in prior_dim_means.items()}
+
     # Render last - now that trajectory, cost, and persistence are settled.
     rendered_html, rendered_terminal = _step_render(
         sessions, tasks, selection, follow_up, snapshot,
@@ -1010,6 +1212,7 @@ def run_weekly(
         cost_baseline_usd=cost_baseline_usd,
         judge_results=final_results,
         moments=moments,
+        last_week_means=last_week_means,
     )
     steps.append("render")
 
@@ -1048,6 +1251,7 @@ def run_weekly(
         steps_executed=steps,
         judging_confidence={} if explain_judging else None,
         forced_frontier=frontier_only,
+        last_week_means=last_week_means,
     )
 
 
@@ -1135,6 +1339,14 @@ def current_iso_week(now: datetime | None = None) -> str:
     if now is None:
         now = _utcnow()
     year, week, _ = now.date().isocalendar()
+    return f"{year:04d}-W{week:02d}"
+
+
+def _prior_iso_week(week_iso: str) -> str:
+    """Return the ISO-week tag for the week immediately before ``week_iso``."""
+    week_start, _week_end = parse_iso_week(week_iso)
+    prior = week_start - timedelta(days=7)
+    year, week, _ = prior.isocalendar()
     return f"{year:04d}-W{week:02d}"
 
 

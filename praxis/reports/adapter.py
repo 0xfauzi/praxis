@@ -16,14 +16,67 @@ from datetime import datetime, timezone
 from praxis.behavior import TrajectoryLabel
 from praxis.reports import digest_html as dh
 from praxis.reports import digest_terminal as dt
+from praxis.scoring.cost_ledger import (
+    BiggestLineInputSession,
+    TierFitInputSession,
+    compute_biggest_line,
+    compute_tier_fit_savings,
+    estimate_session_cost_usd,
+    estimate_tier_fit_savings_for_session,
+)
 from praxis.scoring.rubric import RUBRIC
 
 
+def _cost_inputs(summary):
+    """Build per-session cost-ledger inputs from the in-flight summary.
+
+    Returns (BiggestLine, TierFitSavings). Both functions agree on the
+    'current ISO week' anchor (session.started_at >= Monday of as_of),
+    so we don't need to filter sessions ahead of time - they handle it.
+    """
+    task_label_by_sid: dict[str, str] = {}
+    for task in summary.tasks or []:
+        for sid in task.session_ids:
+            task_label_by_sid[sid] = task.label
+
+    biggest_inputs: list[BiggestLineInputSession] = []
+    tier_inputs: list[TierFitInputSession] = []
+    for s in summary.sessions or []:
+        total_chars = sum(len(t.content) for t in s.user_turns)
+        cost = estimate_session_cost_usd(s.model_hint, total_chars)
+        biggest_inputs.append(BiggestLineInputSession(
+            started_at=s.started_at,
+            cost_usd=cost,
+            model_hint=s.model_hint,
+            task_label=task_label_by_sid.get(s.stable_id),
+        ))
+        tier_savings = estimate_tier_fit_savings_for_session(
+            s.model_hint, total_chars
+        )
+        n_user_turns = len(s.user_turns)
+        avg_chars = total_chars / n_user_turns if n_user_turns else 0.0
+        tier_inputs.append(TierFitInputSession(
+            started_at=s.started_at,
+            user_turn_count=n_user_turns,
+            avg_prompt_chars=avg_chars,
+            tier_fit_savings_usd=tier_savings,
+        ))
+    biggest = compute_biggest_line(biggest_inputs)
+    tier = compute_tier_fit_savings(tier_inputs)
+    return biggest, tier
+
+
 _TRAJECTORY_DISPLAY: dict[TrajectoryLabel, str] = {
+    # v0.2 spec section 7.2 labels (weekly-bucketed model)
     TrajectoryLabel.LEARNING: "Learning",
+    TrajectoryLabel.GROWING_AUTONOMY: "Growing autonomy",
+    TrajectoryLabel.STEADY: "Steady",
+    TrajectoryLabel.DRIFTING: "Drifting",
+    TrajectoryLabel.ATROPHYING: "Atrophying",
+    TrajectoryLabel.READING: "Reading",
+    # v0.1 legacy labels (per-session heuristic, kept for early-week fallback)
     TrajectoryLabel.STABLE_ENGAGED: "Engaged",
     TrajectoryLabel.STABLE_PASSIVE: "Passive",
-    TrajectoryLabel.ATROPHYING: "Atrophying",
     TrajectoryLabel.INSUFFICIENT_DATA: "Reading",
 }
 
@@ -96,30 +149,48 @@ def _follow_up_panel_html(follow_up) -> dh.FollowUpPanel | None:
 
 
 def _cost_ledger_terminal(summary) -> dt.CostLedgerView | None:
-    """Minimal cost-ledger view: this-week vs baseline only.
+    """Cost ledger view including biggest-(model, task) line and tier-fit savings.
 
-    The biggest-(model, task) line and tier-fit savings require building
-    BiggestLineInputSession / TierFitInputSession lists from sessions +
-    judge_results + tasks; deferring to a later wiring pass keeps the
-    adapter from doing the per-session cost math twice. Renderer treats
-    zero biggest_line_usd as "no biggest line on file" and omits it.
+    Both helpers operate on the same per-session inputs computed once
+    by _cost_inputs(); cost is estimated from the user-turn char volume
+    against the model card's pricing.
     """
     if summary.cost_total_usd is None and not summary.sessions:
         return None
+    biggest, tier = _cost_inputs(summary)
     return dt.CostLedgerView(
         this_week_usd=float(summary.cost_total_usd or 0.0),
         baseline_usd=summary.cost_baseline_usd,
+        biggest_model=biggest.model_hint or "",
+        biggest_task_label=biggest.task_label or "",
+        biggest_line_usd=float(biggest.spend_usd or 0.0),
+        biggest_line_sessions=int(biggest.session_count or 0),
+        over_tier_sessions=int(tier.qualifying_session_count or 0),
+        tier_fit_savings_usd=float(tier.estimated_savings_usd or 0.0),
     )
 
 
 def _cost_ledger_html(summary) -> dh.CostLedger | None:
     if summary.cost_total_usd is None and not summary.sessions:
         return None
+    biggest, tier = _cost_inputs(summary)
+    biggest_line = ""
+    if biggest.model_hint and biggest.task_label:
+        biggest_line = (
+            f"{biggest.model_hint} on {biggest.task_label} "
+            f"(${biggest.spend_usd:.2f} over {biggest.session_count} sessions)"
+        )
+    sonnet_note = ""
+    if tier.qualifying_session_count > 0:
+        sonnet_note = (
+            f"{tier.qualifying_session_count} of those would have worked on a cheaper tier, "
+            f"saving ~${tier.estimated_savings_usd:.2f}"
+        )
     return dh.CostLedger(
         this_week_dollars=float(summary.cost_total_usd or 0.0),
         baseline_dollars=float(summary.cost_baseline_usd or 0.0),
-        biggest_line="",
-        sonnet_swap_note="",
+        biggest_line=biggest_line,
+        sonnet_swap_note=sonnet_note,
     )
 
 
@@ -127,10 +198,21 @@ def _task_rows_terminal(summary) -> list[dt.TaskRowView] | None:
     if not summary.tasks:
         return None
     rows: list[dt.TaskRowView] = []
-    # Spec section 5.5: top 3 tasks ranked by session count (tiebreak cost).
+    # Per-session USD by session id, used to populate per-task totals so
+    # 'WHERE THE WEEK WENT' no longer renders $0.00 next to every row.
+    cost_by_sid: dict[str, float] = {}
+    for s in summary.sessions or []:
+        total_chars = sum(len(t.content) for t in s.user_turns)
+        cost = estimate_session_cost_usd(s.model_hint, total_chars)
+        if cost is not None:
+            cost_by_sid[s.stable_id] = cost
+    # Spec section 5.5: top 3 tasks ranked by session count, tiebreak cost.
     ranked = sorted(
         summary.tasks,
-        key=lambda t: (len(t.session_ids), 0.0),
+        key=lambda t: (
+            len(t.session_ids),
+            sum(cost_by_sid.get(sid, 0.0) for sid in t.session_ids),
+        ),
         reverse=True,
     )[:3]
     sid_to_score = {sid: r.dimension_scores
@@ -150,10 +232,11 @@ def _task_rows_terminal(summary) -> list[dt.TaskRowView] | None:
                 if m < worst_mean:
                     worst_mean = m
                     worst_dim = d.key
+        task_total = sum(cost_by_sid.get(sid, 0.0) for sid in task.session_ids)
         rows.append(dt.TaskRowView(
             label=task.label,
             sessions=len(task.session_ids),
-            total_usd=0.0,
+            total_usd=task_total,
             worst_dim_key=worst_dim,
         ))
     return rows
@@ -162,6 +245,12 @@ def _task_rows_terminal(summary) -> list[dt.TaskRowView] | None:
 def _task_rows_html(summary) -> tuple[dh.TaskRow, ...]:
     if not summary.tasks:
         return ()
+    cost_by_sid: dict[str, float] = {}
+    for s in summary.sessions or []:
+        total_chars = sum(len(t.content) for t in s.user_turns)
+        cost = estimate_session_cost_usd(s.model_hint, total_chars)
+        if cost is not None:
+            cost_by_sid[s.stable_id] = cost
     ranked = sorted(
         summary.tasks,
         key=lambda t: len(t.session_ids),
@@ -180,10 +269,11 @@ def _task_rows_html(summary) -> tuple[dh.TaskRow, ...]:
                 m = sum(scores) / len(scores)
                 if worst is None or m < worst:
                     worst = m
+        task_total = sum(cost_by_sid.get(sid, 0.0) for sid in task.session_ids)
         rows.append(dh.TaskRow(
             label=task.label,
             session_count=len(task.session_ids),
-            dollars=0.0,
+            dollars=task_total,
             worst_score=worst,
         ))
     return tuple(rows)

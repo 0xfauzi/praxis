@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS session_scores (
     source_path TEXT NOT NULL,
     judge_model TEXT,
     judge_pass INTEGER NOT NULL DEFAULT 1,
+    signals_json TEXT,
     PRIMARY KEY (stable_id, judge_pass)
 );
 
@@ -157,6 +158,10 @@ class ProfileStore:
         if db_existed:
             with self._conn() as conn:
                 if self._has_schema_v3_marker(conn):
+                    # Already at v3+. Run any later additive column migrations
+                    # in-place so older v3 DBs gain new optional columns
+                    # (signals_json) without a full table rebuild.
+                    self._ensure_session_scores_columns(conn)
                     return
 
         # Migration needed (fresh DB, v0.1, or v0.2 DB without the v3 marker).
@@ -174,6 +179,22 @@ class ProfileStore:
                 self._migration_failure_message(backup_path, exc)
             ) from exc
 
+    @staticmethod
+    def _ensure_session_scores_columns(conn: sqlite3.Connection) -> None:
+        """Add additive columns introduced after the v3 marker landed.
+
+        Currently only `signals_json` (spec section 7 - persists per-session
+        BehavioralSignals so the weekly-bucketed trajectory can replay 90
+        days of history without re-parsing source files). Idempotent: a
+        DB that already has the column is left alone.
+        """
+        cur = conn.execute("PRAGMA table_info(session_scores)")
+        existing_cols = {row[1] for row in cur.fetchall()}
+        if "signals_json" not in existing_cols:
+            conn.execute(
+                "ALTER TABLE session_scores ADD COLUMN signals_json TEXT"
+            )
+
     def _apply_v2_schema(self, conn: sqlite3.Connection) -> None:
         # Wrapped in a method so tests can monkeypatch it to inject failures
         # without having to corrupt the SCHEMA constant. The name is kept for
@@ -188,13 +209,22 @@ class ProfileStore:
         (stable_id, judge_pass) the composite primary key so both pass-1 and
         pass-2 rows can coexist for the same session.
 
+        Also adds ``signals_json`` (spec §7) for persisting per-session
+        BehavioralSignals so the weekly-bucketed trajectory model can read
+        90 days of history at runtime.
+
         SQLite can't ALTER a primary key in place, so we recreate the table.
-        Idempotent: if ``judge_pass`` is already a column the method returns
-        without touching the table.
+        Idempotent: if ``judge_pass`` and ``signals_json`` are already
+        columns the method returns without touching the table.
         """
         cur = conn.execute("PRAGMA table_info(session_scores)")
         existing_cols = {row[1] for row in cur.fetchall()}
-        if "judge_pass" in existing_cols:
+        if "judge_pass" in existing_cols and "signals_json" in existing_cols:
+            return
+        # If we already have judge_pass but not signals_json (an older
+        # v0.3 DB), just add the column - no table rebuild needed.
+        if "judge_pass" in existing_cols and "signals_json" not in existing_cols:
+            conn.execute("ALTER TABLE session_scores ADD COLUMN signals_json TEXT")
             return
         # We rebuild the table to drop the unused v0.1 ``heuristic_scores_json``
         # column (carried forward through the v0.2 migration via CREATE TABLE
@@ -213,6 +243,7 @@ class ProfileStore:
                 source_path TEXT NOT NULL,
                 judge_model TEXT,
                 judge_pass INTEGER NOT NULL DEFAULT 1,
+                signals_json TEXT,
                 PRIMARY KEY (stable_id, judge_pass)
             );
             INSERT INTO session_scores_v3
@@ -298,7 +329,20 @@ class ProfileStore:
             )
             return cur.fetchone() is not None
 
-    def save_session_score(self, score: SessionScore) -> None:
+    def save_session_score(
+        self,
+        score: SessionScore,
+        *,
+        signals: dict[str, float] | None = None,
+    ) -> None:
+        """Persist one SessionScore row, optionally with behavioral signals.
+
+        ``signals`` carries per-session BehavioralSignals as a dict (engagement_rate,
+        delegation_rate, independence_rate, etc) so the weekly-bucketed
+        trajectory (spec §7) can replay the 90-day window without re-parsing
+        source files. None means the caller didn't compute signals; the column
+        is set to NULL and the trajectory model will skip that session.
+        """
         judge_json = None
         judge_model = None
         if score.judge_result is not None:
@@ -313,6 +357,7 @@ class ProfileStore:
                 }
             )
             judge_model = score.judge_result.judge_model
+        signals_json = json.dumps(signals) if signals is not None else None
 
         with self._conn() as conn:
             conn.execute(
@@ -320,8 +365,9 @@ class ProfileStore:
                 INSERT OR REPLACE INTO session_scores
                 (stable_id, provider, started_at, scored_at, overall,
                  dimension_scores_json, judge_result_json,
-                 features_json, source_path, judge_model, judge_pass)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 features_json, source_path, judge_model, judge_pass,
+                 signals_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     score.session_stable_id,
@@ -335,6 +381,7 @@ class ProfileStore:
                     score.source_path,
                     judge_model,
                     score.judge_pass,
+                    signals_json,
                 ),
             )
 
@@ -496,6 +543,15 @@ class ProfileStore:
                 (session_stable_id,),
             )
             return [dict(row) for row in cursor.fetchall()]
+
+    def load_moment_by_id(self, moment_id: str) -> dict[str, Any] | None:
+        """Look up one moment row by moment_id, returning None if missing."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM moments WHERE moment_id = ?",
+                (moment_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     # ---- tasks ----------------------------------------------------------
 

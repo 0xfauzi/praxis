@@ -31,6 +31,13 @@ class TrajectoryLabel(str, Enum):
     STABLE_PASSIVE = "stable_passive" # consistently low engagement
     ATROPHYING = "atrophying"         # delegation rising, engagement falling
     INSUFFICIENT_DATA = "insufficient_data"
+    # v0.2 spec section 7.2 labels produced by the weekly-bucketed model
+    # with hysteresis. The legacy labels above stay for the per-session
+    # heuristic path; the v0.2 weekly model emits these.
+    GROWING_AUTONOMY = "growing_autonomy"
+    STEADY = "steady"
+    DRIFTING = "drifting"
+    READING = "reading"
 
 
 @dataclass
