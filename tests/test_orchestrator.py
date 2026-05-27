@@ -37,7 +37,7 @@ def fake_judge(monkeypatch):
     without an API key.
     """
 
-    def _fake(session, prefer="claude"):  # noqa: ARG001
+    def _fake(session, prefer="claude", **kwargs):  # noqa: ARG001
         return JudgeResult(
             dimension_scores={d.key: 6.0 for d in RUBRIC},
             rationale={d.key: "fixture" for d in RUBRIC},
@@ -167,7 +167,7 @@ def test_pass1_no_heuristic_skip_path(tmp_home, monkeypatch):
 
     judged_ids: list[str] = []
 
-    def _recording_pass1(session, prefer="claude"):  # noqa: ARG001
+    def _recording_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
         judged_ids.append(session.stable_id)
         return JudgeResult(
             dimension_scores={d.key: 6.0 for d in RUBRIC},
@@ -196,7 +196,7 @@ def test_pass1_uses_cheap_tier_anthropic_model(tmp_home, monkeypatch):
 
     seen_models: list[str] = []
 
-    def _recording_with_claude(session, model="claude-opus-4-7"):  # noqa: ARG001
+    def _recording_with_claude(session, model="claude-opus-4-7", **kwargs):  # noqa: ARG001
         seen_models.append(model)
         return JudgeResult(
             dimension_scores={d.key: 5.0 for d in RUBRIC},
@@ -261,7 +261,7 @@ def test_pass2_escalates_only_low_confidence_sessions(tmp_home, monkeypatch):
 
     confidences = iter(["medium", "high", "low"])
 
-    def _fake_pass1(session, prefer="claude"):  # noqa: ARG001
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
         return _pass1_result(confidence=next(confidences))
 
     pass2_calls: list[str] = []
@@ -285,7 +285,7 @@ def test_pass2_result_overrides_pass1(tmp_home, monkeypatch):
     project_root = tmp_home / ".claude" / "projects" / "override-check"
     _write_synthetic_claude_session(project_root, 0)
 
-    def _fake_pass1(session, prefer="claude"):  # noqa: ARG001
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
         return _pass1_result(confidence="low")
 
     def _fake_pass2(session, prefer="claude"):  # noqa: ARG001
@@ -320,10 +320,10 @@ def test_pass2_is_skipped_for_medium_confidence(tmp_home, monkeypatch):
     project_root = tmp_home / ".claude" / "projects" / "medium-only"
     _write_synthetic_claude_session(project_root, 0)
 
-    def _fake_pass1(session, prefer="claude"):  # noqa: ARG001
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
         return _pass1_result(confidence="medium", judge_model="pass-1-medium")
 
-    def _exploding_pass2(session, prefer="claude"):  # noqa: ARG001
+    def _exploding_pass2(session, prefer="claude", **kwargs):  # noqa: ARG001
         raise AssertionError("pass 2 should not run for medium confidence")
 
     monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
@@ -347,7 +347,7 @@ def test_pass2_failure_keeps_pass1_score(tmp_home, monkeypatch):
     project_root = tmp_home / ".claude" / "projects" / "pass2-failure"
     _write_synthetic_claude_session(project_root, 0)
 
-    def _fake_pass1(session, prefer="claude"):  # noqa: ARG001
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
         return _pass1_result(confidence="low", judge_model="pass-1-fallback")
 
     def _failing_pass2(session, prefer="claude"):  # noqa: ARG001
@@ -377,7 +377,7 @@ def test_pass2_call_does_not_include_pass1_outputs(tmp_home, monkeypatch):
 
     captured: list[tuple[tuple, dict]] = []
 
-    def _fake_pass1(session, prefer="claude"):  # noqa: ARG001
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
         return _pass1_result(confidence="low")
 
     def _capturing_pass2(*args, **kwargs):
@@ -431,7 +431,7 @@ def test_escalated_session_persists_both_pass_rows(tmp_home, monkeypatch):
     project_root = tmp_home / ".claude" / "projects" / "judge-pass-both"
     _write_synthetic_claude_session(project_root, 0)
 
-    def _fake_pass1(session, prefer="claude"):  # noqa: ARG001
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
         return _pass1_result(confidence="low", judge_model="pass-1-cheap")
 
     def _fake_pass2(session, prefer="claude"):  # noqa: ARG001
@@ -464,7 +464,7 @@ def test_load_session_scores_dedupes_to_winning_pass_by_default(tmp_home, monkey
     project_root = tmp_home / ".claude" / "projects" / "judge-pass-dedup"
     _write_synthetic_claude_session(project_root, 0)
 
-    def _fake_pass1(session, prefer="claude"):  # noqa: ARG001
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
         return _pass1_result(confidence="low")
 
     def _fake_pass2(session, prefer="claude"):  # noqa: ARG001
@@ -489,7 +489,7 @@ def test_no_pass2_row_when_escalation_fails(tmp_home, monkeypatch):
     project_root = tmp_home / ".claude" / "projects" / "judge-pass-2-fails"
     _write_synthetic_claude_session(project_root, 0)
 
-    def _fake_pass1(session, prefer="claude"):  # noqa: ARG001
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
         return _pass1_result(confidence="low", judge_model="pass-1-fallback")
 
     def _failing_pass2(session, prefer="claude"):  # noqa: ARG001
@@ -505,3 +505,182 @@ def test_no_pass2_row_when_escalation_fails(tmp_home, monkeypatch):
     assert len(all_rows) == 1
     assert all_rows[0]["judge_pass"] == 1
     assert all_rows[0]["judge_result"]["judge_model"] == "pass-1-fallback"
+
+
+# ---------------------------------------------------------------------------
+# US-031: 4-week confidence-distribution telemetry
+# ---------------------------------------------------------------------------
+
+
+def test_pass1_distribution_logged_to_run_log(tmp_home, monkeypatch):
+    """AC: each weekly run logs the pass-1 confidence distribution.
+
+    Builds a window with sessions that produce a mix of confidences and
+    asserts a ``kind='pass1_conf'`` row lands in run_log with counts that
+    match what the fake pass-1 judge emitted.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "distribution"
+    for i in range(3):
+        _write_synthetic_claude_session(project_root, i, hours_ago=i + 1)
+
+    confidences = iter(["medium", "high", "low"])
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        return _pass1_result(confidence=next(confidences))
+
+    def _fake_pass2(session, prefer="claude", **kwargs):  # noqa: ARG001
+        return _pass2_result()
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _fake_pass2)
+
+    run()
+
+    store = ProfileStore(home=resolve_home())
+    rolling = store.recent_pass1_confidence(weeks=4)
+    # Three sessions: one each of medium/high/low.
+    assert rolling == {"low": 1, "medium": 1, "high": 1}
+
+
+def test_pass1_distribution_not_logged_when_zero_calls(tmp_home, monkeypatch):
+    """No pass-1 row should be written when no pass-1 calls succeed.
+
+    Without API keys, the pass-1 entrypoint returns None for every session,
+    so the per-run counter stays zero. Writing a row of zeros would pollute
+    run_log and skew the rolling 4-week share.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "no-keys"
+    _write_synthetic_claude_session(project_root, 0)
+    # tmp_home already clears API key env vars.
+    run()
+    store = ProfileStore(home=resolve_home())
+    rolling = store.recent_pass1_confidence(weeks=4)
+    assert rolling == {"low": 0, "medium": 0, "high": 0}
+
+
+def test_calibration_notice_is_none_without_history(tmp_home, fake_judge):
+    """A fresh install has no history, so the calibration notice must be None.
+
+    With zero prior pass-1 rows, the 4-week share has a denominator of zero
+    and neither threshold can trip; the RunSummary must not surface a banner.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "fresh"
+    _write_synthetic_claude_session(project_root, 0)
+    summary = run()
+    assert summary.calibration_notice is None
+
+
+def test_rolling_high_over_90_triggers_calibration_notice(tmp_home, monkeypatch):
+    """AC: rolling 4-week share of high > 90% surfaces the digest banner.
+
+    Seeds the run_log with a 4-week history where 95% of pass-1 ratings are
+    high, then runs the orchestrator on a new session and asserts the
+    RunSummary carries the "calibration was off; re-tuned" notice.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "over-confident"
+    _write_synthetic_claude_session(project_root, 0)
+
+    store = ProfileStore(home=resolve_home())
+    # 95 high / 3 medium / 2 low = 95% high, well above the 90% threshold.
+    store.record_pass1_confidence(low=2, medium=3, high=95)
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        return _pass1_result(confidence="medium")
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+
+    summary = run()
+    assert summary.calibration_notice == "calibration was off; re-tuned"
+
+
+def test_rolling_high_at_or_below_90_does_not_trigger(tmp_home, monkeypatch):
+    """The threshold is strict ``>`` 90%, not ``>=``: a 90% share is fine."""
+    project_root = tmp_home / ".claude" / "projects" / "at-threshold"
+    _write_synthetic_claude_session(project_root, 0)
+
+    store = ProfileStore(home=resolve_home())
+    # 9 high / 1 other = exactly 90%. Must NOT trip the banner.
+    store.record_pass1_confidence(low=1, medium=0, high=9)
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        return _pass1_result(confidence="medium")
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+
+    summary = run()
+    assert summary.calibration_notice is None
+
+
+def test_rolling_high_over_90_sharpens_pass1_prompt(tmp_home, monkeypatch):
+    """AC: when high > 90%, the pass-1 prompt is auto-sharpened.
+
+    Captures the ``sharpen_calibration`` kwarg the orchestrator forwards to
+    the pass-1 judge entrypoint. The flag must be True so the cheap-tier
+    prompt includes the over-confidence calibration check on this run.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "sharpen"
+    _write_synthetic_claude_session(project_root, 0)
+
+    store = ProfileStore(home=resolve_home())
+    store.record_pass1_confidence(low=1, medium=2, high=97)
+
+    captured: dict[str, object] = {}
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        captured["sharpen_calibration"] = kwargs.get("sharpen_calibration", False)
+        captured["stricter_low"] = kwargs.get("stricter_low", False)
+        return _pass1_result(confidence="medium")
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+
+    run()
+    assert captured["sharpen_calibration"] is True
+    assert captured["stricter_low"] is False
+
+
+def test_rolling_low_over_70_triggers_stricter_low_flag(tmp_home, monkeypatch):
+    """AC: rolling 4-week share of low > 70% applies the stricter definition.
+
+    The orchestrator must forward ``stricter_low=True`` to pass-1 when the
+    rolling share of low exceeds 70%, independent of any high-side action.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "over-flagging"
+    _write_synthetic_claude_session(project_root, 0)
+
+    store = ProfileStore(home=resolve_home())
+    # 80 low / 10 medium / 10 high = 80% low, above the 70% threshold.
+    store.record_pass1_confidence(low=80, medium=10, high=10)
+
+    captured: dict[str, object] = {}
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        captured["stricter_low"] = kwargs.get("stricter_low", False)
+        captured["sharpen_calibration"] = kwargs.get("sharpen_calibration", False)
+        return _pass1_result(confidence="medium")
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+
+    run()
+    assert captured["stricter_low"] is True
+    assert captured["sharpen_calibration"] is False
+
+
+def test_rolling_low_at_or_below_70_does_not_trigger(tmp_home, monkeypatch):
+    """The threshold is strict ``>`` 70%: a 70% share must not trip."""
+    project_root = tmp_home / ".claude" / "projects" / "low-threshold"
+    _write_synthetic_claude_session(project_root, 0)
+
+    store = ProfileStore(home=resolve_home())
+    # 7 low / 3 other = exactly 70%. Must NOT trip.
+    store.record_pass1_confidence(low=7, medium=2, high=1)
+
+    captured: dict[str, object] = {}
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        captured["stricter_low"] = kwargs.get("stricter_low", False)
+        return _pass1_result(confidence="medium")
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+
+    run()
+    assert captured["stricter_low"] is False

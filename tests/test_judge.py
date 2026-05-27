@@ -617,7 +617,7 @@ def test_pass1_uses_cheap_claude_model_when_preferred(monkeypatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     seen: dict[str, object] = {}
 
-    def _fake(session, model=CLAUDE_FRONTIER_MODEL):  # noqa: ARG001
+    def _fake(session, model=CLAUDE_FRONTIER_MODEL, **kwargs):  # noqa: ARG001
         seen["model"] = model
         return JudgeResult(
             dimension_scores={}, rationale={}, standout_moments=[],
@@ -636,7 +636,7 @@ def test_pass1_uses_cheap_openai_model_when_preferred(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
     seen: dict[str, object] = {}
 
-    def _fake(session, model=OPENAI_FRONTIER_MODEL):  # noqa: ARG001
+    def _fake(session, model=OPENAI_FRONTIER_MODEL, **kwargs):  # noqa: ARG001
         seen["model"] = model
         return JudgeResult(
             dimension_scores={}, rationale={}, standout_moments=[],
@@ -655,10 +655,10 @@ def test_pass1_falls_back_to_other_provider_on_error(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
     seen_openai: dict[str, object] = {}
 
-    def _broken_claude(session, model=CLAUDE_FRONTIER_MODEL):  # noqa: ARG001
+    def _broken_claude(session, model=CLAUDE_FRONTIER_MODEL, **kwargs):  # noqa: ARG001
         raise RuntimeError("anthropic down")
 
-    def _fake_openai(session, model=OPENAI_FRONTIER_MODEL):  # noqa: ARG001
+    def _fake_openai(session, model=OPENAI_FRONTIER_MODEL, **kwargs):  # noqa: ARG001
         seen_openai["model"] = model
         return JudgeResult(
             dimension_scores={}, rationale={}, standout_moments=[],
@@ -753,3 +753,82 @@ def test_pass2_receives_only_the_session_no_pass1_context(monkeypatch) -> None:
     # Only the session may be a positional, with at most the model id as a kwarg.
     assert len(args) == 1 and args[0] is session
     assert set(kwargs.keys()) <= {"model"}
+
+
+# ---------------------------------------------------------------------------
+# US-031: prompt calibration adjustments from rolling 4-week telemetry
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_unchanged_when_no_calibration_flags() -> None:
+    """Default prompt has no calibration-check addendum.
+
+    The pre-US-031 prompt is the baseline that pass-1 emits when the
+    rolling 4-week share is within bounds. The phrase only appears when
+    the orchestrator opts in via a flag, so a stock prompt must omit it.
+    """
+    prompt = _build_system_prompt()
+    assert "Calibration check" not in prompt
+
+
+def test_system_prompt_sharpens_high_when_flagged() -> None:
+    """AC: sharpen_calibration injects an over-confidence anchor into the prompt.
+
+    The addendum must specifically address the "high" rating - the only
+    knob that would correct an over-confidence pattern - and must direct
+    the model to default to medium when in doubt.
+    """
+    prompt = _build_system_prompt(sharpen_calibration=True)
+    assert "Calibration check" in prompt
+    assert "90%" in prompt
+    assert "over-confidence" in prompt.lower()
+    # The instruction must reach the "high" rating, not just be a generic note.
+    assert "\"high\"" in prompt or "high" in prompt.lower()
+
+
+def test_system_prompt_tightens_low_when_flagged() -> None:
+    """AC: stricter_low injects an over-flagging anchor into the prompt.
+
+    The addendum must reference the 70% threshold and must constrain "low"
+    to genuinely-ambiguous transcripts so the cheap model stops escalating
+    everything.
+    """
+    prompt = _build_system_prompt(stricter_low=True)
+    assert "Calibration check" in prompt
+    assert "70%" in prompt
+    assert "over-flagging" in prompt.lower()
+
+
+def test_system_prompt_can_apply_both_flags_simultaneously() -> None:
+    """Both auto-tunes can fire on the same run when the rolling shares
+    happen to cross both thresholds at once. Each addendum must be present
+    so the model sees both calibration anchors."""
+    prompt = _build_system_prompt(sharpen_calibration=True, stricter_low=True)
+    assert prompt.count("Calibration check") == 2
+    assert "90%" in prompt
+    assert "70%" in prompt
+
+
+def test_score_session_pass1_forwards_calibration_flags(monkeypatch) -> None:
+    """The flag must reach score_with_claude so the cheap-tier prompt is
+    actually adjusted - not just consumed by score_session_pass1 and dropped."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    captured: dict[str, object] = {}
+
+    def _fake(session, model=CLAUDE_FRONTIER_MODEL, **kwargs):  # noqa: ARG001
+        captured["sharpen_calibration"] = kwargs.get("sharpen_calibration")
+        captured["stricter_low"] = kwargs.get("stricter_low")
+        return JudgeResult(
+            dimension_scores={}, rationale={}, standout_moments=[],
+            failure_modes=[], overall_note="", judge_model=model,
+        )
+
+    monkeypatch.setattr("praxis.scoring.judge.score_with_claude", _fake)
+    score_session_pass1(
+        _make_session([(Role.USER, "x")]),
+        sharpen_calibration=True,
+        stricter_low=True,
+    )
+    assert captured["sharpen_calibration"] is True
+    assert captured["stricter_low"] is True

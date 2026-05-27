@@ -16,7 +16,7 @@ import shutil
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -499,6 +499,55 @@ class ProfileStore:
                 "VALUES (?, ?, ?, ?, ?)",
                 (_utcnow().isoformat(), kind, sessions_seen, sessions_new, notes),
             )
+
+    # ---- pass-1 confidence distribution telemetry (spec §9.6, US-031) ----
+
+    def record_pass1_confidence(self, low: int, medium: int, high: int) -> None:
+        """Append one pass-1 confidence-distribution row to ``run_log``.
+
+        Spec §9.6 (US-031): each weekly run logs the pass-1 confidence
+        distribution so the rolling 4-week share of high/low can be
+        computed for the calibration auto-tune. We use ``kind='pass1_conf'``
+        so the new rows can be queried without touching the existing
+        ``kind='full'`` notes format; the counts are stored as a small
+        JSON blob in ``notes`` to keep the schema unchanged.
+        """
+        payload = json.dumps({"low": low, "medium": medium, "high": high})
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO run_log (run_at, kind, sessions_seen, sessions_new, notes) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (_utcnow().isoformat(), "pass1_conf", 0, 0, payload),
+            )
+
+    def recent_pass1_confidence(self, weeks: int = 4) -> dict[str, int]:
+        """Return aggregated pass-1 confidence counts over the last N weeks.
+
+        Reads every ``kind='pass1_conf'`` row whose ``run_at`` is within the
+        rolling window and sums the counts. Returns zeros when no rows fall
+        in the window (e.g. on a fresh install) so the caller can divide
+        safely after a total > 0 check.
+        """
+        cutoff = _utcnow() - timedelta(weeks=weeks)
+        counts: dict[str, int] = {"low": 0, "medium": 0, "high": 0}
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT notes FROM run_log "
+                "WHERE kind = 'pass1_conf' AND run_at >= ?",
+                (cutoff.isoformat(),),
+            ).fetchall()
+        for row in rows:
+            try:
+                parsed = json.loads(row["notes"] or "")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            for key in counts:
+                value = parsed.get(key, 0)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    counts[key] += value
+        return counts
 
     # ---- follow-ups -----------------------------------------------------
 

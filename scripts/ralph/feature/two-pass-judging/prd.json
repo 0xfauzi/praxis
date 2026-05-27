@@ -65,8 +65,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added record_pass1_confidence / recent_pass1_confidence on ProfileStore (rows live in run_log with kind='pass1_conf' so no schema bump is needed); orchestrator now consults the rolling 4-week share before each pass-1 batch, sets sharpen_calibration when 'high' > 90% and stricter_low when 'low' > 70%, threads both flags through aggregate.score_one_session_pass1 -> judge.score_session_pass1 -> score_with_claude/openai, and asks _build_system_prompt() to inject a 'Calibration check' addendum into the cheap-tier prompt. Per-run pass-1 confidence is counted (before pass-2 overrides) and persisted only when at least one pass-1 call succeeded. RunSummary gained calibration_notice; terminal + HTML renderers surface it when the sharpening fires."
     }
   ]
 }

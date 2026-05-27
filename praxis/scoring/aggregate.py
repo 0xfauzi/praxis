@@ -85,7 +85,12 @@ def score_one_session(session: Session) -> SessionScore | None:
     return _session_score_from_judge(session, judge)
 
 
-def score_one_session_pass1(session: Session) -> SessionScore | None:
+def score_one_session_pass1(
+    session: Session,
+    *,
+    sharpen_calibration: bool = False,
+    stricter_low: bool = False,
+) -> SessionScore | None:
     """Pass 1 of the two-pass judge (spec §9.1): one cheap-tier call per session.
 
     Pass 1 MUST run on every session in the weekly window. There is no skip
@@ -93,8 +98,18 @@ def score_one_session_pass1(session: Session) -> SessionScore | None:
     heuristic features. Returns None only when no API key is configured (the
     judge layer cannot run at all), never to "skip" a session for cost or
     feature-volume reasons.
+
+    Spec §9.6 (US-031): ``sharpen_calibration`` and ``stricter_low`` are
+    forwarded from the orchestrator's 4-week confidence-distribution
+    telemetry. The orchestrator computes the rolling shares before the
+    pass-1 loop and threads the flags through so each pass-1 call uses
+    the same adjusted prompt.
     """
-    judge = score_session_pass1(session)
+    judge = score_session_pass1(
+        session,
+        sharpen_calibration=sharpen_calibration,
+        stricter_low=stricter_low,
+    )
     if judge is None:
         return None
     return _session_score_from_judge(session, judge, judge_pass=1)

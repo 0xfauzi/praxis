@@ -56,6 +56,11 @@ class RunSummary:
     # The terminal renderer ignores this field by design (it omits
     # the last-week annotation in all cases).
     last_week_means: dict[str, float] | None = None
+    # Spec §9.6 (US-031): one-line digest banner surfaced when the rolling
+    # 4-week pass-1 confidence distribution shows the cheap-tier judge has
+    # been over-confident (high > 90%) and the prompt was auto-sharpened
+    # for this run. None means no auto-tune was applied.
+    calibration_notice: str | None = None
 
 
 def _gather_sessions(since_days: int | None = None) -> list[Session]:
@@ -109,15 +114,45 @@ def run(
         to_score = new_sessions
     else:
         to_score = new_sessions[:max_new_scored]
+
+    # Spec §9.6 (US-031): consult the rolling 4-week pass-1 confidence
+    # distribution before this run's pass-1 calls. If "high" is running
+    # above 90%, the cheap-tier judge is over-confident; sharpen the
+    # calibration block in the prompt and surface a digest banner. If
+    # "low" is running above 70%, the cheap-tier judge is over-flagging;
+    # tighten the low-confidence definition. The flags only adjust the
+    # pass-1 prompt - pass 2 always re-judges fresh.
+    rolling = store.recent_pass1_confidence(weeks=4)
+    rolling_total = rolling["low"] + rolling["medium"] + rolling["high"]
+    sharpen_calibration = (
+        rolling_total > 0 and rolling["high"] / rolling_total > 0.9
+    )
+    stricter_low = (
+        rolling_total > 0 and rolling["low"] / rolling_total > 0.7
+    )
+    calibration_notice: str | None = (
+        "calibration was off; re-tuned" if sharpen_calibration else None
+    )
+
+    pass1_confidence_counts = {"low": 0, "medium": 0, "high": 0}
     scored_count = 0
     for session in to_score:
         # Spec §9.1 (US-027): pass 1 runs on every session in the window using
         # the cheap-tier judge. No heuristic features gate this call.
-        pass1_score = score_one_session_pass1(session)
+        pass1_score = score_one_session_pass1(
+            session,
+            sharpen_calibration=sharpen_calibration,
+            stricter_low=stricter_low,
+        )
         if pass1_score is None:
             # No judge available (no API keys, or judge errored) - skip the
             # session rather than substituting a fallback score.
             continue
+        # Spec §9.6 (US-031): count the pass-1 self-confidence before any
+        # downstream override, so the rolling 4-week telemetry reflects what
+        # the cheap-tier judge actually emitted (pass 2 may overturn the
+        # scores, but the calibration signal we tune on is pass 1's read).
+        pass1_confidence_counts[pass1_score.judge_result.confidence] += 1
         # Spec §9.6 (US-029): persist pass-1 first so the cheap-tier read is
         # always recorded (judge_pass=1), even when escalation will later add
         # a pass-2 row. Both rows then coexist for audit / disagreement
@@ -142,6 +177,17 @@ def run(
             # is persisted to avoid surfacing duplicate coaching items.
             store.save_moments(session.stable_id, winning_score.judge_result.moments)
         scored_count += 1
+
+    # Spec §9.6 (US-031): persist this run's pass-1 confidence distribution
+    # so future weekly runs can compute the rolling 4-week share. Skip the
+    # write when no pass-1 calls succeeded (no API key, empty window) so the
+    # run_log isn't polluted with zero rows.
+    if any(pass1_confidence_counts.values()):
+        store.record_pass1_confidence(
+            low=pass1_confidence_counts["low"],
+            medium=pass1_confidence_counts["medium"],
+            high=pass1_confidence_counts["high"],
+        )
 
     # Daily consolidation: only run once per day unless forced.
     today = _utcnow().date()
@@ -218,6 +264,7 @@ def run(
         consolidated_for=consolidated_for,
         trajectory=trajectory,
         model_profiles=model_profiles,
+        calibration_notice=calibration_notice,
     )
 
 

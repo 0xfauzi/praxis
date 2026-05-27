@@ -95,13 +95,49 @@ def _compact_transcript(session: Session) -> str:
     return "\n".join(lines + rendered)
 
 
-def _build_system_prompt() -> str:
+_SHARPEN_CALIBRATION_NOTE = (
+    "Recent 4-week telemetry shows \"high\" exceeding 90% of pass-1 ratings - "
+    "an over-confidence pattern. Reserve \"high\" for sessions where every "
+    "dimension has strong, specific signal AND you would defend the score "
+    "under a senior reviewer's scrutiny. When in doubt, choose medium."
+)
+_STRICTER_LOW_NOTE = (
+    "Recent 4-week telemetry shows \"low\" exceeding 70% of pass-1 ratings - "
+    "an over-flagging pattern that escalates too many sessions to pass 2. "
+    "Use \"low\" only when the transcript is genuinely too short to score "
+    "(fewer than 3 user turns) or you have no specific signal at all across "
+    "the rubric. If you have specific signal on most dims, prefer medium."
+)
+
+
+def _build_system_prompt(
+    *,
+    sharpen_calibration: bool = False,
+    stricter_low: bool = False,
+) -> str:
+    """Build the judge system prompt.
+
+    Spec §9.6 (US-031): the calibration block can be sharpened from
+    4-week confidence-distribution telemetry. When ``sharpen_calibration``
+    is set, an extra calibration check makes "high" harder to qualify for;
+    when ``stricter_low`` is set, "low" is tightened. Both flags default to
+    False so the prompt is unchanged unless the orchestrator opts in.
+    """
     rubric_block = "\n\n".join(
         f"{i+1}. {d.title} (key='{d.key}', weight={d.weight})\n"
         f"   What it measures: {d.description}\n"
         f"   Why it matters: {d.evidence}\n"
         f"   Exemplar: {d.exemplar}"
         for i, d in enumerate(RUBRIC)
+    )
+    calibration_notes: list[str] = []
+    if sharpen_calibration:
+        calibration_notes.append(_SHARPEN_CALIBRATION_NOTE)
+    if stricter_low:
+        calibration_notes.append(_STRICTER_LOW_NOTE)
+    calibration_addendum = (
+        "\n\n" + "\n\n".join(f"**Calibration check**: {n}" for n in calibration_notes)
+        if calibration_notes else ""
     )
     return f"""You are an expert evaluator of human-AI collaboration. Your job is to read one chat session between a person and an AI assistant, and score how well the PERSON is using AI — not how good the AI's response was.
 
@@ -169,7 +205,7 @@ After scoring, self-rate how solid your read of this session is. Return a `confi
 
 - **high**: every dim has clear signal, no contradictions, the transcript is long enough to ground each rationale.
 - **medium**: most dims have clear signal but one or two are weak. Default to this when uncertain about an individual dim.
-- **low**: the transcript was ambiguous, very short, or you felt out of depth on the subject matter (for example, a deep-architecture session where you cannot reliably assess fit). A low rating triggers a second, more expensive pass; use it when you genuinely want a second opinion.
+- **low**: the transcript was ambiguous, very short, or you felt out of depth on the subject matter (for example, a deep-architecture session where you cannot reliably assess fit). A low rating triggers a second, more expensive pass; use it when you genuinely want a second opinion.{calibration_addendum}
 
 This is your own judgment, not a rule. We trust your answer; do not inflate or deflate it.
 
@@ -408,7 +444,13 @@ def verify_moment_substrings(session: Session, moments: list[Moment]) -> list[Mo
     return survivors
 
 
-def score_with_claude(session: Session, model: str = CLAUDE_FRONTIER_MODEL) -> JudgeResult:
+def score_with_claude(
+    session: Session,
+    model: str = CLAUDE_FRONTIER_MODEL,
+    *,
+    sharpen_calibration: bool = False,
+    stricter_low: bool = False,
+) -> JudgeResult:
     """Score one session using Claude. Requires ANTHROPIC_API_KEY in env."""
     from anthropic import Anthropic  # type: ignore
 
@@ -417,7 +459,10 @@ def score_with_claude(session: Session, model: str = CLAUDE_FRONTIER_MODEL) -> J
     response = client.messages.create(
         model=model,
         max_tokens=2000,
-        system=_build_system_prompt(),
+        system=_build_system_prompt(
+            sharpen_calibration=sharpen_calibration,
+            stricter_low=stricter_low,
+        ),
         messages=[
             {
                 "role": "user",
@@ -433,7 +478,13 @@ def score_with_claude(session: Session, model: str = CLAUDE_FRONTIER_MODEL) -> J
     return result
 
 
-def score_with_openai(session: Session, model: str = OPENAI_FRONTIER_MODEL) -> JudgeResult:
+def score_with_openai(
+    session: Session,
+    model: str = OPENAI_FRONTIER_MODEL,
+    *,
+    sharpen_calibration: bool = False,
+    stricter_low: bool = False,
+) -> JudgeResult:
     """Score one session using OpenAI. Requires OPENAI_API_KEY in env."""
     from openai import OpenAI  # type: ignore
 
@@ -442,7 +493,13 @@ def score_with_openai(session: Session, model: str = OPENAI_FRONTIER_MODEL) -> J
     response = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": _build_system_prompt()},
+            {
+                "role": "system",
+                "content": _build_system_prompt(
+                    sharpen_calibration=sharpen_calibration,
+                    stricter_low=stricter_low,
+                ),
+            },
             {
                 "role": "user",
                 "content": f"Score this session.\n\n<transcript>\n{transcript}\n</transcript>",
@@ -483,7 +540,13 @@ def score_session(session: Session, prefer: str = "claude") -> JudgeResult | Non
     return None
 
 
-def score_session_pass1(session: Session, prefer: str = "claude") -> JudgeResult | None:
+def score_session_pass1(
+    session: Session,
+    prefer: str = "claude",
+    *,
+    sharpen_calibration: bool = False,
+    stricter_low: bool = False,
+) -> JudgeResult | None:
     """Pass 1 of the two-pass judge pipeline (spec §9.1).
 
     Pass 1 runs the cheap-tier judge on every session in the weekly window.
@@ -491,6 +554,10 @@ def score_session_pass1(session: Session, prefer: str = "claude") -> JudgeResult
     regardless of feature counts, prompt length, or any other heuristic. The
     cheap model's own ``confidence`` self-flag is what decides whether the
     session escalates to pass 2 (a separate frontier-model call, US-028).
+
+    Spec §9.6 (US-031): ``sharpen_calibration`` and ``stricter_low`` come
+    from the orchestrator's 4-week confidence-distribution telemetry. They
+    only adjust the pass-1 system prompt (pass 2 has its own prompt path).
 
     Returns None when no API key is configured. Provider preference matches
     ``score_session``: try the preferred provider first, fall back to the
@@ -508,9 +575,19 @@ def score_session_pass1(session: Session, prefer: str = "claude") -> JudgeResult
     for choice in order:
         try:
             if choice == "claude" and have_anthropic:
-                return score_with_claude(session, model=CLAUDE_CHEAP_MODEL)
+                return score_with_claude(
+                    session,
+                    model=CLAUDE_CHEAP_MODEL,
+                    sharpen_calibration=sharpen_calibration,
+                    stricter_low=stricter_low,
+                )
             if choice == "openai" and have_openai:
-                return score_with_openai(session, model=OPENAI_CHEAP_MODEL)
+                return score_with_openai(
+                    session,
+                    model=OPENAI_CHEAP_MODEL,
+                    sharpen_calibration=sharpen_calibration,
+                    stricter_low=stricter_low,
+                )
         except Exception as exc:  # noqa: BLE001
             print(f"[scorer] {choice} pass-1 judge failed: {exc!r}", file=sys.stderr)
             continue
