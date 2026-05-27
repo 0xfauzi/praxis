@@ -15,10 +15,14 @@ from praxis.behavior.slope import (
     fit_weekly_trajectory,
 )
 from praxis.behavior.labels import (
+    HYSTERESIS_STDERR_MULTIPLIER,
     MIN_BUCKETS_FOR_LABEL,
     WeeklyTrajectoryLabel,
+    apply_hysteresis,
+    is_strongly_significant,
     label_from_fit,
     label_trajectory,
+    label_trajectory_with_hysteresis,
 )
 from praxis.behavior.weekly import (
     DEFAULT_WINDOW_DAYS,
@@ -53,4 +57,8 @@ __all__ = [
     "WeeklyTrajectoryLabel",
     "label_from_fit",
     "label_trajectory",
+    "HYSTERESIS_STDERR_MULTIPLIER",
+    "apply_hysteresis",
+    "is_strongly_significant",
+    "label_trajectory_with_hysteresis",
 ]
