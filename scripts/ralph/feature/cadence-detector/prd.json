@@ -1,0 +1,38 @@
+{
+  "branchName": "ralph/factory/cadence-detector",
+  "userStories": [
+    {
+      "id": "US-012",
+      "title": "Substantive-session definition + weekday streak",
+      "acceptanceCriteria": [
+        "cadence.py defines is_substantive_session(row) as session_score row exists AND user_turns >= 2 AND elapsed_seconds >= 60, with the threshold constants exposed as module-level constants.",
+        "compute_weekday_streak(profile_store, ending_on_date) returns the count of distinct weekdays in the last N=21 days (configurable) that contain at least one substantive session.",
+        "A user with no substantive sessions in the window returns streak=0 (not None) and the function never raises on an empty profile_store.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "High-adopter spectrum positioning",
+      "acceptanceCriteria": [
+        "cadence.py exposes high_adopter_position(streak, window_days) returning an enum-like literal in {'low','moderate','high'} with thresholds documented and cited to arXiv 2509.19708.",
+        "A window_days value <= 0 raises ValueError before any DB read; a streak greater than window_days raises ValueError (invariant check).",
+        "The function output is deterministic for fixed inputs and covered by parameterised tests at every threshold boundary.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    }
+  ],
+  "allowedPaths": [
+    "praxis/behavior/",
+    "tests/",
+    "scripts/ralph/feature/cadence-detector/"
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "branchName": "ralph/factory/install-coach-uninstall-coach",
+  "userStories": [
+    {
+      "id": "US-028",
+      "title": "Tool detection + per-tool prompts",
+      "acceptanceCriteria": [
+        "`praxis install-coach` detects Claude Code via ~/.claude/settings.json OR ~/.claude/projects/ existing; Codex via ~/.codex/ existing; Copilot via any VS Code workspace storage with Copilot chat artifacts (reuses the existing scanner detection).",
+        "For each detected tool, the command prompts 'Found <Tool>. Install the Praxis coaching hook? [Y/n]:' and proceeds only on yes (default yes); --yes assumes yes for all prompts, --tool restricts to one, --all proceeds regardless of detection.",
+        "If no tools are detected and --all is not passed, the command prints 'No supported AI tools detected. Pass --all to install anyway.' and exits 0 (not non-zero).",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-029",
+      "title": "Claude Code hook installer with sentinel + atomic write",
+      "acceptanceCriteria": [
+        "The installer reads ~/.claude/settings.json (or creates {}), merges a SessionStart and a Stop hook block (each carrying `_praxisManaged: true`) with command `praxis nudge --format claude-code` and `praxis reflect --session-end --non-interactive-fallback` respectively; the merged JSON is validated and written atomically via tempfile + os.replace.",
+        "Pre-existing user-authored hook blocks at the same event name without the sentinel are preserved unchanged; only Praxis-managed blocks are touched.",
+        "If the existing settings.json is unparseable JSON, the installer aborts with a clear error message instructing the user to fix the file; it never overwrites unparseable content.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-030",
+      "title": "Codex CLI hook installer",
+      "acceptanceCriteria": [
+        "The installer reads ~/.codex/hooks.json (or creates a default structure), appends SessionStart and Stop entries with command `praxis nudge --format codex` and `praxis reflect --session-end --non-interactive-fallback`, and tags them with the sentinel.",
+        "Reinstalling on a system that already has the Praxis hooks does not produce duplicate entries; the installer detects the sentinel and updates in place.",
+        "An unwriteable ~/.codex/ (permission denied) raises a clear error and leaves the directory untouched; no partial file is created.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-031",
+      "title": "Copilot file injection (workspace + user-level)",
+      "acceptanceCriteria": [
+        "For Copilot, the installer scopes to the current cwd only and prompts before writing; it manages a block bounded by `<!-- praxisManaged:begin -->` and `<!-- praxisManaged:end -->` inside `<cwd>/.github/copilot-instructions.md`, creating the file if absent.",
+        "Optionally (behind an explicit prompt the user must confirm), it writes `<vscode-user-data>/prompts/praxis-commitment.instructions.md` and ensures user-level settings.json contains `\"chat.instructionsFilesLocations\": { \"<path>\": true }`; if the user declines, neither path is touched.",
+        "If the workspace `.github/copilot-instructions.md` exists but already contains a different `praxisManaged` block, the installer replaces only that block and leaves the rest of the file unchanged (a fixture-based test asserts byte-level preservation of surrounding content).",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-032",
+      "title": "Symmetric uninstall-coach",
+      "acceptanceCriteria": [
+        "`praxis uninstall-coach` removes only blocks/entries carrying the `_praxisManaged: true` sentinel (Claude Code, Codex) or bounded by the `praxisManaged` markdown markers (Copilot); user-authored content at the same event names is left untouched.",
+        "After uninstall, re-running install-coach succeeds without manual cleanup and produces a deep-equal config to a fresh install on a clean machine.",
+        "Uninstall on a system where Praxis was never installed exits 0 with the message 'Nothing to uninstall.' and makes no file writes.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    }
+  ],
+  "allowedPaths": [
+    "praxis/cli/",
+    "tests/",
+    "scripts/ralph/feature/install-coach-uninstall-coach/"
+  ]
+}

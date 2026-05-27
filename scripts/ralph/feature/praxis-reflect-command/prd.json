@@ -1,0 +1,67 @@
+{
+  "branchName": "ralph/factory/praxis-reflect-command",
+  "userStories": [
+    {
+      "id": "US-024",
+      "title": "Interactive 2-question prompt",
+      "acceptanceCriteria": [
+        "`praxis reflect` (no flags, TTY) renders 'Did you focus on: \"<display_text>\"' with options [y]es/[n]o/[p]artial/[s]kip, then accepts a single optional one-line note.",
+        "The command resolves the active commitment via the same logic as praxis-nudge; if none exists, it exits 0 with a single-line message 'No active commitment this week. Run `praxis commit` to start.'",
+        "Selecting [s]kip writes a session_reflections row with self_report='skip' and note=NULL; the row is still inserted (we count opt-outs).",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-025",
+      "title": "--session-end with stdin payload",
+      "acceptanceCriteria": [
+        "`praxis reflect --session-end` reads JSON from stdin with a 100ms timeout; accepts both Claude Code shape (session_id, transcript_path, cwd, hook_event_name) and Codex shape (session_id, cwd, hook_event_name) via duck-typing on present keys.",
+        "Missing/malformed payload writes a session_reflections row with self_report='skip', note='hook payload missing or unparseable', and exits 0 (never blocking the AI tool).",
+        "If both shapes' required fields are absent (no session_id at all), the command still inserts a skip row with a descriptive note instead of inserting nothing.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-026",
+      "title": "Threshold gating with skip rows",
+      "acceptanceCriteria": [
+        "When --session-end is invoked and the transcript shows < 2 user turns OR < 60s elapsed, the command writes a session_reflections row with self_report='skip' and note='session too short' and exits 0.",
+        "Reflect-threshold values come from ~/.praxis/config.toml [reflect] turns_min (default 2) and elapsed_seconds_min (default 60); both have integer types and reject negative values at config-load time.",
+        "If transcript_path does not exist on disk, the command writes a skip row with note='transcript missing' and exits 0 (no crash, no retry loop).",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-027",
+      "title": "Detached child for non-TTY contexts",
+      "acceptanceCriteria": [
+        "When --session-end is invoked from a non-TTY parent (e.g., the Stop hook in production), reflect spawns a child via subprocess.Popen with start_new_session=True (POSIX) / CREATE_NEW_PROCESS_GROUP (Windows); the parent returns within 5 seconds (hook_timeout_seconds, configurable).",
+        "The child receives the resolved follow_up_id, session_id, transcript_path, and cwd via explicit CLI flags (not stdin), opens /dev/tty (POSIX) or CONIN$/CONOUT$ (Windows), and falls back to writing a skip row with note='parent terminal closed' if no TTY is available.",
+        "The parent never returns exit code 2 (Claude Code's 'block' code); the AI tool's exit is therefore never blocked by reflect.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    }
+  ],
+  "allowedPaths": [
+    "praxis/cli/",
+    "praxis/storage/",
+    "tests/",
+    "scripts/ralph/feature/praxis-reflect-command/"
+  ]
+}

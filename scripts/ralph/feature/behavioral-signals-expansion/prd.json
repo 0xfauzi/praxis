@@ -1,0 +1,66 @@
+{
+  "branchName": "ralph/factory/behavioral-signals-expansion",
+  "userStories": [
+    {
+      "id": "US-005",
+      "title": "Specification, error-naming, and iterative-refinement signals",
+      "acceptanceCriteria": [
+        "BehavioralSignals gains specification_artifact_count, error_naming_count, iterative_refinement_count fields (int, default 0); existing fields untouched.",
+        "Each signal has a regex (or set of regexes) in signals.py with cite comments to its primary source from Section 14, and is wired into extract_signals so it fires on a per-session transcript.",
+        "For each signal, tests/behavior/fixtures/ holds 5 positive and 5 negative session fixtures; the test asserts the positive fixtures produce count >= 1 and the negative fixtures produce count == 0.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Knowledge-gap four-subtype classifier",
+      "acceptanceCriteria": [
+        "BehavioralSignals gains knowledge_gaps: dict[str,int] with keys missing_context, missing_specs, multiple_context, unclear_instructions, each counted per user-turn and summed per session.",
+        "A per-turn classifier in signals.py assigns at most one category per turn (with a documented precedence order) and writes 0 for all keys when no gap detected.",
+        "A fixture with a turn matching two categories produces only the higher-precedence key incremented (not both), so totals match the precedence rule and not double-counts.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Plan mode, scaffolding, TDD, recipe, context-and-instructions signals",
+      "acceptanceCriteria": [
+        "BehavioralSignals gains plan_mode_count, scaffolding_artifact_count, tdd_marker_count, recipe_pattern_count, context_instructions_count fields with patterns drawn from Anthropic Claude Code best practices, OpenAI Codex docs, and arXiv 2506.01604.",
+        "Each pattern has 5+5 fixtures under tests/behavior/fixtures/; fixtures are stable across re-runs.",
+        "A blank or whitespace-only transcript yields 0 for every new field (no false positives on empty input).",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Verification-depth, code-comprehension, tool-ladder signals",
+      "acceptanceCriteria": [
+        "BehavioralSignals gains verification_depth: dict[str,int] with keys source_check, test_run, spot_check, blanket_accept; plus code_comprehension_count and tool_ladder_level (int 0..4 for prompt-only/tools-on/skills/hooks/subagents) fields.",
+        "tool_ladder_level for a session is the max ladder rung observed in that session's transcript; ladder rules are documented in signals.py with cite comments.",
+        "A session that mixes a tool call and a hook reference resolves to ladder_level = max(2, 3) = 3, not the sum, and that case is covered by a test.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    }
+  ],
+  "allowedPaths": [
+    "praxis/behavior/",
+    "tests/",
+    "scripts/ralph/feature/behavioral-signals-expansion/"
+  ]
+}

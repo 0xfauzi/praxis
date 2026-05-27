@@ -1,0 +1,66 @@
+{
+  "branchName": "ralph/factory/schema-migrations",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Migration runner with transactional semantics",
+      "acceptanceCriteria": [
+        "A new praxis/storage/migrations/ directory holds numbered *.sql files; profile_store.py runs every file in lexical order on init, wrapping each in BEGIN; ... COMMIT; and inserting one row into schema_migrations(version, applied_at) inside the same transaction.",
+        "schema_migrations is created on first run as (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL); on the second init no migration re-runs.",
+        "A migration whose SQL raises sqlite3.OperationalError triggers ROLLBACK, leaves schema_migrations empty for that version, re-raises, and the next invocation re-attempts the same version (idempotent at fully-applied granularity).",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "follow_ups columns + active-commitment unique index",
+      "acceptanceCriteria": [
+        "A migration adds user_chosen INTEGER NOT NULL DEFAULT 0, display_text TEXT, and superseded_by INTEGER REFERENCES follow_ups(id) to follow_ups.",
+        "A partial-unique index idx_follow_ups_one_active_per_week on follow_ups(week_iso) WHERE outcome='pending' AND superseded_by IS NULL is created.",
+        "Inserting a second row for the same week_iso with outcome='pending' and superseded_by IS NULL raises sqlite3.IntegrityError; inserting it after the first row's superseded_by has been set to a newer id succeeds.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "session_reflections table",
+      "acceptanceCriteria": [
+        "A migration creates session_reflections with id PRIMARY KEY AUTOINCREMENT, session_stable_id TEXT NOT NULL, follow_up_id INTEGER NOT NULL REFERENCES follow_ups(id), self_report TEXT NOT NULL CHECK (self_report IN ('yes','no','partial','skip')), note TEXT, created_at TEXT NOT NULL, and the index idx_reflections_follow_up on follow_up_id.",
+        "Inserting with self_report='maybe' raises sqlite3.IntegrityError; inserting with note=NULL succeeds.",
+        "Insertion helper insert_session_reflection(...) is exposed on profile_store.py and writes ISO-8601 UTC timestamps for created_at.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "session_scores aug_auto columns",
+      "acceptanceCriteria": [
+        "A migration adds aug_auto_classification TEXT and aug_auto_confidence REAL columns to session_scores.",
+        "A read helper on profile_store.py returns the classification + confidence for a given session and returns (None, None) for rows written before the migration ran.",
+        "Inserting aug_auto_classification with a value outside {'augmentation','automation','mixed'} via the Python write helper raises ValueError before any SQL is issued.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    }
+  ],
+  "allowedPaths": [
+    "praxis/storage/",
+    "tests/",
+    "scripts/ralph/feature/schema-migrations/"
+  ]
+}

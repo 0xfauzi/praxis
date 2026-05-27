@@ -1,0 +1,83 @@
+{
+  "branchName": "ralph/factory/praxis-review-rename-and-masthead",
+  "userStories": [
+    {
+      "id": "US-033",
+      "title": "Rename verb + function (no alias)",
+      "acceptanceCriteria": [
+        "`praxis review` is the new public verb; `praxis week` is removed entirely (no deprecation alias, per Section 3).",
+        "praxis/cli/__main__.py renames cmd_week to cmd_review; internal names run_weekly and WeeklyRunSummary are unchanged per Section 3.",
+        "Invoking `praxis week` produces argparse's standard 'unknown command' error and exits non-zero; existing scripts that ran `praxis week` will fail loudly rather than silently.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-034",
+      "title": "Commitment + reflection rollup in run_weekly",
+      "acceptanceCriteria": [
+        "run_weekly produces a CommitmentRollup carrying display_text, sessions count vs prior week, self_report tallies (yes/no/partial/skip aggregated from session_reflections.follow_up_id), and per-dimension before/after rates computed from session_scores within the week.",
+        "WeeklyRunSummary (or the report adapter wrapping it) exposes the CommitmentRollup; both renderers receive it via praxis/reports/adapter.py.",
+        "When no commitment exists for the rendered week, CommitmentRollup is None and renderers gracefully omit the masthead's commitment block rather than crashing.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-035",
+      "title": "Terminal masthead with commitment block",
+      "acceptanceCriteria": [
+        "praxis/reports/digest_terminal.py renders the masthead from Section 2 verbatim: focus quote, sessions counts, self-report tally, the data-says line for the targeted dimension, and the gap-summary line.",
+        "When self-report and the dimension data agree, the gap-summary reads 'your self-report and the data agree this week.'; when they disagree, it renders the gap-detection prose produced by the constrained judge under US-037.",
+        "If a renderer receives CommitmentRollup with sessions=0, it prints 'No sessions logged this week.' instead of a divide-by-zero or empty numeric line.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-036",
+      "title": "HTML masthead + interactive prompt gating",
+      "acceptanceCriteria": [
+        "praxis/reports/digest_html.py renders the same masthead content as the terminal version inside the existing HTML report shell, mirroring the field labels and ordering.",
+        "After printing the terminal masthead, the command renders the [k]eep / [n]ew / [d]igest prompt only when sys.stdin.isatty() AND `--non-interactive` was not passed; on [k]eep it inserts a new follow_ups row for next week with the same display_text, on [n]ew it dispatches to cmd_commit inline, on [d]igest it returns 0.",
+        "Invocation with `--notify --non-interactive` (the install-weekly LaunchAgent path) renders the masthead and exits 0 without ever printing the prompt; an automated test asserts no prompt text appears in captured stdout for that flag combination.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-037",
+      "title": "Gap-detection prose under constrained judge prompt",
+      "acceptanceCriteria": [
+        "A new helper in praxis/reports/ (or a small judge module) generates the gap-summary closing paragraph via the cheap-tier judge when self_report and dim data disagree by >=1 standard deviation (or a documented threshold), under a system prompt that forbids accusatory framing and asks for curiosity-only phrasing.",
+        "The judge output is bounded at <=2 sentences; the renderer truncates anything longer with an ellipsis-and-period rather than emitting an unbounded blob.",
+        "When the judge call fails or no API key is present, the renderer falls back to a static, neutral phrasing ('Self-report and data differ this week. Worth a moment of curiosity.') rather than erroring or omitting the line.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    }
+  ],
+  "allowedPaths": [
+    "praxis/cli/",
+    "praxis/orchestrator.py",
+    "praxis/reports/",
+    "praxis/follow_up.py",
+    "tests/",
+    "scripts/ralph/feature/praxis-review-rename-and-masthead/"
+  ]
+}

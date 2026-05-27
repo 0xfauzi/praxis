@@ -1,0 +1,53 @@
+{
+  "branchName": "ralph/factory/augmentation-automation-classifier",
+  "userStories": [
+    {
+      "id": "US-009",
+      "title": "Classifier module with strict JSON output",
+      "acceptanceCriteria": [
+        "praxis/behavior/aug_auto.py exposes classify_session(transcript_text: str) -> AugAutoResult with fields classification ('augmentation'|'automation'|'mixed'), confidence (float 0..1), rationale (str).",
+        "The module uses Haiku 4.5 when ANTHROPIC_API_KEY is set, else gpt-5-mini, mirroring the existing provider selection in models_advisor; provider is chosen at call time, not at import time.",
+        "If the LLM returns malformed JSON or a classification value outside the three literals, classify_session raises a clearly-named AugAutoParseError; callers must handle it.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Orchestrator integration with graceful degradation",
+      "acceptanceCriteria": [
+        "praxis/orchestrator.py invokes classify_session once per session during pass-1, alongside the existing rubric judge call; the result is written via the new aug_auto profile_store helpers.",
+        "When no API key is available for the chosen provider, the orchestrator logs a single info-level message per run and writes NULL for both aug_auto columns, without aborting the rest of the pipeline.",
+        "On AugAutoParseError, the orchestrator records NULL for both aug_auto columns for that session, logs the rationale text, and continues the rest of the run instead of failing.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Per-week aggregation helper",
+      "acceptanceCriteria": [
+        "aug_auto.py exposes aggregate_for_week(profile_store, week_iso) -> AugAutoWeekSummary returning counts per category, share-of-total, and a 'classifier_unavailable' flag when every row in the week is NULL.",
+        "aggregate_for_week treats NULL rows as 'unclassified' (separate bucket) rather than dropping them, so totals always equal the count of session_scores in the week.",
+        "Calling aggregate_for_week with a week_iso that has zero session_scores returns a summary with all zeros and classifier_unavailable=False (not True).",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    }
+  ],
+  "allowedPaths": [
+    "praxis/behavior/",
+    "praxis/orchestrator.py",
+    "tests/",
+    "scripts/ralph/feature/augmentation-automation-classifier/"
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "branchName": "ralph/factory/praxis-nudge-command",
+  "userStories": [
+    {
+      "id": "US-016",
+      "title": "Nudge verb reads active commitment",
+      "acceptanceCriteria": [
+        "`praxis nudge` is registered in praxis/cli/__main__.py and resolves the active commitment as the single follow_ups row with outcome='pending' AND superseded_by IS NULL for the current ISO week.",
+        "When there is no active commitment, the command exits 0 with empty stdout (no error, no banner) so hooks remain silent until the first commit.",
+        "If multiple active rows exist (would only happen if the unique index from US-002 was bypassed), the command exits non-zero with a clear error referencing the violated invariant.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "--format flag with three outputs",
+      "acceptanceCriteria": [
+        "`--format claude-code` prints exactly the JSON {\"hookSpecificOutput\":{\"additionalContext\":\"[Praxis] This week's focus: <display_text>\"}} on a single line.",
+        "`--format codex` prints the same JSON shape per Section 5; `--format text` (default) prints exactly `[Praxis] This week: <display_text>` followed by newline.",
+        "Passing `--format html` (an unsupported value) exits non-zero with a usage-style error message naming the three accepted values.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-018",
+      "title": "Throttling via ~/.praxis/.last_nudge",
+      "acceptanceCriteria": [
+        "A successful nudge writes a JSON object to ~/.praxis/.last_nudge keyed by (surface, sha1(cwd)) with last fire timestamp; throttle_minutes is read from ~/.praxis/config.toml [nudge] (default 30).",
+        "A second invocation for the same (surface, cwd) within throttle_minutes returns empty stdout and exit 0 without touching the DB.",
+        "If ~/.praxis/.last_nudge contains malformed JSON, the file is renamed to .last_nudge.corrupt and the current call proceeds as if no prior fire; the user-facing call never crashes on the bad file.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-019",
+      "title": "shell-nudge delegates to `praxis nudge --format text`",
+      "acceptanceCriteria": [
+        "`praxis install-shell-nudge` now emits a snippet that calls `praxis nudge --format text` instead of the prior hard-coded line; the snippet sources the same throttle file as the SessionStart hooks.",
+        "A shell startup occurring within throttle_minutes of a Claude Code SessionStart fire (for the same cwd) produces no shell output.",
+        "If `praxis nudge` is not on PATH, the emitted snippet fails closed (silent, exit 0) rather than printing a shell error to the user's prompt.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    }
+  ],
+  "allowedPaths": [
+    "praxis/cli/",
+    "praxis/storage/",
+    "tests/",
+    "scripts/ralph/feature/praxis-nudge-command/"
+  ]
+}

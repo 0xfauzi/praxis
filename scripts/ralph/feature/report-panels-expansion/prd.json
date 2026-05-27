@@ -1,0 +1,81 @@
+{
+  "branchName": "ralph/factory/report-panels-expansion",
+  "userStories": [
+    {
+      "id": "US-038",
+      "title": "Behavioral patterns panel + adapter wiring",
+      "acceptanceCriteria": [
+        "adapter.py exposes a PanelInputs.behavioral_signals field summing the per-session BehavioralSignals across the week; the behavioral-patterns panel renders counts plus up to two concrete excerpts per signal, each excerpt clipped to <=120 chars.",
+        "Both renderers cite the primary source per signal (e.g., 'arXiv 2509.10402 CodeChat') inline in small footnote text.",
+        "When zero new signals fired in the week (e.g., empty profile), the panel renders 'No behavioral patterns captured this week.' rather than an empty table.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-039",
+      "title": "Augmentation/automation balance + cadence panels",
+      "acceptanceCriteria": [
+        "The balance panel renders the augmentation/automation/mixed share for the week with the Anthropic Economic Index ~52%/45% augmentation/automation industry anchor; the cadence panel renders weekday streak + high-adopter spectrum position from cadence-detector with the arXiv 2509.19708 anchor.",
+        "When aug_auto is unavailable for the week (all rows NULL because no API key), the balance panel renders 'Classifier unavailable for this week.' instead of misleading 0/0/0 percentages.",
+        "When cadence's window has zero substantive sessions, the cadence panel renders 'No substantive sessions in the last 21 days.' and omits the high-adopter label.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-040",
+      "title": "Repeat-task radar + verification calibration panels",
+      "acceptanceCriteria": [
+        "The repeat-task radar renders each RepeatTask from detect_repeats with its occurrences count, estimated_minutes_per_occurrence, and a 'Could become a skill' tag; the verification-calibration panel breaks down source-check vs test-run vs spot-check vs blanket-accept counts.",
+        "Both panels cite their primary sources inline (OpenAI ChatGPT usage paper + Anthropic Skills for repeats; Sonar + Stack Overflow 2025 + automation-bias lit for calibration).",
+        "When detect_repeats returns an empty list, the radar panel renders 'No repeat tasks detected this week.' (not an empty list with a misleading header).",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-041",
+      "title": "Specification, context engineering, knowledge-gap panels",
+      "acceptanceCriteria": [
+        "The specification-adoption panel renders the share of sessions in the week that opened with a spec block (Section 11 signal), with the Woodward + SpecKit + Sean Grove citations inline.",
+        "The context-engineering-depth panel renders presence/use of CLAUDE.md / AGENTS.md / Projects / skills (Section 11 scaffolding-artifact signal) with DORA 2025 + Anthropic Skills citations.",
+        "The knowledge-gap distribution panel renders counts across the four arXiv-2501.11709 categories; a session with zero detected gaps still contributes a zero to each category (no silent drops) and the panel renders 'No knowledge gaps detected this week.' only when every category is zero.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-042",
+      "title": "Tool/agent ladder + refined cost-effectiveness panel",
+      "acceptanceCriteria": [
+        "The tool/agent ladder panel renders the user's max ladder rung observed in the week (prompt-only / tools-on / skills / hooks / subagents) with Anthropic Skills/hooks/subagents + OpenAI harness-engineering citations.",
+        "The refined cost-effectiveness panel renders 'You spent $X on <higher-tier model> for tasks <lower-tier model> could have done = $Y overspend' using a counterfactual rule documented in praxis/models_advisor/advisor.py (rule must be deterministic and unit-tested).",
+        "When the cost ledger has no entries for the week, the cost-effectiveness panel renders 'No cost data this week.' rather than $0 overspend (which would falsely imply optimality).",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    }
+  ],
+  "allowedPaths": [
+    "praxis/reports/",
+    "praxis/behavior/",
+    "tests/",
+    "scripts/ralph/feature/report-panels-expansion/"
+  ]
+}
