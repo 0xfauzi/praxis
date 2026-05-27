@@ -48,6 +48,13 @@ class RunSummary:
     consolidated_for: date | None
     trajectory: TrajectoryAssessment | None = None
     model_profiles: list[ModelUsageProfile] | None = None
+    # Spec section 8.1: when 2+ weeks of data are available, per-dim
+    # means from the immediately prior ISO week are surfaced to the
+    # HTML renderer as a faded secondary anchor. None means the
+    # precondition is not met and the renderer omits the annotation.
+    # The terminal renderer ignores this field by design (it omits
+    # the last-week annotation in all cases).
+    last_week_means: dict[str, float] | None = None
 
 
 def _gather_sessions(since_days: int | None = None) -> list[Session]:
