@@ -57,10 +57,42 @@ class ClaudeScanner(BaseScanner):
         else:
             self.root = Path.home() / ".claude" / "projects"
 
+    # Harness-noise project-hint substrings. Claude Code names each project
+    # directory after the cwd it was launched in; sessions launched from
+    # tooling sandboxes carry those directory names as the project_hint.
+    # Filtering by the directory name (not the full file path) keeps the
+    # test fixtures - which legitimately live under pytest tmpdirs - while
+    # excluding REAL sessions whose project_hint indicates a harness origin.
+    _HARNESS_NOISE_HINT_SUBSTRINGS: tuple[str, ...] = (
+        "ralph-worktrees",
+        "ralph-phase",
+        "ralph-sandbox",
+        # pytest-of-<user> appears when claude code is launched inside a
+        # pytest tmpdir during automated testing - the real session does
+        # not live there in production usage.
+        "pytest-of-",
+    )
+
+    def _is_harness_noise(self, path: Path) -> bool:
+        # The hint is the immediate parent dir name (path.parent.name).
+        # Some sessions are nested one more level (sub-agents), so also
+        # check the grandparent.
+        hint_candidates = [path.parent.name]
+        gp = path.parent.parent
+        if gp is not None:
+            hint_candidates.append(gp.name)
+        for hint in hint_candidates:
+            if any(s in hint for s in self._HARNESS_NOISE_HINT_SUBSTRINGS):
+                return True
+        return False
+
     def discover(self) -> Iterator[Path]:
         if not self.root.exists():
             return
-        yield from self.root.rglob("*.jsonl")
+        for path in self.root.rglob("*.jsonl"):
+            if self._is_harness_noise(path):
+                continue
+            yield path
 
     def parse(self, path: Path) -> Session | None:
         turns: list[Turn] = []

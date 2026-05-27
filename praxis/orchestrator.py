@@ -496,10 +496,16 @@ def _step_pass1(sessions: list[Session], tasks: list[Task]) -> Pass1Output:
     _ = tasks  # batching mechanic lands in a follow-up story.
     results: dict[str, JudgeResult] = {}
     low_confidence: list[str] = []
+    # Persist each session score as we go so a crash mid-week doesn't lose
+    # everything and the snapshot rebuild later in run_weekly can read
+    # the rows. The composite PK (stable_id, judge_pass) keeps pass-2
+    # overrides distinct.
+    store = ProfileStore()
     for session in sessions:
         score = score_one_session_pass1(session)
         if score is None or score.judge_result is None:
             continue
+        store.save_session_score(score)
         results[session.stable_id] = score.judge_result
         if score.judge_result.confidence == "low":
             low_confidence.append(session.stable_id)
@@ -522,10 +528,12 @@ def _step_pass2(
         return {}
     by_id = {s.stable_id: s for s in sessions if s.stable_id in flagged}
     out: dict[str, JudgeResult] = {}
+    store = ProfileStore()
     for sid, session in by_id.items():
         score = score_one_session_pass2(session)
         if score is None or score.judge_result is None:
             continue
+        store.save_session_score(score)  # judge_pass=2 row coexists with pass-1
         out[sid] = score.judge_result
     return out
 
@@ -544,12 +552,23 @@ def _step_validate_moments(
     final_results.update(pass2_results)
     by_id = {s.stable_id: s for s in sessions}
     survivors: list[JudgeMoment] = []
+    from dataclasses import replace as _replace
+    from praxis.models import compute_moment_id
     for sid, judge in final_results.items():
         session = by_id.get(sid)
         if session is None:
             continue
         verified = verify_moment_substrings(session, judge.moments)
-        survivors.extend(verified)
+        # The judge does not know session_stable_id or the deterministic
+        # moment_id (sha256(stable_id|dim_key|turn_index)[:16]); populate
+        # them here so downstream consumers (selector, save_moments,
+        # follow-up engine) have stable identifiers to work with.
+        for m in verified:
+            survivors.append(_replace(
+                m,
+                session_stable_id=sid,
+                moment_id=compute_moment_id(sid, m.dim_key, m.turn_index),
+            ))
     return survivors
 
 
@@ -591,7 +610,15 @@ def _step_select_moments(
         )
     if not candidates:
         return None
-    return select_moments_with_fallback(candidates)
+    # Pick the primary provider based on configured API keys. The selector
+    # default is Anthropic; if ANTHROPIC_API_KEY is unset, the Anthropic
+    # SDK raises TypeError before any LLM call (which the
+    # InvalidMomentSelectionError fallback can't catch). Forwarding the
+    # provider explicitly avoids that whole class of failure.
+    primary = "anthropic" if os.environ.get("ANTHROPIC_API_KEY") else "openai"
+    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")):
+        return None
+    return select_moments_with_fallback(candidates, primary_provider=primary)
 
 
 def _step_follow_up(
@@ -1033,12 +1060,20 @@ def _snapshot_from_rows(rows: list[dict]) -> ProfileSnapshot:
     from praxis.scoring.features import SessionFeatures
     from praxis.scoring.judge import JudgeResult
 
+    # SessionFeatures was renamed/reshaped in the features-module component
+    # (heuristics.py -> features.py); pre-rename rows carry extra/legacy
+    # keys in features_json. Filter to current fields so a v0.1/v0.2 mixed
+    # DB still loads, instead of crashing with TypeError on unknown kwargs.
+    from dataclasses import fields as _dc_fields
+    _CURRENT_FEATURE_FIELDS = {f.name for f in _dc_fields(SessionFeatures)}
     for row in rows:
         if not row["judge_result"]:
             # Sessions can only be persisted via the judge path; rows missing
             # a judge result come from earlier builds and are not scoreable.
             continue
-        features = SessionFeatures(**row["features"])
+        raw_features = row["features"] or {}
+        filtered = {k: v for k, v in raw_features.items() if k in _CURRENT_FEATURE_FIELDS}
+        features = SessionFeatures(**filtered)
         jr = row["judge_result"]
         judge = JudgeResult(
             dimension_scores=jr["dimension_scores"],
