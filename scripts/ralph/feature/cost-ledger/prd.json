@@ -66,8 +66,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "praxis/reports/cost_ledger_panel.py: new renderer helper module with COST_LEDGER_DISCLAIMER constant ('rough estimate from token volume + tier pricing') + format_cost_disclaimer (plain text) + format_cost_disclaimer_html (faded span with cost-disclaimer CSS class). Wired into praxis/reports/terminal.py._footer (one DIM line after the consolidation/elapsed line) and praxis/reports/html_report.py colophon (one <p> with the wrapped span). HTML stylesheet adds a .cost-disclaimer rule using var(--ink-300), italic + letter-spacing for the faded footer-caveat look. Disclaimer is unconditional -- it renders regardless of consolidation state, last-week data, trajectory state, or whether the orchestrator has wired the cost ledger panel yet. Moment rendering is not in scope here (no orchestrator code surfaces Moment.dollar_impact_estimate yet); the renderer-side framing contract is enforced by no-invoice-language tests on both surfaces."
     }
   ]
 }
