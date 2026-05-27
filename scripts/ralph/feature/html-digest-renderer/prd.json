@@ -51,8 +51,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added persistence to praxis/reports/digest_html.py: write_digest(digest, home=None) -> Path renders the digest and writes weeks/<iso>.html atomically (temp file + os.replace, no leftover .tmp on success), then refreshes latest.html via _update_latest_pointer (relative symlink on POSIX; copy fallback when symlink_to raises OSError/NotImplementedError - covers Windows-without-developer-mode and FAT filesystems). Home directory defaults via the existing PRAXIS_HOME pattern (praxis.storage.profile_store.resolve_home), so tests sandbox via tmp_path or monkeypatch.setenv. Acceptance criteria all locked in by tests/test_digest_html.py: path layout (weeks/<iso>.html), weeks-dir auto-create, latest.html exists and dereferences to the same bytes, relative-symlink target (resilient to ~/.praxis being moved), overwrite-same-week behavior, broken-symlink replacement, no leftover .tmp, and PRAXIS_HOME-honoring default. 745 tests pass (was 732 + 13 new for US-064); pyright clean on praxis/reports/digest_html.py and tests/test_digest_html.py."
     },
     {
       "id": "US-065",

@@ -18,8 +18,10 @@ through the full weekly pipeline, so they stay fast and pure.
 from __future__ import annotations
 
 import dataclasses
+import os
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -32,6 +34,7 @@ from praxis.reports.digest_html import (
     Trajectory,
     WeeklyDigest,
     render,
+    write_digest,
 )
 
 
@@ -483,3 +486,179 @@ def test_render_keeps_georgia_as_inlined_fallback():
     inlined fallback for both body and display stacks."""
     out = render(_digest())
     assert "Georgia" in out
+
+
+# ------------------------------------- US-064: write to disk + latest pointer
+
+# Spec section 13.1: the HTML is written to ``~/.praxis/weeks/<iso>.html``
+# (one file per ISO week) and ``~/.praxis/latest.html`` always points to
+# the most recent week's file. Re-running on the same week overwrites the
+# file and refreshes the pointer. These tests sandbox the home directory
+# to ``tmp_path`` so the user's real ``~/.praxis`` is never touched.
+
+
+def test_write_digest_writes_to_weeks_directory(tmp_path: Path):
+    """The digest must land at ``<home>/weeks/<iso>.html`` so
+    ``praxis show 2026-W21`` can find it via a stable path (spec
+    section 13.1)."""
+    home = tmp_path / ".praxis"
+    written = write_digest(_digest(week_iso="2026-W21"), home=home)
+    assert written == home / "weeks" / "2026-W21.html"
+    assert written.is_file()
+
+
+def test_write_digest_creates_weeks_dir_if_missing(tmp_path: Path):
+    """First-time runs should not require the user to pre-create
+    ``~/.praxis/weeks/`` - the writer creates the path."""
+    home = tmp_path / ".praxis"
+    assert not (home / "weeks").exists()
+    write_digest(_digest(), home=home)
+    assert (home / "weeks").is_dir()
+
+
+def test_write_digest_returns_path(tmp_path: Path):
+    """The return value is the written file path; callers (CLI,
+    notifier) rely on this to surface the location to the user."""
+    home = tmp_path / ".praxis"
+    written = write_digest(_digest(week_iso="2026-W21"), home=home)
+    assert isinstance(written, Path)
+    assert written.name == "2026-W21.html"
+
+
+def test_write_digest_file_contents_match_render(tmp_path: Path):
+    """``write_digest`` is render() + persistence; the on-disk bytes
+    must equal what ``render`` would have returned."""
+    digest = _filled_digest()
+    home = tmp_path / ".praxis"
+    written = write_digest(digest, home=home)
+    assert written.read_text(encoding="utf-8") == render(digest)
+
+
+def test_write_digest_creates_latest_pointer(tmp_path: Path):
+    """``<home>/latest.html`` must exist after the first write."""
+    home = tmp_path / ".praxis"
+    write_digest(_digest(week_iso="2026-W21"), home=home)
+    latest = home / "latest.html"
+    # Either a symlink (POSIX) or a regular file (Windows fallback) is OK
+    # per the "symlink or platform equivalent" acceptance criterion.
+    assert latest.is_symlink() or latest.is_file()
+
+
+def test_write_digest_latest_resolves_to_written_file(tmp_path: Path):
+    """The latest pointer must dereference to the same content as the
+    week file - whether it is a symlink or a copy."""
+    home = tmp_path / ".praxis"
+    written = write_digest(_filled_digest(), home=home)
+    latest = home / "latest.html"
+    assert latest.read_text(encoding="utf-8") == written.read_text(encoding="utf-8")
+
+
+def test_write_digest_uses_relative_symlink_target(tmp_path: Path):
+    """When a symlink is created (POSIX path), its target must be
+    relative so the pointer survives if ``~/.praxis`` is moved or
+    copied (e.g. to a Time Machine backup). Skipped if the platform
+    fell back to a file copy."""
+    home = tmp_path / ".praxis"
+    write_digest(_digest(week_iso="2026-W21"), home=home)
+    latest = home / "latest.html"
+    if not latest.is_symlink():
+        pytest.skip("platform fell back to a file copy")
+    raw = os.readlink(latest)
+    assert not os.path.isabs(raw), f"latest.html target should be relative, got {raw!r}"
+    assert "2026-W21.html" in raw
+
+
+def test_write_digest_overwrites_same_week(tmp_path: Path):
+    """Re-running on the same week replaces the file's bytes in place
+    (spec acceptance: "Re-running on the same week overwrites the file
+    and updates the symlink")."""
+    home = tmp_path / ".praxis"
+    first_digest = _digest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+    )
+    second_digest = _digest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 28, 9, 0, tzinfo=timezone.utc),
+    )
+    first_path = write_digest(first_digest, home=home)
+    first_bytes = first_path.read_text(encoding="utf-8")
+    second_path = write_digest(second_digest, home=home)
+    assert second_path == first_path
+    assert second_path.read_text(encoding="utf-8") != first_bytes
+    assert "May 28, 2026" in second_path.read_text(encoding="utf-8")
+
+
+def test_write_digest_updates_pointer_to_newest_week(tmp_path: Path):
+    """When a new week is written, ``latest.html`` must follow it -
+    the user always lands on the most recent digest."""
+    home = tmp_path / ".praxis"
+    write_digest(_digest(week_iso="2026-W20"), home=home)
+    written_w21 = write_digest(_digest(week_iso="2026-W21"), home=home)
+    latest = home / "latest.html"
+    assert latest.read_text(encoding="utf-8") == written_w21.read_text(
+        encoding="utf-8"
+    )
+    if latest.is_symlink():
+        assert "2026-W21.html" in os.readlink(latest)
+
+
+def test_write_digest_replaces_existing_latest_file(tmp_path: Path):
+    """If ``latest.html`` already exists as a regular file (e.g.
+    user-pasted, or a previous Windows-fallback copy), it must be
+    replaced cleanly without leaving stale state."""
+    home = tmp_path / ".praxis"
+    home.mkdir(parents=True, exist_ok=True)
+    stale = home / "latest.html"
+    stale.write_text("stale", encoding="utf-8")
+    write_digest(_digest(week_iso="2026-W21"), home=home)
+    assert stale.read_text(encoding="utf-8") != "stale"
+
+
+def test_write_digest_replaces_broken_symlink(tmp_path: Path):
+    """A broken symlink (target deleted manually) should be replaced,
+    not left in place. ``Path.exists()`` returns False on a broken
+    symlink, so the writer must also check ``is_symlink()``."""
+    home = tmp_path / ".praxis"
+    home.mkdir(parents=True, exist_ok=True)
+    broken_target = home / "weeks" / "2025-W52.html"
+    latest = home / "latest.html"
+    try:
+        latest.symlink_to(broken_target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not supported on this platform")
+    # Confirm the pre-condition: the symlink exists but is broken.
+    assert latest.is_symlink()
+    assert not latest.exists()
+    write_digest(_digest(week_iso="2026-W21"), home=home)
+    assert latest.exists()
+    assert latest.read_text(encoding="utf-8") != ""
+
+
+def test_write_digest_leaves_no_tmp_file(tmp_path: Path):
+    """Atomic write uses a ``.tmp`` sibling that must be renamed away
+    before ``write_digest`` returns. A leftover tmp file would mean
+    the rename never happened."""
+    home = tmp_path / ".praxis"
+    write_digest(_digest(week_iso="2026-W21"), home=home)
+    tmp_leftovers = list((home / "weeks").glob("*.tmp"))
+    assert tmp_leftovers == [], (
+        f"atomic write left tmp files behind: {tmp_leftovers}"
+    )
+
+
+def test_write_digest_honors_praxis_home_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """When ``home`` is not passed, ``write_digest`` resolves the home
+    directory through the same ``PRAXIS_HOME`` override the rest of
+    the storage layer uses. This keeps the persistence layer testable
+    without an explicit argument every time."""
+    sandbox = tmp_path / "sandbox"
+    monkeypatch.setenv("PRAXIS_HOME", str(sandbox))
+    written = write_digest(_digest(week_iso="2026-W21"))
+    assert written == sandbox / "weeks" / "2026-W21.html"
+    assert written.is_file()
+    assert (sandbox / "latest.html").read_text(encoding="utf-8") == written.read_text(
+        encoding="utf-8"
+    )

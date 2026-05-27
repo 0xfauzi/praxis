@@ -2,8 +2,11 @@
 
 The digest file is written to ``~/.praxis/weeks/<iso>.html`` and must
 open by double-click in a default browser with no network access.
-This module is the renderer; persistence (writing to disk, updating the
-``latest.html`` symlink) is handled by a separate story.
+``write_digest`` is the persistence side: it renders the digest, writes
+``weeks/<iso>.html`` atomically, and updates ``latest.html`` to point
+at it (symlink on POSIX, file copy fallback on Windows / restricted
+filesystems). The renderer itself remains a pure str-returning
+function so tests and pipelines can drive it without touching disk.
 
 Self-containment rules (US-061 acceptance):
 
@@ -42,8 +45,13 @@ guarantee (US-065).
 from __future__ import annotations
 
 import html
+import os
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+
+from praxis.storage.profile_store import resolve_home
 
 
 @dataclass(frozen=True)
@@ -528,3 +536,55 @@ html, body {{
 </main>
 </body>
 </html>"""
+
+
+# ------------------------------------------------------------------ persistence
+#
+# Spec section 13.1: the HTML lives at ``~/.praxis/weeks/<iso>.html`` and a
+# ``latest.html`` symlink at ``~/.praxis/`` always points to the most recent
+# week's file. Re-running on the same week overwrites the file in place and
+# refreshes the symlink so the most-recent pointer never goes stale.
+
+
+def _update_latest_pointer(latest: Path, target: Path) -> None:
+    """Point ``latest`` at ``target``.
+
+    Uses a relative symlink so the pointer survives if ``~/.praxis`` is
+    later moved or backed up. On Windows (or any filesystem where
+    creating a symlink raises) the function falls back to copying the
+    target's contents - the acceptance criterion calls for "a symlink
+    (or platform equivalent)".
+    """
+    rel_target = os.path.relpath(target, start=latest.parent)
+    # Path.exists() returns False for broken symlinks, so check is_symlink()
+    # separately. unlink(missing_ok=True) covers the no-prior-pointer case.
+    if latest.is_symlink() or latest.exists():
+        latest.unlink()
+    try:
+        latest.symlink_to(rel_target)
+    except (OSError, NotImplementedError):
+        shutil.copy2(target, latest)
+
+
+def write_digest(digest: WeeklyDigest, home: Path | None = None) -> Path:
+    """Render ``digest`` and persist it under ``~/.praxis/weeks/``.
+
+    Writes ``<home>/weeks/<week_iso>.html`` atomically (temp file +
+    ``os.replace``) so a crash mid-write cannot leave a half-written
+    digest on disk. Refreshes ``<home>/latest.html`` to point at the
+    new file. Re-running on the same week overwrites the file and
+    updates the pointer. Returns the absolute path of the written file.
+
+    The home directory defaults to the value of ``$PRAXIS_HOME`` or
+    ``~/.praxis``; tests pass an explicit ``home=tmp_path`` to sandbox
+    file I/O.
+    """
+    base = home if home is not None else resolve_home()
+    weeks_dir = base / "weeks"
+    weeks_dir.mkdir(parents=True, exist_ok=True)
+    target = weeks_dir / f"{digest.week_iso}.html"
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text(render(digest), encoding="utf-8")
+    os.replace(tmp, target)
+    _update_latest_pointer(base / "latest.html", target)
+    return target
