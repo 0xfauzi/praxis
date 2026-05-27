@@ -403,6 +403,45 @@ def cmd_rubric(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+def cmd_install_weekly(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Generate and load the macOS LaunchAgent for ``praxis week --notify``.
+
+    On macOS, writes ``~/Library/LaunchAgents/co.praxis.weekly.plist``
+    with the day/time from ``~/.praxis/config.toml`` and loads it via
+    ``launchctl``. Re-running is idempotent: the existing job is
+    unloaded first, the plist is overwritten, and the new job is
+    loaded.
+
+    Exit codes (spec 12.3):
+      0  plist generated and loaded (macOS), or non-macOS placeholder
+         path completed without scheduling anything.
+      4  launchd installation failed (launchctl returned non-zero, or
+         the config schedule has an invalid day/hour/minute).
+    """
+    if sys.platform != "darwin":
+        # Non-macOS systemd/Task Scheduler output lands in US-083.
+        # Until that story lands, exit cleanly so other platforms are
+        # not blocked by this verb.
+        print(
+            "install-weekly: non-macOS scheduling is printed (not loaded). "
+            "This branch is not yet implemented; coming in a follow-up story.",
+            file=sys.stderr,
+        )
+        return 0
+    from praxis.cli.install_weekly import (
+        InstallWeeklyError,
+        install_weekly_macos,
+    )
+
+    try:
+        path = install_weekly_macos()
+    except InstallWeeklyError as exc:
+        print(f"install-weekly failed: {exc}", file=sys.stderr)
+        return 4
+    print(f"Installed weekly LaunchAgent: {path}")
+    return 0
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     from praxis.config_cli import (
         ConfigCLIError,
@@ -664,6 +703,18 @@ def build_parser() -> argparse.ArgumentParser:
     mod.add_argument("--show", type=str, default=None,
                      help="Show full details for one model card (by id or alias).")
     mod.set_defaults(func=cmd_models)
+
+    iw = sub.add_parser(
+        "install-weekly",
+        help="Install the macOS LaunchAgent that runs 'praxis week --notify'.",
+        description=(
+            "Generate ~/Library/LaunchAgents/co.praxis.weekly.plist from "
+            "the schedule in ~/.praxis/config.toml and load it via "
+            "launchctl. Idempotent. On non-macOS this command prints the "
+            "equivalent snippet without scheduling anything (spec 12.4)."
+        ),
+    )
+    iw.set_defaults(func=cmd_install_weekly)
 
     cfg = sub.add_parser("config",
                          help="View, --get, or --set ~/.praxis/config.toml.")
