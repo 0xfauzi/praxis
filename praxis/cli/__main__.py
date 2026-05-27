@@ -1,6 +1,7 @@
 """CLI entry point.
 
 Commands:
+  week             Render this week's digest (default verb in v0.2).
   scan             Run a scan + score + consolidate cycle. The 'main' verb.
   report           Open or print the latest HTML report.
   status           Show what's been scored, when, and where.
@@ -11,17 +12,129 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 import webbrowser
 from pathlib import Path
 
 from praxis import __version__
 from praxis.config import ensure_config_file
-from praxis.orchestrator import run
+from praxis.orchestrator import InvalidWeekError, run, run_weekly
 from praxis.reports.html_report import render as render_html
 from praxis.reports.terminal import render as render_terminal
 from praxis.scoring.rubric import RUBRIC
 from praxis.storage.profile_store import ProfileStore, resolve_home
+
+
+def _weekly_html_path(week_iso: str) -> Path:
+    """Per-ISO-week HTML path (spec section 13.1).
+
+    The macOS launchd job writes one HTML file per week here so the
+    user can re-open past weeks; ``~/.praxis/latest.html`` is a separate
+    symlink target managed by the scheduled run (out of scope here).
+    """
+    weeks_dir = resolve_home() / "weeks"
+    weeks_dir.mkdir(parents=True, exist_ok=True)
+    return weeks_dir / f"{week_iso}.html"
+
+
+def _post_notify(week_iso: str, trajectory_label: str | None) -> None:
+    """Best-effort macOS notification (spec section 13.2).
+
+    Silent no-op on non-macOS so the same flag is portable. ``osascript``
+    failures (notifications disabled, sandboxed env) are logged to stderr
+    and do not fail the run -- the digest is still rendered.
+    """
+    if sys.platform != "darwin":
+        return
+    title = "Praxis weekly read is ready"
+    body = f"Open ~/.praxis/weeks/{week_iso}.html to read."
+    if trajectory_label:
+        title = f"Praxis: {trajectory_label} this week"
+    try:
+        subprocess.run(
+            [
+                "osascript",
+                "-e",
+                f'display notification "{body}" with title "{title}" sound name "default"',
+            ],
+            check=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[cli] osascript notification failed: {exc!r}", file=sys.stderr)
+
+
+def cmd_week(args: argparse.Namespace) -> int:
+    """Render this week's digest (or a past week with --week <iso>).
+
+    Flag behavior (spec sections 12.1, 13.1-13.3):
+      --week <iso>      Render the persisted data for that past ISO week
+                        (e.g. ``2026-W21``). Scanning and scoring are
+                        skipped; the snapshot is rebuilt from the DB so
+                        the digest reflects what was judged at the time.
+      --dry-run         Compute the digest from existing data only; do
+                        not invoke the scan+score+persist path and do
+                        not write any files. Useful for previewing the
+                        digest layout against current data.
+      --frontier-only   Force every session through the frontier judge
+                        (spec 9.6). The flag is wired to the orchestrator
+                        today so the seam stays stable; the two-pass
+                        judge that honors it lands in a separate story.
+      --explain-judging Print the pass-1 confidence distribution at the
+                        end of the run (spec 9.6). With the two-pass
+                        judge not yet wired, the explainer says so
+                        explicitly rather than fabricating numbers.
+      --notify          Post a macOS notification when the digest is
+                        ready. Silent no-op on non-Darwin platforms.
+      --write-html      Write the HTML digest to ``~/.praxis/weeks/
+                        <iso>.html``. The terminal render always happens;
+                        the HTML file is written only when this flag (or
+                        the scheduled --notify run) requests it.
+    """
+    try:
+        summary = run_weekly(
+            week_iso=args.week,
+            dry_run=args.dry_run,
+            frontier_only=args.frontier_only,
+            explain_judging=args.explain_judging,
+        )
+    except InvalidWeekError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(render_terminal(summary))
+
+    target_week = summary.week_iso or "current"
+    if args.write_html or args.notify:
+        html_path = _weekly_html_path(target_week)
+        html_path.write_text(render_html(summary), encoding="utf-8")
+        print(f"  HTML saved: {html_path}")
+
+    if args.explain_judging:
+        print()
+        print("  --explain-judging:")
+        if summary.forced_frontier:
+            print("    pass-1 skipped (--frontier-only forced frontier judge).")
+        confidence = summary.judging_confidence or {}
+        if confidence:
+            for label in ("high", "medium", "low"):
+                if label in confidence:
+                    print(f"    {label}: {confidence[label]}")
+        else:
+            print(
+                "    no pass-1 confidence recorded for this run "
+                "(two-pass judge wiring lands in a later story)."
+            )
+
+    if args.notify:
+        traj_label = (
+            summary.trajectory.label.value.title()
+            if summary.trajectory is not None
+            else None
+        )
+        _post_notify(target_week, traj_label)
+
+    return 0
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
@@ -283,6 +396,69 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--version", action="version", version=f"praxis {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    week = sub.add_parser(
+        "week",
+        help="Render this week's digest (the v0.2 primary verb).",
+        description=(
+            "Render the weekly digest from the current data, or render a "
+            "past week with --week <iso>. The terminal output always "
+            "renders; HTML and notifications are opt-in via flags."
+        ),
+    )
+    week.add_argument(
+        "--week",
+        type=str,
+        default=None,
+        metavar="ISO",
+        help=(
+            "Render a past ISO week (e.g. 2026-W21). Scanning and scoring "
+            "are skipped; the snapshot is rebuilt from the persisted DB rows."
+        ),
+    )
+    week.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Compute everything but do not write to the DB or any files. "
+            "Useful for previewing the digest against current data."
+        ),
+    )
+    week.add_argument(
+        "--frontier-only",
+        action="store_true",
+        help=(
+            "Force every session through the frontier judge (spec 9.6). "
+            "The two-pass judge wiring lands in a separate story; the "
+            "flag is wired here so the CLI seam stays stable."
+        ),
+    )
+    week.add_argument(
+        "--explain-judging",
+        action="store_true",
+        help=(
+            "Print the pass-1 confidence distribution after the digest "
+            "(spec 9.6). Will note when no distribution was recorded."
+        ),
+    )
+    week.add_argument(
+        "--notify",
+        action="store_true",
+        help=(
+            "Post a macOS notification when the digest is ready. Silent "
+            "no-op on non-Darwin platforms (spec 13.2). Implies "
+            "--write-html."
+        ),
+    )
+    week.add_argument(
+        "--write-html",
+        action="store_true",
+        help=(
+            "Write the HTML digest to ~/.praxis/weeks/<iso>.html "
+            "(spec 13.1). The terminal render is always printed."
+        ),
+    )
+    week.set_defaults(func=cmd_week)
 
     scan = sub.add_parser("scan", help="Scan, score, and consolidate.")
     scan.add_argument("--since-days", type=int, default=30,

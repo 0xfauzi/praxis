@@ -1,1 +1,16 @@
 # progress.txt: union of factory component logs
+
+## Iteration 1 - US-074: praxis week and its flags
+- What I did: Added `praxis week` subcommand with all v0.2 flags (--week, --dry-run, --frontier-only, --explain-judging, --notify, --write-html), wired to a new `run_weekly()` entry point in the orchestrator. `--week 2026-W21` parses ISO-week strings and rebuilds the snapshot from persisted DB rows in that week's range.
+- Files changed:
+  - praxis/orchestrator.py: added `run_weekly`, `parse_iso_week`, `current_iso_week`, `InvalidWeekError`; extended `RunSummary` with `week_iso`, `judging_confidence`, `forced_frontier`.
+  - praxis/cli/__main__.py: added `cmd_week`, `_weekly_html_path`, `_post_notify`, and the `week` subparser.
+  - tests/test_cli.py: 8 new tests covering subparser registration, ISO-week filtering, --dry-run, --write-html, --explain-judging (with and without --frontier-only), and malformed-iso rejection.
+- Verification: `python -m pytest` -> 702 passed (was 694 baseline; +8 new tests). `mypy praxis` -> still 34 errors, all pre-existing (none introduced).
+- What the next iteration should know:
+  - `run_weekly()` is the stable CLI seam for v0.2; future stories that wire the real two-pass judge / clustering / moments pipeline should plug in here rather than at `run()` (which still exists for `praxis scan` / install-daemon's legacy path).
+  - `--frontier-only` and `--explain-judging` are wired but their underlying judge behavior is a deliberate no-op today: the CLI explain block prints a clear stub explaining no pass-1 distribution was recorded. When the two-pass judge lands, populate `RunSummary.judging_confidence` from inside `run_weekly`/judge code; the CLI already prints it.
+  - HTML lands at `~/.praxis/weeks/<iso>.html` (spec 13.1). `--notify` implies `--write-html` because the macOS notification body links to that file.
+  - There is no installed `mypy` config; `mypy praxis` runs but only as an external check. 34 errors are pre-existing tech debt from anthropic/openai SDK return-type unions and one Optional[ModelCard] in cmd_models.
+  - The previous `run()` entry point in orchestrator.py is unchanged so existing tests/callers (`praxis scan`, install-daemon, fixtures) still pass.
+---

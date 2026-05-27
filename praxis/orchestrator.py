@@ -10,6 +10,7 @@ re-runs are idempotent and cheap.
 """
 from __future__ import annotations
 
+import re
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -55,6 +56,23 @@ class RunSummary:
     # The terminal renderer ignores this field by design (it omits
     # the last-week annotation in all cases).
     last_week_means: dict[str, float] | None = None
+    # Set when run_weekly() targets a specific ISO week (either via
+    # --week <iso> for a past week, or by default for the current
+    # week). Renderers display this in the masthead. None means the
+    # legacy run() entry point was used (since_days window, no week
+    # framing).
+    week_iso: str | None = None
+    # Set by run_weekly(explain_judging=True) so the CLI can print
+    # the pass-1 confidence distribution after the run. Maps a label
+    # ("high"/"medium"/"low") to the count of sessions in that bucket
+    # during pass-1. None means --explain-judging was not requested
+    # for this run.
+    judging_confidence: dict[str, int] | None = None
+    # True when run_weekly(frontier_only=True) was used, so renderers
+    # and the explain-judging block can surface that pass-1 was skipped.
+    # The two-pass judge lands in a later story; this flag is the
+    # stable seam future judge code reads to skip pass-1.
+    forced_frontier: bool = False
 
 
 def _gather_sessions(since_days: int | None = None) -> list[Session]:
@@ -228,3 +246,154 @@ def _snapshot_from_rows(rows: list[dict]) -> ProfileSnapshot:
             )
         )
     return ProfileSnapshot.from_scores(scores)
+
+
+_ISO_WEEK_RE = re.compile(r"^(\d{4})-W(\d{2})$")
+
+
+class InvalidWeekError(ValueError):
+    """Raised when --week receives a string that is not 'YYYY-Www'."""
+
+
+def parse_iso_week(week_iso: str) -> tuple[date, date]:
+    """Parse an ISO-week tag (e.g. '2026-W21') to its [Monday, next Monday) range.
+
+    Returns (week_start, week_end) as dates, both UTC. The end is the
+    Monday of the following week, so callers can treat [start, end) as a
+    half-open interval. Raises InvalidWeekError on malformed input.
+    """
+    match = _ISO_WEEK_RE.match(week_iso)
+    if match is None:
+        raise InvalidWeekError(
+            f"invalid --week value {week_iso!r}: expected 'YYYY-Www' "
+            f"(for example, 2026-W21)."
+        )
+    year = int(match.group(1))
+    week = int(match.group(2))
+    try:
+        week_start = date.fromisocalendar(year, week, 1)
+    except ValueError as exc:
+        raise InvalidWeekError(
+            f"invalid --week value {week_iso!r}: {exc}."
+        ) from exc
+    return week_start, week_start + timedelta(days=7)
+
+
+def current_iso_week(now: datetime | None = None) -> str:
+    """Return the current ISO-week tag ('YYYY-Www')."""
+    if now is None:
+        now = _utcnow()
+    year, week, _ = now.date().isocalendar()
+    return f"{year:04d}-W{week:02d}"
+
+
+def run_weekly(
+    week_iso: str | None = None,
+    dry_run: bool = False,
+    frontier_only: bool = False,
+    explain_judging: bool = False,
+) -> RunSummary:
+    """Weekly-cadence entry point used by ``praxis week``.
+
+    The spec's v0.2 pipeline (scan -> cluster -> two-pass judge -> moments
+    -> trajectory -> render) is being assembled story by story; this
+    function is the stable CLI-facing seam those stories will plug into.
+    The flags below define the contract the CLI promises today so the
+    surface stays stable as the underlying pipeline lands.
+
+    Args:
+        week_iso: ISO-week tag (e.g. ``"2026-W21"``). When set, the run
+            renders that past week's persisted data only: scanning and
+            scoring are skipped and the snapshot is rebuilt from rows
+            whose ``started_at`` falls inside the ISO-week range. The
+            week defaults to the current ISO week, in which case the
+            full scan+score pipeline runs over the last 7 days.
+        dry_run: Compute the digest but skip every write side effect.
+            For the current week this means the scan+score pipeline is
+            not invoked at all (so no new rows are persisted to
+            ``session_scores``/``moments``); the snapshot is rebuilt
+            from whatever is already in the DB for the target window.
+            ``--write-html`` and ``--notify`` are CLI-level concerns
+            and are also honored by the caller.
+        frontier_only: Force every session through the frontier judge
+            (spec section 9.6's ``praxis week --frontier-only`` switch).
+            The two-pass judge lands in a separate story; the flag is
+            wired here so future judge code can read it from the same
+            run context without another CLI change. No behavioral
+            effect today beyond being recorded on the run.
+        explain_judging: When true, the returned RunSummary carries a
+            ``judging_confidence`` dict so the CLI can print the
+            pass-1 confidence distribution per spec 9.6. The two-pass
+            judge has not landed yet, so today the dict is empty and
+            the CLI documents that explicitly to avoid implying a
+            measurement that did not happen.
+
+    Returns:
+        A :class:`RunSummary` whose ``week_iso`` field is set to the
+        target week (the requested ``--week`` value if provided, else
+        the current ISO week). When ``explain_judging`` is true the
+        ``judging_confidence`` field is also populated (possibly
+        empty) so the CLI knows to print the explainer block.
+    """
+    started = time.time()
+    target_week_iso = week_iso if week_iso is not None else current_iso_week()
+
+    if week_iso is not None:
+        # Past-week render: do not scan or score; rebuild the snapshot
+        # from rows already persisted for that ISO week.
+        week_start, week_end = parse_iso_week(week_iso)
+        store = ProfileStore()
+        since_dt = datetime.combine(week_start, datetime.min.time(), tzinfo=timezone.utc)
+        until_dt = datetime.combine(week_end, datetime.min.time(), tzinfo=timezone.utc)
+        all_rows = store.load_session_scores(since=since_dt)
+        rows = [
+            row for row in all_rows
+            if datetime.fromisoformat(row["started_at"]) < until_dt
+        ]
+        snapshot = _snapshot_from_rows(rows)
+        coaching = generate_coaching(snapshot)
+        summary = RunSummary(
+            sessions_seen=len(rows),
+            sessions_new=0,
+            sessions_scored=0,
+            elapsed_seconds=round(time.time() - started, 2),
+            snapshot=snapshot,
+            coaching=coaching,
+            consolidated_for=None,
+            trajectory=None,
+            model_profiles=None,
+            week_iso=target_week_iso,
+            judging_confidence={} if explain_judging else None,
+            forced_frontier=frontier_only,
+        )
+        return summary
+
+    # Current-week render: respect dry_run by skipping the scan+score
+    # write path entirely. The rebuild path mirrors the past-week branch.
+    if dry_run:
+        store = ProfileStore()
+        since_dt = _utcnow() - timedelta(days=7)
+        rows = store.load_session_scores(since=since_dt)
+        snapshot = _snapshot_from_rows(rows)
+        coaching = generate_coaching(snapshot)
+        return RunSummary(
+            sessions_seen=len(rows),
+            sessions_new=0,
+            sessions_scored=0,
+            elapsed_seconds=round(time.time() - started, 2),
+            snapshot=snapshot,
+            coaching=coaching,
+            consolidated_for=None,
+            trajectory=None,
+            model_profiles=None,
+            week_iso=target_week_iso,
+            judging_confidence={} if explain_judging else None,
+            forced_frontier=frontier_only,
+        )
+
+    base = run(since_days=7)
+    base.week_iso = target_week_iso
+    base.forced_frontier = frontier_only
+    if explain_judging:
+        base.judging_confidence = {}
+    return base

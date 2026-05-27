@@ -11,8 +11,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added run_weekly() in praxis/orchestrator.py as the CLI seam; cmd_week + week subparser in praxis/cli/__main__.py; tests in tests/test_cli.py."
     },
     {
       "id": "US-075",
