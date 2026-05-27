@@ -62,17 +62,25 @@ from praxis.storage.profile_store import resolve_home
 
 @dataclass(frozen=True)
 class Trajectory:
-    """Trajectory headline + confidence band (spec section 7).
+    """Trajectory headline + evidence + risks + interventions (spec section 7).
 
     The label is the categorical read ("Learning", "Steady", "Drifting",
-    etc.); the headline is the LLM-generated specific sentence; the
-    confidence_band is the short qualifier shown alongside ("high
-    confidence", "low confidence - 4 weekly buckets", etc.).
+    etc.). headline is the LLM-generated specific sentence. evidence is
+    the LLM's enumeration of what they noticed across the week's sessions
+    (each entry is a single-sentence observation). risks names what this
+    pattern means for the user's skill development. interventions is a
+    list of concrete next moves. These all come from `TrajectoryAssessment`
+    in `praxis.behavior.trajectory`.
     """
 
     label: str = ""
     headline: str = ""
     confidence_band: str = ""
+    evidence: tuple[str, ...] = ()
+    risks: tuple[str, ...] = ()
+    interventions: tuple[str, ...] = ()
+    engagement_slope: float = 0.0
+    delegation_slope: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -84,6 +92,18 @@ class MomentPanel:
     next_time_try: str = ""
     cost_dollars: float | None = None
     cost_minutes: int | None = None
+    # Context fields that let the reader place the moment in time:
+    dim_title: str = ""               # "Verification habits"
+    session_started_at: str = ""       # "Tuesday, May 27, 4:32pm"
+    recurrence_count: int = 0          # 0 = first time, N = N prior weeks with same suggested_alternative
+
+
+@dataclass(frozen=True)
+class ModelSpend:
+    """One row in the model-by-model cost breakdown."""
+
+    model: str
+    dollars: float
 
 
 @dataclass(frozen=True)
@@ -94,6 +114,8 @@ class CostLedger:
     baseline_dollars: float = 0.0
     biggest_line: str = ""
     sonnet_swap_note: str = ""
+    # Per-model split for the stacked-bar visualization.
+    model_split: tuple[ModelSpend, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -104,6 +126,7 @@ class TaskRow:
     session_count: int = 0
     dollars: float = 0.0
     worst_score: float | None = None
+    worst_dim_title: str = ""
 
 
 @dataclass(frozen=True)
@@ -114,6 +137,7 @@ class DimRow:
     score: float = 0.0
     baseline: float | None = None
     delta: float | None = None
+    evidence_citation: str = ""        # "Sarkar 2025: experienced agent users plan first"
 
 
 @dataclass(frozen=True)
@@ -122,6 +146,34 @@ class FollowUpPanel:
 
     commitment_text: str = ""
     outcome: str = ""  # "improved" | "unchanged" | "worse" | "pending"
+
+
+@dataclass(frozen=True)
+class VitalSigns:
+    """The 4-metric vital-signs strip below the trajectory hero.
+
+    A dashboard-style glance at the week. Current values are always set;
+    history is optional and (when present) lets the renderer draw a
+    sparkline for each rate.
+    """
+
+    engagement_rate: float = 0.0
+    delegation_rate: float = 0.0
+    session_count: int = 0
+    spend_usd: float = 0.0
+    # Optional history for sparklines: weekly rates from oldest to newest,
+    # ending with this week. Falsey when there isn't enough history.
+    engagement_history: tuple[float, ...] = ()
+    delegation_history: tuple[float, ...] = ()
+
+
+@dataclass(frozen=True)
+class WeeklyTrajectoryPoint:
+    """One bucket on the multi-week trajectory line chart."""
+
+    week_iso: str
+    engagement_rate: float
+    delegation_rate: float
 
 
 @dataclass(frozen=True)
@@ -145,6 +197,9 @@ class WeeklyDigest:
     dimensions: tuple[DimRow, ...] = ()
     follow_up: FollowUpPanel | None = None
     one_thing_to_try: str = ""
+    # New v0.2+ fields below; defaults keep older test fixtures working.
+    vital_signs: VitalSigns | None = None
+    weekly_trajectory: tuple[WeeklyTrajectoryPoint, ...] = ()
 
 
 # ---------------------------------------------------------------- section text
@@ -191,6 +246,15 @@ def _safe(text: str) -> str:
     return html.escape(sanitized)
 
 
+def _ordinal(n: int) -> str:
+    """Return '1st', '2nd', '3rd', '4th', etc. for small positives."""
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
 def _format_week_label(iso: str) -> str:
     """Render '2026-W22' as 'Week 22 · May 25 – May 31, 2026'."""
     try:
@@ -206,30 +270,137 @@ def _format_week_label(iso: str) -> str:
         return iso or ""
 
 
-def _trajectory_section(traj: Trajectory | None, week_iso: str) -> str:
-    """Trajectory hero: this is the visual identity of the week."""
+def _trajectory_section(
+    traj: Trajectory | None,
+    week_iso: str,
+    vital_signs: VitalSigns | None = None,
+) -> str:
+    """Trajectory hero: the week's identity + diagnostic + vital signs strip."""
     label = _safe(traj.label) if traj and traj.label else "Reading"
     headline = _safe(traj.headline) if traj and traj.headline else ""
     week_label = _safe(_format_week_label(week_iso))
     headline_html = (
         f'<p class="t-lede">{headline}</p>' if headline else ""
     )
+    vitals_html = _vital_signs_html(vital_signs) if vital_signs else ""
     return f"""
   <section class="t-hero" id="trajectory">
     <div class="t-eyebrow">{week_label}</div>
     <h1 class="t-label">{label}</h1>
     <div class="t-rule"></div>
     {headline_html}
+    {vitals_html}
+  </section>"""
+
+
+def _vital_signs_html(vs: VitalSigns) -> str:
+    """4-stat strip below the trajectory hero.
+
+    Renders engagement_rate, delegation_rate, session_count, spend_usd
+    as four equal-width tiles separated by thin rules. Sparklines
+    appear only when ``*_history`` carries 3+ points; otherwise the
+    tile shows just the current value.
+    """
+    eng_spark = _sparkline_svg(vs.engagement_history, accent=True) if len(vs.engagement_history) >= 3 else ""
+    del_spark = _sparkline_svg(vs.delegation_history, accent=False) if len(vs.delegation_history) >= 3 else ""
+    return f"""
+    <div class="vitals">
+      <div class="vital">
+        <div class="vital-label">Engagement</div>
+        <div class="vital-value">{vs.engagement_rate:.2f}</div>
+        {eng_spark}
+      </div>
+      <div class="vital">
+        <div class="vital-label">Delegation</div>
+        <div class="vital-value">{vs.delegation_rate:.2f}</div>
+        {del_spark}
+      </div>
+      <div class="vital">
+        <div class="vital-label">Sessions</div>
+        <div class="vital-value">{vs.session_count}</div>
+      </div>
+      <div class="vital">
+        <div class="vital-label">Spend</div>
+        <div class="vital-value">${vs.spend_usd:,.2f}</div>
+      </div>
+    </div>"""
+
+
+def _sparkline_svg(values: tuple[float, ...], accent: bool = False) -> str:
+    """Tiny inline SVG sparkline. Auto-scales y to data range."""
+    if len(values) < 2:
+        return ""
+    vmin = min(values)
+    vmax = max(values)
+    rng = max(0.01, vmax - vmin)
+    w, h, pad = 80, 18, 1.5
+    inner_w = w - 2 * pad
+    inner_h = h - 2 * pad
+    n = len(values)
+    pts = []
+    for i, v in enumerate(values):
+        x = pad + (i / max(1, n - 1)) * inner_w
+        y = pad + (1.0 - (v - vmin) / rng) * inner_h
+        pts.append(f"{x:.2f},{y:.2f}")
+    color_class = "spark-accent" if accent else "spark-muted"
+    return (
+        f'<svg class="spark {color_class}" viewBox="0 0 {w} {h}" '
+        f'role="img" aria-label="sparkline">'
+        f'<polyline points="{" ".join(pts)}" '
+        f'fill="none" stroke-width="1.2" stroke-linejoin="round" stroke-linecap="round"/>'
+        f'</svg>'
+    )
+
+
+def _trajectory_evidence_section(traj: Trajectory | None) -> str:
+    """The Bigger Pattern panel: trajectory's evidence + risks + interventions.
+
+    These are LLM-generated and represent the deepest content the
+    pipeline produces. They sit inside the coaching block because they
+    ARE coaching — observations about the user's patterns, what those
+    patterns risk, and concrete things to try.
+    """
+    if traj is None or not (traj.evidence or traj.risks or traj.interventions):
+        return ""
+    parts: list[str] = []
+    if traj.evidence:
+        items = "".join(f"<li>{_safe(e)}</li>" for e in traj.evidence[:4])
+        parts.append(
+            '<div class="pattern-block">'
+            '<div class="pattern-label">What we noticed across the week</div>'
+            f'<ul class="pattern-list">{items}</ul>'
+            '</div>'
+        )
+    if traj.risks:
+        items = "".join(f"<li>{_safe(r)}</li>" for r in traj.risks[:3])
+        parts.append(
+            '<div class="pattern-block">'
+            '<div class="pattern-label pattern-label--warn">What this risks</div>'
+            f'<ul class="pattern-list">{items}</ul>'
+            '</div>'
+        )
+    if traj.interventions:
+        items = "".join(f"<li>{_safe(i)}</li>" for i in traj.interventions[:4])
+        parts.append(
+            '<div class="pattern-block">'
+            '<div class="pattern-label">What to do differently</div>'
+            f'<ul class="pattern-list pattern-list--actions">{items}</ul>'
+            '</div>'
+        )
+    return f"""
+  <section class="pattern-section">
+    <div class="s-eyebrow">The Bigger Pattern</div>
+    {"".join(parts)}
   </section>"""
 
 
 def _moment_section(moment: MomentPanel | None, dim_title: str = "") -> str:
     """The headline coaching moment. First panel after the trajectory hero.
 
-    Renders as the feature article of the digest: a pull-quote, a why
-    paragraph, a what-to-try paragraph. Carries a COACHING kicker tag
-    above the section eyebrow so the reader sees, at a glance, that
-    this is where the coaching lives.
+    Renders as the feature article of the digest: a pull-quote with
+    session context, a why paragraph, a what-to-try paragraph, and a
+    recurrence callout when the same suggested_alternative has been
+    flagged in prior weeks.
     """
     coaching_tag = '<div class="coaching-tag">Coaching</div>'
     if moment is None or not (moment.quoted_excerpt or moment.why_lost_score):
@@ -242,25 +413,49 @@ def _moment_section(moment: MomentPanel | None, dim_title: str = "") -> str:
     quote = _safe(moment.quoted_excerpt) if moment.quoted_excerpt else ""
     why = _safe(moment.why_lost_score) if moment.why_lost_score else ""
     nxt = _safe(moment.next_time_try) if moment.next_time_try else ""
-    dim_chip = _safe(dim_title) if dim_title else ""
+    # Prefer the MomentPanel's own dim_title; fall back to caller-passed value.
+    effective_dim = moment.dim_title or dim_title
+    dim_chip = _safe(effective_dim) if effective_dim else ""
     eyebrow = (
         f"This Week's Moment <span class=\"s-eyebrow-dim\">&nbsp;·&nbsp; {dim_chip}</span>"
         if dim_chip
         else "This Week's Moment"
     )
     blocks: list[str] = []
-    if quote:
+    # Recurrence chip: spec §4.4 "escalate the framing" when a lapse keeps
+    # recurring. Sits ABOVE the quote so the reader sees the streak first.
+    if moment.recurrence_count and moment.recurrence_count > 0:
+        n = moment.recurrence_count + 1  # plus this week
         blocks.append(
-            f'<blockquote class="m-quote"><span class="m-quote-mark">&ldquo;</span>{quote}<span class="m-quote-mark m-quote-mark--close">&rdquo;</span></blockquote>'
+            f'<div class="m-recurrence">This is the {_ordinal(n)} week we\'ve flagged this exact pattern.</div>'
+        )
+    if quote:
+        ctx = ""
+        if moment.session_started_at:
+            ctx = f'<div class="m-quote-context">{_safe(moment.session_started_at)}</div>'
+        blocks.append(
+            f'<blockquote class="m-quote"><span class="m-quote-mark">&ldquo;</span>{quote}<span class="m-quote-mark m-quote-mark--close">&rdquo;</span></blockquote>{ctx}'
         )
     if why:
         blocks.append(
             f'<p class="m-body"><span class="m-inline-label">Why this lost score</span>{why}</p>'
         )
     if nxt:
-        blocks.append(
-            f'<p class="m-body"><span class="m-inline-label">Next time, try</span>{nxt}</p>'
-        )
+        # Split next_time_try into bullets when the LLM returned a
+        # multi-clause sentence (very common). Heuristic: split on
+        # ". " and treat 2+ clauses as bullets; otherwise render as a
+        # single paragraph.
+        clauses = [c.strip().rstrip(".") for c in nxt.split(". ") if c.strip()]
+        if len(clauses) >= 2 and all(len(c) > 10 for c in clauses):
+            items = "".join(f"<li>{_safe(c)}</li>" for c in clauses)
+            blocks.append(
+                f'<div class="m-body"><span class="m-inline-label">What to do instead</span>'
+                f'<ul class="m-try-list">{items}</ul></div>'
+            )
+        else:
+            blocks.append(
+                f'<p class="m-body"><span class="m-inline-label">What to do instead</span>{nxt}</p>'
+            )
     cost_bits: list[str] = []
     if moment.cost_dollars is not None:
         cost_bits.append(f"${moment.cost_dollars:.2f}")
@@ -320,14 +515,48 @@ def _cost_ledger_section(ledger: CostLedger | None) -> str:
         )
 
     full_amount = f"${ledger.this_week_dollars:,.2f}"
+    # Stat tiles - 3-col row that sits above the model split bar.
+    baseline_tile = (
+        f'<div class="stat-tile">'
+        f'<div class="stat-tile-label">90-day baseline</div>'
+        f'<div class="stat-tile-value">${ledger.baseline_dollars:,.2f}</div>'
+        f'</div>'
+        if ledger.baseline_dollars and ledger.baseline_dollars > 0
+        else (
+            '<div class="stat-tile">'
+            '<div class="stat-tile-label">90-day baseline</div>'
+            '<div class="stat-tile-value stat-tile-value--forming">forming</div>'
+            '</div>'
+        )
+    )
+    delta_tile = ""
+    if ledger.baseline_dollars and ledger.baseline_dollars > 0:
+        diff = ledger.this_week_dollars - ledger.baseline_dollars
+        sign = "+" if diff >= 0 else "-"
+        delta_str = f"{sign}${abs(diff):,.2f}"
+        delta_tile = (
+            f'<div class="stat-tile">'
+            f'<div class="stat-tile-label">vs baseline</div>'
+            f'<div class="stat-tile-value">{delta_str}</div>'
+            f'</div>'
+        )
+    stat_tiles = (
+        '<div class="stat-tiles">'
+        f'<div class="stat-tile stat-tile--accent">'
+        f'<div class="stat-tile-label">This week</div>'
+        f'<div class="stat-tile-value">{full_amount}</div>'
+        f'</div>'
+        f'{baseline_tile}'
+        f'{delta_tile}'
+        '</div>'
+    )
+    split_bar = _cost_split_bar(ledger.model_split, ledger.this_week_dollars)
     return f"""
   <section class="c-section" id="cost-ledger">
     <div class="s-eyebrow">Cost Ledger</div>
-    <div class="c-amount" title="{full_amount}" aria-label="{full_amount}">
-      <span class="c-currency">$</span><span class="c-big">{big}</span><span class="c-cents">.{cents}</span>
-      <span class="c-amount-plain">{full_amount}</span>
-    </div>
-    {delta_html}
+    <div class="c-amount-plain" aria-hidden="true">{full_amount}</div>
+    {stat_tiles}
+    {split_bar}
     {biggest_html}
     {sonnet_html}
   </section>"""
@@ -585,6 +814,136 @@ def _follow_up_section(follow_up: FollowUpPanel | None) -> str:
   </section>"""
 
 
+def _weekly_trajectory_section(
+    points: tuple[WeeklyTrajectoryPoint, ...]
+) -> str:
+    """Multi-week trajectory line chart of engagement and delegation rates.
+
+    This is the literal "trajectory" the spec section 7 talks about,
+    visualized. Renders as an SVG line chart with two series. Falls
+    back to a placeholder card when fewer than 2 weeks of data exist.
+    """
+    if not points:
+        return f"""
+  <section class="wt-section" id="weekly-trajectory">
+    <div class="s-eyebrow">Your Learning Trajectory</div>
+    <p class="placeholder">A multi-week trajectory chart will appear here once you have at least 4 weeks of digests on file. (This week is week 1.)</p>
+  </section>"""
+    if len(points) < 4:
+        weeks_have = len(points)
+        weeks_need = 4 - weeks_have
+        return f"""
+  <section class="wt-section" id="weekly-trajectory">
+    <div class="s-eyebrow">Your Learning Trajectory</div>
+    <p class="placeholder">Building. {weeks_have} week{"s" if weeks_have != 1 else ""} of buckets on file; {weeks_need} more before the line chart fits.</p>
+  </section>"""
+
+    # Build the SVG.
+    width, height = 640, 220
+    pad_left, pad_right, pad_top, pad_bottom = 64, 24, 20, 40
+    inner_w = width - pad_left - pad_right
+    inner_h = height - pad_top - pad_bottom
+    n = len(points)
+
+    def to_xy(i: int, val: float) -> tuple[float, float]:
+        x = pad_left + (i / max(1, n - 1)) * inner_w
+        # values are 0-1 rates; map to inner_h with y inverted.
+        v = max(0.0, min(1.0, val))
+        y = pad_top + (1.0 - v) * inner_h
+        return x, y
+
+    eng_pts = [to_xy(i, p.engagement_rate) for i, p in enumerate(points)]
+    del_pts = [to_xy(i, p.delegation_rate) for i, p in enumerate(points)]
+
+    eng_path = " ".join(f"{x:.1f},{y:.1f}" for x, y in eng_pts)
+    del_path = " ".join(f"{x:.1f},{y:.1f}" for x, y in del_pts)
+
+    # Y-axis gridlines at 0, 0.5, 1.0
+    gridlines: list[str] = []
+    for frac, label in ((0.0, "0.0"), (0.5, "0.5"), (1.0, "1.0")):
+        y = pad_top + (1.0 - frac) * inner_h
+        gridlines.append(
+            f'<line x1="{pad_left}" y1="{y:.1f}" x2="{width - pad_right}" y2="{y:.1f}" class="wt-grid"/>'
+            f'<text x="{pad_left - 12}" y="{y:.1f}" dy="0.35em" text-anchor="end" class="wt-axis-label">{label}</text>'
+        )
+
+    # X-axis: week labels (shorten to "W22" from "2026-W22")
+    x_labels: list[str] = []
+    for i, p in enumerate(points):
+        x = pad_left + (i / max(1, n - 1)) * inner_w
+        short = p.week_iso.split("-W")[-1] if "-W" in p.week_iso else p.week_iso
+        x_labels.append(
+            f'<text x="{x:.1f}" y="{height - pad_bottom + 18}" text-anchor="middle" class="wt-axis-label">W{short}</text>'
+        )
+
+    # End-point dots and labels for the most recent week
+    eng_x, eng_y = eng_pts[-1]
+    del_x, del_y = del_pts[-1]
+    end_dots = (
+        f'<circle cx="{eng_x:.1f}" cy="{eng_y:.1f}" r="3.5" class="wt-dot wt-dot--eng"/>'
+        f'<circle cx="{del_x:.1f}" cy="{del_y:.1f}" r="3.5" class="wt-dot wt-dot--del"/>'
+    )
+
+    # Legend
+    legend = (
+        '<g class="wt-legend" transform="translate(64, 4)">'
+        '<rect x="0" y="0" width="14" height="2" class="wt-legend-eng"/>'
+        '<text x="20" y="0" dy="0.4em" class="wt-legend-text">Engagement</text>'
+        '<rect x="110" y="0" width="14" height="2" class="wt-legend-del"/>'
+        '<text x="130" y="0" dy="0.4em" class="wt-legend-text">Delegation</text>'
+        '</g>'
+    )
+
+    return f"""
+  <section class="wt-section" id="weekly-trajectory">
+    <div class="s-eyebrow">Your Learning Trajectory · {n} weeks</div>
+    <svg class="wt-chart" viewBox="0 0 {width} {height}" role="img" aria-label="Engagement and delegation over time">
+      {"".join(gridlines)}
+      {legend}
+      <polyline points="{eng_path}" fill="none" stroke-width="1.8" class="wt-line-eng"/>
+      <polyline points="{del_path}" fill="none" stroke-width="1.8" class="wt-line-del"/>
+      {end_dots}
+      {"".join(x_labels)}
+    </svg>
+  </section>"""
+
+
+def _cost_split_bar(model_split: tuple[ModelSpend, ...], total: float) -> str:
+    """Single horizontal stacked bar showing per-model spend share.
+
+    Each segment width = model's share of total. The accent color is
+    used for the largest segment; subsequent segments step down in
+    opacity to keep one-color discipline while still differentiating.
+    """
+    if not model_split or total <= 0:
+        return ""
+    # Sort by spend desc.
+    rows = sorted(model_split, key=lambda m: m.dollars, reverse=True)
+    segments: list[str] = []
+    legend: list[str] = []
+    opacities = [1.0, 0.65, 0.45, 0.30, 0.20]
+    for i, row in enumerate(rows[:5]):
+        share = row.dollars / total
+        pct = max(2.0, share * 100)
+        op = opacities[i] if i < len(opacities) else 0.15
+        segments.append(
+            f'<div class="cb-seg" style="width:{pct:.2f}%; opacity:{op}" title="{_safe(row.model)} · ${row.dollars:,.2f}"></div>'
+        )
+        legend.append(
+            f'<div class="cb-legend-row">'
+            f'<span class="cb-legend-swatch" style="opacity:{op}"></span>'
+            f'<span class="cb-legend-model">{_safe(row.model)}</span>'
+            f'<span class="cb-legend-spend">${row.dollars:,.2f}</span>'
+            f'</div>'
+        )
+    return (
+        '<div class="cost-bar-wrap">'
+        f'<div class="cost-bar">{"".join(segments)}</div>'
+        f'<div class="cost-bar-legend">{"".join(legend)}</div>'
+        '</div>'
+    )
+
+
 def _next_week_section(sentence: str) -> str:
     if not sentence:
         return f"""
@@ -626,14 +985,13 @@ def render(digest: WeeklyDigest) -> str:
             pass
 
     week = _safe(digest.week_iso)
-    # Section order intentionally puts the COACHING TRIO immediately
-    # after the trajectory hero (this is a coaching product; the
-    # learning loop is the primary thing). Cost / tasks / dimensions
-    # follow as the supporting data appendix. The HTML id ordering
-    # stays as the rendered DOM order so the spec-test contract holds.
+    # Section order: trajectory hero (with vital signs) -> coaching
+    # spread (moment, bigger pattern, follow-up, next-week) -> data
+    # appendix (cost, tasks, dimensions) -> longitudinal trajectory.
     coaching_block = (
         '<div class="coaching">'
         f'{_moment_section(digest.headline_moment, dim_title=dim_title)}'
+        f'{_trajectory_evidence_section(digest.trajectory)}'
         f'{_follow_up_section(digest.follow_up)}'
         f'{_next_week_section(digest.one_thing_to_try)}'
         '</div>'
@@ -645,10 +1003,13 @@ def render(digest: WeeklyDigest) -> str:
         f'{_cost_ledger_section(digest.cost_ledger)}'
         f'{_task_breakdown_section(digest.task_breakdown)}'
         f'{_dimensions_section(digest.dimensions)}'
+        f'{_weekly_trajectory_section(digest.weekly_trajectory)}'
         '</div>'
     )
     body_sections = (
-        _trajectory_section(digest.trajectory, digest.week_iso)
+        _trajectory_section(
+            digest.trajectory, digest.week_iso, vital_signs=digest.vital_signs,
+        )
         + coaching_block
         + data_block
     )
@@ -774,6 +1135,272 @@ html, body {{
   font-style: italic;
   max-width: 560px;
 }}
+
+/* --- Vital signs strip below the trajectory hero ------------------- */
+.vitals {{
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  background: var(--rule);
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  margin-top: 40px;
+}}
+.vital {{
+  background: var(--cream);
+  padding: 20px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}}
+.vital-label {{
+  font-family: var(--sans);
+  font-size: 9.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  font-weight: 500;
+}}
+.vital-value {{
+  font-family: var(--serif);
+  font-size: 26px;
+  color: var(--ink);
+  line-height: 1;
+  letter-spacing: -0.01em;
+}}
+.spark {{
+  width: 80px;
+  height: 18px;
+  display: block;
+}}
+.spark-accent polyline {{ stroke: var(--accent); }}
+.spark-muted polyline {{ stroke: var(--ink-faded); }}
+
+/* --- The Bigger Pattern: trajectory evidence + risks + interventions */
+.pattern-section {{
+  margin-bottom: 0;
+  padding-top: 48px;
+  padding-bottom: 48px;
+  border-top: 1px solid var(--rule);
+}}
+.pattern-block {{
+  margin-bottom: 28px;
+}}
+.pattern-block:last-child {{ margin-bottom: 0; }}
+.pattern-label {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 14px;
+  font-weight: 500;
+}}
+.pattern-label--warn {{
+  color: var(--ink);
+  position: relative;
+}}
+.pattern-label--warn::before {{
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: var(--accent);
+  margin-right: 10px;
+  vertical-align: middle;
+  border-radius: 50%;
+}}
+.pattern-list {{
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}}
+.pattern-list li {{
+  font-family: var(--serif);
+  font-size: 16px;
+  line-height: 1.55;
+  color: var(--ink);
+  padding-left: 22px;
+  margin-bottom: 10px;
+  position: relative;
+}}
+.pattern-list li::before {{
+  content: "·";
+  position: absolute;
+  left: 6px;
+  top: -2px;
+  color: var(--accent);
+  font-size: 22px;
+  line-height: 1.1;
+}}
+.pattern-list--actions li::before {{
+  content: "→";
+  font-size: 14px;
+  top: 0;
+  font-family: var(--sans);
+}}
+
+/* --- Recurrence callout on the moment -------------------------------- */
+.m-recurrence {{
+  display: inline-block;
+  font-family: var(--sans);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink);
+  background: var(--accent-soft);
+  border-left: 3px solid var(--accent);
+  padding: 10px 14px 10px 14px;
+  margin-bottom: 24px;
+  font-weight: 500;
+}}
+.m-quote-context {{
+  font-family: var(--sans);
+  font-size: 11.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  margin: -24px 0 32px;
+}}
+.m-try-list {{
+  list-style: none;
+  padding: 0;
+  margin: 6px 0 0;
+}}
+.m-try-list li {{
+  font-family: var(--serif);
+  font-size: 16.5px;
+  line-height: 1.55;
+  color: var(--ink);
+  padding-left: 22px;
+  margin-bottom: 8px;
+  position: relative;
+}}
+.m-try-list li::before {{
+  content: "→";
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: var(--accent);
+  font-family: var(--sans);
+}}
+
+/* --- Stat tiles (cost summary 3-col grid) ---------------------------- */
+.stat-tiles {{
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  background: var(--rule);
+  margin-bottom: 28px;
+}}
+.stat-tile {{
+  background: var(--cream);
+  padding: 20px 18px 22px;
+}}
+.stat-tile--accent {{
+  background: var(--accent-faint);
+}}
+.stat-tile-label {{
+  font-family: var(--sans);
+  font-size: 9.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin-bottom: 12px;
+  font-weight: 500;
+}}
+.stat-tile-value {{
+  font-family: var(--serif);
+  font-size: 22px;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+}}
+.stat-tile-value--forming {{
+  color: var(--ink-faded);
+  font-style: italic;
+  font-size: 17px;
+}}
+
+/* --- Cost stacked-bar with legend ----------------------------------- */
+.cost-bar-wrap {{
+  margin-bottom: 24px;
+}}
+.cost-bar {{
+  display: flex;
+  height: 12px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--cream-edge);
+  margin-bottom: 16px;
+}}
+.cb-seg {{
+  background: var(--accent);
+  height: 100%;
+}}
+.cost-bar-legend {{
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}}
+.cb-legend-row {{
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  gap: 12px;
+  align-items: center;
+  font-family: var(--sans);
+  font-size: 13px;
+  color: var(--ink-muted);
+}}
+.cb-legend-swatch {{
+  width: 12px;
+  height: 12px;
+  background: var(--accent);
+  border-radius: 2px;
+}}
+.cb-legend-model {{
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 16px;
+}}
+.cb-legend-spend {{
+  color: var(--ink-muted);
+  font-family: var(--sans);
+  font-size: 13px;
+  letter-spacing: 0.01em;
+}}
+
+/* --- Weekly trajectory chart ---------------------------------------- */
+.wt-section {{
+  margin-bottom: 96px;
+}}
+.wt-chart {{
+  width: 100%;
+  height: auto;
+  max-width: 640px;
+  margin-top: 16px;
+}}
+.wt-grid {{
+  stroke: var(--rule);
+  stroke-width: 1;
+}}
+.wt-axis-label {{
+  font-family: var(--sans);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  fill: var(--ink-faded);
+}}
+.wt-line-eng {{ stroke: var(--accent); }}
+.wt-line-del {{ stroke: var(--ink-muted); stroke-dasharray: 4 4; }}
+.wt-dot--eng {{ fill: var(--accent); }}
+.wt-dot--del {{ fill: var(--ink-muted); }}
+.wt-legend-text {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  fill: var(--ink-muted);
+}}
+.wt-legend-eng {{ fill: var(--accent); }}
+.wt-legend-del {{ fill: var(--ink-muted); }}
 
 /* --- Coaching block: visual continuity across moment + follow-up + next-week.
        Three sections, one editorial spread. */

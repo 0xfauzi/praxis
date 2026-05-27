@@ -110,7 +110,29 @@ def _headline_moment_view_terminal(summary) -> dt.HeadlineMomentView | None:
     return None
 
 
-def _headline_moment_panel_html(summary) -> dh.MomentPanel | None:
+def _dim_title_from_key(dim_key: str) -> str:
+    """Look up a rubric dimension's display title from its key."""
+    try:
+        from praxis.scoring.rubric import by_key
+        return by_key(dim_key).title
+    except Exception:  # noqa: BLE001
+        return dim_key.title() if dim_key else ""
+
+
+def _format_session_started_at(sessions, stable_id: str) -> str:
+    """Find a session's started_at and render as 'Tuesday, May 27, 4:32 PM UTC'."""
+    if not stable_id:
+        return ""
+    for s in sessions or []:
+        if s.stable_id == stable_id:
+            try:
+                return s.started_at.strftime("%A, %B %-d, %-I:%M %p UTC")
+            except (AttributeError, ValueError):
+                return ""
+    return ""
+
+
+def _headline_moment_panel_html(summary, recurrence_count: int = 0) -> dh.MomentPanel | None:
     sel = summary.selection
     if sel is None:
         return None
@@ -123,6 +145,11 @@ def _headline_moment_panel_html(summary) -> dh.MomentPanel | None:
                 next_time_try=m.suggested_alternative,
                 cost_dollars=m.dollar_impact_estimate,
                 cost_minutes=m.minutes_impact_estimate,
+                dim_title=_dim_title_from_key(m.dim_key),
+                session_started_at=_format_session_started_at(
+                    summary.sessions, m.session_stable_id
+                ),
+                recurrence_count=int(recurrence_count or 0),
             )
     return None
 
@@ -191,6 +218,7 @@ def _cost_ledger_html(summary) -> dh.CostLedger | None:
         baseline_dollars=float(summary.cost_baseline_usd or 0.0),
         biggest_line=biggest_line,
         sonnet_swap_note=sonnet_note,
+        model_split=_model_split_html(summary),
     )
 
 
@@ -321,6 +349,151 @@ def _trajectory_html(summary) -> dh.Trajectory | None:
         label=label,
         headline=traj.headline or "",
         confidence_band="",
+        evidence=tuple(traj.evidence or ()),
+        risks=tuple(traj.risks or ()),
+        interventions=tuple(traj.interventions or ()),
+        engagement_slope=float(traj.engagement_slope or 0.0),
+        delegation_slope=float(traj.delegation_slope or 0.0),
+    )
+
+
+def _vital_signs_html(summary) -> dh.VitalSigns | None:
+    """Aggregate engagement_rate and delegation_rate across the week."""
+    if not summary.sessions:
+        return None
+    from praxis.behavior import extract as extract_signals
+    eng_rates: list[float] = []
+    del_rates: list[float] = []
+    for s in summary.sessions:
+        sig = extract_signals(s)
+        eng_rates.append(sig.engagement_rate)
+        del_rates.append(sig.delegation_rate)
+    if not eng_rates:
+        return None
+    eng = sum(eng_rates) / len(eng_rates)
+    deleg = sum(del_rates) / len(del_rates)
+    spend = float(summary.cost_total_usd or 0.0)
+    return dh.VitalSigns(
+        engagement_rate=eng,
+        delegation_rate=deleg,
+        session_count=len(summary.sessions),
+        spend_usd=spend,
+    )
+
+
+def _weekly_trajectory_html(summary) -> tuple:
+    """Build multi-week (week_iso, engagement, delegation) tuples.
+
+    Reads the same 90-day window the trajectory model reads. Returns an
+    empty tuple when no signals are persisted (the renderer shows a
+    placeholder in that case).
+    """
+    from praxis.behavior.weekly import (
+        WeeklySessionInput,
+        bucket_sessions_by_iso_week,
+    )
+    import json
+    from datetime import datetime, timedelta, timezone
+    from praxis.storage.profile_store import ProfileStore
+
+    try:
+        store = ProfileStore()
+    except Exception:  # noqa: BLE001
+        return tuple()
+    since = datetime.now(timezone.utc) - timedelta(days=90)
+    try:
+        rows = store.load_session_scores(since=since)
+    except Exception:  # noqa: BLE001
+        return tuple()
+    inputs: list[WeeklySessionInput] = []
+    for row in rows:
+        raw = row.get("signals_json")
+        if not raw:
+            continue
+        try:
+            sig = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        inputs.append(WeeklySessionInput(
+            started_at=datetime.fromisoformat(row["started_at"]),
+            engagement_rate=float(sig.get("engagement_rate", 0.0)),
+            delegation_rate=float(sig.get("delegation_rate", 0.0)),
+            independence_rate=float(sig.get("independence_rate", 0.0)),
+            dim_scores=row.get("dimension_scores") or {},
+        ))
+    if not inputs:
+        return tuple()
+    buckets = bucket_sessions_by_iso_week(inputs)
+    points = []
+    for b in buckets:
+        if not b.eligible_for_fit:
+            continue
+        points.append(dh.WeeklyTrajectoryPoint(
+            week_iso=b.iso_week,
+            engagement_rate=b.engagement_rate_mean,
+            delegation_rate=b.delegation_rate_mean,
+        ))
+    return tuple(points)
+
+
+def _recurrence_count_for_headline(summary) -> int:
+    """How many of the prior 3 weekly_digests had the same suggested_alternative
+    as this week's headline moment."""
+    sel = summary.selection
+    if sel is None:
+        return 0
+    # Find this week's headline moment's suggested_alternative
+    headline_id = sel.headline_moment_id
+    target_alt = ""
+    for m in summary.moments:
+        if m.moment_id == headline_id:
+            target_alt = m.suggested_alternative or ""
+            break
+    if not target_alt:
+        return 0
+    # Look at the prior 3 weekly_digests
+    from praxis.storage.profile_store import ProfileStore
+    from praxis.orchestrator import _prior_iso_week  # type: ignore
+    try:
+        store = ProfileStore()
+    except Exception:  # noqa: BLE001
+        return 0
+    iso = summary.week_iso
+    count = 0
+    for _ in range(3):
+        iso = _prior_iso_week(iso)
+        try:
+            digest_row = store.load_weekly_digest(iso)
+        except Exception:  # noqa: BLE001
+            continue
+        if digest_row is None:
+            continue
+        moment_id = digest_row.get("headline_moment_id")
+        if not moment_id:
+            continue
+        m_row = store.load_moment_by_id(moment_id)
+        if m_row is None:
+            continue
+        if (m_row.get("suggested_alternative") or "") == target_alt:
+            count += 1
+    return count
+
+
+def _model_split_html(summary) -> tuple:
+    """Per-model spend tuples for the cost stacked-bar chart."""
+    if not summary.sessions:
+        return tuple()
+    spend_by_model: dict[str, float] = {}
+    for s in summary.sessions:
+        chars = sum(len(t.content) for t in s.user_turns)
+        c = estimate_session_cost_usd(s.model_hint, chars)
+        if c is None or c <= 0:
+            continue
+        key = s.model_hint or "unknown"
+        spend_by_model[key] = spend_by_model.get(key, 0.0) + c
+    return tuple(
+        dh.ModelSpend(model=m, dollars=v)
+        for m, v in spend_by_model.items()
     )
 
 
@@ -360,15 +533,26 @@ def build_terminal_digest(summary, follow_up=None) -> dt.WeeklyDigest:
 
 
 def build_html_digest(summary, follow_up=None) -> dh.WeeklyDigest:
-    """Adapter: WeeklyRunSummary -> digest_html.WeeklyDigest."""
+    """Adapter: WeeklyRunSummary -> digest_html.WeeklyDigest.
+
+    Populates the rich v0.2+ fields (vital signs, trajectory evidence /
+    risks / interventions, model-split cost breakdown, recurrence count,
+    multi-week trajectory points) in addition to the original section
+    inputs. Each helper is best-effort: a missing DB or partial data
+    yields an empty field rather than raising, so the renderer always
+    gets a valid WeeklyDigest.
+    """
+    recurrence = _recurrence_count_for_headline(summary)
     return dh.WeeklyDigest(
         week_iso=summary.week_iso or "",
         generated_at=datetime.now(timezone.utc),
         trajectory=_trajectory_html(summary),
-        headline_moment=_headline_moment_panel_html(summary),
+        headline_moment=_headline_moment_panel_html(summary, recurrence_count=recurrence),
         cost_ledger=_cost_ledger_html(summary),
         task_breakdown=_task_rows_html(summary),
         dimensions=_dim_rows_html(summary),
         follow_up=_follow_up_panel_html(follow_up),
         one_thing_to_try=_one_thing_to_try(summary),
+        vital_signs=_vital_signs_html(summary),
+        weekly_trajectory=_weekly_trajectory_html(summary),
     )
