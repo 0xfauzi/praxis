@@ -132,6 +132,50 @@ class RunSummary:
     forced_frontier: bool = False
 
 
+def _task_id_for(task) -> str:
+    """sha256(sorted session ids)[:16] - matches the spec section 14 contract."""
+    import hashlib
+    sids = sorted(task.session_ids)
+    return hashlib.sha256("|".join(sids).encode("utf-8")).hexdigest()[:16]
+
+
+def _task_project_hint(task, sessions) -> str | None:
+    """Pick the most-common project_hint across the task's sessions."""
+    by_id = {s.stable_id: s for s in sessions}
+    hints = [by_id[sid].project_hint for sid in task.session_ids
+             if sid in by_id and by_id[sid].project_hint]
+    if not hints:
+        return None
+    # Most common (small lists, no need for Counter)
+    counts: dict[str, int] = {}
+    for h in hints:
+        counts[h] = counts.get(h, 0) + 1
+    return max(counts, key=counts.get)
+
+
+@dataclass
+class _SummaryView:
+    """Read-only view of an in-flight WeeklyRunSummary for the renderer adapter.
+
+    The adapter reads a fixed set of attributes from the summary; we
+    can pass it this view before WeeklyRunSummary is constructed (so
+    the digest renderer sees the actual data being assembled, not a
+    placeholder). Keeps the adapter contract narrow.
+    """
+
+    week_iso: str
+    sessions: list
+    tasks: list
+    judge_results: dict
+    moments: list
+    selection: object | None
+    snapshot: object
+    trajectory: object | None
+    cost_total_usd: float | None
+    cost_baseline_usd: float | None
+    last_week_means: dict[str, float] | None
+
+
 def _gather_sessions(since_days: int | None = None) -> list[Session]:
     """Run every scanner and collect sessions."""
     since_ts: float | None = None
@@ -413,47 +457,10 @@ class WeeklyRunSummary:
     # renderers and the explain-judging block can note that pass-1
     # was bypassed.
     forced_frontier: bool = False
-
-    # ---- RunSummary-shaped read-only views ----------------------------
-    # The legacy v0.1 terminal renderer at praxis/reports/terminal.py
-    # accepts a RunSummary with these fields. WeeklyRunSummary exposes
-    # them as properties so the CLI can hand the same summary to the
-    # existing renderer without an explicit adapter step. The new
-    # digest_terminal renderer is wired up by the digest-rendering
-    # adapter in a follow-up story.
-    @property
-    def sessions_seen(self) -> int:
-        return len(self.sessions)
-
-    @property
-    def sessions_new(self) -> int:
-        return len(self.sessions)
-
-    @property
-    def sessions_scored(self) -> int:
-        return len(self.judge_results)
-
-    @property
-    def coaching(self) -> Coaching:
-        # Generate fallback coaching on demand from the snapshot so the
-        # renderer's coaching panel has something to display.
-        return generate_coaching(self.snapshot)
-
-    @property
-    def consolidated_for(self) -> date | None:
-        return None
-
-    @property
-    def model_profiles(self) -> list[ModelUsageProfile] | None:
-        return None
-
-    @property
-    def last_week_means(self) -> dict[str, float] | None:
-        return None
-
-    @property
-    def calibration_notice(self) -> str | None:
-        return None
+    # Spec section 8.1: per-dim means from the immediately prior ISO
+    # week. None when the precondition (2+ weeks of data) is not met
+    # so the renderer omits the faded last-week annotation.
+    last_week_means: dict[str, float] | None = None
 
 
 def _step_scan(since_days: int) -> list[Session]:
@@ -592,12 +599,16 @@ def _step_follow_up(
     moments: list[JudgeMoment],
     snapshot: ProfileSnapshot,
     week_iso: str,
+    verification_rate: float = 0.0,
+    delegation_rate: float = 0.0,
 ) -> object | None:
     """Step 7: build this week's commitment from the headline moment.
 
-    Output feeds: render (follow-up panel). Persistence of the follow-up
-    row and closing of the prior week's row are handled by the persistence
-    story (US-071).
+    `verification_rate` and `delegation_rate` capture this week's actual
+    rates so the FollowUp's baseline_value reflects real behavior, not
+    a hardcoded zero. Next week's run reads back the row, computes the
+    new rates the same way, and decides outcome via close_follow_up.
+    Output feeds: render (follow-up panel) + persistence in run_weekly.
     """
     if selection is None:
         return None
@@ -620,9 +631,68 @@ def _step_follow_up(
             suggested_alternative=headline.suggested_alternative,
         ),
         snapshot=snapshot,
-        verification_rate=0.0,
-        delegation_rate=0.0,
+        verification_rate=verification_rate,
+        delegation_rate=delegation_rate,
     )
+
+
+def _compute_week_rates(sessions: list[Session]) -> tuple[float, float]:
+    """Aggregate verification_rate + delegation_rate across the week's sessions.
+
+    verification_rate is share of user turns with a verification marker
+    (sourced from SessionFeatures.marker_hit_counts). delegation_rate is
+    the mean of per-session BehavioralSignals.delegation_rate. Both
+    feed the FollowUp baseline so we can measure improvement next week.
+    """
+    from praxis.scoring.features import extract as extract_features
+    if not sessions:
+        return 0.0, 0.0
+    total_user_turns = 0
+    total_verify_hits = 0
+    delegation_rates: list[float] = []
+    for s in sessions:
+        f = extract_features(s)
+        ut = len(s.user_turns)
+        if ut:
+            total_user_turns += ut
+            total_verify_hits += f.marker_hit_counts.get("verification", 0)
+        sig = extract_signals(s)
+        delegation_rates.append(sig.delegation_rate)
+    verification_rate = (
+        total_verify_hits / total_user_turns if total_user_turns else 0.0
+    )
+    delegation_rate = (
+        sum(delegation_rates) / len(delegation_rates) if delegation_rates else 0.0
+    )
+    return verification_rate, delegation_rate
+
+
+def _close_prior_follow_up(
+    store: ProfileStore,
+    current_week_iso: str,
+    snapshot: ProfileSnapshot,
+    verification_rate: float,
+    delegation_rate: float,
+) -> None:
+    """Find the most recent pending follow-up before this week and close it.
+
+    Per spec section 6.3: each weekly run reads the prior week's FollowUp,
+    measures this week's value of its target_metric, computes outcome via
+    pure threshold rules, and saves the closed row back. The LLM does not
+    decide the outcome - that's a structural enforcement of the feedback-
+    loop contract.
+    """
+    from praxis.follow_up import close_follow_up
+
+    prior = store.latest_follow_up()
+    if prior is None:
+        return
+    if prior.week_iso == current_week_iso:
+        return
+    if prior.outcome != "pending":
+        return
+    closed = close_follow_up(prior, snapshot, verification_rate, delegation_rate)
+    store.save_follow_up(closed)
 
 
 def _step_render(
@@ -633,20 +703,44 @@ def _step_render(
     snapshot: ProfileSnapshot,
     *,
     dry_run: bool = False,
+    week_iso: str = "",
+    trajectory: TrajectoryAssessment | None = None,
+    cost_total_usd: float | None = None,
+    cost_baseline_usd: float | None = None,
+    judge_results: dict[str, JudgeResult] | None = None,
+    moments: list[JudgeMoment] | None = None,
+    last_week_means: dict[str, float] | None = None,
 ) -> tuple[str, str]:
     """Step 8: produce HTML + terminal renderings of the digest.
 
-    The actual layout is owned by `praxis.reports`; this step's job is
-    to assemble inputs from the steps above and call the renderers. The
-    full wiring lands in a follow-up story (US-071+); this version
-    returns empty strings so the ordering contract can be tested first.
-
-    `dry_run` is plumbed through so the future file-writing step (US-073
-    or render follow-up) can skip the on-disk write while still computing
-    and returning the rendered strings for terminal display.
+    Assembles a `_SummaryView` from the steps above plus the orchestrator
+    metadata (trajectory, cost), feeds the adapter, and calls both the
+    HTML and terminal digest renderers. `dry_run` is forwarded so future
+    file-writing concerns can branch here without changing the contract.
+    The first five positional parameters are the documented step-data-flow
+    contract from spec 9.4 (US-070); the rest are kwargs so the contract
+    stays stable.
     """
-    _ = sessions, tasks, selection, follow_up, snapshot, dry_run
-    return "", ""
+    from praxis.reports import digest_html as _dh
+    from praxis.reports import digest_terminal as _dt
+    from praxis.reports.adapter import build_html_digest, build_terminal_digest
+
+    view = _SummaryView(
+        week_iso=week_iso,
+        sessions=sessions,
+        tasks=tasks,
+        judge_results=judge_results or {},
+        moments=moments or [],
+        selection=selection,
+        snapshot=snapshot,
+        trajectory=trajectory,
+        cost_total_usd=cost_total_usd,
+        cost_baseline_usd=cost_baseline_usd,
+        last_week_means=last_week_means,
+    )
+    rendered_html = _dh.render(build_html_digest(view, follow_up))
+    rendered_terminal = _dt.render(build_terminal_digest(view, follow_up))
+    return rendered_html, rendered_terminal
 
 
 def run_weekly(
@@ -693,7 +787,8 @@ def run_weekly(
     steps: list[str] = []
 
     # Past-week render: do not scan or score; rebuild the snapshot
-    # from rows already persisted for that ISO week.
+    # from rows already persisted for that ISO week, then render with
+    # whatever moments/tasks/follow-up persisted for that week.
     if week_iso is not None:
         week_start, week_end = parse_iso_week(week_iso)
         if store is None:
@@ -706,6 +801,22 @@ def run_weekly(
             if datetime.fromisoformat(row["started_at"]) < until_dt
         ]
         snapshot = _snapshot_from_rows(rows)
+        # Load the persisted follow-up for that week (if any) so the
+        # past-week digest can show the commitment + outcome.
+        past_follow_up = store.load_follow_up(week_iso)
+        # Render the past-week digest. Sessions/tasks/moments are empty
+        # for past weeks today (we'd need to read from DB; deferred), so
+        # the digest mostly carries snapshot + follow-up + masthead.
+        rendered_html, rendered_terminal = _step_render(
+            [], [], None, past_follow_up, snapshot,
+            dry_run=True,
+            week_iso=week_iso,
+            trajectory=None,
+            cost_total_usd=None,
+            cost_baseline_usd=None,
+            judge_results={},
+            moments=[],
+        )
         return WeeklyRunSummary(
             week_iso=week_iso,
             sessions=[],
@@ -714,8 +825,8 @@ def run_weekly(
             moments=[],
             selection=None,
             snapshot=snapshot,
-            rendered_html="",
-            rendered_terminal="",
+            rendered_html=rendered_html,
+            rendered_terminal=rendered_terminal,
             elapsed_seconds=round(time.time() - started, 2),
             trajectory=None,
             cost_total_usd=None,
@@ -783,27 +894,23 @@ def run_weekly(
         snapshot = ProfileSnapshot.from_scores([])
 
     week_iso = current_week_iso
-    follow_up = _step_follow_up(selection, moments, snapshot, week_iso)
-    steps.append("follow_up")
-
-    rendered_html, rendered_terminal = _step_render(
-        sessions, tasks, selection, follow_up, snapshot, dry_run=dry_run,
+    verification_rate, delegation_rate = _compute_week_rates(sessions)
+    follow_up = _step_follow_up(
+        selection, moments, snapshot, week_iso,
+        verification_rate=verification_rate,
+        delegation_rate=delegation_rate,
     )
-    steps.append("render")
+    steps.append("follow_up")
 
     # Trajectory is computed off the scanned sessions, NOT off any step's
     # output: it is summary metadata for the digest row, not part of the
-    # spec 9.4 pipeline. Compute it here so the digest write below can
-    # populate trajectory_label / trajectory_headline (spec section 14).
+    # spec 9.4 pipeline. Compute it here so the render step can include
+    # it and the digest write can populate trajectory_label.
     sessions_with_signals = [(s, extract_signals(s)) for s in sessions]
     trajectory = assess_trajectory(sessions_with_signals)
 
-    # Spec 10.1 / 15.2: cost_total_usd is praxis's own LLM spend on this
-    # week's pipeline (cluster + pass1 + pass2 + selector), estimated
-    # from per-call token volumes and the judge_model recorded on each
-    # JudgeResult. The estimate is rough by design; we do not bill
-    # against live invoices. None means "no priced calls happened" -
-    # e.g. an empty week, or every judged call used an unpriced model.
+    # Spec 10.1: cost_total_usd is praxis's own LLM spend on this week's
+    # pipeline. None means no priced calls happened.
     estimated_cost = estimate_weekly_pipeline_cost(
         sessions=sessions,
         pass1_results=pass1.results,
@@ -811,21 +918,79 @@ def run_weekly(
         moment_count=len(moments),
     )
     cost_total_usd: float | None = estimated_cost if estimated_cost > 0.0 else None
-
     cost_baseline_usd: float | None = None
 
+    # Persist tasks/moments/follow-up and read the cost baseline before
+    # we render. The renderer reads cost_baseline_usd via the summary;
+    # if we render before reading it, the digest shows a zero baseline.
     digest_persisted = False
     if not dry_run:
         if store is None:
             store = ProfileStore()
-        # Spec 10.1: baseline is the 90-day rolling weekly mean of prior
-        # cost_total_usd. Read BEFORE we UPSERT this week's row so the
-        # current week is excluded by data, not just by the < filter.
         cost_baseline_usd = store.weekly_cost_baseline(before_week_iso=week_iso)
+
+        # Persist tasks + task_members for the week's clusters (spec 14).
+        for task in tasks:
+            if not task.session_ids:
+                continue
+            task_id = _task_id_for(task)
+            session_started = [
+                s.started_at for s in sessions
+                if s.stable_id in task.session_ids
+            ]
+            t_start = min(session_started) if session_started else _utcnow()
+            t_end = max(session_started) if session_started else _utcnow()
+            project_hint = _task_project_hint(task, sessions)
+            store.save_task(
+                task_id=task_id,
+                label=task.label,
+                task_type=task.task_type,
+                project_hint=project_hint,
+                started_at=t_start,
+                ended_at=t_end,
+                session_stable_ids=list(task.session_ids),
+                total_cost_estimate_usd=None,
+                label_source=task.label_source,
+            )
+
+        # Persist surviving moments (already redacted by save_moments).
+        # Group by session so save_moments can apply per-session replace.
+        moments_by_session: dict[str, list[JudgeMoment]] = {}
+        for m in moments:
+            if m.session_stable_id:
+                moments_by_session.setdefault(m.session_stable_id, []).append(m)
+        for sid, ms in moments_by_session.items():
+            store.save_moments(sid, ms)
+
+        # Close last week's commitment (spec 6.3) BEFORE saving this
+        # week's row, so latest_follow_up() reliably finds the prior one.
+        _close_prior_follow_up(
+            store, week_iso, snapshot,
+            verification_rate, delegation_rate,
+        )
+
+        # Persist this week's follow-up commitment (spec 6.3).
+        if follow_up is not None:
+            store.save_follow_up(follow_up)
+
+    # Render last - now that trajectory, cost, and persistence are settled.
+    rendered_html, rendered_terminal = _step_render(
+        sessions, tasks, selection, follow_up, snapshot,
+        dry_run=dry_run,
+        week_iso=week_iso,
+        trajectory=trajectory,
+        cost_total_usd=cost_total_usd,
+        cost_baseline_usd=cost_baseline_usd,
+        judge_results=final_results,
+        moments=moments,
+    )
+    steps.append("render")
+
+    if not dry_run:
+        # Now that we have the rendered HTML, write the weekly_digests row.
         headline_moment_id = (
             selection.headline_moment_id if selection is not None else None
         )
-        html_path = rendered_html if rendered_html else None
         store.save_weekly_digest(
             week_iso=week_iso,
             trajectory_label=trajectory.label.value,
@@ -834,7 +999,7 @@ def run_weekly(
             headline_moment_id=headline_moment_id,
             cost_total_usd=cost_total_usd,
             cost_baseline_usd=cost_baseline_usd,
-            html_path=html_path,
+            html_path=None,
         )
         digest_persisted = True
 

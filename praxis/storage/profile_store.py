@@ -497,6 +497,81 @@ class ProfileStore:
             )
             return [dict(row) for row in cursor.fetchall()]
 
+    # ---- tasks ----------------------------------------------------------
+
+    def save_task(
+        self,
+        *,
+        task_id: str,
+        label: str,
+        task_type: str,
+        project_hint: str | None,
+        started_at: datetime,
+        ended_at: datetime,
+        session_stable_ids: list[str],
+        total_cost_estimate_usd: float | None,
+        label_source: str,
+    ) -> None:
+        """Persist one task cluster + its members.
+
+        Spec section 14: ``tasks`` and ``task_members`` are the v0.2
+        tables; each weekly run UPSERTs the current week's clusters so
+        that re-running the same week is idempotent. The members are
+        replaced as a set (delete-then-insert under the same task_id) so
+        a re-cluster that shifts a session between tasks does not leave
+        a stale row.
+        """
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO tasks
+                (task_id, label, task_type, project_hint, started_at,
+                 ended_at, session_count, total_cost_estimate_usd, label_source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    label,
+                    task_type,
+                    project_hint,
+                    started_at.isoformat(),
+                    ended_at.isoformat(),
+                    len(session_stable_ids),
+                    total_cost_estimate_usd,
+                    label_source,
+                ),
+            )
+            conn.execute(
+                "DELETE FROM task_members WHERE task_id = ?",
+                (task_id,),
+            )
+            if session_stable_ids:
+                conn.executemany(
+                    "INSERT INTO task_members (task_id, session_stable_id) "
+                    "VALUES (?, ?)",
+                    [(task_id, sid) for sid in session_stable_ids],
+                )
+
+    def load_tasks_for_week(
+        self, week_start: datetime, week_end: datetime
+    ) -> list[dict[str, Any]]:
+        """Return tasks that started within [week_start, week_end), with members."""
+        with self._conn() as conn:
+            task_rows = [
+                dict(row) for row in conn.execute(
+                    "SELECT * FROM tasks WHERE started_at >= ? AND started_at < ? "
+                    "ORDER BY started_at ASC",
+                    (week_start.isoformat(), week_end.isoformat()),
+                ).fetchall()
+            ]
+            for t in task_rows:
+                members = conn.execute(
+                    "SELECT session_stable_id FROM task_members WHERE task_id = ?",
+                    (t["task_id"],),
+                ).fetchall()
+                t["session_stable_ids"] = [m["session_stable_id"] for m in members]
+        return task_rows
+
     # ---- daily consolidation (v0.2: table dropped; stubs keep callers alive
     #      until the orchestrator/CLI/reports refactor lands) ----
 

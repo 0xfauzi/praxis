@@ -55,3 +55,9 @@
 {"ts": "2026-05-27T00:49:34Z", "event": "contract_result", "data": {"tier": 1, "passed": false, "breaker": null, "duration_seconds": 0.01}}
 {"ts": "2026-05-27T00:49:34Z", "event": "contract_result", "data": {"tier": 2, "passed": false, "breaker": null, "duration_seconds": 0.01}}
 {"ts": "2026-05-27T00:49:34Z", "event": "factory_completed", "data": {"completed": 9, "failed": 2, "skipped": 4, "duration_seconds": 6671.51}}
+{"ts": "2026-05-27T14:24:33Z", "event": "factory_started", "data": {"project": "praxis-v0-2", "components": 1}}
+{"ts": "2026-05-27T14:24:33Z", "event": "component_started", "component": "macos-launch-agent"}
+{"ts": "2026-05-27T15:01:41Z", "event": "verification_result", "component": "macos-launch-agent", "data": {"passed": true, "checks": ["prd_stories", "test_suite", "typecheck", "linter", "diff_scope", "bad_patterns"], "failures": [], "duration_seconds": 1.15}}
+{"ts": "2026-05-27T15:03:38Z", "event": "review_result", "component": "macos-launch-agent", "data": {"passed": true, "mode": "hard", "fail_count": 0, "advisory_count": 2, "duration_seconds": 117.06}}
+{"ts": "2026-05-27T15:04:29Z", "event": "component_completed", "component": "macos-launch-agent", "data": {"duration_seconds": 2225.98, "iterations": 5}}
+{"ts": "2026-05-27T15:04:29Z", "event": "factory_completed", "data": {"completed": 1, "failed": 0, "skipped": 0, "duration_seconds": 2395.47}}

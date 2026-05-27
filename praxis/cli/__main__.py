@@ -36,8 +36,8 @@ from praxis.orchestrator import (
     run,
     run_weekly,
 )
-from praxis.reports.html_report import render as render_html
-from praxis.reports.terminal import render as render_terminal
+from praxis.reports.html_report import render as render_html_legacy
+from praxis.reports.terminal import render as render_terminal_legacy
 from praxis.scoring.baseline import (
     BaselineInputSession,
     compute_baseline,
@@ -51,12 +51,34 @@ def _weekly_html_path(week_iso: str) -> Path:
     """Per-ISO-week HTML path (spec section 13.1).
 
     The macOS launchd job writes one HTML file per week here so the
-    user can re-open past weeks; ``~/.praxis/latest.html`` is a separate
-    symlink target managed by the scheduled run (out of scope here).
+    user can re-open past weeks; ``~/.praxis/latest.html`` is a symlink
+    refreshed by ``_update_latest_symlink`` on each write.
     """
     weeks_dir = resolve_home() / "weeks"
     weeks_dir.mkdir(parents=True, exist_ok=True)
     return weeks_dir / f"{week_iso}.html"
+
+
+def _update_latest_symlink(html_path: Path) -> None:
+    """Refresh ~/.praxis/latest.html to point at the just-written digest.
+
+    Spec section 13.1 / 13.2 ("the user clicks the notification, gets
+    `~/.praxis/latest.html`"). Best-effort: if the filesystem doesn't
+    support symlinks (some Windows configs) we just skip silently.
+    """
+    latest = resolve_home() / "latest.html"
+    try:
+        # Use relative target so the symlink remains valid if ~/.praxis
+        # is moved or remounted.
+        target = html_path.relative_to(resolve_home())
+    except ValueError:
+        target = html_path
+    try:
+        if latest.is_symlink() or latest.exists():
+            latest.unlink()
+        latest.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pass
 
 
 _TRAJECTORY_LABEL_DISPLAY: dict[str, str] = {
@@ -172,12 +194,13 @@ def cmd_week(args: argparse.Namespace) -> int:
         print(no_sessions_message(summary.week_iso), file=sys.stderr)
         return 3
 
-    print(render_terminal(summary))
+    print(summary.rendered_terminal)
 
     target_week = summary.week_iso or "current"
     if args.write_html or args.notify:
         html_path = _weekly_html_path(target_week)
-        html_path.write_text(render_html(summary), encoding="utf-8")
+        html_path.write_text(summary.rendered_html, encoding="utf-8")
+        _update_latest_symlink(html_path)
         print(f"  HTML saved: {html_path}")
 
     if args.explain_judging:
@@ -358,7 +381,7 @@ def cmd_show(args: argparse.Namespace) -> int:
     if summary.snapshot.session_count == 0:
         print(no_sessions_message(summary.week_iso), file=sys.stderr)
         return 3
-    print(render_terminal(summary))
+    print(summary.rendered_terminal)
     return 0
 
 
