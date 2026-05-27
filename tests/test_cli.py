@@ -1,25 +1,38 @@
-"""Tests for the praxis CLI (US-047: `praxis follow-up`, US-074: `praxis week`).
+"""Tests for the praxis CLI.
 
-US-047 acceptance criteria:
+US-047 acceptance criteria (`praxis follow-up`):
   - praxis follow-up prints the most recent follow_ups row in human-readable form
   - Output includes commitment_text, baseline_value, measured_value (or '--'
     if pending), and outcome
   - Exits 0 when a follow-up exists, exits 3 with a clear message when none
     exist yet
 
-US-074 acceptance criteria:
+US-074 acceptance criteria (`praxis week`):
   - `praxis week`, `--week <iso>`, `--dry-run`, `--frontier-only`,
     `--explain-judging`, `--notify`, and `--write-html` are wired to
     the orchestrator with documented behavior
   - `--week` accepts ISO-week strings like 2026-W21 and renders a past
     week's data
 
+US-075 acceptance criteria (auxiliary commands):
+  - `praxis re-score <session_stable_id>` re-runs the frontier judge for that
+    session and updates session_scores
+  - `praxis baseline`, `praxis follow-up`, `praxis history`, `praxis show
+    <week_iso>` are wired to read-only operations and exit 0
+  - `praxis scan` performs scan + score without rendering a digest
+  - `praxis status`, `praxis rubric`, `praxis models` are preserved from v0.1
+
 Tests go through the argparse entry point (`praxis.cli.__main__.main`) so
 the subparser registration is exercised end-to-end, not just the handler.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
 
 from praxis.cli.__main__ import build_parser, main
 from praxis.follow_up import FollowUp
@@ -264,3 +277,295 @@ def test_week_explain_judging_notes_frontier_only(tmp_home, capsys):
     out = capsys.readouterr().out
     assert code == 0
     assert "pass-1 skipped" in out
+
+
+# ---------------------------------------------------------------------------
+# US-075 - auxiliary commands: re-score, baseline, history, show, scan.
+# ---------------------------------------------------------------------------
+
+
+def _write_minimal_claude_session(tmp_home: Path, session_id: str) -> Path:
+    """Write a small synthetic Claude JSONL file under the test home.
+
+    Returns the path. Used by the re-score test to give the re-scorer a
+    real on-disk file to re-parse, since `re_score_session` reads
+    `source_path` from the persisted row and hands it to the scanner.
+    """
+    root = tmp_home / ".claude" / "projects" / "rescore-test"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{session_id}.jsonl"
+    when = datetime.now(timezone.utc) - timedelta(hours=1)
+    events = [
+        {
+            "type": "user",
+            "timestamp": when.isoformat().replace("+00:00", "Z"),
+            "message": {"role": "user", "content": "Goal: re-score me."},
+        },
+        {
+            "type": "assistant",
+            "timestamp": (when + timedelta(seconds=10)).isoformat().replace("+00:00", "Z"),
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-7",
+                "content": [{"type": "text", "text": "Acknowledged."}],
+            },
+        },
+    ]
+    with path.open("w", encoding="utf-8") as f:
+        for e in events:
+            f.write(json.dumps(e) + "\n")
+    return path
+
+
+@pytest.fixture
+def fake_frontier_judge(monkeypatch):
+    """Replace ``score_session`` with a deterministic stub returning 7.5.
+
+    Mirrors test_orchestrator.fake_judge but locks the score so the
+    re-score test can assert the row was overwritten by the new judge
+    output (the seed row uses 4.0 so any change is detectable).
+    """
+
+    def _fake(session, prefer="claude"):  # noqa: ARG001
+        return JudgeResult(
+            dimension_scores={d.key: 7.5 for d in RUBRIC},
+            rationale={d.key: "re-scored fixture" for d in RUBRIC},
+            standout_moments=["re-score standout"],
+            failure_modes=[],
+            overall_note="re-scored",
+            judge_model="fixture-frontier",
+        )
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session", _fake)
+    return _fake
+
+
+def test_subcommands_registered():
+    """Every v0.2 auxiliary command must be registered as a subparser."""
+    parser = build_parser()
+    # `praxis re-score X` is the single-session counterpart to `praxis scan`.
+    args = parser.parse_args(["re-score", "sess-001"])
+    assert args.cmd == "re-score"
+    assert args.session_stable_id == "sess-001"
+    # Read-only verbs take no arguments at the parser layer.
+    assert parser.parse_args(["baseline"]).cmd == "baseline"
+    assert parser.parse_args(["history"]).cmd == "history"
+    # `show` is positional ISO-week; same shape as `--week` on the week command.
+    show_args = parser.parse_args(["show", "2026-W21"])
+    assert show_args.cmd == "show"
+    assert show_args.week_iso == "2026-W21"
+
+
+def test_rescore_unknown_session_exits_1(tmp_home, capsys):
+    """re-score must exit 1 with a clear error when the stable_id is unknown."""
+    code = main(["re-score", "does-not-exist"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "does-not-exist" in err
+
+
+def test_rescore_updates_session_row(tmp_home, capsys, fake_frontier_judge):
+    """re-score re-runs the judge and overwrites session_scores for that row."""
+    # Write a real source file the Claude scanner can re-parse, then seed
+    # session_scores with a row pointing at it. The Claude scanner's
+    # stable_id derives from session_id+provider; we mirror that here so
+    # the re-score lookup finds the seeded row.
+    sid_uuid = str(uuid.uuid4())
+    src = _write_minimal_claude_session(tmp_home, sid_uuid)
+    # Parse via the scanner once to learn the stable_id (avoids hand-rolling
+    # the hash).
+    from praxis.scanners.claude import ClaudeScanner
+
+    parsed = ClaudeScanner().parse(src)
+    assert parsed is not None
+    stable_id = parsed.stable_id
+
+    # Seed a low-score row so we can detect the re-score actually wrote 7.5.
+    _seed_score(stable_id, parsed.started_at, overall=4.0)
+    # The seeded row points at /tmp/<id>.jsonl from _seed_score; overwrite
+    # source_path to point at the real file we wrote so the re-scorer can
+    # re-parse it.
+    store = ProfileStore()
+    row = store.load_one_session_score(stable_id)
+    assert row is not None
+    score = SessionScore(
+        session_stable_id=stable_id,
+        provider="claude",
+        started_at=parsed.started_at,
+        dimension_scores=row["dimension_scores"],
+        overall=4.0,
+        judge_result=JudgeResult(
+            dimension_scores=row["dimension_scores"],
+            rationale={d.key: "seed" for d in RUBRIC},
+            standout_moments=[],
+            failure_modes=[],
+            overall_note="seed",
+            judge_model="seed",
+        ),
+        features=SessionFeatures(turn_count=2, avg_prompt_chars=20.0),
+        source_path=str(src),
+    )
+    store.save_session_score(score)
+
+    code = main(["re-score", stable_id])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Re-scored" in out
+    assert stable_id in out
+
+    # The persisted row should reflect the new judge output (7.5 across
+    # every dim => weighted overall ~7.5 too).
+    refreshed = store.load_one_session_score(stable_id)
+    assert refreshed is not None
+    assert refreshed["overall"] == pytest.approx(7.5, abs=0.01)
+    assert refreshed["judge_result"]["judge_model"] == "fixture-frontier"
+
+
+def test_rescore_without_judge_exits_2(tmp_home, capsys):
+    """No API keys => re-score exits 2 (the "no judge" exit code)."""
+    sid_uuid = str(uuid.uuid4())
+    src = _write_minimal_claude_session(tmp_home, sid_uuid)
+    from praxis.scanners.claude import ClaudeScanner
+
+    parsed = ClaudeScanner().parse(src)
+    assert parsed is not None
+    stable_id = parsed.stable_id
+    _seed_score(stable_id, parsed.started_at)
+    # Overwrite source_path to the real file so re-parse succeeds; the
+    # judge will then be the failing step.
+    store = ProfileStore()
+    score = SessionScore(
+        session_stable_id=stable_id,
+        provider="claude",
+        started_at=parsed.started_at,
+        dimension_scores={d.key: 6.0 for d in RUBRIC},
+        overall=6.0,
+        judge_result=JudgeResult(
+            dimension_scores={d.key: 6.0 for d in RUBRIC},
+            rationale={d.key: "seed" for d in RUBRIC},
+            standout_moments=[],
+            failure_modes=[],
+            overall_note="seed",
+            judge_model="seed",
+        ),
+        features=SessionFeatures(turn_count=2, avg_prompt_chars=20.0),
+        source_path=str(src),
+    )
+    store.save_session_score(score)
+
+    code = main(["re-score", stable_id])
+    err = capsys.readouterr().err
+    # tmp_home fixture cleared ANTHROPIC_API_KEY and OPENAI_API_KEY, so the
+    # real score_session() returns None and re_score_session raises with
+    # code="no_judge".
+    assert code == 2
+    assert "ANTHROPIC_API_KEY" in err or "OPENAI_API_KEY" in err
+
+
+def test_baseline_on_empty_data_exits_zero(tmp_home, capsys):
+    """baseline must render cleanly when there are no sessions yet."""
+    code = main(["baseline"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "90-DAY BASELINE" in out
+    # Forming state: placeholder appears for the overall + every dim row.
+    assert "--" in out
+
+
+def test_baseline_with_data_prints_overall_and_dims(tmp_home, capsys):
+    """With 14+ days of data, baseline prints numeric overall + every dim."""
+    # Seed 20 days ago so the data span is >= 14 (baseline is not forming).
+    when = datetime.now(timezone.utc) - timedelta(days=20)
+    _seed_score("base-1", when, overall=6.4)
+    _seed_score("base-2", when + timedelta(days=1), overall=7.0)
+
+    code = main(["baseline"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "90-DAY BASELINE" in out
+    assert "Sessions in window: 2" in out
+    # Every rubric dim title appears in the output.
+    for d in RUBRIC:
+        assert d.title in out
+
+
+def test_history_with_no_data_exits_zero(tmp_home, capsys):
+    """history on an empty DB must exit 0 with a helpful message."""
+    code = main(["history"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "No history yet" in out
+
+
+def test_history_lists_iso_weeks_newest_first(tmp_home, capsys):
+    """history groups session_scores by ISO week, newest first."""
+    # Two sessions in 2026-W21, one in 2026-W19.
+    _seed_score("h1", datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc))
+    _seed_score("h2", datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc))
+    _seed_score("h3", datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc))
+
+    code = main(["history"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "2026-W21" in out
+    assert "2026-W19" in out
+    # 2026-W21 has 2 sessions, 2026-W19 has 1; newest week appears first.
+    assert out.index("2026-W21") < out.index("2026-W19")
+
+
+def test_show_renders_past_week_and_exits_zero(tmp_home, capsys):
+    """show <week_iso> renders the persisted snapshot for that week."""
+    in_week = datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc)
+    _seed_score("show-1", in_week)
+
+    code = main(["show", "2026-W21"])
+    out = capsys.readouterr().out
+    assert code == 0
+    # Masthead matches the week digest output.
+    assert "PRAXIS" in out
+    assert "1 sessions in window" in out
+
+
+def test_show_rejects_malformed_week_iso(tmp_home, capsys):
+    """show with a malformed ISO-week tag exits 1."""
+    code = main(["show", "bogus"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "YYYY-Www" in err
+
+
+def test_scan_does_not_render_digest(tmp_home, capsys):
+    """scan must NOT render the masthead/dimensions; it prints a one-line summary."""
+    code = main(["scan"])
+    out = capsys.readouterr().out
+    assert code == 0
+    # The digest masthead contains "PRAXIS" in its banner. scan should not
+    # produce that banner; it should produce a "Scanned N session(s)" line.
+    assert "Scanned" in out
+    assert "PRAXIS" not in out
+    # No HTML file written either.
+    assert not (resolve_home() / "report.html").exists()
+
+
+def test_status_preserved(tmp_home, capsys):
+    """`praxis status` survives the v0.2 surface refactor (US-075 ACs)."""
+    code = main(["status"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Scorecard home" in out
+
+
+def test_rubric_preserved(tmp_home, capsys):
+    """`praxis rubric` survives the v0.2 surface refactor (US-075 ACs)."""
+    code = main(["rubric"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "SCORING RUBRIC" in out
+
+
+def test_models_preserved(tmp_home, capsys):
+    """`praxis models` survives the v0.2 surface refactor (US-075 ACs)."""
+    code = main(["models"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "model cards loaded" in out

@@ -1,13 +1,18 @@
 """CLI entry point.
 
-Commands:
-  week             Render this week's digest (default verb in v0.2).
-  scan             Run a scan + score + consolidate cycle. The 'main' verb.
+Commands (v0.2 surface):
+  week             Render this week's digest (the primary verb in v0.2).
+  scan             Scan + score new sessions; no digest rendered (spec 12.1).
+  re-score         Re-run the frontier judge for one session and update its row.
+  baseline         Print the current 90-day baseline (read-only).
+  follow-up        Print the most recent weekly commitment and its outcome.
+  history          List past weekly digests by ISO week (read-only).
+  show             Render a past week's digest from persisted data (read-only).
   report           Open or print the latest HTML report.
   status           Show what's been scored, when, and where.
   rubric           Print the scoring rubric and weights.
-  follow-up        Print the most recent weekly commitment and its outcome.
-  install-daemon   Print platform-specific scheduling instructions.
+  models           List or describe the built-in model cards.
+  config           View / --get / --set ~/.praxis/config.toml.
 """
 from __future__ import annotations
 
@@ -15,13 +20,26 @@ import argparse
 import subprocess
 import sys
 import webbrowser
+from datetime import datetime, timezone
 from pathlib import Path
 
 from praxis import __version__
 from praxis.config import ensure_config_file
-from praxis.orchestrator import InvalidWeekError, run, run_weekly
+from praxis.orchestrator import (
+    InvalidWeekError,
+    ReScoreError,
+    list_persisted_weeks,
+    re_score_session,
+    run,
+    run_weekly,
+)
 from praxis.reports.html_report import render as render_html
 from praxis.reports.terminal import render as render_terminal
+from praxis.scoring.baseline import (
+    BaselineInputSession,
+    compute_baseline,
+    is_baseline_forming,
+)
 from praxis.scoring.rubric import RUBRIC
 from praxis.storage.profile_store import ProfileStore, resolve_home
 
@@ -138,23 +156,144 @@ def cmd_week(args: argparse.Namespace) -> int:
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
+    """Scan source files and score newly-discovered sessions.
+
+    Per spec 12.1 the v0.2 ``scan`` verb is intentionally NOT a digest
+    renderer: it does the work of discovering new sessions and persisting
+    judge results, and prints a one-line summary of what changed. The
+    digest (terminal masthead, dimensions, coaching, trajectory) is the
+    job of ``praxis week`` and ``praxis show <week_iso>``.
+
+    The output is a compact progress report so the user can confirm the
+    scan made progress and, if invoked from a cron job, the log lines
+    are still grep-able.
+    """
     summary = run(
         since_days=args.since_days,
         max_new_scored=args.max_new,
         force_consolidate=args.force_consolidate,
     )
 
-    # Terminal output always.
+    print(
+        f"Scanned {summary.sessions_seen} session(s); "
+        f"{summary.sessions_new} new; "
+        f"scored {summary.sessions_scored} via judge "
+        f"({summary.elapsed_seconds}s)."
+    )
+    print(f"Render the digest with: praxis week")
+    return 0
+
+
+def cmd_re_score(args: argparse.Namespace) -> int:
+    """Re-run the frontier judge against one persisted session.
+
+    Looks up the row in ``session_scores`` by stable_id, re-parses the
+    source file via the matching scanner, runs the judge, and overwrites
+    the persisted row + moments. Useful when judge prompts or model
+    versions change and the user wants to refresh a specific session
+    without re-scanning the whole window.
+
+    Exit codes:
+      0 - row re-scored and saved
+      1 - session_stable_id not found, or the source file could not be parsed
+      2 - no judge available (no API keys configured, or all judges errored)
+    """
+    try:
+        score = re_score_session(args.session_stable_id)
+    except ReScoreError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2 if exc.code == "no_judge" else 1
+    print(
+        f"Re-scored {score.session_stable_id} "
+        f"({score.provider}): overall {score.overall:.2f}/10."
+    )
+    return 0
+
+
+def cmd_baseline(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Print the current 90-day baseline of session scores.
+
+    Read-only: never scans, never scores, never writes. Reads the
+    persisted ``session_scores`` rows and computes the same Baseline
+    the weekly digest would render in its baseline panel. When the
+    user has less than 14 days of data the baseline is "forming"
+    (spec 8.4) and rows render ``--`` in place of numbers.
+    """
+    store = ProfileStore()
+    rows = store.load_session_scores()
+    inputs = [
+        BaselineInputSession(
+            started_at=datetime.fromisoformat(row["started_at"]),
+            overall=float(row["overall"]),
+            dimension_scores=row["dimension_scores"],
+            # Rates require re-parsing source files, which would
+            # break the read-only contract of `baseline`. They are
+            # omitted from this view; the weekly digest panel is the
+            # canonical place to see them.
+            engagement_rate=0.0,
+            delegation_rate=0.0,
+            independence_rate=0.0,
+        )
+        for row in rows
+    ]
+    as_of = datetime.now(timezone.utc)
+    forming = is_baseline_forming(inputs, as_of=as_of)
+    baseline = compute_baseline(inputs, as_of=as_of)
+
+    print("\nPRAXIS - 90-DAY BASELINE\n")
+    print(f"  Window:  {baseline.window_start} to {baseline.window_end}")
+    print(f"  Sessions in window: {baseline.session_count}")
+    if forming:
+        print("  Baseline forming. Come back in 2 more weeks for week-over-week.")
+        print(f"  Overall:           --")
+        for d in RUBRIC:
+            print(f"  {d.title.ljust(22)} --")
+        return 0
+    print(f"  Overall:           {baseline.overall_mean:.2f}/10")
+    for d in RUBRIC:
+        value = baseline.dimension_means.get(d.key, 0.0)
+        print(f"  {d.title.ljust(22)} {value:.2f}/10")
+    return 0
+
+
+def cmd_history(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """List past weekly digests, newest first.
+
+    Read-only: derives the list from the ISO weeks present in
+    ``session_scores``. For each week it prints the count of judged
+    sessions and the mean overall score. The user can then drill in
+    with ``praxis show <week_iso>``.
+    """
+    weeks = list_persisted_weeks()
+    if not weeks:
+        print("No history yet. Run: praxis scan, then praxis week.")
+        return 0
+    print("\nPRAXIS - WEEKLY HISTORY\n")
+    print(f"  {'Week'.ljust(12)} {'Sessions'.rjust(8)}   Overall")
+    for entry in weeks:
+        print(
+            f"  {entry['week_iso'].ljust(12)} "
+            f"{str(entry['session_count']).rjust(8)}   "
+            f"{entry['overall_mean']:.2f}/10"
+        )
+    print(f"\nInspect one week: praxis show <week_iso>")
+    return 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    """Render a past week's digest from persisted data.
+
+    Read-only: equivalent to ``praxis week --week <iso>`` but skips the
+    HTML/notify side-effect flags. Exits 0 if the week has data, 0 with
+    a "no sessions" masthead otherwise (the renderer handles the empty
+    case gracefully), or 1 on a malformed ISO-week string.
+    """
+    try:
+        summary = run_weekly(week_iso=args.week_iso)
+    except InvalidWeekError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     print(render_terminal(summary))
-
-    # HTML report.
-    html_path = resolve_home() / "report.html"
-    html_path.write_text(render_html(summary), encoding="utf-8")
-    print(f"  Report saved: {html_path}")
-
-    if args.open:
-        webbrowser.open(html_path.as_uri())
-
     return 0
 
 
@@ -460,16 +599,78 @@ def build_parser() -> argparse.ArgumentParser:
     )
     week.set_defaults(func=cmd_week)
 
-    scan = sub.add_parser("scan", help="Scan, score, and consolidate.")
+    scan = sub.add_parser(
+        "scan",
+        help="Scan + score newly-discovered sessions (no digest render).",
+        description=(
+            "Discover new sessions and run the judge against them, "
+            "persisting results into ~/.praxis/profile.db. Prints a "
+            "one-line summary; the digest itself lives behind "
+            "'praxis week' / 'praxis show <iso>'."
+        ),
+    )
     scan.add_argument("--since-days", type=int, default=30,
                       help="Only consider session files modified in the last N days.")
     scan.add_argument("--max-new", type=int, default=50,
                       help="Cap on newly-discovered sessions to deep-score per run.")
     scan.add_argument("--force-consolidate", action="store_true",
-                      help="Re-run daily consolidation even if already done today.")
-    scan.add_argument("--open", action="store_true",
-                      help="Open the HTML report after scanning.")
+                      help="Force the consolidation step even if it ran today.")
     scan.set_defaults(func=cmd_scan)
+
+    rescore = sub.add_parser(
+        "re-score",
+        help="Re-run the frontier judge for one session and update its row.",
+        description=(
+            "Look up the persisted session by stable_id, re-parse its "
+            "source file, run the frontier judge, and overwrite the row "
+            "in session_scores (and that session's moments). Useful when "
+            "the judge prompt or model version changes."
+        ),
+    )
+    rescore.add_argument(
+        "session_stable_id",
+        type=str,
+        help="The stable_id of a session already in session_scores.",
+    )
+    rescore.set_defaults(func=cmd_re_score)
+
+    base = sub.add_parser(
+        "baseline",
+        help="Print the current 90-day baseline (read-only).",
+        description=(
+            "Read-only summary of the 90-day rolling baseline that the "
+            "weekly digest panel uses. Renders '--' when the user has "
+            "less than 14 days of data (spec section 8.4)."
+        ),
+    )
+    base.set_defaults(func=cmd_baseline)
+
+    hist = sub.add_parser(
+        "history",
+        help="List past weekly digests, newest first (read-only).",
+        description=(
+            "Enumerate the ISO weeks present in session_scores with "
+            "their session count and mean overall score. Drill into one "
+            "with 'praxis show <week_iso>'."
+        ),
+    )
+    hist.set_defaults(func=cmd_history)
+
+    show = sub.add_parser(
+        "show",
+        help="Render a past week's digest from persisted data (read-only).",
+        description=(
+            "Render the persisted snapshot for the given ISO week "
+            "(e.g. 2026-W21). No scanning, no scoring, no writes."
+        ),
+    )
+    show.add_argument(
+        "week_iso",
+        type=str,
+        metavar="WEEK_ISO",
+        help="ISO-week tag of the week to render (e.g. 2026-W21).",
+    )
+    show.set_defaults(func=cmd_show)
 
     rep = sub.add_parser("report", help="Open or print the latest HTML report.")
     rep.add_argument("--print", action="store_true",

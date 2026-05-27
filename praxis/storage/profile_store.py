@@ -299,6 +299,28 @@ class ProfileStore:
             )
         return rows
 
+    def load_one_session_score(self, stable_id: str) -> dict[str, Any] | None:
+        """Return one row of session_scores by stable_id, or None.
+
+        Used by ``praxis re-score`` to look up the source_path/provider for a
+        single session before re-running the judge against it (spec section
+        12.1: re-score is the single-session counterpart to ``praxis scan``).
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM session_scores WHERE stable_id = ?",
+                (stable_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        out["dimension_scores"] = json.loads(out["dimension_scores_json"])
+        out["features"] = json.loads(out["features_json"])
+        out["judge_result"] = (
+            json.loads(out["judge_result_json"]) if out["judge_result_json"] else None
+        )
+        return out
+
     # ---- moments --------------------------------------------------------
 
     def save_moments(

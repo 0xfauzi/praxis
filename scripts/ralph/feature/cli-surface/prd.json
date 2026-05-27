@@ -26,8 +26,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added re_score_session() + list_persisted_weeks() in orchestrator.py and load_one_session_score() in profile_store.py as the CLI seams. cmd_re_score / cmd_baseline / cmd_history / cmd_show + their subparsers in praxis/cli/__main__.py. scan now prints a one-line progress summary instead of rendering the digest. Tests in tests/test_cli.py (14 new)."
     },
     {
       "id": "US-076",

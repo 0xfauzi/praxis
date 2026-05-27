@@ -15,6 +15,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
+from typing import Any
 
 
 def _utcnow() -> datetime:
@@ -26,6 +27,8 @@ from praxis.behavior import (
     assess as assess_trajectory,
     extract as extract_signals,
 )
+from pathlib import Path
+
 from praxis.models import Session
 from praxis.models_advisor import ModelUsageProfile, build_profiles
 from praxis.scanners import ALL_SCANNERS
@@ -397,3 +400,117 @@ def run_weekly(
     if explain_judging:
         base.judging_confidence = {}
     return base
+
+
+class ReScoreError(RuntimeError):
+    """Raised by ``re_score_session`` when re-scoring cannot complete.
+
+    Carries a structured ``code`` so the CLI maps it to an exit code
+    without parsing the message:
+      - ``"not_found"``  -- no session with that stable_id in session_scores
+      - ``"no_judge"``   -- neither ANTHROPIC_API_KEY nor OPENAI_API_KEY set,
+                            or every configured judge errored
+      - ``"unreadable"`` -- the persisted source_path could not be parsed
+                            (file moved, corrupted, or provider unknown)
+    """
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+def _scanner_for_provider(provider: str):
+    """Return the scanner class whose ``provider_name`` matches.
+
+    The session_scores row stores the provider as a string (the value of
+    ``Provider.<...>.value``); we map it back to the scanner class that
+    originally parsed the file. Returns None for an unknown provider so
+    the caller can surface a clear "unreadable" error.
+    """
+    for cls in ALL_SCANNERS:
+        if cls.provider_name == provider:
+            return cls
+    return None
+
+
+def re_score_session(session_stable_id: str) -> SessionScore:
+    """Re-run the frontier judge for one persisted session.
+
+    Looks up the session by stable_id, re-parses its source file via the
+    matching scanner, calls the LLM judge, and overwrites the persisted
+    row + moments. The judge picked is the frontier judge (the default
+    ``score_session`` order is Claude-first, OpenAI-second; both are
+    frontier-tier models per the built-in cards).
+
+    Returns the new SessionScore. Raises ReScoreError when the session
+    cannot be re-scored; the CLI maps the ``.code`` field to an exit
+    code so future stories (US-076) can add the "no API key" exit-2
+    behavior without touching this function.
+    """
+    store = ProfileStore()
+    row = store.load_one_session_score(session_stable_id)
+    if row is None:
+        raise ReScoreError(
+            "not_found",
+            f"no session with stable_id={session_stable_id!r} in session_scores.",
+        )
+
+    scanner_cls = _scanner_for_provider(row["provider"])
+    if scanner_cls is None:
+        raise ReScoreError(
+            "unreadable",
+            f"unknown provider {row['provider']!r} for session {session_stable_id}.",
+        )
+    scanner = scanner_cls()
+    source_path = Path(row["source_path"])
+    session = scanner.parse(source_path)
+    if session is None:
+        raise ReScoreError(
+            "unreadable",
+            f"could not re-parse {source_path}: file missing or malformed.",
+        )
+
+    score = score_one_session(session)
+    if score is None:
+        raise ReScoreError(
+            "no_judge",
+            "no frontier judge available "
+            "(set ANTHROPIC_API_KEY or OPENAI_API_KEY and retry).",
+        )
+    store.save_session_score(score)
+    if score.judge_result is not None:
+        store.save_moments(session.stable_id, score.judge_result.moments)
+    return score
+
+
+def list_persisted_weeks() -> list[dict[str, Any]]:
+    """List every ISO week that has at least one persisted session score.
+
+    Used by ``praxis history`` to enumerate which past weeks
+    ``praxis show <week_iso>`` can render. Each entry has:
+      - ``week_iso``: the ISO-week tag, e.g. ``"2026-W21"``
+      - ``session_count``: number of judged sessions inside that week
+      - ``overall_mean``: mean of ``session_scores.overall`` for that week,
+        rounded to two decimals (matches the digest's display precision).
+
+    Returned newest-week first so the CLI lists most-recent first.
+    """
+    store = ProfileStore()
+    rows = store.load_session_scores()
+    buckets: dict[str, list[float]] = {}
+    for row in rows:
+        started = datetime.fromisoformat(row["started_at"])
+        year, week, _ = started.date().isocalendar()
+        week_iso = f"{year:04d}-W{week:02d}"
+        buckets.setdefault(week_iso, []).append(float(row["overall"]))
+    result: list[dict[str, Any]] = []
+    for week_iso in sorted(buckets.keys(), reverse=True):
+        scores = buckets[week_iso]
+        result.append(
+            {
+                "week_iso": week_iso,
+                "session_count": len(scores),
+                "overall_mean": round(sum(scores) / len(scores), 2),
+            }
+        )
+    return result
