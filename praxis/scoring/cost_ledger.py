@@ -28,7 +28,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
-from praxis.models_advisor.cards import find_card_for_model_hint
+from praxis.models_advisor.cards import ModelCard, find_card_for_model_hint, load_all_cards
 
 
 # 90 days mirrors the engagement baseline (spec section 8.2): long
@@ -44,6 +44,14 @@ COST_BASELINE_WINDOW_DAYS = 90
 # users do not read these numbers as invoiced costs.
 COST_CHARS_PER_TOKEN = 4.0
 COST_OUTPUT_TO_INPUT_RATIO = 1.5
+
+# Tier-fit qualifying thresholds (spec section 10.1, US-049). A
+# frontier-tier session counts toward "you could have paid less" only
+# when it really is a tiny workload: at most a few turns AND short
+# prompts. Both thresholds must be met; large prompts or long
+# conversations are plausibly the right use of a frontier model.
+TIER_FIT_MAX_USER_TURNS = 3
+TIER_FIT_MAX_AVG_PROMPT_CHARS = 200
 
 
 @dataclass(frozen=True)
@@ -83,6 +91,45 @@ class BiggestLineInputSession:
     cost_usd: float | None
     model_hint: str | None
     task_label: str | None
+
+
+@dataclass(frozen=True)
+class TierFitInputSession:
+    """One session's input to the tier-fit savings estimate.
+
+    `tier_fit_savings_usd` is the per-session
+    (frontier_cost - cheaper_tier_cost) USD figure pre-computed by the
+    caller (typically via `estimate_tier_fit_savings_for_session`).
+    None signals 'not a frontier session with a cheaper-tier
+    alternative on file' -- the aggregator skips such sessions, since
+    there's nothing to save against. `user_turn_count` and
+    `avg_prompt_chars` carry the qualifying-threshold signals so the
+    aggregator stays pure: it filters by week + thresholds and sums,
+    nothing more.
+    """
+
+    started_at: datetime
+    user_turn_count: int
+    avg_prompt_chars: float
+    tier_fit_savings_usd: float | None
+
+
+@dataclass(frozen=True)
+class TierFitSavings:
+    """Inputs for the tier-fit savings row of the cost panel.
+
+    `qualifying_session_count` is the number of frontier-tier sessions
+    in the current ISO week that met the small-workload thresholds
+    (TIER_FIT_MAX_USER_TURNS, TIER_FIT_MAX_AVG_PROMPT_CHARS) and have
+    a cheaper-tier alternative on file. `estimated_savings_usd` is the
+    summed (frontier_cost - cheaper_tier_cost) across those sessions:
+    a rough 'you could have paid this much less' for the week. Both
+    fields are 0 when no sessions qualify -- the renderer can use that
+    to omit the row entirely.
+    """
+
+    qualifying_session_count: int
+    estimated_savings_usd: float
 
 
 @dataclass(frozen=True)
@@ -274,4 +321,112 @@ def compute_biggest_line(
         task_label=winner_key[1],
         spend_usd=round(spend_by_pair[winner_key], 4),
         session_count=sessions_by_pair[winner_key],
+    )
+
+
+def _find_fast_tier_card_in_family(family: str) -> ModelCard | None:
+    """The fast-tier card in `family`, if one exists.
+
+    Mirrors `models_advisor.advisor._find_fast_tier_card_in_family` so
+    the cost panel's 'you could have paid less' answer uses the same
+    cheaper-tier mapping the per-model advice already uses. Returns
+    None for families with no fast tier (e.g. gemini, which ships only
+    a frontier card in the built-in set) -- such sessions get no
+    tier-fit savings estimate, since there's nothing to compare against.
+    """
+    for card in load_all_cards().values():
+        if card.family == family and card.tier == "fast":
+            return card
+    return None
+
+
+def estimate_tier_fit_savings_for_session(
+    model_hint: str | None,
+    total_input_chars: int,
+) -> float | None:
+    """Per-session USD savings if a frontier session had used the fast tier.
+
+    Returns the difference (frontier_cost - cheaper_tier_cost) computed
+    from the same `total_input_chars` under each card's pricing.
+    Same chars-per-token and output-multiplier assumptions as
+    `estimate_session_cost_usd` so the per-session frontier cost shown
+    in the cost ledger and the frontier half of this delta agree.
+
+    Returns None when:
+      - `model_hint` resolves to no card,
+      - the card is not frontier-tier (no savings to claim),
+      - the family has no fast-tier card on file,
+      - either card lacks per-token pricing.
+
+    Returns 0.0 for a frontier session with `total_input_chars <= 0`
+    (the session qualifies, the workload is just empty).
+    """
+    frontier = find_card_for_model_hint(model_hint)
+    if frontier is None or frontier.tier != "frontier":
+        return None
+    if frontier.input_per_million_usd is None or frontier.output_per_million_usd is None:
+        return None
+    fast = _find_fast_tier_card_in_family(frontier.family)
+    if fast is None or fast.input_per_million_usd is None or fast.output_per_million_usd is None:
+        return None
+    if total_input_chars <= 0:
+        return 0.0
+    input_tokens = total_input_chars / COST_CHARS_PER_TOKEN
+    output_tokens = input_tokens * COST_OUTPUT_TO_INPUT_RATIO
+    frontier_cost = (
+        input_tokens * frontier.input_per_million_usd / 1_000_000
+        + output_tokens * frontier.output_per_million_usd / 1_000_000
+    )
+    fast_cost = (
+        input_tokens * fast.input_per_million_usd / 1_000_000
+        + output_tokens * fast.output_per_million_usd / 1_000_000
+    )
+    return frontier_cost - fast_cost
+
+
+def compute_tier_fit_savings(
+    sessions: list[TierFitInputSession],
+    as_of: datetime | None = None,
+) -> TierFitSavings:
+    """Sum per-session tier-fit savings across qualifying sessions in the current ISO week.
+
+    Spec section 10.1: the cost panel reports how much could have been
+    saved by routing tiny frontier-model sessions to the family's fast
+    tier instead. A session qualifies iff:
+      - It falls in the current ISO week (Monday-inclusive).
+      - `user_turn_count <= TIER_FIT_MAX_USER_TURNS` (= 3).
+      - `avg_prompt_chars <= TIER_FIT_MAX_AVG_PROMPT_CHARS` (= 200).
+      - `tier_fit_savings_usd is not None` (i.e. the caller's helper
+        identified a frontier card with a fast-tier sibling).
+
+    `tier_fit_savings_usd == 0.0` still qualifies -- a zero-char
+    Opus session is a real frontier session, the workload just happens
+    to be empty. Skipping it would under-count the qualifying session
+    count.
+
+    Sessions outside the current ISO week are silently dropped: the
+    panel reports on this-week activity, the 90-day baseline answer
+    lives on `CostLedger`.
+    """
+    if as_of is None:
+        as_of = datetime.now(timezone.utc)
+    current_week_start = _iso_week_start(as_of.date())
+
+    qualifying_count = 0
+    total_savings = 0.0
+    for s in sessions:
+        if s.started_at.date() < current_week_start:
+            continue
+        if s.user_turn_count > TIER_FIT_MAX_USER_TURNS:
+            continue
+        if s.avg_prompt_chars > TIER_FIT_MAX_AVG_PROMPT_CHARS:
+            continue
+        if s.tier_fit_savings_usd is None:
+            continue
+        qualifying_count += 1
+        total_savings += s.tier_fit_savings_usd
+
+    return TierFitSavings(
+        qualifying_session_count=qualifying_count,
+        estimated_savings_usd=round(total_savings, 4),
     )

@@ -38,8 +38,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "praxis/scoring/cost_ledger.py: pure aggregator (compute_tier_fit_savings) over TierFitInputSession(started_at, user_turn_count, avg_prompt_chars, tier_fit_savings_usd). Card-lookup helper (estimate_tier_fit_savings_for_session) resolves the frontier card and the family's fast-tier card via find_card_for_model_hint + a local _find_fast_tier_card_in_family (mirrors advisor.py). Qualifying rule: in-current-ISO-week AND user_turn_count <= 3 AND avg_prompt_chars <= 200 AND tier_fit_savings_usd is not None. 'Opus/GPT-5' is interpreted as 'frontier-tier card with a fast-tier sibling' so the rule generalizes to any frontier model with a cheaper alternative (Gemini has no fast sibling so it naturally drops out). Constants TIER_FIT_MAX_USER_TURNS=3 and TIER_FIT_MAX_AVG_PROMPT_CHARS=200 expose the thresholds. Token + output assumptions reuse COST_CHARS_PER_TOKEN/COST_OUTPUT_TO_INPUT_RATIO so frontier-half of the savings agrees with estimate_session_cost_usd."
     },
     {
       "id": "US-050",
