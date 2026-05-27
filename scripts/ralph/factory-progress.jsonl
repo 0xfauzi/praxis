@@ -1,0 +1,57 @@
+{"ts": "2026-05-26T22:58:22Z", "event": "factory_started", "data": {"project": "praxis-v0-2", "components": 16}}
+{"ts": "2026-05-26T22:58:22Z", "event": "component_started", "component": "storage-schema"}
+{"ts": "2026-05-26T22:58:22Z", "event": "component_started", "component": "config-file"}
+{"ts": "2026-05-26T22:58:22Z", "event": "component_started", "component": "features-module"}
+{"ts": "2026-05-26T22:58:22Z", "event": "component_started", "component": "transcript-compression"}
+{"ts": "2026-05-26T23:16:06Z", "event": "verification_result", "component": "config-file", "data": {"passed": true, "checks": ["prd_stories", "test_suite", "typecheck", "linter", "diff_scope", "bad_patterns"], "failures": [], "duration_seconds": 0.23}}
+{"ts": "2026-05-26T23:16:35Z", "event": "review_result", "component": "config-file", "data": {"passed": true, "mode": "hard", "fail_count": 0, "advisory_count": 0, "duration_seconds": 29.03}}
+{"ts": "2026-05-26T23:16:36Z", "event": "component_completed", "component": "config-file", "data": {"duration_seconds": 1063.69, "iterations": 3}}
+{"ts": "2026-05-26T23:16:36Z", "event": "verification_result", "component": "transcript-compression", "data": {"passed": true, "checks": ["prd_stories", "test_suite", "typecheck", "linter", "diff_scope", "bad_patterns"], "failures": [], "duration_seconds": 0.19}}
+{"ts": "2026-05-26T23:17:09Z", "event": "review_result", "component": "transcript-compression", "data": {"passed": true, "mode": "hard", "fail_count": 0, "advisory_count": 1, "duration_seconds": 33.36}}
+{"ts": "2026-05-26T23:17:10Z", "event": "component_completed", "component": "transcript-compression", "data": {"duration_seconds": 1093.06, "iterations": 3}}
+{"ts": "2026-05-26T23:19:51Z", "event": "verification_result", "component": "features-module", "data": {"passed": true, "checks": ["prd_stories", "test_suite", "typecheck", "linter", "diff_scope", "bad_patterns"], "failures": [], "duration_seconds": 0.19}}
+{"ts": "2026-05-26T23:20:19Z", "event": "review_result", "component": "features-module", "data": {"passed": true, "mode": "hard", "fail_count": 0, "advisory_count": 0, "duration_seconds": 27.56}}
+{"ts": "2026-05-26T23:20:19Z", "event": "component_completed", "component": "features-module", "data": {"duration_seconds": 1288.62, "iterations": 3}}
+{"ts": "2026-05-26T23:28:25Z", "event": "verification_result", "component": "storage-schema", "data": {"passed": true, "checks": ["prd_stories", "test_suite", "typecheck", "linter", "diff_scope", "bad_patterns"], "failures": [], "duration_seconds": 0.32}}
+{"ts": "2026-05-26T23:29:04Z", "event": "review_result", "component": "storage-schema", "data": {"passed": true, "mode": "hard", "fail_count": 0, "advisory_count": 1, "duration_seconds": 39.39}}
+{"ts": "2026-05-26T23:29:05Z", "event": "component_completed", "component": "storage-schema", "data": {"duration_seconds": 1802.07, "iterations": 4}}
+{"ts": "2026-05-26T23:29:05Z", "event": "component_started", "component": "judge-moments-extension"}
+{"ts": "2026-05-26T23:29:05Z", "event": "component_started", "component": "task-clustering"}
+{"ts": "2026-05-26T23:29:05Z", "event": "component_started", "component": "baseline-stats"}
+{"ts": "2026-05-26T23:29:05Z", "event": "component_started", "component": "trajectory-model"}
+{"ts": "2026-05-27T00:06:28Z", "event": "verification_result", "component": "baseline-stats", "data": {"passed": true, "checks": ["prd_stories", "test_suite", "typecheck", "linter", "diff_scope", "bad_patterns"], "failures": [], "duration_seconds": 0.59}}
+{"ts": "2026-05-27T00:07:15Z", "event": "review_result", "component": "baseline-stats", "data": {"passed": true, "mode": "hard", "fail_count": 0, "advisory_count": 5, "duration_seconds": 46.29}}
+{"ts": "2026-05-27T00:07:15Z", "event": "component_completed", "component": "baseline-stats", "data": {"duration_seconds": 2242.87, "iterations": 4}}
+{"ts": "2026-05-27T00:07:15Z", "event": "component_started", "component": "follow-up-loop"}
+{"ts": "2026-05-27T00:09:15Z", "event": "verification_result", "component": "judge-moments-extension", "data": {"passed": true, "checks": ["prd_stories", "test_suite", "typecheck", "linter", "diff_scope", "bad_patterns"], "failures": [], "duration_seconds": 0.24}}
+{"ts": "2026-05-27T00:10:00Z", "event": "review_result", "component": "judge-moments-extension", "data": {"passed": true, "mode": "hard", "fail_count": 0, "advisory_count": 0, "duration_seconds": 44.46}}
+{"ts": "2026-05-27T00:10:00Z", "event": "component_completed", "component": "judge-moments-extension", "data": {"duration_seconds": 2410.37, "iterations": 4}}
+{"ts": "2026-05-27T00:10:00Z", "event": "component_started", "component": "two-pass-judge-pipeline"}
+{"ts": "2026-05-27T00:13:04Z", "event": "verification_result", "component": "task-clustering", "data": {"passed": true, "checks": ["prd_stories", "test_suite", "typecheck", "linter", "diff_scope", "bad_patterns"], "failures": [], "duration_seconds": 0.2}}
+{"ts": "2026-05-27T00:13:49Z", "event": "review_result", "component": "task-clustering", "data": {"passed": true, "mode": "hard", "fail_count": 0, "advisory_count": 3, "duration_seconds": 44.8}}
+{"ts": "2026-05-27T00:13:49Z", "event": "component_completed", "component": "task-clustering", "data": {"duration_seconds": 2639.21, "iterations": 5}}
+{"ts": "2026-05-27T00:13:49Z", "event": "component_started", "component": "moment-selector"}
+{"ts": "2026-05-27T00:15:18Z", "event": "verification_result", "component": "trajectory-model", "data": {"passed": true, "checks": ["prd_stories", "test_suite", "typecheck", "linter", "diff_scope", "bad_patterns"], "failures": [], "duration_seconds": 0.85}}
+{"ts": "2026-05-27T00:15:56Z", "event": "review_result", "component": "trajectory-model", "data": {"passed": true, "mode": "hard", "fail_count": 0, "advisory_count": 1, "duration_seconds": 38.3}}
+{"ts": "2026-05-27T00:15:56Z", "event": "component_completed", "component": "trajectory-model", "data": {"duration_seconds": 2771.98, "iterations": 5}}
+{"ts": "2026-05-27T00:15:56Z", "event": "component_started", "component": "cost-ledger"}
+{"ts": "2026-05-27T00:31:56Z", "event": "verification_result", "component": "follow-up-loop", "data": {"passed": true, "checks": ["prd_stories", "test_suite", "typecheck", "linter", "diff_scope", "bad_patterns"], "failures": [], "duration_seconds": 0.25}}
+{"ts": "2026-05-27T00:32:37Z", "event": "review_result", "component": "follow-up-loop", "data": {"passed": true, "mode": "hard", "fail_count": 0, "advisory_count": 2, "duration_seconds": 40.46}}
+{"ts": "2026-05-27T00:32:37Z", "event": "component_completed", "component": "follow-up-loop", "data": {"duration_seconds": 1480.85, "iterations": 3}}
+{"ts": "2026-05-27T00:42:24Z", "event": "verification_result", "component": "moment-selector", "data": {"passed": true, "checks": ["prd_stories", "test_suite", "typecheck", "linter", "diff_scope", "bad_patterns"], "failures": [], "duration_seconds": 0.18}}
+{"ts": "2026-05-27T00:43:02Z", "event": "review_result", "component": "moment-selector", "data": {"passed": true, "mode": "hard", "fail_count": 0, "advisory_count": 0, "duration_seconds": 38.43}}
+{"ts": "2026-05-27T00:43:02Z", "event": "component_completed", "component": "moment-selector", "data": {"duration_seconds": 1713.99, "iterations": 4}}
+{"ts": "2026-05-27T00:44:52Z", "event": "component_retrying", "component": "two-pass-judge-pipeline", "data": {"attempt": 1, "reason": "Did not complete"}}
+{"ts": "2026-05-27T00:44:57Z", "event": "component_started", "component": "two-pass-judge-pipeline"}
+{"ts": "2026-05-27T00:45:01Z", "event": "component_retrying", "component": "cost-ledger", "data": {"attempt": 1, "reason": "Did not complete"}}
+{"ts": "2026-05-27T00:45:06Z", "event": "component_started", "component": "cost-ledger"}
+{"ts": "2026-05-27T00:47:10Z", "event": "component_retrying", "component": "two-pass-judge-pipeline", "data": {"attempt": 2, "reason": "Did not complete"}}
+{"ts": "2026-05-27T00:47:15Z", "event": "component_started", "component": "two-pass-judge-pipeline"}
+{"ts": "2026-05-27T00:47:17Z", "event": "component_retrying", "component": "cost-ledger", "data": {"attempt": 2, "reason": "Did not complete"}}
+{"ts": "2026-05-27T00:47:22Z", "event": "component_started", "component": "cost-ledger"}
+{"ts": "2026-05-27T00:49:26Z", "event": "component_failed", "component": "two-pass-judge-pipeline", "data": {"error": "Did not complete"}}
+{"ts": "2026-05-27T00:49:34Z", "event": "component_failed", "component": "cost-ledger", "data": {"error": "Did not complete"}}
+{"ts": "2026-05-27T00:49:34Z", "event": "contract_result", "data": {"tier": 0, "passed": false, "breaker": "config-file", "duration_seconds": 0.02}}
+{"ts": "2026-05-27T00:49:34Z", "event": "contract_result", "data": {"tier": 1, "passed": false, "breaker": null, "duration_seconds": 0.01}}
+{"ts": "2026-05-27T00:49:34Z", "event": "contract_result", "data": {"tier": 2, "passed": false, "breaker": null, "duration_seconds": 0.01}}
+{"ts": "2026-05-27T00:49:34Z", "event": "factory_completed", "data": {"completed": 9, "failed": 2, "skipped": 4, "duration_seconds": 6671.51}}
