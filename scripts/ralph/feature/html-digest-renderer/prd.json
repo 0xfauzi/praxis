@@ -24,8 +24,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Extended praxis/reports/digest_html.py with seven frozen panel dataclasses (Trajectory, MomentPanel, CostLedger, TaskRow, DimRow, FollowUpPanel) plus a one_thing_to_try str on WeeklyDigest. All new fields default to None / () / '' so US-061 callers keep working. The renderer walks a fixed section list in spec section 6.1 order and emits stable HTML id anchors (id='trajectory', 'this-weeks-moment', 'cost-ledger', 'where-the-week-went', 'the-six-dimensions', 'follow-up-from-last-week', 'one-thing-to-try-next-week'); when a panel has no data it renders a placeholder so the document shape is constant. The masthead carries only week + generated date - no /10 anywhere above the trajectory section, locked by tests/test_digest_html.py (test_masthead_does_not_lead_with_overall_score, test_render_has_no_hero_score_before_trajectory, plus order tests). 727 tests pass (was 713 + 14 new). Self-containment contract from US-061 still holds across the populated digest path."
     },
     {
       "id": "US-063",

@@ -16,3 +16,21 @@
   - The `WeeklyDigest` dataclass is intentionally minimal. When adding new fields, prefer optional defaults so existing tests do not need to update on every extension.
 ---
 
+## Iteration 2 - US-062: Section order per 6.1
+- What I did: Added six frozen panel dataclasses (Trajectory, MomentPanel, CostLedger, TaskRow, DimRow, FollowUpPanel) plus a `one_thing_to_try: str` field on WeeklyDigest, all optional with sensible defaults. The render() now walks a fixed seven-section list in spec section 6.1 order (trajectory -> moment -> cost ledger -> task breakdown -> dimensions -> follow-up -> next-week-try) and emits stable HTML id anchors so the document order is test-anchorable. Each section renders a placeholder paragraph when its data is missing, so the document shape is invariant under partial data. The masthead carries only the week title and generation date - no /10 above the fold. Added 14 tests covering the section order, the masthead-no-/10 contract, populated-vs-placeholder paths, and a regression check that US-061 self-containment still holds with new sections in play.
+- Files changed: praxis/reports/digest_html.py (extended), tests/test_digest_html.py (extended), scripts/ralph/feature/html-digest-renderer/prd.json (US-062 passes=true).
+- Verification:
+  - `uv run --extra dev pytest` -> 727 passed in 0.59s (was 713 + 14 new).
+  - `uv run --with pyright pyright praxis/reports/digest_html.py tests/test_digest_html.py` -> 0 errors, 0 warnings.
+  - `uv run --with pyright pyright praxis/reports/` -> 0 errors, 0 warnings.
+  - Smoke render: filled-out WeeklyDigest rendered to tempfile; section ids appear in spec section 6.1 order; no banned substrings (<link, <script, <img, http(s)://, @import, url().
+- What the next iteration should know:
+  - Section anchors are id='trajectory', 'this-weeks-moment', 'cost-ledger', 'where-the-week-went', 'the-six-dimensions', 'follow-up-from-last-week', 'one-thing-to-try-next-week'. Tests assert position order on these ids; rename them at your peril.
+  - The `_SECTION_IDS_IN_ORDER` and `_SECTION_TITLES_IN_ORDER` tuples in tests/test_digest_html.py are the test-side contract. If you reorder sections, update both.
+  - Each section currently has a soft fallback path: when its panel is None or empty, it emits a `<p class="placeholder">` rather than dropping the section. US-063 (visual language) should keep that placeholder pattern - dropping sections would break the order contract.
+  - Trajectory is the ONLY section without a visible section-title <h2>, per the spec ASCII art ("[Trajectory headline + confidence band]" with no heading). It uses an "Trajectory" eyebrow chip instead, which keeps the section anchor without crowding the headline.
+  - The masthead's `<header class="masthead">...</header>` is the test boundary for the "no /10" contract. If you add anything to the masthead, make sure `/10` does not appear inside the header element.
+  - When US-063 swaps in the v0.1 visual language (Libre Baskerville + cream/terracotta), the CSS variables --primary (#C1573B) and --cream-100 (#FAF7F2) are already in place; the work is mostly font-stack and finer typography.
+  - The new dataclasses (Trajectory, MomentPanel, CostLedger, TaskRow, DimRow, FollowUpPanel) are intentionally narrow. They're for the renderer's input contract; do NOT confuse them with the broader domain types in praxis.behavior.trajectory.TrajectoryAssessment or praxis.scoring.moment_selector.Moment. The adapter between domain models and these render-time panels lives elsewhere (not yet wired in this factory).
+---
+
