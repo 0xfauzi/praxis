@@ -236,14 +236,14 @@ def main() -> int:
         print(f"  export PRAXIS_CLAUDE_ROOT={claude_root}")
         print(f"  export PRAXIS_CODEX_HOME={codex_root.parent}")
         print(f"  export PRAXIS_HOME={scorecard_home}")
-        print(f"  praxis scan --no-judge")
+        print(f"  praxis scan")
         print()
         print("Or one-liner:")
         print()
         print(f"  PRAXIS_CLAUDE_ROOT={claude_root} \\")
         print(f"  PRAXIS_CODEX_HOME={codex_root.parent} \\")
         print(f"  PRAXIS_HOME={scorecard_home} \\")
-        print(f"  praxis scan --no-judge")
+        print(f"  praxis scan")
     return 0
 
 

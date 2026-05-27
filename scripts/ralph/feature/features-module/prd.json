@@ -1,0 +1,47 @@
+{
+  "branchName": "ralph/factory/features-module",
+  "userStories": [
+    {
+      "id": "US-011",
+      "title": "Move praxis/scoring/heuristics.py to praxis/scoring/features.py",
+      "acceptanceCriteria": [
+        "File praxis/scoring/heuristics.py no longer exists",
+        "File praxis/scoring/features.py exists and exposes the same feature-extraction functions",
+        "All in-repo imports updated to the new path",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Remove the heuristic scoring decision path",
+      "acceptanceCriteria": [
+        "Any function that returned a heuristic /10 score has been deleted",
+        "Any code path that used heuristics as a fallback when the judge was unavailable has been deleted",
+        "Imports and call sites that referenced the deleted functions have been removed",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "features.py exposes turn count, prompt length, and marker counts as pure data",
+      "acceptanceCriteria": [
+        "features.py returns a SessionFeatures dataclass with turn_count, avg_prompt_chars, and marker_hit_counts",
+        "No function in features.py returns a score, label, or coaching decision",
+        "Module docstring explicitly states features are metadata/inputs only",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    }
+  ]
+}

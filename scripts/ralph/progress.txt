@@ -1,2 +1,1 @@
 # progress.txt: union of factory component logs
-# (concatenated as branches merge into main)

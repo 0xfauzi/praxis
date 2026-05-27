@@ -56,7 +56,6 @@ CREATE TABLE IF NOT EXISTS session_scores (
     scored_at TEXT NOT NULL,
     overall REAL NOT NULL,
     dimension_scores_json TEXT NOT NULL,
-    heuristic_scores_json TEXT NOT NULL,
     judge_result_json TEXT,
     features_json TEXT NOT NULL,
     source_path TEXT NOT NULL,
@@ -261,9 +260,9 @@ class ProfileStore:
                 """
                 INSERT OR REPLACE INTO session_scores
                 (stable_id, provider, started_at, scored_at, overall,
-                 dimension_scores_json, heuristic_scores_json, judge_result_json,
+                 dimension_scores_json, judge_result_json,
                  features_json, source_path, judge_model)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     score.session_stable_id,
@@ -272,7 +271,6 @@ class ProfileStore:
                     _utcnow().isoformat(),
                     score.overall,
                     json.dumps(score.dimension_scores),
-                    json.dumps(score.heuristic_scores),
                     judge_json,
                     json.dumps(asdict(score.features)),
                     score.source_path,
@@ -293,7 +291,6 @@ class ProfileStore:
             rows = [dict(row) for row in conn.execute(sql, args).fetchall()]
         for row in rows:
             row["dimension_scores"] = json.loads(row["dimension_scores_json"])
-            row["heuristic_scores"] = json.loads(row["heuristic_scores_json"])
             row["features"] = json.loads(row["features_json"])
             row["judge_result"] = (
                 json.loads(row["judge_result_json"]) if row["judge_result_json"] else None
