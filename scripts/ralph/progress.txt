@@ -1,1 +1,18 @@
 # progress.txt: union of factory component logs
+
+## Iteration 1 - US-061: Self-contained HTML with inline CSS
+- What I did: Built the v0.2 weekly digest renderer scaffolding. Added praxis/reports/digest_html.py with a frozen WeeklyDigest dataclass (week_iso + generated_at) and a pure render() function that emits a complete HTML document with all CSS in an inline <style> block and no external resources. Added tests/test_digest_html.py with 19 self-containment assertions.
+- Files changed: praxis/reports/digest_html.py (new), tests/test_digest_html.py (new), scripts/ralph/feature/html-digest-renderer/prd.json (US-061 passes=true).
+- Verification:
+  - `uv run --extra dev pytest` -> 713 passed in 0.53s (was 694 + 19 new).
+  - `uv run --with pyright pyright praxis/reports/digest_html.py tests/test_digest_html.py` -> 0 errors, 0 warnings.
+  - Smoke test: rendered HTML to a tempfile and confirmed no http(s)://, <link, <script, <img, @import, or url( substrings.
+- What the next iteration should know:
+  - The renderer lives in praxis/reports/digest_html.py and is a pure function `render(digest: WeeklyDigest) -> str`. Future stories (US-062..US-065) should extend the WeeklyDigest dataclass with new fields (trajectory, headline moment, cost ledger, tasks, dim scores, follow-up, "one thing to try") and add new sections to the rendered HTML. Keep the dataclass frozen.
+  - Self-containment is a hard contract: every new section must keep the output free of <link>, <script>, <img>, http(s):// URLs, @import, and url(...) in CSS. The existing tests will fail loudly if any of those slip in.
+  - Font stack is currently Georgia + system sans-serif only. US-063 will need to introduce Libre Baskerville via an inlined fallback (the v0.1 visual language). When that lands, update test_render_uses_system_font_stack accordingly.
+  - The v0.1 renderer (praxis/reports/html_report.py) still imports Google Fonts via <link>. Do NOT touch it from this factory; it is the legacy `praxis scan` surface, separate from the v0.2 weekly digest.
+  - Use `Georgia` (not 'Libre Baskerville') as the primary font face for now so the digest renders consistently offline; layered styles use CSS variables (--primary, --cream-100, --ink-900, --ink-500, --border-light) which mirror the v0.1 tokens and should stay aligned with US-063.
+  - The `WeeklyDigest` dataclass is intentionally minimal. When adding new fields, prefer optional defaults so existing tests do not need to update on every extension.
+---
+

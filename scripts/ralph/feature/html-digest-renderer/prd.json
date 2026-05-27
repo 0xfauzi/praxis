@@ -11,8 +11,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Introduced praxis/reports/digest_html.py with a frozen WeeklyDigest dataclass and a pure render() that emits a full HTML document with inline CSS only. The font stack is system-only (Georgia + sans-serif fallback) so the file renders offline; spec section 13.1 self-containment is locked by tests/test_digest_html.py (no <link>, <script>, <img>, http(s):// URLs, @import, or url(...) in the output). 713 tests pass (was 694 + 19 new). The dataclass is minimal scaffolding; later stories (US-062..US-065) extend it with the spec section 6.1 sections."
     },
     {
       "id": "US-062",
