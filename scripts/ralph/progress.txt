@@ -14,3 +14,17 @@
   - 3 new ruff E402 warnings were accepted (imports below the existing _utcnow() helper, matching the file's pre-existing style). Repo has no ruff config; not enforced.
 ---
 
+## Iteration 2 - US-071: Persist weekly_digests row with snapshot_json
+- What I did: Added ProfileStore.save_weekly_digest (INSERT OR REPLACE on week_iso PK), load_weekly_digest (parses snapshot_json back to a dict), and count_weekly_digests (idempotency assertion helper). Wired persistence into run_weekly: after the render step it computes trajectory via extract_signals + assess_trajectory and UPSERTs the digest with trajectory_label/trajectory_headline/headline_moment_id/snapshot_json (and cost/html fields as None until US-073/render plumbs them). WeeklyRunSummary now exposes trajectory, cost_total_usd, cost_baseline_usd, digest_persisted. run_weekly accepts an optional store= for tests and US-072's --dry-run.
+- Files changed: praxis/storage/profile_store.py, praxis/orchestrator.py, tests/test_orchestrator.py
+- Verification: `uv run pytest` -> 703 passed (was 698 before; +5 new tests for US-071). `uv run mypy praxis` -> 34 errors in 6 files, none in orchestrator.py or profile_store.py (same baseline as US-070).
+- What the next iteration should know:
+  - Trajectory is computed OUTSIDE the 8-step pipeline (off scanned sessions, after render). Spec 9.4 ordering is unchanged - this is summary metadata for the digest row, not a new step. The render-args count test still expects 5 args, untouched.
+  - run_weekly(store=None) is the production path (constructs a fresh ProfileStore). run_weekly(store=my_store) is the test/dry-run path. US-072 should add a `dry_run: bool = False` parameter that short-circuits the save_weekly_digest call AND the eventual file write in _step_render.
+  - cost_total_usd and cost_baseline_usd are passed through as None today. US-073 will compute them: cost_total_usd from this run's judge calls (pass1 + pass2 + selector + headline + cluster), cost_baseline_usd from the 90-day weekly median (per spec 15.1.6). Plumb both into run_weekly's local variables before the save_weekly_digest call.
+  - html_path is None until the render step actually writes a file. The convention from praxis.cli.__main__ is resolve_home() / "report.html" for the daily report; the weekly equivalent per spec 15.1.2 is resolve_home() / "weeks" / f"{week_iso}.html". When _step_render starts writing, return the written path as the first tuple element (currently rendered_html is the HTML *content*, an empty string) and update run_weekly to pass that path - the html_path column is for the file location, not the HTML body.
+  - snapshot_json uses dataclasses.asdict() so any future addition to ProfileSnapshot flows through automatically. The round-trip test (test_run_weekly_digest_snapshot_json_round_trips) lists every current ProfileSnapshot field explicitly to catch silent drops if the renderer ever switches to manual serialization.
+  - The idempotency contract is enforced by `INSERT OR REPLACE INTO weekly_digests`. The PK is week_iso so a second run within the same ISO week updates the row in place (and refreshes generated_at). Two consecutive run_weekly() calls leave exactly one row.
+  - load_weekly_digest returns a dict with both snapshot_json (raw text) and snapshot (parsed dict). Callers who need the full ProfileSnapshot object will need a from_dict constructor on ProfileSnapshot; not added in this iteration since no current caller needs it.
+---
+

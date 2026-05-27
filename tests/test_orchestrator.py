@@ -189,3 +189,89 @@ def test_run_weekly_returns_summary_with_week_iso(tmp_home, step_recorder):
     # tagging is exercised in praxis.behavior.weekly tests.
     assert summary.week_iso.startswith("20")
     assert "-W" in summary.week_iso
+
+
+# --- US-071: persist weekly_digests row ----------------------------------
+
+def test_run_weekly_writes_one_digest_row(tmp_home, step_recorder):
+    """A weekly_digests row exists for the current week after run_weekly."""
+    summary = run_weekly()
+    store = ProfileStore(home=resolve_home())
+    row = store.load_weekly_digest(summary.week_iso)
+    assert row is not None
+    assert row["week_iso"] == summary.week_iso
+    # All schema-required (NOT NULL) columns must be populated.
+    assert row["generated_at"]
+    assert row["trajectory_label"]
+    assert row["trajectory_headline"]
+    assert row["snapshot_json"]
+    assert summary.digest_persisted is True
+
+
+def test_run_weekly_digest_snapshot_json_round_trips(tmp_home, step_recorder):
+    """snapshot_json holds the full ProfileSnapshot (US-071 AC #2)."""
+    summary = run_weekly()
+    store = ProfileStore(home=resolve_home())
+    row = store.load_weekly_digest(summary.week_iso)
+    assert row is not None
+    snap = row["snapshot"]
+    # Every public field on ProfileSnapshot must round-trip through
+    # snapshot_json. Listing them by name guards against the renderer
+    # silently dropping a field if ProfileSnapshot grows.
+    for key in (
+        "overall",
+        "dimension_means",
+        "session_count",
+        "provider_breakdown",
+        "strongest_dimension",
+        "weakest_dimension",
+        "standout_moments",
+        "failure_modes",
+    ):
+        assert key in snap, f"snapshot_json missing field: {key}"
+    assert snap["overall"] == summary.snapshot.overall
+    assert snap["session_count"] == summary.snapshot.session_count
+
+
+def test_run_weekly_digest_is_idempotent(tmp_home, step_recorder):
+    """Re-running for the same week replaces the row, not duplicates it.
+
+    US-071 AC #3: UPSERT semantics. The PK is week_iso so a second run
+    on the same week must leave exactly one row, with a refreshed
+    generated_at timestamp.
+    """
+    first = run_weekly()
+    store = ProfileStore(home=resolve_home())
+    assert store.count_weekly_digests() == 1
+    first_row = store.load_weekly_digest(first.week_iso)
+    assert first_row is not None
+
+    second = run_weekly()
+    # Same week, still exactly one row.
+    assert second.week_iso == first.week_iso
+    assert store.count_weekly_digests() == 1
+
+
+def test_run_weekly_persists_trajectory_label_and_headline(tmp_home, step_recorder):
+    """Digest row carries the trajectory label + headline from this run."""
+    summary = run_weekly()
+    assert summary.trajectory is not None
+    store = ProfileStore(home=resolve_home())
+    row = store.load_weekly_digest(summary.week_iso)
+    assert row is not None
+    assert row["trajectory_label"] == summary.trajectory.label.value
+    assert row["trajectory_headline"] == summary.trajectory.headline
+
+
+def test_run_weekly_accepts_external_store(tmp_home, step_recorder):
+    """Callers (and US-072 --dry-run) can inject a ProfileStore.
+
+    The digest still lands in that store, not a fresh one. This test
+    pins the contract that the second run_weekly() positional/keyword
+    is `store=` and that it is used for the write.
+    """
+    store = ProfileStore(home=resolve_home())
+    summary = run_weekly(store=store)
+    assert store.count_weekly_digests() == 1
+    row = store.load_weekly_digest(summary.week_iso)
+    assert row is not None

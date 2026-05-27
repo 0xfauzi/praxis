@@ -260,6 +260,12 @@ class WeeklyRunSummary:
     rendered_html: str
     rendered_terminal: str
     elapsed_seconds: float
+    trajectory: TrajectoryAssessment | None = None
+    # cost_*_usd are wired in by US-073 (perf/cost story) - reserved here so
+    # the persistence story (US-071) can plumb them through to weekly_digests.
+    cost_total_usd: float | None = None
+    cost_baseline_usd: float | None = None
+    digest_persisted: bool = False
     steps_executed: list[str] = field(default_factory=list)
 
 
@@ -450,7 +456,10 @@ def _step_render(
     return "", ""
 
 
-def run_weekly(since_days: int = 7) -> WeeklyRunSummary:
+def run_weekly(
+    since_days: int = 7,
+    store: ProfileStore | None = None,
+) -> WeeklyRunSummary:
     """Run the weekly pipeline in spec Section 9.4 order.
 
     Order (US-070):
@@ -464,8 +473,9 @@ def run_weekly(since_days: int = 7) -> WeeklyRunSummary:
       8. render
 
     Outputs flow strictly forward: each step only receives data from its
-    documented upstream steps (US-070 AC #2). Persistence, --dry-run,
-    and perf are handled by US-071/072/073 against this same ordering.
+    documented upstream steps (US-070 AC #2). After render, the digest row
+    is UPSERTed into weekly_digests (US-071); --dry-run (US-072) and perf
+    (US-073) hang off this same ordering.
     """
     started = time.time()
     steps: list[str] = []
@@ -501,6 +511,35 @@ def run_weekly(since_days: int = 7) -> WeeklyRunSummary:
     )
     steps.append("render")
 
+    # Trajectory is computed off the scanned sessions, NOT off any step's
+    # output: it is summary metadata for the digest row, not part of the
+    # spec 9.4 pipeline. Compute it here so the digest write below can
+    # populate trajectory_label / trajectory_headline (spec section 14).
+    sessions_with_signals = [(s, extract_signals(s)) for s in sessions]
+    trajectory = assess_trajectory(sessions_with_signals)
+
+    cost_total_usd: float | None = None
+    cost_baseline_usd: float | None = None
+
+    digest_persisted = False
+    if store is None:
+        store = ProfileStore()
+    headline_moment_id = (
+        selection.headline_moment_id if selection is not None else None
+    )
+    html_path = rendered_html if rendered_html else None
+    store.save_weekly_digest(
+        week_iso=week_iso,
+        trajectory_label=trajectory.label.value,
+        trajectory_headline=trajectory.headline,
+        snapshot=snapshot,
+        headline_moment_id=headline_moment_id,
+        cost_total_usd=cost_total_usd,
+        cost_baseline_usd=cost_baseline_usd,
+        html_path=html_path,
+    )
+    digest_persisted = True
+
     return WeeklyRunSummary(
         week_iso=week_iso,
         sessions=sessions,
@@ -512,6 +551,10 @@ def run_weekly(since_days: int = 7) -> WeeklyRunSummary:
         rendered_html=rendered_html,
         rendered_terminal=rendered_terminal,
         elapsed_seconds=round(time.time() - started, 2),
+        trajectory=trajectory,
+        cost_total_usd=cost_total_usd,
+        cost_baseline_usd=cost_baseline_usd,
+        digest_persisted=digest_persisted,
         steps_executed=steps,
     )
 

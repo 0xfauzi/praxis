@@ -25,8 +25,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added ProfileStore.save_weekly_digest / load_weekly_digest / count_weekly_digests with INSERT OR REPLACE on the week_iso PK. snapshot_json is asdict(ProfileSnapshot). run_weekly() now computes trajectory via extract_signals + assess_trajectory (off scanned sessions, not via a new pipeline step) and UPSERTs the digest row after render. WeeklyRunSummary gains trajectory/cost_total_usd/cost_baseline_usd/digest_persisted fields. cost_total_usd and cost_baseline_usd are wired through as None pending US-073. html_path is None until the render step starts writing files."
     },
     {
       "id": "US-072",

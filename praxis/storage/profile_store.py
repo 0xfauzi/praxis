@@ -467,6 +467,76 @@ class ProfileStore:
             outcome=outcome,
         )
 
+    # ---- weekly digests -------------------------------------------------
+
+    def save_weekly_digest(
+        self,
+        week_iso: str,
+        trajectory_label: str,
+        trajectory_headline: str,
+        snapshot: ProfileSnapshot,
+        headline_moment_id: str | None = None,
+        cost_total_usd: float | None = None,
+        cost_baseline_usd: float | None = None,
+        html_path: str | None = None,
+        generated_at: datetime | None = None,
+    ) -> None:
+        """UPSERT one weekly_digests row keyed by week_iso (spec section 14).
+
+        snapshot_json is the full ProfileSnapshot for the week (US-071 AC #2);
+        we round-trip via asdict so future schema additions to ProfileSnapshot
+        flow through automatically. Re-running for the same week_iso replaces
+        the row in-place (idempotent: `INSERT OR REPLACE` against the PK).
+        """
+        when = (generated_at or _utcnow()).isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO weekly_digests
+                (week_iso, generated_at, trajectory_label, trajectory_headline,
+                 headline_moment_id, cost_total_usd, cost_baseline_usd,
+                 snapshot_json, html_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    week_iso,
+                    when,
+                    trajectory_label,
+                    trajectory_headline,
+                    headline_moment_id,
+                    cost_total_usd,
+                    cost_baseline_usd,
+                    json.dumps(asdict(snapshot)),
+                    html_path,
+                ),
+            )
+
+    def load_weekly_digest(self, week_iso: str) -> dict[str, Any] | None:
+        """Read back one weekly_digests row, with snapshot_json parsed.
+
+        Returns None if no row exists for the given week_iso.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT week_iso, generated_at, trajectory_label, trajectory_headline, "
+                "       headline_moment_id, cost_total_usd, cost_baseline_usd, "
+                "       snapshot_json, html_path "
+                "FROM weekly_digests WHERE week_iso = ?",
+                (week_iso,),
+            ).fetchone()
+        if row is None:
+            return None
+        data = dict(row)
+        data["snapshot"] = json.loads(data["snapshot_json"])
+        return data
+
+    def count_weekly_digests(self) -> int:
+        """Number of rows in weekly_digests. Used by idempotency tests."""
+        with self._conn() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) AS c FROM weekly_digests"
+            ).fetchone()["c"]
+
     def prior_follow_up(self, before_week_iso: str) -> FollowUp | None:
         """Return the most recent follow_up with week_iso strictly before the given one.
 
