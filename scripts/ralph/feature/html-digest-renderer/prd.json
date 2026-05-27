@@ -11,8 +11,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Introduced praxis/reports/digest_html.py with a frozen WeeklyDigest dataclass and a pure render() that emits a full HTML document with inline CSS only. The font stack is system-only (Georgia + sans-serif fallback) so the file renders offline; spec section 13.1 self-containment is locked by tests/test_digest_html.py (no <link>, <script>, <img>, http(s):// URLs, @import, or url(...) in the output). 713 tests pass (was 694 + 19 new). The dataclass is minimal scaffolding; later stories (US-062..US-065) extend it with the spec section 6.1 sections."
     },
     {
       "id": "US-062",
@@ -24,8 +24,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Extended praxis/reports/digest_html.py with seven frozen panel dataclasses (Trajectory, MomentPanel, CostLedger, TaskRow, DimRow, FollowUpPanel) plus a one_thing_to_try str on WeeklyDigest. All new fields default to None / () / '' so US-061 callers keep working. The renderer walks a fixed section list in spec section 6.1 order and emits stable HTML id anchors (id='trajectory', 'this-weeks-moment', 'cost-ledger', 'where-the-week-went', 'the-six-dimensions', 'follow-up-from-last-week', 'one-thing-to-try-next-week'); when a panel has no data it renders a placeholder so the document shape is constant. The masthead carries only week + generated date - no /10 anywhere above the trajectory section, locked by tests/test_digest_html.py (test_masthead_does_not_lead_with_overall_score, test_render_has_no_hero_score_before_trajectory, plus order tests). 727 tests pass (was 713 + 14 new). Self-containment contract from US-061 still holds across the populated digest path."
     },
     {
       "id": "US-063",
@@ -37,8 +37,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Expanded the CSS :root token block in praxis/reports/digest_html.py to mirror the full v0.1 palette (--primary #C1573B, --primary-hover, --primary-soft, --primary-line, --cream-100 #FAF7F2, --cream-300, --cream-400, --ink-900/700/500/300/100, --border-light, --border-medium) so the digest reads as the same product as the v0.1 scan report. Switched the display font-family declarations on .masthead-title, .section-title, .traj-label, .traj-headline, .moment-quote, .task-rank/.dim-score, and .next-week-line to lead with 'Libre Baskerville' and fall back to Georgia; the body stack now lists Georgia + 'Libre Baskerville' + serif (mirroring the v0.1 body declaration). Self-containment from US-061 is preserved: no <link>, @import, @font-face, url(...), or fonts.googleapis.com - the browser uses Libre Baskerville if installed locally and falls back to Georgia otherwise (the 'inlined fallback' pattern). Added 5 new tests (test_render_uses_v01_terracotta_primary, test_render_uses_v01_cream_background, test_render_names_libre_baskerville_in_font_stack, test_render_does_not_fetch_libre_baskerville, test_render_keeps_georgia_as_inlined_fallback). 732 tests pass (was 727 + 5 new); pyright clean on praxis/reports/digest_html.py and tests/test_digest_html.py."
     },
     {
       "id": "US-064",
@@ -51,8 +51,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added persistence to praxis/reports/digest_html.py: write_digest(digest, home=None) -> Path renders the digest and writes weeks/<iso>.html atomically (temp file + os.replace, no leftover .tmp on success), then refreshes latest.html via _update_latest_pointer (relative symlink on POSIX; copy fallback when symlink_to raises OSError/NotImplementedError - covers Windows-without-developer-mode and FAT filesystems). Home directory defaults via the existing PRAXIS_HOME pattern (praxis.storage.profile_store.resolve_home), so tests sandbox via tmp_path or monkeypatch.setenv. Acceptance criteria all locked in by tests/test_digest_html.py: path layout (weeks/<iso>.html), weeks-dir auto-create, latest.html exists and dereferences to the same bytes, relative-symlink target (resilient to ~/.praxis being moved), overwrite-same-week behavior, broken-symlink replacement, no leftover .tmp, and PRAXIS_HOME-honoring default. 745 tests pass (was 732 + 13 new for US-064); pyright clean on praxis/reports/digest_html.py and tests/test_digest_html.py."
     },
     {
       "id": "US-065",
@@ -64,8 +64,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Wired praxis.redactor.redact_secrets and a <synthetic> marker strip into the render path of praxis/reports/digest_html.py. New private helper _safe(text) replaces every prior html.escape call on user-content fields: it runs redact_secrets first (so provider API keys / AWS access keys / GitHub PATs / JWTs / labeled-secret tails become [REDACTED]), strips the literal <synthetic> placeholder used by the codex scanner's _real_model path, then html.escapes the result. Order matters: redact and strip BEFORE escape, so `<synthetic>` never even reaches the &lt;synthetic&gt; visible-but-still-leaked form. The redactor is itself idempotent and .replace is too, so _safe is idempotent. Applied to: week_iso, generated_at, Trajectory(label/headline/confidence_band), MomentPanel(quoted_excerpt/why_lost_score/next_time_try), CostLedger(biggest_line/sonnet_swap_note), TaskRow.label, DimRow.title, FollowUpPanel(commitment_text/outcome), one_thing_to_try. Added 14 tests under 'US-065: no synthetic markers, no raw secrets, no PII' covering: each provider key family is redacted, every user-content field path is sealed, surrounding prose is preserved, idempotence under double-render, on-disk write_digest output is clean, US-061 self-containment is preserved, existing html.escape behavior for non-synthetic angle brackets still holds, and an already-[REDACTED] placeholder is not re-redacted. 759 tests pass (was 745 + 14 new); pyright clean on praxis/reports/digest_html.py and tests/test_digest_html.py."
     }
   ]
 }
