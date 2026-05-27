@@ -74,6 +74,13 @@ class MomentSelection:
     supporting_moment_ids: list[str] = field(default_factory=list)
 
 
+class InvalidMomentSelectionError(ValueError):
+    """Raised when the selector LLM's response references moment_ids
+    that are not in the input candidate set, and the single re-prompt
+    permitted by spec section 4.3 / US-030 also failed to produce a
+    valid response. US-031's fallback path catches this."""
+
+
 # (system_prompt, user_prompt, model) -> response text. Tests pass a
 # stub here so the pipeline can be exercised without hitting any API.
 LLMCaller = Callable[[str, str, str], str]
@@ -198,6 +205,33 @@ def _call_openai(system: str, user: str, model: str) -> str:
     return response.choices[0].message.content or ""
 
 
+def _invalid_ids(selection: MomentSelection, valid_ids: set[str]) -> list[str]:
+    """Return moment_ids referenced by the selection that are NOT in
+    valid_ids. Order is preserved (headline first, then supporting in
+    the order the model returned them) so the re-prompt error message
+    reads naturally; duplicates are de-duplicated."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for mid in (selection.headline_moment_id, *selection.supporting_moment_ids):
+        if mid not in valid_ids and mid not in seen:
+            out.append(mid)
+            seen.add(mid)
+    return out
+
+
+def _retry_user_prompt(original: str, invalid: list[str]) -> str:
+    """Build the user-turn prompt for the single permitted re-prompt:
+    repeat the candidate list, then name the offending ids and ask the
+    model to retry using only ids from the candidate set. Naming the
+    bad ids verbatim is what the spec means by 'the specific error'."""
+    return (
+        f"{original}\n\n"
+        "Your previous response referenced moment_ids that are not in the "
+        f"candidate set: {', '.join(invalid)}. Retry, returning only "
+        "moment_ids from the candidate set above."
+    )
+
+
 def cheap_model_for(primary_provider: str) -> str:
     """Return the cheap-tier model id for the given primary provider.
 
@@ -232,6 +266,7 @@ def select_moments(
     model = cheap_model_for(primary_provider)
     system_prompt = _SYSTEM_PROMPT
     user_prompt = _build_user_prompt(candidates)
+    valid_ids = {c.moment.moment_id for c in candidates}
 
     if llm_caller is None:
         if primary_provider == "openai":
@@ -240,4 +275,18 @@ def select_moments(
             llm_caller = _call_claude
 
     text = llm_caller(system_prompt, user_prompt, model)
-    return _parse_selection(text)
+    selection = _parse_selection(text)
+    invalid = _invalid_ids(selection, valid_ids)
+    if not invalid:
+        return selection
+
+    retry_user = _retry_user_prompt(user_prompt, invalid)
+    retry_text = llm_caller(system_prompt, retry_user, model)
+    retry_selection = _parse_selection(retry_text)
+    retry_invalid = _invalid_ids(retry_selection, valid_ids)
+    if retry_invalid:
+        raise InvalidMomentSelectionError(
+            "Selector returned moment_ids not in candidate set after retry: "
+            f"{', '.join(retry_invalid)}"
+        )
+    return retry_selection

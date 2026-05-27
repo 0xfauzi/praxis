@@ -20,12 +20,15 @@ import pytest
 
 from praxis.scoring.moment_selector import (
     PRIMARY_CHEAP_MODELS,
+    InvalidMomentSelectionError,
     Moment,
     MomentCandidate,
     MomentSelection,
     _build_user_prompt,
     _candidate_payload,
+    _invalid_ids,
     _parse_selection,
+    _retry_user_prompt,
     _SYSTEM_PROMPT,
     cheap_model_for,
     select_moments,
@@ -371,3 +374,245 @@ def test_select_moments_serializes_recurrence_and_dollar_impact_in_prompt():
     # Both numbers are in the JSON payload the LLM saw.
     assert '"recurrence_count": 2' in captured["user"]
     assert '"dollar_impact_estimate": 4.5' in captured["user"]
+
+
+# ---------- US-030: validate IDs, re-prompt once on failure ----------
+
+
+def test_invalid_ids_helper_empty_when_all_valid():
+    sel = MomentSelection(
+        headline_moment_id="m1",
+        headline_reason="x.",
+        supporting_moment_ids=["m2", "m3"],
+    )
+    assert _invalid_ids(sel, {"m1", "m2", "m3"}) == []
+
+
+def test_invalid_ids_helper_returns_headline_then_supporting_in_order():
+    sel = MomentSelection(
+        headline_moment_id="BAD_H",
+        headline_reason="x.",
+        supporting_moment_ids=["m2", "BAD_S"],
+    )
+    assert _invalid_ids(sel, {"m2"}) == ["BAD_H", "BAD_S"]
+
+
+def test_invalid_ids_helper_dedupes_repeats():
+    sel = MomentSelection(
+        headline_moment_id="BAD",
+        headline_reason="x.",
+        supporting_moment_ids=["BAD", "BAD"],
+    )
+    assert _invalid_ids(sel, set()) == ["BAD"]
+
+
+def test_retry_user_prompt_names_each_invalid_id_and_candidate_set():
+    out = _retry_user_prompt("ORIGINAL_PROMPT", ["BAD1", "BAD2"])
+    assert "ORIGINAL_PROMPT" in out
+    assert "BAD1" in out
+    assert "BAD2" in out
+    assert "candidate set" in out
+
+
+def test_select_moments_does_not_reprompt_when_all_ids_valid():
+    """If the first response references only valid ids, no second LLM
+    call is made -- the retry budget is reserved for actual failures."""
+    calls: list[tuple[str, str, str]] = []
+
+    def stub(system: str, user: str, model: str) -> str:
+        calls.append((system, user, model))
+        return json.dumps(
+            {
+                "headline_moment_id": "m1",
+                "headline_reason": "x.",
+                "supporting_moment_ids": ["m2"],
+            }
+        )
+
+    cands = [_candidate(moment_id="m1"), _candidate(moment_id="m2")]
+    out = select_moments(cands, primary_provider="anthropic", llm_caller=stub)
+    assert out is not None
+    assert out.headline_moment_id == "m1"
+    assert len(calls) == 1
+
+
+def test_select_moments_reprompts_when_headline_id_unknown():
+    """First response's headline is not in the candidate set: the LLM
+    is called a second time with the bad id named in the user prompt."""
+    calls: list[tuple[str, str, str]] = []
+
+    def stub(system: str, user: str, model: str) -> str:
+        calls.append((system, user, model))
+        if len(calls) == 1:
+            return json.dumps(
+                {
+                    "headline_moment_id": "BOGUS",
+                    "headline_reason": "x.",
+                    "supporting_moment_ids": [],
+                }
+            )
+        return json.dumps(
+            {
+                "headline_moment_id": "m1",
+                "headline_reason": "corrected.",
+                "supporting_moment_ids": [],
+            }
+        )
+
+    cands = [_candidate(moment_id="m1")]
+    out = select_moments(cands, primary_provider="anthropic", llm_caller=stub)
+    assert out is not None
+    assert out.headline_moment_id == "m1"
+    assert out.headline_reason == "corrected."
+    assert len(calls) == 2
+    assert "BOGUS" in calls[1][1]
+
+
+def test_select_moments_reprompts_when_supporting_id_unknown():
+    """One supporting id is bogus: re-prompt, recover."""
+    calls: list[tuple[str, str, str]] = []
+
+    def stub(system: str, user: str, model: str) -> str:
+        calls.append((system, user, model))
+        if len(calls) == 1:
+            return json.dumps(
+                {
+                    "headline_moment_id": "m1",
+                    "headline_reason": "x.",
+                    "supporting_moment_ids": ["m2", "GHOST"],
+                }
+            )
+        return json.dumps(
+            {
+                "headline_moment_id": "m1",
+                "headline_reason": "x.",
+                "supporting_moment_ids": ["m2"],
+            }
+        )
+
+    cands = [_candidate(moment_id="m1"), _candidate(moment_id="m2")]
+    out = select_moments(cands, primary_provider="anthropic", llm_caller=stub)
+    assert out is not None
+    assert out.supporting_moment_ids == ["m2"]
+    assert len(calls) == 2
+    assert "GHOST" in calls[1][1]
+
+
+def test_select_moments_retry_prompt_lists_every_invalid_id():
+    """When several ids are wrong, the retry message names them all so
+    the model knows the full set of corrections to make."""
+    calls: list[tuple[str, str, str]] = []
+
+    def stub(system: str, user: str, model: str) -> str:
+        calls.append((system, user, model))
+        if len(calls) == 1:
+            return json.dumps(
+                {
+                    "headline_moment_id": "BAD1",
+                    "headline_reason": "x.",
+                    "supporting_moment_ids": ["BAD2", "BAD3"],
+                }
+            )
+        return json.dumps(
+            {
+                "headline_moment_id": "m1",
+                "headline_reason": "x.",
+                "supporting_moment_ids": [],
+            }
+        )
+
+    cands = [_candidate(moment_id="m1")]
+    select_moments(cands, primary_provider="anthropic", llm_caller=stub)
+    retry_user = calls[1][1]
+    assert "BAD1" in retry_user
+    assert "BAD2" in retry_user
+    assert "BAD3" in retry_user
+
+
+def test_select_moments_retry_includes_original_candidate_payload():
+    """The retry must include the original candidate list -- otherwise
+    the model is guessing without context. The retry user prompt is the
+    original prompt + an error tail."""
+    calls: list[tuple[str, str, str]] = []
+
+    def stub(system: str, user: str, model: str) -> str:
+        calls.append((system, user, model))
+        if len(calls) == 1:
+            return json.dumps(
+                {
+                    "headline_moment_id": "WRONG",
+                    "headline_reason": "x.",
+                    "supporting_moment_ids": [],
+                }
+            )
+        return json.dumps(
+            {
+                "headline_moment_id": "m1",
+                "headline_reason": "x.",
+                "supporting_moment_ids": [],
+            }
+        )
+
+    cands = [
+        _candidate(moment_id="m1", dim_key="verification"),
+        _candidate(moment_id="m2", dim_key="planning"),
+    ]
+    select_moments(cands, primary_provider="anthropic", llm_caller=stub)
+    retry_user = calls[1][1]
+    # Original candidates still present in the retry prompt.
+    assert "m1" in retry_user
+    assert "m2" in retry_user
+    assert "verification" in retry_user
+    assert "planning" in retry_user
+
+
+def test_select_moments_raises_when_retry_response_still_invalid():
+    """If the second attempt still references unknown ids, raise
+    InvalidMomentSelectionError so the US-031 fallback path can catch
+    it. The error message names the offending id(s)."""
+    calls: list[tuple[str, str, str]] = []
+
+    def stub(system: str, user: str, model: str) -> str:
+        calls.append((system, user, model))
+        return json.dumps(
+            {
+                "headline_moment_id": "STILL_BAD",
+                "headline_reason": "x.",
+                "supporting_moment_ids": [],
+            }
+        )
+
+    cands = [_candidate(moment_id="m1")]
+    with pytest.raises(InvalidMomentSelectionError) as excinfo:
+        select_moments(cands, primary_provider="anthropic", llm_caller=stub)
+    assert "STILL_BAD" in str(excinfo.value)
+
+
+def test_select_moments_never_calls_llm_a_third_time():
+    """The retry budget is exactly one. Two failures must NOT trigger a
+    third attempt -- that would be a runaway cost and contradicts the
+    US-030 acceptance criterion 're-prompted once'."""
+    n = 0
+
+    def stub(system: str, user: str, model: str) -> str:
+        nonlocal n
+        n += 1
+        return json.dumps(
+            {
+                "headline_moment_id": "NOPE",
+                "headline_reason": "x.",
+                "supporting_moment_ids": [],
+            }
+        )
+
+    cands = [_candidate(moment_id="m1")]
+    with pytest.raises(InvalidMomentSelectionError):
+        select_moments(cands, primary_provider="anthropic", llm_caller=stub)
+    assert n == 2
+
+
+def test_invalid_moment_selection_error_is_a_value_error():
+    """InvalidMomentSelectionError must subclass ValueError so callers
+    that catch the broad shape still work; US-031 can catch the narrow
+    type for its fallback path."""
+    assert issubclass(InvalidMomentSelectionError, ValueError)
