@@ -31,7 +31,7 @@ from praxis.scanners import ALL_SCANNERS
 from praxis.scoring.aggregate import (
     ProfileSnapshot,
     SessionScore,
-    score_one_session,
+    score_one_session_pass1,
 )
 from praxis.scoring.coach import Coaching, generate_coaching
 from praxis.storage.profile_store import ProfileStore
@@ -76,15 +76,19 @@ def _gather_sessions(since_days: int | None = None) -> list[Session]:
 
 def run(
     since_days: int | None = 30,
-    max_new_scored: int = 50,
+    max_new_scored: int | None = None,
     force_consolidate: bool = False,
 ) -> RunSummary:
     """Full pipeline. Idempotent: re-running won't re-score known sessions.
 
     Args:
         since_days: Only consider session files modified in the last N days.
-        max_new_scored: Cap on how many newly-discovered sessions get the
-            judge treatment in one run (protects API budgets).
+        max_new_scored: Optional cap on how many newly-discovered sessions
+            get the judge treatment in one run. Defaults to ``None`` (no
+            cap): spec §9.1 mandates that pass 1 runs on every session in
+            the weekly window, with no skip path. The parameter is retained
+            so power users can override for ad-hoc CLI runs (``praxis scan``
+            with a tight budget), but the weekly pipeline always passes None.
         force_consolidate: Run daily consolidation even if one already
             exists for today.
     """
@@ -93,15 +97,22 @@ def run(
 
     sessions = _gather_sessions(since_days=since_days)
     # Filter out sessions with no user turns (system-only / tool-only files).
+    # This is a structural filter (nothing to judge), not a heuristic skip.
     sessions = [s for s in sessions if s.user_turns]
     new_sessions = [s for s in sessions if not store.has_session(s.stable_id)]
 
-    # Sort newest first so if we hit the cap, the most recent get scored.
+    # Sort newest first so if a caller overrides the cap, the most recent
+    # sessions win. The default has no cap (spec §9.1: pass 1 on every session).
     new_sessions.sort(key=lambda s: s.started_at, reverse=True)
-    to_score = new_sessions[:max_new_scored]
+    if max_new_scored is None:
+        to_score = new_sessions
+    else:
+        to_score = new_sessions[:max_new_scored]
     scored_count = 0
     for session in to_score:
-        score = score_one_session(session)
+        # Spec §9.1 (US-027): pass 1 runs on every session in the window using
+        # the cheap-tier judge. No heuristic features gate this call.
+        score = score_one_session_pass1(session)
         if score is None:
             # No judge available (no API keys, or judge errored) - skip the
             # session rather than substituting a fallback score.

@@ -14,11 +14,16 @@ from datetime import datetime, timezone
 
 from praxis.models import Moment, Provider, Role, Session, Turn
 from praxis.scoring.judge import (
+    CLAUDE_CHEAP_MODEL,
+    CLAUDE_FRONTIER_MODEL,
+    OPENAI_CHEAP_MODEL,
+    OPENAI_FRONTIER_MODEL,
     JudgeResult,
     _build_system_prompt,
     _parse_confidence,
     _parse_moments,
     _parse_response,
+    score_session_pass1,
     verify_moment_substrings,
 )
 
@@ -577,3 +582,91 @@ def test_judge_result_default_confidence_is_medium() -> None:
     )
     assert r.confidence == "medium"
     assert r.confidence_reason == ""
+
+
+# ---------------------------------------------------------------------------
+# US-027: pass 1 entrypoint (cheap-tier judge that runs on every session)
+# ---------------------------------------------------------------------------
+
+
+def test_pass1_constants_match_spec() -> None:
+    """Spec §9.1: pass 1 uses haiku / gpt-5-mini; pass 2 uses opus / gpt-5."""
+    assert CLAUDE_CHEAP_MODEL == "claude-haiku-4-5"
+    assert OPENAI_CHEAP_MODEL == "gpt-5-mini"
+    assert CLAUDE_FRONTIER_MODEL == "claude-opus-4-7"
+    assert OPENAI_FRONTIER_MODEL == "gpt-5"
+
+
+def test_pass1_returns_none_without_api_keys(monkeypatch) -> None:
+    """US-027: pass 1 cannot fabricate scores; without keys it returns None.
+
+    Returning None here means "this session is unjudged in this run", not
+    "skip it on heuristic grounds". The orchestrator's caller already
+    differentiates: a None pass-1 result is logged, never substituted.
+    """
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    session = _make_session([(Role.USER, "anything")])
+    assert score_session_pass1(session) is None
+
+
+def test_pass1_uses_cheap_claude_model_when_preferred(monkeypatch) -> None:
+    """Pass 1 calls Claude with CLAUDE_CHEAP_MODEL when anthropic is the preference."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    seen: dict[str, object] = {}
+
+    def _fake(session, model=CLAUDE_FRONTIER_MODEL):  # noqa: ARG001
+        seen["model"] = model
+        return JudgeResult(
+            dimension_scores={}, rationale={}, standout_moments=[],
+            failure_modes=[], overall_note="", judge_model=model,
+        )
+
+    monkeypatch.setattr("praxis.scoring.judge.score_with_claude", _fake)
+    result = score_session_pass1(_make_session([(Role.USER, "x")]))
+    assert result is not None
+    assert seen["model"] == CLAUDE_CHEAP_MODEL
+
+
+def test_pass1_uses_cheap_openai_model_when_preferred(monkeypatch) -> None:
+    """When the openai provider is preferred, pass 1 uses OPENAI_CHEAP_MODEL."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
+    seen: dict[str, object] = {}
+
+    def _fake(session, model=OPENAI_FRONTIER_MODEL):  # noqa: ARG001
+        seen["model"] = model
+        return JudgeResult(
+            dimension_scores={}, rationale={}, standout_moments=[],
+            failure_modes=[], overall_note="", judge_model=model,
+        )
+
+    monkeypatch.setattr("praxis.scoring.judge.score_with_openai", _fake)
+    result = score_session_pass1(_make_session([(Role.USER, "x")]), prefer="openai")
+    assert result is not None
+    assert seen["model"] == OPENAI_CHEAP_MODEL
+
+
+def test_pass1_falls_back_to_other_provider_on_error(monkeypatch) -> None:
+    """If the preferred provider raises, pass 1 tries the other one (still cheap-tier)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
+    seen_openai: dict[str, object] = {}
+
+    def _broken_claude(session, model=CLAUDE_FRONTIER_MODEL):  # noqa: ARG001
+        raise RuntimeError("anthropic down")
+
+    def _fake_openai(session, model=OPENAI_FRONTIER_MODEL):  # noqa: ARG001
+        seen_openai["model"] = model
+        return JudgeResult(
+            dimension_scores={}, rationale={}, standout_moments=[],
+            failure_modes=[], overall_note="", judge_model=model,
+        )
+
+    monkeypatch.setattr("praxis.scoring.judge.score_with_claude", _broken_claude)
+    monkeypatch.setattr("praxis.scoring.judge.score_with_openai", _fake_openai)
+
+    result = score_session_pass1(_make_session([(Role.USER, "x")]))
+    assert result is not None
+    assert seen_openai["model"] == OPENAI_CHEAP_MODEL

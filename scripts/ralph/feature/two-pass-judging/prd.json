@@ -11,8 +11,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added score_session_pass1 (cheap-tier judge) in praxis/scoring/judge.py with constants CLAUDE_CHEAP_MODEL=claude-haiku-4-5 and OPENAI_CHEAP_MODEL=gpt-5-mini. Added score_one_session_pass1 wrapper in aggregate.py. Orchestrator now calls the pass-1 entrypoint and the max_new_scored default changed from 50 to None so every session in the weekly window goes through pass 1."
     },
     {
       "id": "US-028",

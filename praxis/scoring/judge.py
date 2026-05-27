@@ -37,6 +37,15 @@ _WHITESPACE_RE = re.compile(r"\s+")
 MAX_TRANSCRIPT_CHARS = 12_000
 
 
+# Spec §9.1 two-pass judging: pass 1 always runs on every session using the
+# cheap-tier model from the user's primary provider, and emits its own
+# self-confidence flag that decides escalation to pass 2 (the frontier model).
+CLAUDE_FRONTIER_MODEL = "claude-opus-4-7"
+CLAUDE_CHEAP_MODEL = "claude-haiku-4-5"
+OPENAI_FRONTIER_MODEL = "gpt-5"
+OPENAI_CHEAP_MODEL = "gpt-5-mini"
+
+
 @dataclass
 class JudgeResult:
     """Output of one LLM judge call on one session."""
@@ -399,7 +408,7 @@ def verify_moment_substrings(session: Session, moments: list[Moment]) -> list[Mo
     return survivors
 
 
-def score_with_claude(session: Session, model: str = "claude-opus-4-7") -> JudgeResult:
+def score_with_claude(session: Session, model: str = CLAUDE_FRONTIER_MODEL) -> JudgeResult:
     """Score one session using Claude. Requires ANTHROPIC_API_KEY in env."""
     from anthropic import Anthropic  # type: ignore
 
@@ -424,7 +433,7 @@ def score_with_claude(session: Session, model: str = "claude-opus-4-7") -> Judge
     return result
 
 
-def score_with_openai(session: Session, model: str = "gpt-5") -> JudgeResult:
+def score_with_openai(session: Session, model: str = OPENAI_FRONTIER_MODEL) -> JudgeResult:
     """Score one session using OpenAI. Requires OPENAI_API_KEY in env."""
     from openai import OpenAI  # type: ignore
 
@@ -470,5 +479,39 @@ def score_session(session: Session, prefer: str = "claude") -> JudgeResult | Non
         except Exception as exc:  # noqa: BLE001
             # Keep going — the other provider might work.
             print(f"[scorer] {choice} judge failed: {exc!r}", file=sys.stderr)
+            continue
+    return None
+
+
+def score_session_pass1(session: Session, prefer: str = "claude") -> JudgeResult | None:
+    """Pass 1 of the two-pass judge pipeline (spec §9.1).
+
+    Pass 1 runs the cheap-tier judge on every session in the weekly window.
+    There is no skip path: the orchestrator calls this for every session
+    regardless of feature counts, prompt length, or any other heuristic. The
+    cheap model's own ``confidence`` self-flag is what decides whether the
+    session escalates to pass 2 (a separate frontier-model call, US-028).
+
+    Returns None when no API key is configured. Provider preference matches
+    ``score_session``: try the preferred provider first, fall back to the
+    other if its call raises.
+    """
+    have_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    have_openai = bool(os.environ.get("OPENAI_API_KEY"))
+
+    order: list[str]
+    if prefer == "claude":
+        order = ["claude", "openai"]
+    else:
+        order = ["openai", "claude"]
+
+    for choice in order:
+        try:
+            if choice == "claude" and have_anthropic:
+                return score_with_claude(session, model=CLAUDE_CHEAP_MODEL)
+            if choice == "openai" and have_openai:
+                return score_with_openai(session, model=OPENAI_CHEAP_MODEL)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[scorer] {choice} pass-1 judge failed: {exc!r}", file=sys.stderr)
             continue
     return None

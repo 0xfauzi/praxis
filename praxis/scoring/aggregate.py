@@ -13,7 +13,7 @@ from statistics import mean
 
 from praxis.models import Session
 from praxis.scoring.features import SessionFeatures, extract
-from praxis.scoring.judge import JudgeResult, score_session
+from praxis.scoring.judge import JudgeResult, score_session, score_session_pass1
 from praxis.scoring.rubric import RUBRIC
 
 
@@ -36,16 +36,14 @@ def _weighted_overall(dimension_scores: dict[str, float]) -> float:
     return round(total, 2)
 
 
-def score_one_session(session: Session) -> SessionScore | None:
-    """Score one session via the LLM judge.
+def _session_score_from_judge(session: Session, judge: JudgeResult) -> SessionScore:
+    """Build a SessionScore from a session and its judge output.
 
-    Returns None if no judge is available (no API keys configured, or all
-    configured judges errored). Callers should treat None as "skip this
-    session" rather than substituting a default.
+    Shared by the frontier-judge path (``score_one_session``) and the
+    pass-1 cheap-tier path (``score_one_session_pass1``); both packages
+    the same SessionScore shape, only the judge model used to produce
+    ``judge`` differs.
     """
-    judge = score_session(session)
-    if judge is None:
-        return None
     features = extract(session)
     dimension_scores = {d.key: judge.dimension_scores.get(d.key, 5.0) for d in RUBRIC}
     overall = _weighted_overall(dimension_scores)
@@ -59,6 +57,34 @@ def score_one_session(session: Session) -> SessionScore | None:
         features=features,
         source_path=session.source_path,
     )
+
+
+def score_one_session(session: Session) -> SessionScore | None:
+    """Score one session via the LLM judge.
+
+    Returns None if no judge is available (no API keys configured, or all
+    configured judges errored). Callers should treat None as "skip this
+    session" rather than substituting a default.
+    """
+    judge = score_session(session)
+    if judge is None:
+        return None
+    return _session_score_from_judge(session, judge)
+
+
+def score_one_session_pass1(session: Session) -> SessionScore | None:
+    """Pass 1 of the two-pass judge (spec §9.1): one cheap-tier call per session.
+
+    Pass 1 MUST run on every session in the weekly window. There is no skip
+    path; the orchestrator iterates the whole window without consulting any
+    heuristic features. Returns None only when no API key is configured (the
+    judge layer cannot run at all), never to "skip" a session for cost or
+    feature-volume reasons.
+    """
+    judge = score_session_pass1(session)
+    if judge is None:
+        return None
+    return _session_score_from_judge(session, judge)
 
 
 @dataclass
