@@ -3,8 +3,8 @@
 The weekly digest cadence is the core delivery surface in v0.2: a
 LaunchAgent fires ``praxis week --notify`` on the user-configured day
 and time, which writes the HTML digest under ``~/.praxis/weeks/`` and
-posts a macOS notification. ``install-weekly`` generates and loads the
-launchd plist; ``uninstall-weekly`` (a separate story) reverses it.
+posts a macOS notification. ``install_weekly_macos`` generates and
+loads the launchd plist; ``uninstall_weekly_macos`` reverses it.
 
 This module is intentionally testable: the plist text is built by a
 pure function (:func:`build_plist`) and the launchctl calls go through
@@ -231,3 +231,35 @@ def install_weekly_macos(
             f"{stderr or 'no stderr output'}"
         )
     return plist_file
+
+
+def uninstall_weekly_macos(home: Path | None = None) -> bool:
+    """Unload the LaunchAgent and delete the plist; return whether anything existed.
+
+    Per AC US-080, this must exit 0 even when the job is already gone:
+    the user-facing contract is "after uninstall-weekly, the job is not
+    scheduled," and that contract is trivially satisfied when nothing
+    was scheduled in the first place. So we treat both the
+    "plist missing" case and a non-zero ``launchctl unload`` as
+    success (launchctl returns non-zero for "not loaded," which is
+    indistinguishable from a real error from our side -- and either
+    way, deleting the file gets us to the desired end state).
+
+    Returns ``True`` when a plist file was found and removed, ``False``
+    when nothing was scheduled. The CLI does not currently branch on
+    this, but tests assert on it and a future "--quiet" flag could.
+    """
+    plist_file = plist_path(home)
+    if not plist_file.exists():
+        return False
+
+    # Best-effort unload. launchctl returns non-zero when the job is
+    # not loaded, and we cannot distinguish that from a real failure;
+    # in both cases the right next move is to delete the file.
+    subprocess.run(
+        ["launchctl", "unload", str(plist_file)],
+        check=False,
+        capture_output=True,
+    )
+    plist_file.unlink()
+    return True

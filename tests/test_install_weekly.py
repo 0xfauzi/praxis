@@ -1,4 +1,4 @@
-"""Tests for the macOS install-weekly path (US-079).
+"""Tests for the macOS install-weekly / uninstall-weekly paths (US-079, US-080).
 
 Acceptance criteria covered:
   - ``praxis install-weekly`` writes ~/Library/LaunchAgents/co.praxis.weekly.plist
@@ -7,6 +7,8 @@ Acceptance criteria covered:
   - Re-running install-weekly is idempotent (existing job is unloaded,
     the plist is overwritten, and the new job is loaded again).
   - launchctl failure surfaces as CLI exit code 4 with a clear message.
+  - ``praxis uninstall-weekly`` unloads and deletes the plist.
+  - ``praxis uninstall-weekly`` is a no-op (exit 0) when no plist exists.
 
 Subprocess is monkeypatched: real ``launchctl`` is not invoked. The
 tmp_home fixture patches ``Path.home()`` so the plist lands inside
@@ -28,6 +30,7 @@ from praxis.cli.install_weekly import (
     build_plist,
     install_weekly_macos,
     plist_path,
+    uninstall_weekly_macos,
 )
 
 
@@ -239,3 +242,124 @@ def test_plist_path_uses_home_override(tmp_path):
     """plist_path honors the explicit ``home`` argument for non-test callers too."""
     expected = tmp_path / "Library" / "LaunchAgents" / "co.praxis.weekly.plist"
     assert plist_path(home=tmp_path) == expected
+
+
+# ---------------------------------------------------------------------------
+# uninstall_weekly_macos -- US-080.
+# ---------------------------------------------------------------------------
+
+
+def test_uninstall_weekly_unloads_and_deletes_plist(tmp_home, fake_launchctl):
+    """Uninstall calls ``launchctl unload`` on the plist and removes the file."""
+    # Install first so there's something to remove (this records a
+    # ``launchctl load`` call in fake_launchctl that we slice off
+    # before asserting on uninstall's calls).
+    installed = install_weekly_macos()
+    assert installed.exists()
+    install_call_count = len(fake_launchctl)
+
+    removed = uninstall_weekly_macos()
+
+    assert removed is True
+    assert not installed.exists()
+    new_calls = fake_launchctl[install_call_count:]
+    assert len(new_calls) == 1
+    assert new_calls[0][0] == "launchctl"
+    assert new_calls[0][1] == "unload"
+    assert new_calls[0][-1] == str(installed)
+
+
+def test_uninstall_weekly_when_absent_is_a_noop(tmp_home, fake_launchctl):
+    """When no plist exists, uninstall returns False and does not call launchctl."""
+    expected = plist_path()
+    assert not expected.exists()
+
+    removed = uninstall_weekly_macos()
+
+    assert removed is False
+    # No subprocess call should have been made: there was nothing to unload.
+    assert fake_launchctl == []
+
+
+def test_uninstall_weekly_tolerates_launchctl_failure(tmp_home, monkeypatch):
+    """A non-zero ``launchctl unload`` must not block plist deletion.
+
+    launchctl returns non-zero when the job is not currently loaded,
+    and we cannot distinguish that from a real failure; either way,
+    the plist file should still be removed so the user reaches the
+    "nothing scheduled" end state.
+    """
+    # Place a plist via the real installer (with a stub that succeeds),
+    # then swap the stub for one that fails on unload to simulate a
+    # half-detached job.
+    monkeypatch.setattr(
+        "praxis.cli.install_weekly.subprocess.run",
+        lambda cmd, *a, **kw: subprocess.CompletedProcess(
+            cmd, returncode=0, stdout="", stderr=""
+        ),
+    )
+    installed = install_weekly_macos()
+    assert installed.exists()
+
+    monkeypatch.setattr(
+        "praxis.cli.install_weekly.subprocess.run",
+        lambda cmd, *a, **kw: subprocess.CompletedProcess(
+            cmd, returncode=1, stdout="", stderr="not loaded"
+        ),
+    )
+
+    removed = uninstall_weekly_macos()
+    assert removed is True
+    assert not installed.exists()
+
+
+def test_cli_uninstall_weekly_exits_0_after_removal(tmp_home, capsys, monkeypatch):
+    """``praxis uninstall-weekly`` exits 0 and reports the path it removed."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        "praxis.cli.install_weekly.subprocess.run",
+        lambda cmd, *a, **kw: subprocess.CompletedProcess(
+            cmd, returncode=0, stdout="", stderr=""
+        ),
+    )
+    installed = install_weekly_macos()
+    assert installed.exists()
+
+    code = main(["uninstall-weekly"])
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Removed" in out
+    assert "co.praxis.weekly.plist" in out
+    assert not installed.exists()
+
+
+def test_cli_uninstall_weekly_exits_0_when_nothing_installed(
+    tmp_home, capsys, monkeypatch
+):
+    """``praxis uninstall-weekly`` exits 0 even when there is no plist to remove."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        "praxis.cli.install_weekly.subprocess.run",
+        lambda cmd, *a, **kw: subprocess.CompletedProcess(
+            cmd, returncode=0, stdout="", stderr=""
+        ),
+    )
+    assert not plist_path().exists()
+
+    code = main(["uninstall-weekly"])
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "No weekly LaunchAgent" in out
+
+
+def test_cli_uninstall_weekly_non_macos_exits_0(tmp_home, capsys, monkeypatch):
+    """On non-macOS, ``praxis uninstall-weekly`` exits 0 and explains the no-op."""
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    code = main(["uninstall-weekly"])
+    err = capsys.readouterr().err
+
+    assert code == 0
+    assert "non-macOS" in err

@@ -442,6 +442,42 @@ def cmd_install_weekly(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+def cmd_uninstall_weekly(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Unload and delete the macOS LaunchAgent installed by ``install-weekly``.
+
+    On macOS, runs ``launchctl unload`` on
+    ``~/Library/LaunchAgents/co.praxis.weekly.plist`` (best-effort) and
+    then deletes the plist file. Running this when no job is installed
+    is not an error: per AC US-080, the user contract is "after
+    uninstall-weekly, the weekly job is not scheduled," which is
+    trivially satisfied when nothing was scheduled to begin with.
+
+    Exit codes:
+      0  always (job removed, or never installed).
+    """
+    if sys.platform != "darwin":
+        # Non-macOS is a no-op symmetric with install-weekly's
+        # placeholder branch -- there is nothing to remove because
+        # nothing was scheduled.
+        print(
+            "uninstall-weekly: non-macOS has no scheduled job to remove.",
+            file=sys.stderr,
+        )
+        return 0
+    from praxis.cli.install_weekly import (
+        plist_path,
+        uninstall_weekly_macos,
+    )
+
+    removed = uninstall_weekly_macos()
+    path = plist_path()
+    if removed:
+        print(f"Removed weekly LaunchAgent: {path}")
+    else:
+        print(f"No weekly LaunchAgent found at: {path}")
+    return 0
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     from praxis.config_cli import (
         ConfigCLIError,
@@ -715,6 +751,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     iw.set_defaults(func=cmd_install_weekly)
+
+    uw = sub.add_parser(
+        "uninstall-weekly",
+        help="Unload and remove the macOS LaunchAgent installed by install-weekly.",
+        description=(
+            "Run 'launchctl unload' against "
+            "~/Library/LaunchAgents/co.praxis.weekly.plist and delete the "
+            "file. Exits 0 even when no job is currently installed."
+        ),
+    )
+    uw.set_defaults(func=cmd_uninstall_weekly)
 
     cfg = sub.add_parser("config",
                          help="View, --get, or --set ~/.praxis/config.toml.")
