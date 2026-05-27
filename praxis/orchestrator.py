@@ -32,6 +32,7 @@ from praxis.scoring.aggregate import (
     ProfileSnapshot,
     SessionScore,
     score_one_session_pass1,
+    score_one_session_pass2,
 )
 from praxis.scoring.coach import Coaching, generate_coaching
 from praxis.storage.profile_store import ProfileStore
@@ -117,6 +118,15 @@ def run(
             # No judge available (no API keys, or judge errored) - skip the
             # session rather than substituting a fallback score.
             continue
+        # Spec §9.1 (US-028): when pass 1 self-flags as low confidence, re-judge
+        # on the frontier model in a fresh call (no pass-1 context). The pass-2
+        # result overrides pass-1's scores, rationale, and moments. If pass 2
+        # fails (no key, transient error), keep the pass-1 score rather than
+        # leaving the session unjudged.
+        if score.judge_result.confidence == "low":
+            pass2_score = score_one_session_pass2(session)
+            if pass2_score is not None:
+                score = pass2_score
         store.save_session_score(score)
         if score.judge_result is not None:
             # Persist moments only when the judge actually ran; a heuristic-only

@@ -515,3 +515,18 @@ def score_session_pass1(session: Session, prefer: str = "claude") -> JudgeResult
             print(f"[scorer] {choice} pass-1 judge failed: {exc!r}", file=sys.stderr)
             continue
     return None
+
+
+def score_session_pass2(session: Session, prefer: str = "claude") -> JudgeResult | None:
+    """Pass 2 of the two-pass judge pipeline (spec §9.1).
+
+    Pass 2 re-judges a single session on the frontier-tier model after pass 1
+    self-flagged it as low confidence. One session per call (no batching).
+    The frontier judge receives ONLY the compressed transcript - it is told
+    nothing about pass 1's scores, rationale, or moments, so it judges fresh
+    per spec §9.1. The caller decides which sessions to escalate based on
+    pass 1's ``confidence`` field; this entrypoint does not gate on it.
+
+    Returns None when no API key is configured.
+    """
+    return score_session(session, prefer=prefer)

@@ -24,6 +24,7 @@ from praxis.scoring.judge import (
     _parse_moments,
     _parse_response,
     score_session_pass1,
+    score_session_pass2,
     verify_moment_substrings,
 )
 
@@ -670,3 +671,85 @@ def test_pass1_falls_back_to_other_provider_on_error(monkeypatch) -> None:
     result = score_session_pass1(_make_session([(Role.USER, "x")]))
     assert result is not None
     assert seen_openai["model"] == OPENAI_CHEAP_MODEL
+
+
+# ---------------------------------------------------------------------------
+# US-028: pass 2 entrypoint (frontier judge for low-confidence sessions)
+# ---------------------------------------------------------------------------
+
+
+def test_pass2_returns_none_without_api_keys(monkeypatch) -> None:
+    """Pass 2 cannot fabricate scores either; without keys it returns None.
+
+    The orchestrator should then keep the pass-1 score for that session
+    rather than substituting a fallback.
+    """
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    session = _make_session([(Role.USER, "anything")])
+    assert score_session_pass2(session) is None
+
+
+def test_pass2_uses_frontier_claude_model_when_preferred(monkeypatch) -> None:
+    """Pass 2 calls Claude with CLAUDE_FRONTIER_MODEL (opus), not the cheap tier."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    seen: dict[str, object] = {}
+
+    def _fake(session, model=CLAUDE_FRONTIER_MODEL):  # noqa: ARG001
+        seen["model"] = model
+        return JudgeResult(
+            dimension_scores={}, rationale={}, standout_moments=[],
+            failure_modes=[], overall_note="", judge_model=model,
+        )
+
+    monkeypatch.setattr("praxis.scoring.judge.score_with_claude", _fake)
+    result = score_session_pass2(_make_session([(Role.USER, "x")]))
+    assert result is not None
+    assert seen["model"] == CLAUDE_FRONTIER_MODEL
+
+
+def test_pass2_uses_frontier_openai_model_when_preferred(monkeypatch) -> None:
+    """When openai is preferred, pass 2 uses OPENAI_FRONTIER_MODEL (gpt-5)."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
+    seen: dict[str, object] = {}
+
+    def _fake(session, model=OPENAI_FRONTIER_MODEL):  # noqa: ARG001
+        seen["model"] = model
+        return JudgeResult(
+            dimension_scores={}, rationale={}, standout_moments=[],
+            failure_modes=[], overall_note="", judge_model=model,
+        )
+
+    monkeypatch.setattr("praxis.scoring.judge.score_with_openai", _fake)
+    result = score_session_pass2(_make_session([(Role.USER, "x")]), prefer="openai")
+    assert result is not None
+    assert seen["model"] == OPENAI_FRONTIER_MODEL
+
+
+def test_pass2_receives_only_the_session_no_pass1_context(monkeypatch) -> None:
+    """Spec §9.1 / AC: pass-2 prompts do not include pass-1 outputs.
+
+    The pass-2 entrypoint must hand the provider client only the session
+    (and a model id). It must not accept or forward any JudgeResult,
+    score dict, rationale, or moments list from pass 1.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+    captured_calls: list[tuple[tuple, dict]] = []
+
+    def _fake(*args, **kwargs):
+        captured_calls.append((args, kwargs))
+        return JudgeResult(
+            dimension_scores={}, rationale={}, standout_moments=[],
+            failure_modes=[], overall_note="", judge_model=CLAUDE_FRONTIER_MODEL,
+        )
+
+    monkeypatch.setattr("praxis.scoring.judge.score_with_claude", _fake)
+    session = _make_session([(Role.USER, "x")])
+    score_session_pass2(session)
+    assert len(captured_calls) == 1
+    args, kwargs = captured_calls[0]
+    # Only the session may be a positional, with at most the model id as a kwarg.
+    assert len(args) == 1 and args[0] is session
+    assert set(kwargs.keys()) <= {"model"}

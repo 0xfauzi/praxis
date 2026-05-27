@@ -25,8 +25,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added score_session_pass2 in praxis/scoring/judge.py (thin wrapper over score_session that uses CLAUDE_FRONTIER_MODEL / OPENAI_FRONTIER_MODEL, one session per call) and score_one_session_pass2 in aggregate.py. Orchestrator now inspects pass-1 JudgeResult.confidence and, when it equals 'low', calls the pass-2 entrypoint; the pass-2 SessionScore replaces the pass-1 one before persistence so scores, rationale, and moments all reflect pass 2. If pass 2 returns None (no key / transient error) the pass-1 score is kept. Pass-2 receives only the session - no JudgeResult, score dict, or moments are forwarded."
     },
     {
       "id": "US-029",

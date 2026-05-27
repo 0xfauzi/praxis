@@ -13,7 +13,12 @@ from statistics import mean
 
 from praxis.models import Session
 from praxis.scoring.features import SessionFeatures, extract
-from praxis.scoring.judge import JudgeResult, score_session, score_session_pass1
+from praxis.scoring.judge import (
+    JudgeResult,
+    score_session,
+    score_session_pass1,
+    score_session_pass2,
+)
 from praxis.scoring.rubric import RUBRIC
 
 
@@ -82,6 +87,21 @@ def score_one_session_pass1(session: Session) -> SessionScore | None:
     feature-volume reasons.
     """
     judge = score_session_pass1(session)
+    if judge is None:
+        return None
+    return _session_score_from_judge(session, judge)
+
+
+def score_one_session_pass2(session: Session) -> SessionScore | None:
+    """Pass 2 of the two-pass judge (spec §9.1): one frontier-tier call per session.
+
+    Used only for sessions that pass 1 self-flagged as low confidence. The
+    frontier judge gets ONLY the compressed transcript - no pass-1 scores,
+    rationale, or moments are passed in, so pass 2 judges fresh. Returns
+    None when no API key is configured; the caller should keep the pass-1
+    score in that case.
+    """
+    judge = score_session_pass2(session)
     if judge is None:
         return None
     return _session_score_from_judge(session, judge)
