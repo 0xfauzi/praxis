@@ -1,1 +1,14 @@
 # progress.txt: union of factory component logs
+
+## Iteration 1 - US-066: Fits in <80 columns
+- What I did: Created the v0.2 terminal digest renderer skeleton with a strict 79-visible-char-per-line budget and the test that enforces it. Renderer lives at praxis/reports/digest_terminal.py and exposes WeeklyDigest dataclass + render() function.
+- Files changed: praxis/reports/digest_terminal.py (new), tests/test_digest_terminal.py (new), scripts/ralph/feature/terminal-digest-renderer/prd.json (US-066 passes=true).
+- Verification: `uv run pytest tests/` -> 702 passed. `uvx mypy praxis/reports/digest_terminal.py tests/test_digest_terminal.py --ignore-missing-imports --follow-imports=silent` -> Success, no issues.
+- What the next iteration should know:
+  * The v0.2 digest renderer is a SEPARATE module from praxis/reports/terminal.py (the v0.1 `praxis scan` renderer). Don't grafit US-067/068/069 onto the v0.1 terminal.py - extend digest_terminal.py instead. test_renderer_module_does_not_clobber_v01_terminal locks this.
+  * WeeklyDigest currently has only `week_label` and `trajectory_headline`. US-067 must add fields for headline moment and follow_up (US-068 cost ledger + tasks, US-069 dim panel). When adding, default each to None so a missing section renders a clear placeholder rather than crashing.
+  * The 80-col constraint is enforced by tests/test_digest_terminal.py::test_populated_digest_lines_under_80 and test_long_trajectory_headline_wraps_within_budget. Every new section helper MUST pass these. Use the `_wrap()` helper in digest_terminal for text wrapping; it preserves identifiers and hyphenated tokens.
+  * Helper constants: MAX_LINE_WIDTH=79, INDENT="  " (2 spaces), CONTENT_WIDTH=77. Section eyebrows use `_section_rule(title)` to keep the rule width consistent across sections.
+  * No em-dashes anywhere (CLAUDE.md house rule). Use hyphens or colons. Masthead uses a literal " - " between PRAXIS and the week label.
+  * The visible_width() helper strips ANSI before measuring; the test uses its own _strip_ansi helper to avoid tautology with the renderer.
+---
