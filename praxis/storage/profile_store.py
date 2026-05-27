@@ -16,7 +16,7 @@ import shutil
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -536,6 +536,32 @@ class ProfileStore:
             return conn.execute(
                 "SELECT COUNT(*) AS c FROM weekly_digests"
             ).fetchone()["c"]
+
+    def weekly_cost_baseline(
+        self, before_week_iso: str, lookback_days: int = 90
+    ) -> float | None:
+        """Mean cost_total_usd across prior digests in the last 90 days.
+
+        Spec 10.1: the cost ledger baseline is the rolling weekly mean.
+        Returns None when no prior digest has a recorded cost (e.g. the
+        first weekly run, or a stretch of digests written before cost
+        tracking landed). The current week is excluded by the `<` on
+        week_iso so this week's own cost cannot leak into its own
+        baseline (matches the score-baseline rule in spec 8.1).
+        """
+        cutoff = (_utcnow() - timedelta(days=lookback_days)).isoformat()
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT AVG(cost_total_usd) AS avg_cost "
+                "FROM weekly_digests "
+                "WHERE week_iso < ? "
+                "  AND generated_at >= ? "
+                "  AND cost_total_usd IS NOT NULL",
+                (before_week_iso, cutoff),
+            ).fetchone()
+        if row is None or row["avg_cost"] is None:
+            return None
+        return float(row["avg_cost"])
 
     def prior_follow_up(self, before_week_iso: str) -> FollowUp | None:
         """Return the most recent follow_up with week_iso strictly before the given one.

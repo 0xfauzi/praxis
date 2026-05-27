@@ -36,6 +36,7 @@ from praxis.scoring.aggregate import (
 )
 from praxis.scoring.clustering import Task, cluster_sessions
 from praxis.scoring.coach import Coaching, generate_coaching
+from praxis.scoring.cost import estimate_weekly_pipeline_cost
 from praxis.scoring.judge import JudgeResult, verify_moment_substrings
 from praxis.scoring.moment_selector import (
     Moment as SelectorMoment,
@@ -531,13 +532,30 @@ def run_weekly(
     sessions_with_signals = [(s, extract_signals(s)) for s in sessions]
     trajectory = assess_trajectory(sessions_with_signals)
 
-    cost_total_usd: float | None = None
+    # Spec 10.1 / 15.2: cost_total_usd is praxis's own LLM spend on this
+    # week's pipeline (cluster + pass1 + pass2 + selector), estimated
+    # from per-call token volumes and the judge_model recorded on each
+    # JudgeResult. The estimate is rough by design; we do not bill
+    # against live invoices. None means "no priced calls happened" -
+    # e.g. an empty week, or every judged call used an unpriced model.
+    estimated_cost = estimate_weekly_pipeline_cost(
+        sessions=sessions,
+        pass1_results=pass1.results,
+        pass2_results=pass2_results,
+        moment_count=len(moments),
+    )
+    cost_total_usd: float | None = estimated_cost if estimated_cost > 0.0 else None
+
     cost_baseline_usd: float | None = None
 
     digest_persisted = False
     if not dry_run:
         if store is None:
             store = ProfileStore()
+        # Spec 10.1: baseline is the 90-day rolling weekly mean of prior
+        # cost_total_usd. Read BEFORE we UPSERT this week's row so the
+        # current week is excluded by data, not just by the < filter.
+        cost_baseline_usd = store.weekly_cost_baseline(before_week_iso=week_iso)
         headline_moment_id = (
             selection.headline_moment_id if selection is not None else None
         )

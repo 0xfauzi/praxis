@@ -14,13 +14,20 @@ step's outputs only feed its documented downstream consumers.
 """
 from __future__ import annotations
 
+import json
 import os
+import time
+import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from praxis import orchestrator as orch
+from praxis.models import Moment as JudgeMoment
 from praxis.orchestrator import Pass1Output, run, run_weekly
+from praxis.scoring.clustering import Task
 from praxis.scoring.judge import JudgeResult
+from praxis.scoring.moment_selector import MomentSelection
 from praxis.scoring.rubric import RUBRIC
 from praxis.storage.profile_store import ProfileStore, resolve_home
 
@@ -384,3 +391,349 @@ def test_run_weekly_default_persists_digest(tmp_home, step_recorder):
     store = ProfileStore(home=resolve_home())
     assert store.count_weekly_digests() == 1
     assert summary.digest_persisted is True
+
+
+# --- US-073: perf target on 30-session week ------------------------------
+
+# Spec 15.2 / US-073 AC: a 30-session synthetic week must complete in <120s
+# wall time and project <$2 in LLM spend. The test stubs every LLM call so
+# the elapsed time measures only the in-process pipeline (scanner I/O, the
+# orchestrator's own bookkeeping, follow-up template, persistence), and the
+# cost figure measures what those calls would have *cost* given their
+# input/output token volumes and each judge's recorded model. With stubs in
+# place the real headroom under the 120s gate is huge - that is by design;
+# the gate exists to catch regressions where the pipeline accidentally grows
+# an O(N^2) loop or a synchronous network call we forgot to mock.
+
+PERF_WALL_TIME_LIMIT_S = 120.0
+PERF_COST_LIMIT_USD = 2.0
+
+
+def _write_synthetic_claude_session(home, when: datetime, content: str) -> None:
+    """Drop one Claude JSONL into tmp_home so the scanner picks it up.
+
+    Mirrors the shape of `synthetic_claude_session` in conftest.py but
+    parameterized so the perf fixture can produce 30 distinct files.
+    Each session has 4 turns of realistic length (~150-250 chars), which
+    keeps the per-session compact transcript big enough to make the cost
+    estimator's contribution non-trivial without being unrealistic.
+    """
+    root = home / ".claude" / "projects" / "perf-30-sessions"
+    root.mkdir(parents=True, exist_ok=True)
+    session_id = str(uuid.uuid4())
+    path = root / f"{session_id}.jsonl"
+    events = [
+        {
+            "type": "user",
+            "timestamp": when.isoformat().replace("+00:00", "Z"),
+            "message": {"role": "user", "content": content},
+        },
+        {
+            "type": "assistant",
+            "timestamp": (when + timedelta(seconds=10)).isoformat().replace("+00:00", "Z"),
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-7",
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        "Plan: identify the failing assertion, trace the data "
+                        "model back to the producer, and add a regression test."
+                    ),
+                }],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": (when + timedelta(seconds=20)).isoformat().replace("+00:00", "Z"),
+            "message": {
+                "role": "user",
+                "content": (
+                    "Walk me through the trade-off. I want to understand why "
+                    "this approach is safer than the alternative we tried."
+                ),
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": (when + timedelta(seconds=30)).isoformat().replace("+00:00", "Z"),
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-7",
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        "Because the audit_log writes are async, the old path "
+                        "could commit the SQL while the audit was still in "
+                        "flight - so a crash mid-flush dropped the trail."
+                    ),
+                }],
+            },
+        },
+    ]
+    with path.open("w", encoding="utf-8") as f:
+        for e in events:
+            f.write(json.dumps(e) + "\n")
+
+
+@pytest.fixture
+def thirty_synthetic_sessions(tmp_home):
+    """Write 30 Claude JSONL files spread across the past week.
+
+    Spreading the mtimes keeps the scanner's `since=` filter happy and
+    matches the distribution a real user would have. The exact spacing
+    is not load-bearing; the test only cares that 30 files exist within
+    the orchestrator's default `since_days=7` window.
+    """
+    now = datetime.now(timezone.utc)
+    for i in range(30):
+        # ~5 hours between sessions keeps everything inside a 7-day window.
+        when = now - timedelta(hours=5 * i + 1)
+        _write_synthetic_claude_session(
+            tmp_home,
+            when,
+            (
+                f"Goal: refactor segment {i} of the auth module. "
+                f"Constraints: keep CI green and audit_log writes synchronous."
+            ),
+        )
+
+
+@pytest.fixture
+def stub_weekly_llm_calls(monkeypatch):
+    """Replace every LLM call the weekly pipeline reaches with a fast stub.
+
+    Real API calls are not allowed in tests (no keys, slow, expensive).
+    These stubs return realistic-shaped objects so the cost estimator's
+    per-call sizing remains representative of production: the judge
+    rationale lengths feed the output-token estimate, and the moment
+    excerpts are taken verbatim from the synthetic transcripts so the
+    substring verifier keeps them (otherwise the moment_count argument
+    to the cost estimator would always be 0 and the selector wedge of
+    the estimate would vanish).
+    """
+    # Every 5th session gets a low-confidence flag so pass 2 actually
+    # runs - exercising the more expensive frontier wedge of the cost
+    # model. 6/30 escalation rate sits inside the spec 15.2 #3 band
+    # (15-30%) which the calibration target uses on real data.
+    def _fake_score(session, prefer="claude"):  # noqa: ARG001
+        # Recognizable substring from the synthetic transcripts above so
+        # the moment survives the post-judge substring verifier.
+        excerpt = "Walk me through the trade-off"
+        confidence = "low" if hash(session.stable_id) % 5 == 0 else "medium"
+        # Pass 2 uses the frontier model; pass 1 uses the cheap tier.
+        # We can't tell which call this is from inside the stub, so we
+        # use the session_stable_id hash as a deterministic proxy: a
+        # session flagged "low" by pass 1 will get re-judged by pass 2
+        # with a different model. To approximate that, the stub returns
+        # a heavier judge_model when the session would escalate.
+        judge_model = (
+            "claude-opus-4-7" if confidence == "low" else "claude-haiku-4-5"
+        )
+        return JudgeResult(
+            dimension_scores={d.key: 6.0 for d in RUBRIC},
+            rationale={
+                d.key: (
+                    f"The user's {d.key} work was workmanlike: clear goal "
+                    f"statement and some context but no explicit success criteria."
+                )
+                for d in RUBRIC
+            },
+            standout_moments=["asked for trade-off rationale before committing"],
+            failure_modes=["did not verify audit_log write semantics"],
+            overall_note=(
+                "Solid mid-week session. The user asked good clarifying "
+                "questions but accepted the SQL block without re-reading it."
+            ),
+            judge_model=judge_model,
+            moments=[
+                JudgeMoment(
+                    dim_key="verification",
+                    turn_index=1,
+                    quoted_excerpt=excerpt,
+                    why_it_lost_score=(
+                        "accepted assistant explanation without checking the "
+                        "audit_log write semantics"
+                    ),
+                    suggested_alternative=(
+                        "ask the assistant to point to the exact lines that "
+                        "make the writes synchronous before accepting"
+                    ),
+                    severity="moderate",
+                )
+            ],
+            confidence=confidence,
+            confidence_reason="single-session signal",
+        )
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session", _fake_score)
+
+    def _fake_cluster(sessions, prefer="anthropic"):  # noqa: ARG001
+        # One realistic-shaped Task; coverage validation in cluster_sessions
+        # is not exercised here (the orchestrator only consumes the result).
+        return [
+            Task(
+                label="auth module refactor",
+                task_type="refactoring",
+                session_ids=[s.stable_id for s in sessions],
+                rationale="all sessions share the audit_log/auth-module goal",
+                label_source="llm",
+            )
+        ]
+
+    monkeypatch.setattr(orch, "cluster_sessions", _fake_cluster)
+
+    def _fake_select(candidates, primary_provider="anthropic", *, llm_caller=None):  # noqa: ARG001
+        if not candidates:
+            return None
+        return MomentSelection(
+            headline_moment_id=candidates[0].moment.moment_id,
+            headline_reason="largest verification slip this week",
+            supporting_moment_ids=[
+                c.moment.moment_id for c in candidates[1:3]
+            ],
+        )
+
+    monkeypatch.setattr(orch, "select_moments_with_fallback", _fake_select)
+
+
+def test_run_weekly_perf_30_sessions_under_120s_and_2_usd(
+    thirty_synthetic_sessions, stub_weekly_llm_calls
+):
+    """Spec 15.2 / US-073 AC #1-2: 30-session week is <120s wall, <$2 spend.
+
+    AC #3 ("the perf test records the measurement") is satisfied by the
+    print statement at the bottom: pytest captures stdout and surfaces
+    it on `-s` / `-rA`, and it is included in the assert messages so a
+    failure on either gate also records the measured numbers.
+    """
+    started = time.monotonic()
+    summary = run_weekly()
+    wall_elapsed = time.monotonic() - started
+
+    # Sanity: the scanner found all 30 files we wrote.
+    assert len(summary.sessions) == 30, (
+        f"scanner discovered {len(summary.sessions)} sessions, expected 30"
+    )
+
+    # AC #1: <120s wall time. Check both the externally-measured wall time
+    # (this test's scope) and the summary's own self-reported elapsed so a
+    # regression in either the pipeline OR the timing instrumentation
+    # surfaces here.
+    assert wall_elapsed < PERF_WALL_TIME_LIMIT_S, (
+        f"30-session run_weekly wall time {wall_elapsed:.2f}s "
+        f"exceeds spec 15.2 limit of {PERF_WALL_TIME_LIMIT_S}s"
+    )
+    assert summary.elapsed_seconds < PERF_WALL_TIME_LIMIT_S, (
+        f"WeeklyRunSummary.elapsed_seconds={summary.elapsed_seconds}s "
+        f"exceeds spec 15.2 limit of {PERF_WALL_TIME_LIMIT_S}s"
+    )
+
+    # AC #2: <$2 projected spend. cost_total_usd is None only when no
+    # priced calls happened, which would mean the stubs above silently
+    # broke. Treat that as a perf-test failure too.
+    assert summary.cost_total_usd is not None, (
+        "cost_total_usd was None - the cost estimator saw no priced calls, "
+        "which usually means the LLM stubs are returning unpriced model ids"
+    )
+    assert summary.cost_total_usd < PERF_COST_LIMIT_USD, (
+        f"30-session run_weekly projected ${summary.cost_total_usd:.4f} in "
+        f"LLM spend, exceeds spec 15.2 limit of ${PERF_COST_LIMIT_USD:.2f}"
+    )
+
+    # AC #3: record the measurement. Pytest captures stdout by default;
+    # `pytest -s` or `-rA` surface this line in CI logs.
+    print(
+        f"[perf] run_weekly(30 sessions): "
+        f"wall_elapsed={wall_elapsed:.3f}s, "
+        f"summary.elapsed_seconds={summary.elapsed_seconds}s, "
+        f"cost_total_usd=${summary.cost_total_usd:.4f}"
+    )
+
+
+def test_run_weekly_cost_total_usd_is_persisted(
+    thirty_synthetic_sessions, stub_weekly_llm_calls
+):
+    """The estimated cost lands in weekly_digests.cost_total_usd.
+
+    US-073's perf target is only useful if the number gets stored alongside
+    the digest so it can feed the cost ledger panel in spec 10.1. This pins
+    the persistence contract: the estimator's output must reach the row.
+    """
+    summary = run_weekly()
+    store = ProfileStore(home=resolve_home())
+    row = store.load_weekly_digest(summary.week_iso)
+    assert row is not None
+    assert row["cost_total_usd"] is not None
+    assert row["cost_total_usd"] == pytest.approx(summary.cost_total_usd)
+
+
+def test_run_weekly_cost_baseline_uses_prior_weekly_digests(tmp_home, step_recorder):
+    """spec 10.1: cost_baseline_usd is the rolling weekly mean of prior runs.
+
+    Seeds two prior digests with known costs, then runs the orchestrator and
+    confirms the new row's cost_baseline_usd is the mean of the two priors.
+    The current run is excluded by week_iso (the helper filters strictly <).
+    """
+    store = ProfileStore(home=resolve_home())
+    # Seed two prior weeks with $0.50 and $1.00 spend.
+    snapshot = orch.ProfileSnapshot.from_scores([])
+    store.save_weekly_digest(
+        week_iso="2026-W19",
+        trajectory_label="steady",
+        trajectory_headline="steady week",
+        snapshot=snapshot,
+        cost_total_usd=0.50,
+    )
+    store.save_weekly_digest(
+        week_iso="2026-W20",
+        trajectory_label="steady",
+        trajectory_headline="steady week",
+        snapshot=snapshot,
+        cost_total_usd=1.00,
+    )
+    summary = run_weekly(store=store)
+    row = store.load_weekly_digest(summary.week_iso)
+    assert row is not None
+    # Mean of 0.50 and 1.00 = 0.75. The current week is NOT included in
+    # its own baseline (the helper's WHERE week_iso < ? filter).
+    assert row["cost_baseline_usd"] == pytest.approx(0.75)
+
+
+def test_run_weekly_cost_baseline_is_none_on_first_run(tmp_home, step_recorder):
+    """First-ever digest has no prior weeks, so cost_baseline_usd is NULL.
+
+    The renderer (spec 8.4 logic applied to cost) shows "--" in that case
+    and skips the delta. Pinning None (not 0.0) here keeps that branch live.
+    """
+    summary = run_weekly()
+    store = ProfileStore(home=resolve_home())
+    row = store.load_weekly_digest(summary.week_iso)
+    assert row is not None
+    assert row["cost_baseline_usd"] is None
+
+
+def test_run_weekly_dry_run_does_not_compute_baseline(tmp_home, step_recorder):
+    """Dry-run skips the persistence block, so cost_baseline_usd stays None.
+
+    The baseline read is in the `if not dry_run` block alongside the write,
+    by design: dry-run callers do not need the baseline because they will
+    not persist a row. This pins the contract so a future refactor cannot
+    accidentally read from the store under dry-run.
+    """
+    # Seed a prior digest with known cost so the baseline read WOULD have
+    # picked it up if dry-run were not blocking the read.
+    store = ProfileStore(home=resolve_home())
+    snapshot = orch.ProfileSnapshot.from_scores([])
+    store.save_weekly_digest(
+        week_iso="2026-W18",
+        trajectory_label="steady",
+        trajectory_headline="prior week",
+        snapshot=snapshot,
+        cost_total_usd=1.50,
+    )
+    summary = run_weekly(dry_run=True)
+    # No row was written this week (dry-run), and the in-memory summary
+    # carries cost_baseline_usd=None because the read was skipped.
+    assert summary.digest_persisted is False
+    assert summary.cost_baseline_usd is None

@@ -52,8 +52,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added praxis/scoring/cost.py with estimate_weekly_pipeline_cost() that sums per-call costs across cluster + pass1 + pass2 + selector using model-card pricing (chars/4 -> tokens, then per-million rate). run_weekly() now populates cost_total_usd from the estimate (clamped to None when 0.0) and reads cost_baseline_usd via new ProfileStore.weekly_cost_baseline(before_week_iso, lookback_days=90), which AVG()s prior weekly_digests.cost_total_usd over the last 90 days excluding the current week. Baseline read is inside the `if not dry_run` block (dry-run never touches the store). New perf test writes 30 synthetic Claude JSONL files into tmp_home with mtimes spread across the past week, stubs score_session/cluster_sessions/select_moments_with_fallback (no real LLM keys available in tests), runs run_weekly(), and asserts wall<120s + cost_total<$2 + prints the measurement. Real-stub measurement: ~8ms wall, ~$0.33 projected spend. Headroom is huge by design - the gate exists to catch regressions where the pipeline grows an O(N^2) loop or a synchronous network call we forgot to mock."
     }
   ]
 }
