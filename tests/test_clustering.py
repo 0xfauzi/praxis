@@ -1473,3 +1473,184 @@ def test_openai_shape_retry_accepts_reshape_regardless_of_shape(monkeypatch):
     assert len(recorder.calls) == 2
     assert len(tasks) == 1
     assert tasks[0].label == "still one again"
+
+
+# ---------------------------------------------------------------------------
+# US-030: same-task exclusion within a pass-1 batch
+# ---------------------------------------------------------------------------
+
+
+def _task(label: str, sessions: list[Session]) -> clustering.Task:
+    return clustering.Task(
+        label=label,
+        task_type="other",
+        session_ids=[s.stable_id for s in sessions],
+        rationale="",
+    )
+
+
+def test_pass1_batch_size_default_is_five():
+    """Spec §9.1: pass 1 sends 5 sessions per LLM call."""
+    assert clustering.PASS1_BATCH_SIZE == 5
+
+
+def test_build_pass1_batches_empty_input_returns_empty_list():
+    assert clustering.build_pass1_batches([], []) == []
+
+
+def test_build_pass1_batches_no_task_mates_groups_by_size():
+    """With each session in its own singleton task, the helper should fill
+    batches up to ``max_batch_size`` since there are no exclusion conflicts.
+    """
+    sessions = [_make_session(f"s{i}", f"prompt {i}") for i in range(7)]
+    tasks = [_task(f"label {i}", [s]) for i, s in enumerate(sessions)]
+
+    batches = clustering.build_pass1_batches(sessions, tasks, max_batch_size=5)
+
+    assert sum(len(b) for b in batches) == 7
+    assert [len(b) for b in batches] == [5, 2]
+
+
+def test_build_pass1_batches_no_two_sessions_from_the_same_task():
+    """US-030 AC #1: pass-1 batches never contain two sessions sharing a task.
+
+    Build a window where two tasks each have multiple sessions; the batcher
+    must spread same-task siblings across different batches even when there
+    would be room for both in a single batch.
+    """
+    s_a1 = _make_session("a1", "task A part 1")
+    s_a2 = _make_session("a2", "task A part 2")
+    s_b1 = _make_session("b1", "task B part 1")
+    s_b2 = _make_session("b2", "task B part 2")
+    sessions = [s_a1, s_a2, s_b1, s_b2]
+    tasks = [
+        _task("task A", [s_a1, s_a2]),
+        _task("task B", [s_b1, s_b2]),
+    ]
+
+    batches = clustering.build_pass1_batches(sessions, tasks, max_batch_size=5)
+
+    # Every batch must contain at most one session from each task.
+    a_ids = {s_a1.stable_id, s_a2.stable_id}
+    b_ids = {s_b1.stable_id, s_b2.stable_id}
+    for batch in batches:
+        batch_ids = {s.stable_id for s in batch}
+        assert len(batch_ids & a_ids) <= 1
+        assert len(batch_ids & b_ids) <= 1
+
+
+def test_build_pass1_batches_oversized_task_overflows_into_new_batches():
+    """US-030 AC #2: extras from a single oversized task roll into batches
+    alone or alongside non-task-mates only.
+
+    A task with 7 sessions in a window where no other task exists must
+    produce 7 batches (each holding exactly one of the task's sessions),
+    even though ``max_batch_size`` is 5. There is no other session that
+    could join without sharing the task.
+    """
+    sessions = [_make_session(f"s{i}", f"prompt {i}") for i in range(7)]
+    tasks = [_task("oversized", sessions)]
+
+    batches = clustering.build_pass1_batches(sessions, tasks, max_batch_size=5)
+
+    assert len(batches) == 7
+    for batch in batches:
+        assert len(batch) == 1
+
+
+def test_build_pass1_batches_oversized_task_pairs_with_non_task_mates():
+    """The extras from an oversized task should be joined by non-task-mates
+    when such sessions exist - the constraint is "no two task-mates in one
+    batch", not "task-mates must be alone".
+    """
+    big_task_sessions = [
+        _make_session(f"big-{i}", f"big prompt {i}") for i in range(6)
+    ]
+    other = [_make_session(f"o-{i}", f"other prompt {i}") for i in range(4)]
+    sessions = big_task_sessions + other
+    tasks = [
+        _task("big task", big_task_sessions),
+        _task("other task 1", [other[0], other[1]]),
+        _task("other task 2", [other[2], other[3]]),
+    ]
+
+    batches = clustering.build_pass1_batches(sessions, tasks, max_batch_size=5)
+
+    big_ids = {s.stable_id for s in big_task_sessions}
+    other_ids = {s.stable_id for s in other}
+
+    # All ten sessions are placed.
+    assert sum(len(b) for b in batches) == 10
+
+    # Each batch has at most one session from the big task.
+    for batch in batches:
+        ids = {s.stable_id for s in batch}
+        assert len(ids & big_ids) <= 1
+
+    # At least one batch demonstrates an extra paired with a non-task-mate
+    # (i.e., one big-task session and one other-task session together).
+    paired = [
+        batch for batch in batches
+        if any(s.stable_id in big_ids for s in batch)
+        and any(s.stable_id in other_ids for s in batch)
+    ]
+    assert paired, "expected at least one batch to mix big-task with non-task-mates"
+
+
+def test_build_pass1_batches_respects_max_batch_size():
+    sessions = [_make_session(f"s{i}", f"prompt {i}") for i in range(12)]
+    # Each session is its own task so the only ceiling is max_batch_size.
+    tasks = [_task(f"task {i}", [s]) for i, s in enumerate(sessions)]
+
+    batches = clustering.build_pass1_batches(sessions, tasks, max_batch_size=5)
+
+    for batch in batches:
+        assert len(batch) <= 5
+    assert sum(len(b) for b in batches) == 12
+
+
+def test_build_pass1_batches_unassigned_sessions_treated_as_singletons():
+    """Defensive: sessions absent from ``tasks`` are placed without exclusion.
+
+    This is not the spec-mandated case (clustering must cover every session)
+    but the helper should still produce a usable batching rather than crash
+    or drop them.
+    """
+    assigned = [_make_session("a", "part of task")]
+    unassigned = [_make_session(f"u{i}", f"loose {i}") for i in range(3)]
+    sessions = assigned + unassigned
+    tasks = [_task("only task", assigned)]
+
+    batches = clustering.build_pass1_batches(sessions, tasks, max_batch_size=5)
+
+    placed_ids = {s.stable_id for batch in batches for s in batch}
+    assert placed_ids == {s.stable_id for s in sessions}
+
+
+def test_build_pass1_batches_rejects_zero_or_negative_batch_size():
+    sessions = [_make_session("a", "x")]
+    tasks = [_task("t", sessions)]
+    with pytest.raises(ValueError):
+        clustering.build_pass1_batches(sessions, tasks, max_batch_size=0)
+    with pytest.raises(ValueError):
+        clustering.build_pass1_batches(sessions, tasks, max_batch_size=-1)
+
+
+def test_build_pass1_batches_is_deterministic():
+    """The builder is deterministic so tests can pin it and so two runs over
+    the same inputs produce the same batch layout. Spec-level randomization
+    happens after batching (§9.4 in-batch shuffle) and is the caller's job.
+    """
+    sessions = [_make_session(f"s{i}", f"prompt {i}") for i in range(8)]
+    tasks = [
+        _task("alpha", sessions[:3]),
+        _task("beta", sessions[3:6]),
+        _task("gamma", sessions[6:]),
+    ]
+
+    a = clustering.build_pass1_batches(sessions, tasks, max_batch_size=5)
+    b = clustering.build_pass1_batches(sessions, tasks, max_batch_size=5)
+
+    assert [[s.stable_id for s in batch] for batch in a] == [
+        [s.stable_id for s in batch] for batch in b
+    ]

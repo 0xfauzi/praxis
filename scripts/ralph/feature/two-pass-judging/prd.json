@@ -11,8 +11,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added score_session_pass1 (cheap-tier judge) in praxis/scoring/judge.py with constants CLAUDE_CHEAP_MODEL=claude-haiku-4-5 and OPENAI_CHEAP_MODEL=gpt-5-mini. Added score_one_session_pass1 wrapper in aggregate.py. Orchestrator now calls the pass-1 entrypoint and the max_new_scored default changed from 50 to None so every session in the weekly window goes through pass 1."
     },
     {
       "id": "US-028",
@@ -25,8 +25,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added score_session_pass2 in praxis/scoring/judge.py (thin wrapper over score_session that uses CLAUDE_FRONTIER_MODEL / OPENAI_FRONTIER_MODEL, one session per call) and score_one_session_pass2 in aggregate.py. Orchestrator now inspects pass-1 JudgeResult.confidence and, when it equals 'low', calls the pass-2 entrypoint; the pass-2 SessionScore replaces the pass-1 one before persistence so scores, rationale, and moments all reflect pass 2. If pass 2 returns None (no key / transient error) the pass-1 score is kept. Pass-2 receives only the session - no JudgeResult, score dict, or moments are forwarded."
     },
     {
       "id": "US-029",
@@ -38,8 +38,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added judge_pass column to session_scores with composite primary key (stable_id, judge_pass) so pass-1 and pass-2 rows coexist instead of overwriting. SessionScore dataclass gained a judge_pass field (default 1); score_one_session_pass1/_pass2 set it to 1/2 respectively. Orchestrator now persists pass-1 first (judge_pass=1) and, when escalating, persists pass-2 as a second row (judge_pass=2) - both rows live in the DB. Moments come from the winning judgment only. load_session_scores dedupes to the highest pass per session by default; include_all_passes=True returns every row for audit/disagreement analysis. Schema version bumped to 3; v0.3 migration is a single-pass session_scores rebuild that also drops the unused v0.1 heuristic_scores_json column."
     },
     {
       "id": "US-030",
@@ -51,8 +51,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added build_pass1_batches(sessions, tasks, max_batch_size=5) helper in praxis/scoring/clustering.py plus PASS1_BATCH_SIZE=5 constant. The helper groups sessions into pass-1 batches such that no batch contains two sessions sharing a task assignment (spec §9.4); when one task has more sessions than there are batches with room, the extras roll into new batches alone or alongside non-task-mates. Placement is deterministic (largest-task-first, then input order); in-batch shuffling per spec is left to the caller so the builder stays testable. 10 new unit tests in tests/test_clustering.py cover the constraint, oversized-task overflow, non-task-mate pairing, max-batch-size cap, unassigned-session fallback, zero/negative size rejection, determinism, and the default batch size value. The orchestrator is not yet wired to call this - pass 1 still runs one session per call (US-027) - because clustering integration into the orchestrator is a separate concern not covered by this story's AC."
     },
     {
       "id": "US-031",
@@ -65,8 +65,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added record_pass1_confidence / recent_pass1_confidence on ProfileStore (rows live in run_log with kind='pass1_conf' so no schema bump is needed); orchestrator now consults the rolling 4-week share before each pass-1 batch, sets sharpen_calibration when 'high' > 90% and stricter_low when 'low' > 70%, threads both flags through aggregate.score_one_session_pass1 -> judge.score_session_pass1 -> score_with_claude/openai, and asks _build_system_prompt() to inject a 'Calibration check' addendum into the cheap-tier prompt. Per-run pass-1 confidence is counted (before pass-2 overrides) and persisted only when at least one pass-1 call succeeded. RunSummary gained calibration_notice; terminal + HTML renderers surface it when the sharpening fires."
     }
   ]
 }

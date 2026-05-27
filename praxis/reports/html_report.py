@@ -398,6 +398,15 @@ def render(summary: RunSummary) -> str:
     trajectory_html = _trajectory_html(summary.trajectory)
     models_html = _models_section_html(summary.model_profiles)
 
+    # Spec §9.6 (US-031): when the rolling 4-week telemetry tripped the
+    # high>90% threshold, the orchestrator sets calibration_notice; surface
+    # it as a small banner so the reader knows the pass-1 prompt was
+    # auto-tuned this run. Hidden when notice is None.
+    calibration_html = (
+        f'<div class="calibration-note">{html.escape(summary.calibration_notice)}</div>'
+        if summary.calibration_notice else ""
+    )
+
     generated_at = datetime.now(timezone.utc).strftime("%d %B %Y")
     consolidated_note = (
         f"Consolidated today · {summary.sessions_scored} new sessions analyzed"
@@ -956,6 +965,21 @@ html, body {{
   line-height: 1.5;
 }}
 
+/* Calibration auto-tune banner (US-031): only rendered when the rolling
+   4-week pass-1 telemetry tripped the high>90% threshold and the prompt
+   was sharpened for this run. */
+.calibration-note {{
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--primary);
+  padding: 12px 16px;
+  margin-bottom: 32px;
+  border-left: 3px solid var(--primary);
+  background: var(--primary-soft);
+}}
+
 /* Cost summary callout (above per-model grid) */
 .cost-summary {{
   margin-top: 16px;
@@ -1002,6 +1026,8 @@ html, body {{
   </section>
 
   {provider_html}
+
+  {calibration_html}
 
   <div class="headline">{html.escape(coaching.headline)}</div>
 

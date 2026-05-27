@@ -7,10 +7,17 @@ US-020 persists judge-emitted moments after redaction. The fields under test:
   - re-judging a session replaces its prior moments (DELETE + INSERT)
   - calling save_moments with the heuristic-only path does not run (covered in
     test_orchestrator); here we exercise the storage layer directly.
+
+US-031 also exercises ProfileStore.record_pass1_confidence /
+recent_pass1_confidence: the rolling 4-week telemetry that powers the
+calibration auto-tune is persisted via the same store and the count
+aggregation must be correct for the orchestrator's threshold checks.
 """
 from __future__ import annotations
 
 import hashlib
+import sqlite3
+from datetime import datetime, timedelta, timezone
 
 from praxis.models import Moment, compute_moment_id
 from praxis.storage.profile_store import ProfileStore, resolve_home
@@ -320,3 +327,118 @@ def test_save_moments_other_sessions_unaffected_by_replacement(tmp_home) -> None
     assert a_rows[0]["dim_key"] == "context"
     assert len(b_rows) == 1
     assert b_rows[0]["quoted_excerpt"] == "B1"
+
+
+# ---------------------------------------------------------------------------
+# US-031: pass-1 confidence-distribution telemetry persistence
+# ---------------------------------------------------------------------------
+
+
+def test_record_pass1_confidence_writes_run_log_row(tmp_home) -> None:
+    """AC: each weekly run logs the pass-1 confidence distribution.
+
+    record_pass1_confidence must produce a discoverable ``kind='pass1_conf'``
+    row carrying low/medium/high counts. We assert via a raw sqlite query so
+    we know the storage format - not just that the round trip works.
+    """
+    store = ProfileStore(home=resolve_home())
+    store.record_pass1_confidence(low=2, medium=7, high=3)
+    conn = sqlite3.connect(store.db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = list(
+            conn.execute(
+                "SELECT notes FROM run_log WHERE kind = 'pass1_conf'"
+            ).fetchall()
+        )
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    import json
+    parsed = json.loads(rows[0]["notes"])
+    assert parsed == {"low": 2, "medium": 7, "high": 3}
+
+
+def test_recent_pass1_confidence_aggregates_rows_in_window(tmp_home) -> None:
+    """Counts across multiple rows in the 4-week window must sum correctly."""
+    store = ProfileStore(home=resolve_home())
+    store.record_pass1_confidence(low=1, medium=3, high=5)
+    store.record_pass1_confidence(low=2, medium=4, high=6)
+    store.record_pass1_confidence(low=0, medium=1, high=2)
+    rolling = store.recent_pass1_confidence(weeks=4)
+    assert rolling == {"low": 3, "medium": 8, "high": 13}
+
+
+def test_recent_pass1_confidence_returns_zeros_when_empty(tmp_home) -> None:
+    """A fresh install has no pass1_conf rows; the result must be all zeros
+    so callers can safely check ``total > 0`` before computing a share."""
+    store = ProfileStore(home=resolve_home())
+    rolling = store.recent_pass1_confidence(weeks=4)
+    assert rolling == {"low": 0, "medium": 0, "high": 0}
+
+
+def test_recent_pass1_confidence_excludes_rows_older_than_window(tmp_home) -> None:
+    """Rows older than the 4-week cutoff are excluded.
+
+    Inject a row with a timestamp set 5 weeks in the past; the rolling query
+    must ignore it and only count rows from inside the window.
+    """
+    store = ProfileStore(home=resolve_home())
+    # In-window row first - this one should count.
+    store.record_pass1_confidence(low=1, medium=1, high=1)
+    # Now hand-write an old row by going through sqlite directly.
+    old_ts = (datetime.now(timezone.utc) - timedelta(weeks=5)).isoformat()
+    import json
+    conn = sqlite3.connect(store.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO run_log (run_at, kind, sessions_seen, sessions_new, notes) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (old_ts, "pass1_conf", 0, 0, json.dumps({"low": 99, "medium": 99, "high": 99})),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    rolling = store.recent_pass1_confidence(weeks=4)
+    # Only the recent row counts. The 99/99/99 row is past the cutoff.
+    assert rolling == {"low": 1, "medium": 1, "high": 1}
+
+
+def test_recent_pass1_confidence_ignores_malformed_rows(tmp_home) -> None:
+    """A pass1_conf row with non-JSON notes must not crash the query.
+
+    Defensive: a future code path or hand-edit could leave garbage in the
+    notes column. We log nothing - parsing simply skips the row so the
+    rolling share stays sensible.
+    """
+    store = ProfileStore(home=resolve_home())
+    store.record_pass1_confidence(low=1, medium=2, high=3)
+    conn = sqlite3.connect(store.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO run_log (run_at, kind, sessions_seen, sessions_new, notes) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (datetime.now(timezone.utc).isoformat(), "pass1_conf", 0, 0, "not-json"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    rolling = store.recent_pass1_confidence(weeks=4)
+    assert rolling == {"low": 1, "medium": 2, "high": 3}
+
+
+def test_recent_pass1_confidence_only_counts_pass1_conf_kind(tmp_home) -> None:
+    """Other run_log rows (kind='full' etc.) must not be parsed as distribution
+    data. The notes column on a full-run row carries free-text summaries that
+    would otherwise crash json.loads or, worse, spuriously match key names."""
+    store = ProfileStore(home=resolve_home())
+    store.log_run(
+        kind="full",
+        sessions_seen=10,
+        sessions_new=5,
+        notes='{"low": 99, "medium": 99, "high": 99}',
+    )
+    rolling = store.recent_pass1_confidence(weeks=4)
+    # A 'full' row with a notes string that happens to be valid JSON must
+    # still be ignored - the kind filter is what makes the query safe.
+    assert rolling == {"low": 0, "medium": 0, "high": 0}

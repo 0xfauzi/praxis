@@ -5,12 +5,19 @@ Spec 15.6:
   - run() followed by run() shows sessions_new == 0 once scored (idempotence)
   - Without API keys, sessions are seen but not scored (no heuristic fallback)
 
+Spec 9.1 / US-027: pass 1 runs on every session in the weekly window. The
+orchestrator's pass-1 path is what these tests intercept (via ``fake_judge``).
+
 The previous test_force_consolidate_replaces_today_row was removed in US-002
 along with the daily_consolidations table.
 """
 from __future__ import annotations
 
+import json
 import os
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -22,9 +29,15 @@ from praxis.storage.profile_store import ProfileStore, resolve_home
 
 @pytest.fixture
 def fake_judge(monkeypatch):
-    """Replace the LLM judge with a deterministic stub returning fixed scores."""
+    """Replace the pass-1 LLM judge with a deterministic stub.
 
-    def _fake(session, prefer="claude"):  # noqa: ARG001
+    Spec §9.1: the weekly orchestrator's first judging step is pass 1
+    (cheap-tier judge) on every session. We patch the pass-1 entrypoint
+    that ``score_one_session_pass1`` calls so tests can run end-to-end
+    without an API key.
+    """
+
+    def _fake(session, prefer="claude", **kwargs):  # noqa: ARG001
         return JudgeResult(
             dimension_scores={d.key: 6.0 for d in RUBRIC},
             rationale={d.key: "fixture" for d in RUBRIC},
@@ -34,7 +47,7 @@ def fake_judge(monkeypatch):
             judge_model="fixture",
         )
 
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session", _fake)
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake)
     return _fake
 
 
@@ -75,3 +88,599 @@ def test_run_without_keys_does_not_score(tmp_home, synthetic_claude_session):
     store = ProfileStore(home=resolve_home())
     rows = store.load_session_scores()
     assert rows == []
+
+
+def _write_synthetic_claude_session(
+    root: Path, session_index: int, *, hours_ago: int = 1
+) -> Path:
+    """Write one minimal Claude JSONL into ``root`` and return its path.
+
+    Helper for the pass-1 coverage tests below: builds N small sessions
+    that all live in the same project directory so the scanner picks
+    them up in one pass. We do not call the fixture-level helper
+    because it always writes to a single fixed filename.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    session_id = str(uuid.uuid4())
+    path = root / f"{session_id}.jsonl"
+    when = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+    events = [
+        {
+            "type": "user",
+            "timestamp": when.isoformat().replace("+00:00", "Z"),
+            "message": {
+                "role": "user",
+                "content": f"Goal: session {session_index} task.",
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": (when + timedelta(seconds=10))
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-7",
+                "content": [{"type": "text", "text": f"Working on session {session_index}."}],
+            },
+        },
+    ]
+    with path.open("w", encoding="utf-8") as f:
+        for e in events:
+            f.write(json.dumps(e) + "\n")
+    return path
+
+
+def test_pass1_runs_on_every_session_in_window(tmp_home, fake_judge):
+    """US-027: every session in the weekly window receives a pass-1 judgment.
+
+    Build a multi-session window with one session that has a tiny prompt
+    and one that has a long prompt - the kind of split that a heuristic
+    skip path (e.g. "short prompts are obvious; don't waste a judge call")
+    would gate on. The orchestrator must judge all of them.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "weekly-window"
+    session_count = 8
+    for i in range(session_count):
+        _write_synthetic_claude_session(project_root, i)
+
+    summary = run()
+    assert summary.sessions_seen == session_count
+    assert summary.sessions_new == session_count
+    assert summary.sessions_scored == session_count
+
+
+def test_pass1_no_heuristic_skip_path(tmp_home, monkeypatch):
+    """US-027: no heuristic feature gates the pass-1 call.
+
+    We verify by recording every Session the pass-1 judge sees - if any
+    feature-based filter were inserted between the orchestrator and the
+    judge, some sessions would be missing. We assert the recorded set
+    matches the set of seen sessions exactly.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "no-skip"
+    session_count = 5
+    for i in range(session_count):
+        # Mix turn counts and prompt lengths to exercise common heuristic
+        # candidates (turn_count < N, avg_prompt_chars < N).
+        _write_synthetic_claude_session(project_root, i, hours_ago=i + 1)
+
+    judged_ids: list[str] = []
+
+    def _recording_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        judged_ids.append(session.stable_id)
+        return JudgeResult(
+            dimension_scores={d.key: 6.0 for d in RUBRIC},
+            rationale={d.key: "fixture" for d in RUBRIC},
+            standout_moments=[],
+            failure_modes=[],
+            overall_note="fixture",
+            judge_model="fixture-cheap-tier",
+        )
+
+    monkeypatch.setattr(
+        "praxis.scoring.aggregate.score_session_pass1", _recording_pass1
+    )
+
+    summary = run()
+    assert summary.sessions_seen == session_count
+    assert summary.sessions_scored == session_count
+    assert len(judged_ids) == session_count
+    assert len(set(judged_ids)) == session_count
+
+
+def test_pass1_uses_cheap_tier_anthropic_model(tmp_home, monkeypatch):
+    """US-027: pass 1 calls Claude with the cheap-tier model id, not the frontier."""
+    project_root = tmp_home / ".claude" / "projects" / "pass1-model-check"
+    _write_synthetic_claude_session(project_root, 0)
+
+    seen_models: list[str] = []
+
+    def _recording_with_claude(session, model="claude-opus-4-7", **kwargs):  # noqa: ARG001
+        seen_models.append(model)
+        return JudgeResult(
+            dimension_scores={d.key: 5.0 for d in RUBRIC},
+            rationale={d.key: "x" for d in RUBRIC},
+            standout_moments=[],
+            failure_modes=[],
+            overall_note="x",
+            judge_model=model,
+        )
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "praxis.scoring.judge.score_with_claude", _recording_with_claude
+    )
+
+    summary = run()
+    assert summary.sessions_scored == 1
+    assert seen_models == ["claude-haiku-4-5"]
+
+
+# ---------------------------------------------------------------------------
+# US-028: low-confidence sessions escalate to the pass-2 frontier judge
+# ---------------------------------------------------------------------------
+
+
+def _pass1_result(*, confidence: str, judge_model: str = "pass-1-cheap") -> JudgeResult:
+    """Pass-1-style JudgeResult fixture with the given self-confidence."""
+    return JudgeResult(
+        dimension_scores={d.key: 5.0 for d in RUBRIC},
+        rationale={d.key: "pass1" for d in RUBRIC},
+        standout_moments=["pass1 standout"],
+        failure_modes=["pass1 failure"],
+        overall_note="pass1 overall",
+        judge_model=judge_model,
+        confidence=confidence,  # type: ignore[arg-type]
+    )
+
+
+def _pass2_result() -> JudgeResult:
+    """Pass-2-style JudgeResult with distinctive values so we can verify override."""
+    return JudgeResult(
+        dimension_scores={d.key: 9.0 for d in RUBRIC},
+        rationale={d.key: "pass2-frontier" for d in RUBRIC},
+        standout_moments=["pass2 standout"],
+        failure_modes=["pass2 failure"],
+        overall_note="pass2 overall",
+        judge_model="pass-2-frontier",
+        confidence="high",
+    )
+
+
+def test_pass2_escalates_only_low_confidence_sessions(tmp_home, monkeypatch):
+    """US-028: pass 2 runs for low-confidence sessions, not medium or high.
+
+    Builds a window where pass-1 returns a different confidence per session
+    (medium / high / low). Pass-2 must be invoked exactly once - for the
+    low-confidence session - and never for the others.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "escalation-mix"
+    for i in range(3):
+        _write_synthetic_claude_session(project_root, i, hours_ago=i + 1)
+
+    confidences = iter(["medium", "high", "low"])
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        return _pass1_result(confidence=next(confidences))
+
+    pass2_calls: list[str] = []
+
+    def _fake_pass2(session, prefer="claude"):  # noqa: ARG001
+        pass2_calls.append(session.stable_id)
+        return _pass2_result()
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _fake_pass2)
+
+    summary = run()
+    assert summary.sessions_scored == 3
+    assert len(pass2_calls) == 1, (
+        f"pass 2 should run only on the low-confidence session, got {len(pass2_calls)} call(s)"
+    )
+
+
+def test_pass2_result_overrides_pass1(tmp_home, monkeypatch):
+    """US-028: pass-2 scores, rationale, and moments override pass-1 for that session."""
+    project_root = tmp_home / ".claude" / "projects" / "override-check"
+    _write_synthetic_claude_session(project_root, 0)
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        return _pass1_result(confidence="low")
+
+    def _fake_pass2(session, prefer="claude"):  # noqa: ARG001
+        return _pass2_result()
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _fake_pass2)
+
+    run()
+
+    store = ProfileStore(home=resolve_home())
+    rows = store.load_session_scores()
+    assert len(rows) == 1
+    row = rows[0]
+    # All dim scores come from pass 2 (9.0), not pass 1 (5.0).
+    assert all(v == 9.0 for v in row["dimension_scores"].values())
+    # The persisted judge_result carries pass-2 metadata, not pass-1.
+    jr = row["judge_result"]
+    assert jr["judge_model"] == "pass-2-frontier"
+    assert jr["overall_note"] == "pass2 overall"
+    assert jr["rationale"]["planning"] == "pass2-frontier"
+    assert "pass2 standout" in jr["standout_moments"]
+    assert "pass2 failure" in jr["failure_modes"]
+
+
+def test_pass2_is_skipped_for_medium_confidence(tmp_home, monkeypatch):
+    """US-028 negative path: a medium-confidence pass-1 result is the final score.
+
+    The persisted row must reflect pass-1's output and the pass-2 entrypoint
+    must not be invoked at all.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "medium-only"
+    _write_synthetic_claude_session(project_root, 0)
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        return _pass1_result(confidence="medium", judge_model="pass-1-medium")
+
+    def _exploding_pass2(session, prefer="claude", **kwargs):  # noqa: ARG001
+        raise AssertionError("pass 2 should not run for medium confidence")
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _exploding_pass2)
+
+    run()
+
+    store = ProfileStore(home=resolve_home())
+    rows = store.load_session_scores()
+    assert len(rows) == 1
+    assert rows[0]["judge_result"]["judge_model"] == "pass-1-medium"
+
+
+def test_pass2_failure_keeps_pass1_score(tmp_home, monkeypatch):
+    """If pass 2 returns None (no key, transient error), keep the pass-1 score.
+
+    Spec: a session should never silently disappear; if escalation cannot
+    run, pass 1's read is what we have, so persist it rather than dropping
+    the session.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "pass2-failure"
+    _write_synthetic_claude_session(project_root, 0)
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        return _pass1_result(confidence="low", judge_model="pass-1-fallback")
+
+    def _failing_pass2(session, prefer="claude"):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _failing_pass2)
+
+    summary = run()
+    assert summary.sessions_scored == 1
+
+    store = ProfileStore(home=resolve_home())
+    rows = store.load_session_scores()
+    assert len(rows) == 1
+    assert rows[0]["judge_result"]["judge_model"] == "pass-1-fallback"
+
+
+def test_pass2_call_does_not_include_pass1_outputs(tmp_home, monkeypatch):
+    """AC: pass-2 prompts do not include pass-1 outputs.
+
+    The pass-2 entrypoint is wrapped to capture its call signature and we
+    assert it only receives the Session - never a JudgeResult, score dict,
+    rationale, or moments from pass 1.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "pass2-args"
+    _write_synthetic_claude_session(project_root, 0)
+
+    captured: list[tuple[tuple, dict]] = []
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        return _pass1_result(confidence="low")
+
+    def _capturing_pass2(*args, **kwargs):
+        captured.append((args, kwargs))
+        return _pass2_result()
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _capturing_pass2)
+
+    run()
+
+    assert len(captured) == 1
+    args, kwargs = captured[0]
+    # Only the session goes in. No pass-1 JudgeResult is forwarded.
+    assert len(args) == 1
+    from praxis.models import Session as _Session
+    assert isinstance(args[0], _Session)
+    for v in list(args[1:]) + list(kwargs.values()):
+        assert not isinstance(v, JudgeResult), "pass-2 must not receive a JudgeResult"
+
+
+# ---------------------------------------------------------------------------
+# US-029: both passes persisted with judge_pass column
+# ---------------------------------------------------------------------------
+
+
+def test_pass1_only_session_persists_judge_pass_1(tmp_home, fake_judge):
+    """AC: a session that does NOT escalate has a single row with judge_pass=1.
+
+    The default fake_judge fixture returns confidence='medium' (the dataclass
+    default for an unset field), so no escalation happens.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "judge-pass-1-only"
+    _write_synthetic_claude_session(project_root, 0)
+
+    run()
+
+    store = ProfileStore(home=resolve_home())
+    all_rows = store.load_session_scores(include_all_passes=True)
+    assert len(all_rows) == 1
+    assert all_rows[0]["judge_pass"] == 1
+
+
+def test_escalated_session_persists_both_pass_rows(tmp_home, monkeypatch):
+    """AC: when pass 2 runs, both pass-1 and pass-2 rows are persisted.
+
+    Pass-1 must not be overwritten when pass-2 lands; the composite primary
+    key on (stable_id, judge_pass) keeps both alive so the disagreement is
+    auditable (spec §9.6).
+    """
+    project_root = tmp_home / ".claude" / "projects" / "judge-pass-both"
+    _write_synthetic_claude_session(project_root, 0)
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        return _pass1_result(confidence="low", judge_model="pass-1-cheap")
+
+    def _fake_pass2(session, prefer="claude"):  # noqa: ARG001
+        return _pass2_result()
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _fake_pass2)
+
+    run()
+
+    store = ProfileStore(home=resolve_home())
+    all_rows = store.load_session_scores(include_all_passes=True)
+    assert len(all_rows) == 2, "both pass-1 and pass-2 rows must coexist"
+    by_pass = {row["judge_pass"]: row for row in all_rows}
+    assert set(by_pass) == {1, 2}
+    # The pass-1 row should carry pass-1's judge model and scores (5.0), not
+    # pass-2's (9.0): the row has not been overwritten.
+    assert by_pass[1]["judge_result"]["judge_model"] == "pass-1-cheap"
+    assert all(v == 5.0 for v in by_pass[1]["dimension_scores"].values())
+    # The pass-2 row carries pass-2's frontier metadata.
+    assert by_pass[2]["judge_result"]["judge_model"] == "pass-2-frontier"
+    assert all(v == 9.0 for v in by_pass[2]["dimension_scores"].values())
+
+
+def test_load_session_scores_dedupes_to_winning_pass_by_default(tmp_home, monkeypatch):
+    """``load_session_scores()`` (no flag) returns one row per session — the
+    pass-2 row when escalation happened. Otherwise the snapshot pipeline would
+    double-count any escalated session in the weekly window.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "judge-pass-dedup"
+    _write_synthetic_claude_session(project_root, 0)
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        return _pass1_result(confidence="low")
+
+    def _fake_pass2(session, prefer="claude"):  # noqa: ARG001
+        return _pass2_result()
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _fake_pass2)
+
+    run()
+
+    store = ProfileStore(home=resolve_home())
+    canonical = store.load_session_scores()
+    assert len(canonical) == 1
+    assert canonical[0]["judge_pass"] == 2
+    assert canonical[0]["judge_result"]["judge_model"] == "pass-2-frontier"
+
+
+def test_no_pass2_row_when_escalation_fails(tmp_home, monkeypatch):
+    """When pass 2 fails (no key / transient error), no pass-2 row is
+    written. The pass-1 row stays as the canonical judgment so the session
+    is never silently dropped (consistent with US-028's fallback behavior)."""
+    project_root = tmp_home / ".claude" / "projects" / "judge-pass-2-fails"
+    _write_synthetic_claude_session(project_root, 0)
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        return _pass1_result(confidence="low", judge_model="pass-1-fallback")
+
+    def _failing_pass2(session, prefer="claude"):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _failing_pass2)
+
+    run()
+
+    store = ProfileStore(home=resolve_home())
+    all_rows = store.load_session_scores(include_all_passes=True)
+    assert len(all_rows) == 1
+    assert all_rows[0]["judge_pass"] == 1
+    assert all_rows[0]["judge_result"]["judge_model"] == "pass-1-fallback"
+
+
+# ---------------------------------------------------------------------------
+# US-031: 4-week confidence-distribution telemetry
+# ---------------------------------------------------------------------------
+
+
+def test_pass1_distribution_logged_to_run_log(tmp_home, monkeypatch):
+    """AC: each weekly run logs the pass-1 confidence distribution.
+
+    Builds a window with sessions that produce a mix of confidences and
+    asserts a ``kind='pass1_conf'`` row lands in run_log with counts that
+    match what the fake pass-1 judge emitted.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "distribution"
+    for i in range(3):
+        _write_synthetic_claude_session(project_root, i, hours_ago=i + 1)
+
+    confidences = iter(["medium", "high", "low"])
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        return _pass1_result(confidence=next(confidences))
+
+    def _fake_pass2(session, prefer="claude", **kwargs):  # noqa: ARG001
+        return _pass2_result()
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _fake_pass2)
+
+    run()
+
+    store = ProfileStore(home=resolve_home())
+    rolling = store.recent_pass1_confidence(weeks=4)
+    # Three sessions: one each of medium/high/low.
+    assert rolling == {"low": 1, "medium": 1, "high": 1}
+
+
+def test_pass1_distribution_not_logged_when_zero_calls(tmp_home, monkeypatch):
+    """No pass-1 row should be written when no pass-1 calls succeed.
+
+    Without API keys, the pass-1 entrypoint returns None for every session,
+    so the per-run counter stays zero. Writing a row of zeros would pollute
+    run_log and skew the rolling 4-week share.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "no-keys"
+    _write_synthetic_claude_session(project_root, 0)
+    # tmp_home already clears API key env vars.
+    run()
+    store = ProfileStore(home=resolve_home())
+    rolling = store.recent_pass1_confidence(weeks=4)
+    assert rolling == {"low": 0, "medium": 0, "high": 0}
+
+
+def test_calibration_notice_is_none_without_history(tmp_home, fake_judge):
+    """A fresh install has no history, so the calibration notice must be None.
+
+    With zero prior pass-1 rows, the 4-week share has a denominator of zero
+    and neither threshold can trip; the RunSummary must not surface a banner.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "fresh"
+    _write_synthetic_claude_session(project_root, 0)
+    summary = run()
+    assert summary.calibration_notice is None
+
+
+def test_rolling_high_over_90_triggers_calibration_notice(tmp_home, monkeypatch):
+    """AC: rolling 4-week share of high > 90% surfaces the digest banner.
+
+    Seeds the run_log with a 4-week history where 95% of pass-1 ratings are
+    high, then runs the orchestrator on a new session and asserts the
+    RunSummary carries the "calibration was off; re-tuned" notice.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "over-confident"
+    _write_synthetic_claude_session(project_root, 0)
+
+    store = ProfileStore(home=resolve_home())
+    # 95 high / 3 medium / 2 low = 95% high, well above the 90% threshold.
+    store.record_pass1_confidence(low=2, medium=3, high=95)
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        return _pass1_result(confidence="medium")
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+
+    summary = run()
+    assert summary.calibration_notice == "calibration was off; re-tuned"
+
+
+def test_rolling_high_at_or_below_90_does_not_trigger(tmp_home, monkeypatch):
+    """The threshold is strict ``>`` 90%, not ``>=``: a 90% share is fine."""
+    project_root = tmp_home / ".claude" / "projects" / "at-threshold"
+    _write_synthetic_claude_session(project_root, 0)
+
+    store = ProfileStore(home=resolve_home())
+    # 9 high / 1 other = exactly 90%. Must NOT trip the banner.
+    store.record_pass1_confidence(low=1, medium=0, high=9)
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        return _pass1_result(confidence="medium")
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+
+    summary = run()
+    assert summary.calibration_notice is None
+
+
+def test_rolling_high_over_90_sharpens_pass1_prompt(tmp_home, monkeypatch):
+    """AC: when high > 90%, the pass-1 prompt is auto-sharpened.
+
+    Captures the ``sharpen_calibration`` kwarg the orchestrator forwards to
+    the pass-1 judge entrypoint. The flag must be True so the cheap-tier
+    prompt includes the over-confidence calibration check on this run.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "sharpen"
+    _write_synthetic_claude_session(project_root, 0)
+
+    store = ProfileStore(home=resolve_home())
+    store.record_pass1_confidence(low=1, medium=2, high=97)
+
+    captured: dict[str, object] = {}
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        captured["sharpen_calibration"] = kwargs.get("sharpen_calibration", False)
+        captured["stricter_low"] = kwargs.get("stricter_low", False)
+        return _pass1_result(confidence="medium")
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+
+    run()
+    assert captured["sharpen_calibration"] is True
+    assert captured["stricter_low"] is False
+
+
+def test_rolling_low_over_70_triggers_stricter_low_flag(tmp_home, monkeypatch):
+    """AC: rolling 4-week share of low > 70% applies the stricter definition.
+
+    The orchestrator must forward ``stricter_low=True`` to pass-1 when the
+    rolling share of low exceeds 70%, independent of any high-side action.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "over-flagging"
+    _write_synthetic_claude_session(project_root, 0)
+
+    store = ProfileStore(home=resolve_home())
+    # 80 low / 10 medium / 10 high = 80% low, above the 70% threshold.
+    store.record_pass1_confidence(low=80, medium=10, high=10)
+
+    captured: dict[str, object] = {}
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        captured["stricter_low"] = kwargs.get("stricter_low", False)
+        captured["sharpen_calibration"] = kwargs.get("sharpen_calibration", False)
+        return _pass1_result(confidence="medium")
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+
+    run()
+    assert captured["stricter_low"] is True
+    assert captured["sharpen_calibration"] is False
+
+
+def test_rolling_low_at_or_below_70_does_not_trigger(tmp_home, monkeypatch):
+    """The threshold is strict ``>`` 70%: a 70% share must not trip."""
+    project_root = tmp_home / ".claude" / "projects" / "low-threshold"
+    _write_synthetic_claude_session(project_root, 0)
+
+    store = ProfileStore(home=resolve_home())
+    # 7 low / 3 other = exactly 70%. Must NOT trip.
+    store.record_pass1_confidence(low=7, medium=2, high=1)
+
+    captured: dict[str, object] = {}
+
+    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
+        captured["stricter_low"] = kwargs.get("stricter_low", False)
+        return _pass1_result(confidence="medium")
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+
+    run()
+    assert captured["stricter_low"] is False

@@ -131,6 +131,12 @@ def _masthead(summary: RunSummary) -> list[str]:
             for k, v in sorted(snap.provider_breakdown.items(), key=lambda kv: -kv[1])
         )
         lines.append(f"{INDENT}{chips}")
+    # Spec §9.6 (US-031): when the rolling 4-week telemetry tripped the
+    # high>90% threshold, surface a one-line banner so the user knows the
+    # pass-1 prompt was auto-tuned on this run.
+    if summary.calibration_notice:
+        lines.append("")
+        lines.append(f"{INDENT}{TERRA}note{RESET}  {DIM}{summary.calibration_notice}{RESET}")
     return lines
 
 
