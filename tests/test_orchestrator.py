@@ -34,9 +34,14 @@ from praxis.storage.profile_store import ProfileStore, resolve_home
 
 @pytest.fixture
 def fake_judge(monkeypatch):
-    """Replace the LLM judge with a deterministic stub returning fixed scores."""
+    """Replace the LLM judge with a deterministic stub returning fixed scores.
 
-    def _fake(session, prefer="claude"):  # noqa: ARG001
+    Patches both pass-1 (cheap) and pass-2 (frontier) entrypoints so the
+    weekly orchestrator path picks up the stub regardless of which pass
+    a given test exercises.
+    """
+
+    def _fake(session, prefer="claude", **kwargs):  # noqa: ARG001
         return JudgeResult(
             dimension_scores={d.key: 6.0 for d in RUBRIC},
             rationale={d.key: "fixture" for d in RUBRIC},
@@ -46,7 +51,8 @@ def fake_judge(monkeypatch):
             judge_model="fixture",
         )
 
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session", _fake)
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake)
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _fake)
     return _fake
 
 

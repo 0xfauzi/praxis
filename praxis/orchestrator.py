@@ -381,7 +381,7 @@ def _step_pass1(sessions: list[Session], tasks: list[Task]) -> Pass1Output:
     results: dict[str, JudgeResult] = {}
     low_confidence: list[str] = []
     for session in sessions:
-        score = score_one_session(session)
+        score = score_one_session_pass1(session)
         if score is None or score.judge_result is None:
             continue
         results[session.stable_id] = score.judge_result
@@ -407,7 +407,7 @@ def _step_pass2(
     by_id = {s.stable_id: s for s in sessions if s.stable_id in flagged}
     out: dict[str, JudgeResult] = {}
     for sid, session in by_id.items():
-        score = score_one_session(session)
+        score = score_one_session_pass2(session)
         if score is None or score.judge_result is None:
             continue
         out[sid] = score.judge_result
