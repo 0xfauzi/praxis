@@ -38,8 +38,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added `dry_run: bool = False` parameter to run_weekly(). When True: skips ProfileStore construction (no profile.db write), skips save_weekly_digest call (no DB row), and passes dry_run=True kwarg through to _step_render so future file-write logic can short-circuit while still computing rendered strings. Explicit store= injection does NOT override dry_run - defense-in-depth so the flag cannot be defeated. The full pipeline still executes; only side effects are suppressed. WeeklyRunSummary.rendered_terminal is populated as usual so terminal output remains available."
     },
     {
       "id": "US-073",

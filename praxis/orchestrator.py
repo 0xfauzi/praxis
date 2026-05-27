@@ -444,6 +444,8 @@ def _step_render(
     selection: MomentSelection | None,
     follow_up: object | None,
     snapshot: ProfileSnapshot,
+    *,
+    dry_run: bool = False,
 ) -> tuple[str, str]:
     """Step 8: produce HTML + terminal renderings of the digest.
 
@@ -451,14 +453,19 @@ def _step_render(
     to assemble inputs from the steps above and call the renderers. The
     full wiring lands in a follow-up story (US-071+); this version
     returns empty strings so the ordering contract can be tested first.
+
+    `dry_run` is plumbed through so the future file-writing step (US-073
+    or render follow-up) can skip the on-disk write while still computing
+    and returning the rendered strings for terminal display.
     """
-    _ = sessions, tasks, selection, follow_up, snapshot
+    _ = sessions, tasks, selection, follow_up, snapshot, dry_run
     return "", ""
 
 
 def run_weekly(
     since_days: int = 7,
     store: ProfileStore | None = None,
+    dry_run: bool = False,
 ) -> WeeklyRunSummary:
     """Run the weekly pipeline in spec Section 9.4 order.
 
@@ -476,6 +483,12 @@ def run_weekly(
     documented upstream steps (US-070 AC #2). After render, the digest row
     is UPSERTed into weekly_digests (US-071); --dry-run (US-072) and perf
     (US-073) hang off this same ordering.
+
+    `dry_run=True` (US-072) computes the full pipeline (terminal output
+    included via `rendered_terminal`) but writes nothing: no DB row, no
+    on-disk file, no ProfileStore construction. Passing an explicit
+    `store=` does not override `dry_run`; the contract is that dry-run
+    never persists, no matter how it was called.
     """
     started = time.time()
     steps: list[str] = []
@@ -507,7 +520,7 @@ def run_weekly(
     steps.append("follow_up")
 
     rendered_html, rendered_terminal = _step_render(
-        sessions, tasks, selection, follow_up, snapshot
+        sessions, tasks, selection, follow_up, snapshot, dry_run=dry_run,
     )
     steps.append("render")
 
@@ -522,23 +535,24 @@ def run_weekly(
     cost_baseline_usd: float | None = None
 
     digest_persisted = False
-    if store is None:
-        store = ProfileStore()
-    headline_moment_id = (
-        selection.headline_moment_id if selection is not None else None
-    )
-    html_path = rendered_html if rendered_html else None
-    store.save_weekly_digest(
-        week_iso=week_iso,
-        trajectory_label=trajectory.label.value,
-        trajectory_headline=trajectory.headline,
-        snapshot=snapshot,
-        headline_moment_id=headline_moment_id,
-        cost_total_usd=cost_total_usd,
-        cost_baseline_usd=cost_baseline_usd,
-        html_path=html_path,
-    )
-    digest_persisted = True
+    if not dry_run:
+        if store is None:
+            store = ProfileStore()
+        headline_moment_id = (
+            selection.headline_moment_id if selection is not None else None
+        )
+        html_path = rendered_html if rendered_html else None
+        store.save_weekly_digest(
+            week_iso=week_iso,
+            trajectory_label=trajectory.label.value,
+            trajectory_headline=trajectory.headline,
+            snapshot=snapshot,
+            headline_moment_id=headline_moment_id,
+            cost_total_usd=cost_total_usd,
+            cost_baseline_usd=cost_baseline_usd,
+            html_path=html_path,
+        )
+        digest_persisted = True
 
     return WeeklyRunSummary(
         week_iso=week_iso,

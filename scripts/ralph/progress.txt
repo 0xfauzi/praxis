@@ -28,3 +28,15 @@
   - load_weekly_digest returns a dict with both snapshot_json (raw text) and snapshot (parsed dict). Callers who need the full ProfileSnapshot object will need a from_dict constructor on ProfileSnapshot; not added in this iteration since no current caller needs it.
 ---
 
+## Iteration 3 - US-072: --dry-run computes without persisting
+- What I did: Added `dry_run: bool = False` parameter to run_weekly(). When True it gates the entire persistence block (no ProfileStore construction, no save_weekly_digest call) and propagates `dry_run=True` as a keyword arg through to _step_render so the future on-disk file write can be short-circuited. Explicit `store=` injection does NOT override `dry_run` - the gate is "if not dry_run", so passing a real store + dry_run=True still writes nothing. The pipeline (scan/cluster/pass1/pass2/validate/select/follow_up/render) still executes in full so terminal output is computed and returned in WeeklyRunSummary.rendered_terminal.
+- Files changed: praxis/orchestrator.py, tests/test_orchestrator.py
+- Verification: `uv run pytest` -> 709 passed (was 703 before; +6 new tests for US-072). `uv run mypy praxis` -> 34 errors in 6 files, none in orchestrator.py (same baseline as US-070/US-071).
+- What the next iteration should know:
+  - _step_render now accepts a `dry_run` keyword-only arg (default False). The signature is `(sessions, tasks, selection, follow_up, snapshot, *, dry_run=False)`. The positional-args count is still 5, so the US-070 data-flow contract test (test_run_weekly_step_inputs_match_documented_upstream) is intact. US-073 (perf) and the eventual render-file-write story should both honor this kwarg: when dry_run is True, skip the on-disk html_path write but still return the rendered_terminal string.
+  - The dry_run contract is "no side effects, ever". Even if a caller passes `store=my_store, dry_run=True`, no write happens. This is enforced in run_weekly's `if not dry_run:` block - keep this gate, do not move the save_weekly_digest call outside it.
+  - test_run_weekly_dry_run_does_not_create_db_file is the canonical guard against accidentally constructing ProfileStore() in the dry-run path. ProfileStore.__init__ does `home.mkdir(...)` + `_init_schema()` which writes ~/.praxis/profile.db. The test asserts that file does not exist after a dry-run on a fresh tmp_home. If you ever need a read-only store handle in run_weekly, you'll need a separate "read-only" construction path, or do the reads through a passed-in store the caller already has.
+  - There is no weekly CLI command yet. When `praxis weekly` lands, it should expose `--dry-run` as an argparse flag and pass it through to run_weekly(dry_run=...). The daily CLI's `praxis scan` does NOT need a dry-run today (out of scope for this story).
+  - cost_total_usd and cost_baseline_usd are still passed through as None - that is US-073's job. The dry-run path does not even reach the save call so these fields' values do not matter when dry_run=True.
+---
+

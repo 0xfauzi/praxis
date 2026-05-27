@@ -275,3 +275,112 @@ def test_run_weekly_accepts_external_store(tmp_home, step_recorder):
     assert store.count_weekly_digests() == 1
     row = store.load_weekly_digest(summary.week_iso)
     assert row is not None
+
+
+# --- US-072: --dry-run computes without persisting -----------------------
+
+def test_run_weekly_dry_run_does_not_persist_digest(tmp_home, step_recorder):
+    """dry_run=True must not write a weekly_digests row (US-072 AC #1)."""
+    summary = run_weekly(dry_run=True)
+    # Inspect via a fresh store - the dry-run path must not have created
+    # one of its own. Constructing a store here is fine: it is the test
+    # asserting "no row exists", not the SUT.
+    store = ProfileStore(home=resolve_home())
+    assert store.count_weekly_digests() == 0
+    assert store.load_weekly_digest(summary.week_iso) is None
+    assert summary.digest_persisted is False
+
+
+def test_run_weekly_dry_run_does_not_create_db_file(tmp_home, step_recorder):
+    """dry_run=True must not construct a ProfileStore (no DB file write).
+
+    Spec AC #1: dry-run prevents file writes. The ProfileStore constructor
+    creates ~/.praxis/profile.db as a side effect, so dry-run must avoid
+    constructing one when the caller hasn't supplied one.
+    """
+    db_path = tmp_home / ".praxis" / "profile.db"
+    assert not db_path.exists()
+    run_weekly(dry_run=True)
+    assert not db_path.exists(), (
+        "dry_run=True wrote profile.db; ProfileStore() must not be "
+        "constructed in the dry-run path"
+    )
+
+
+def test_run_weekly_dry_run_with_explicit_store_does_not_write(
+    tmp_home, step_recorder
+):
+    """dry_run wins over an explicit store= (no row is written either way).
+
+    Defense-in-depth: callers who pass a real store but also ask for
+    dry-run must still get no persistence. Pinning this avoids someone
+    later "fixing" the explicit-store branch to write through.
+    """
+    store = ProfileStore(home=resolve_home())
+    assert store.count_weekly_digests() == 0
+    summary = run_weekly(store=store, dry_run=True)
+    assert store.count_weekly_digests() == 0
+    assert summary.digest_persisted is False
+
+
+def test_run_weekly_dry_run_still_returns_rendered_terminal(
+    tmp_home, monkeypatch
+):
+    """dry_run=True still computes and returns the terminal rendering.
+
+    Spec AC #2: terminal output is still produced. The renderer returns
+    its string via WeeklyRunSummary.rendered_terminal; this test pins
+    that dry-run does NOT short-circuit the render step or drop its
+    output.
+    """
+    # Stub just the render step to return a sentinel terminal string.
+    # Leave the rest of the pipeline real, so we exercise the full
+    # control flow that an actual dry-run user would hit.
+    captured: dict[str, object] = {}
+
+    def _render_stub(*args, **kwargs):
+        captured["args_count"] = len(args)
+        captured["dry_run_kwarg"] = kwargs.get("dry_run")
+        return ("<html>WEEK</html>", "TERMINAL DIGEST OUTPUT")
+
+    monkeypatch.setattr(orch, "_step_render", _render_stub)
+    # Stub the upstream steps too so the test does not depend on the
+    # scanners finding sessions or the LLM judges being reachable.
+    monkeypatch.setattr(orch, "_step_scan", lambda *_a, **_k: [])
+    monkeypatch.setattr(orch, "_step_cluster", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        orch,
+        "_step_pass1",
+        lambda *_a, **_k: Pass1Output(results={}, low_confidence_session_ids=[]),
+    )
+    monkeypatch.setattr(orch, "_step_pass2", lambda *_a, **_k: {})
+    monkeypatch.setattr(orch, "_step_validate_moments", lambda *_a, **_k: [])
+    monkeypatch.setattr(orch, "_step_select_moments", lambda *_a, **_k: None)
+    monkeypatch.setattr(orch, "_step_follow_up", lambda *_a, **_k: None)
+
+    summary = run_weekly(dry_run=True)
+    assert summary.rendered_terminal == "TERMINAL DIGEST OUTPUT"
+    assert summary.rendered_html == "<html>WEEK</html>"
+    assert captured["dry_run_kwarg"] is True
+
+
+def test_run_weekly_dry_run_flag_reaches_render_step(tmp_home, step_recorder):
+    """dry_run is propagated to _step_render so the future on-disk write
+    can be skipped while still computing the strings."""
+    run_weekly(dry_run=True)
+    by_name = {name: payload for name, payload in step_recorder}
+    assert by_name["render"]["kwargs"].get("dry_run") is True
+    # And the positional-args count remains the documented 5, so the
+    # data-flow contract from US-070 is not weakened.
+    assert len(by_name["render"]["args"]) == 5
+
+
+def test_run_weekly_default_persists_digest(tmp_home, step_recorder):
+    """The default (dry_run=False) still persists the digest row.
+
+    Pins that adding the dry-run gate did not flip the default off.
+    """
+    summary = run_weekly()
+    store = ProfileStore(home=resolve_home())
+    assert store.count_weekly_digests() == 1
+    assert summary.digest_persisted is True
