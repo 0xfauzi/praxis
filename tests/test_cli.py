@@ -1001,3 +1001,169 @@ def test_notify_is_noop_on_non_darwin(
     assert code == 0
     # No osascript call should have been recorded.
     assert fake_osascript == []
+
+
+# ---------------------------------------------------------------------------
+# US-082 - notification includes trajectory label, osascript never crashes run.
+# ---------------------------------------------------------------------------
+
+
+def test_notify_body_includes_trajectory_label(
+    tmp_home, capsys, monkeypatch, fake_api_key, fake_osascript
+):
+    """The notification body carries the digest's trajectory label.
+
+    Per AC US-082, the body must include the trajectory label so the
+    user gets the gist without opening the HTML (spec 13.2 example:
+    "Drifting this week."). With a single seeded session the trajectory
+    falls into INSUFFICIENT_DATA, which renders as "Reading" -- that
+    string must appear in the AppleScript ``display notification`` body.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _seed_score("sess-traj", datetime.now(timezone.utc))
+
+    code = main(["week", "--notify"])
+    capsys.readouterr()
+    assert code == 0
+    script = fake_osascript[0][2]
+    # User-facing form of INSUFFICIENT_DATA per the terminal renderer.
+    assert "Reading" in script
+    # AC US-081 still holds: the latest.html path stays in the body.
+    assert "~/.praxis/latest.html" in script
+
+
+def test_notify_body_uses_user_facing_trajectory_label(
+    tmp_home, capsys, monkeypatch, fake_api_key, fake_osascript
+):
+    """Raw enum values like ``stable_engaged`` are mapped to display form.
+
+    Drives the assertion that the body never contains the underscored
+    enum value: when the trajectory label is ``stable_engaged`` the
+    body must show "Engaged", not "Stable_Engaged" or "stable_engaged".
+    Forces a known label by stubbing ``run_weekly`` so the test does
+    not depend on the heuristic assessor's bucket count.
+    """
+    from praxis.behavior.trajectory import TrajectoryAssessment, TrajectoryLabel
+    from praxis.cli import __main__ as cli_main
+    from praxis.orchestrator import WeeklyRunSummary
+    from praxis.scoring.aggregate import ProfileSnapshot
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _seed_score("sess-engaged", datetime.now(timezone.utc))
+
+    # Stub run_weekly to return a summary with a known non-INSUFFICIENT_DATA
+    # trajectory. Build a minimal snapshot that satisfies the exit-3 gate
+    # (session_count >= 1) without going through the orchestrator.
+    snapshot = ProfileSnapshot(
+        overall=6.0,
+        dimension_means={d.key: 6.0 for d in RUBRIC},
+        session_count=1,
+        provider_breakdown={"claude": 1},
+        strongest_dimension=RUBRIC[0].key,
+        weakest_dimension=RUBRIC[-1].key,
+    )
+    fake_summary = WeeklyRunSummary(
+        week_iso="2026-W21",
+        sessions=[],
+        tasks=[],
+        judge_results={},
+        moments=[],
+        selection=None,
+        snapshot=snapshot,
+        rendered_html="<html></html>",
+        rendered_terminal="",
+        elapsed_seconds=0.0,
+        trajectory=TrajectoryAssessment(
+            label=TrajectoryLabel.STABLE_ENGAGED,
+            engagement_slope=0.0,
+            delegation_slope=0.0,
+            headline="Engaged this week.",
+        ),
+    )
+    monkeypatch.setattr(cli_main, "run_weekly", lambda **kw: fake_summary)
+
+    code = main(["week", "--notify"])
+    capsys.readouterr()
+    assert code == 0
+    script = fake_osascript[0][2]
+    assert "Engaged" in script
+    # Negative: the raw enum value (with underscore) must never leak through.
+    assert "stable_engaged" not in script
+    assert "Stable_Engaged" not in script
+
+
+def test_notify_survives_osascript_filenotfound(
+    tmp_home, capsys, monkeypatch, fake_api_key
+):
+    """`osascript` binary missing must not crash the run (AC US-082).
+
+    Sandboxed CI runners may not have ``osascript`` on PATH;
+    subprocess.run raises FileNotFoundError before the AppleScript runs.
+    The CLI must log the failure to stderr and still exit 0 -- the
+    digest is already rendered and the HTML is already written.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _seed_score("sess-nofile", datetime.now(timezone.utc))
+
+    def _missing(cmd, *args, **kwargs):  # noqa: ARG001
+        raise FileNotFoundError("osascript")
+
+    monkeypatch.setattr("praxis.cli.__main__.subprocess.run", _missing)
+
+    code = main(["week", "--notify"])
+    captured = capsys.readouterr()
+    assert code == 0
+    # Failure is surfaced to stderr so the user / launchd log has a record.
+    assert "osascript notification failed" in captured.err
+
+
+def test_notify_survives_osascript_nonzero_exit(
+    tmp_home, capsys, monkeypatch, fake_api_key
+):
+    """osascript returning non-zero must not crash the run (AC US-082).
+
+    Notification Center can refuse to display (locked screen, focus
+    mode, denied permission). osascript exits non-zero in those cases.
+    The CLI must log the failure and still exit 0.
+    """
+    import subprocess as _subprocess
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _seed_score("sess-nonzero", datetime.now(timezone.utc))
+
+    def _failing(cmd, *args, **kwargs):  # noqa: ARG001
+        return _subprocess.CompletedProcess(
+            cmd, returncode=1, stdout="", stderr="permission denied"
+        )
+
+    monkeypatch.setattr("praxis.cli.__main__.subprocess.run", _failing)
+
+    code = main(["week", "--notify"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "osascript notification failed" in captured.err
+    assert "permission denied" in captured.err
+
+
+def test_notify_survives_unexpected_exception(
+    tmp_home, capsys, monkeypatch, fake_api_key
+):
+    """Any exception from subprocess.run is caught (AC US-082).
+
+    Defends the broad ``except Exception`` clause: even when something
+    unexpected (e.g., PermissionError, OSError) bubbles out of the
+    subprocess layer, the run must still exit 0 with the failure
+    logged to stderr.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _seed_score("sess-oserror", datetime.now(timezone.utc))
+
+    def _explode(cmd, *args, **kwargs):  # noqa: ARG001
+        raise PermissionError("operation not permitted")
+
+    monkeypatch.setattr("praxis.cli.__main__.subprocess.run", _explode)
+
+    code = main(["week", "--notify"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "osascript notification failed" in captured.err

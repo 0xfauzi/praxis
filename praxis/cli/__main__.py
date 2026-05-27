@@ -59,7 +59,16 @@ def _weekly_html_path(week_iso: str) -> Path:
     return weeks_dir / f"{week_iso}.html"
 
 
-def _post_notify() -> None:
+_TRAJECTORY_LABEL_DISPLAY: dict[str, str] = {
+    "learning": "Learning",
+    "stable_engaged": "Engaged",
+    "stable_passive": "Passive",
+    "atrophying": "Atrophying",
+    "insufficient_data": "Reading",
+}
+
+
+def _post_notify(trajectory_label: str | None = None) -> None:
     """Best-effort macOS notification (spec section 13.2).
 
     Posts a ``display notification`` AppleScript with the fixed title
@@ -67,23 +76,41 @@ def _post_notify() -> None:
     ``~/.praxis/latest.html`` (the symlink maintained by the HTML
     digest writer always tracks the most recent week).
 
+    When ``trajectory_label`` is provided, the body is prefixed with the
+    label (per spec 13.2 example: "Drifting this week. ..."), so the
+    user gets the gist without opening the HTML. The label string is
+    the user-facing form (e.g., "Drifting", "Atrophying"), not the raw
+    enum value.
+
     Silent no-op on non-macOS so the same flag is portable. ``osascript``
-    failures (notifications disabled, sandboxed env) are logged to stderr
-    and do not fail the run -- the digest is still rendered.
+    failures (binary missing, notifications disabled, non-zero exit,
+    sandboxed env) are logged to stderr and do not fail the run -- the
+    digest is still rendered.
     """
     if sys.platform != "darwin":
         return
     title = "Praxis weekly read is ready"
-    body = "Open ~/.praxis/latest.html to read."
+    if trajectory_label:
+        body = f"{trajectory_label} this week. Open ~/.praxis/latest.html for the detail."
+    else:
+        body = "Open ~/.praxis/latest.html to read."
     try:
-        subprocess.run(
+        result = subprocess.run(
             [
                 "osascript",
                 "-e",
                 f'display notification "{body}" with title "{title}" sound name "default"',
             ],
             check=False,
+            capture_output=True,
+            text=True,
         )
+        if result.returncode != 0:
+            print(
+                f"[cli] osascript notification failed: "
+                f"exit {result.returncode}: {result.stderr.strip()}",
+                file=sys.stderr,
+            )
     except Exception as exc:  # noqa: BLE001
         print(f"[cli] osascript notification failed: {exc!r}", file=sys.stderr)
 
@@ -170,7 +197,11 @@ def cmd_week(args: argparse.Namespace) -> int:
             )
 
     if args.notify:
-        _post_notify()
+        traj_label: str | None = None
+        if summary.trajectory is not None:
+            raw = summary.trajectory.label.value
+            traj_label = _TRAJECTORY_LABEL_DISPLAY.get(raw, raw.title())
+        _post_notify(trajectory_label=traj_label)
 
     return 0
 
