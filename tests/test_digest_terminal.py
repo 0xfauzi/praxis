@@ -12,15 +12,20 @@ import re
 from praxis.reports import digest_terminal
 from praxis.reports.digest_terminal import (
     MAX_LINE_WIDTH,
+    MAX_TASKS_RENDERED,
+    CostLedgerView,
     FollowUpView,
     HeadlineMomentView,
+    TaskRowView,
     WeeklyDigest,
     render,
     visible_width,
 )
 from praxis.reports.digest_terminal import (
+    _COST_LEDGER_PLACEHOLDER,
     _FOLLOW_UP_PLACEHOLDER,
     _HEADLINE_MOMENT_PLACEHOLDER,
+    _TASKS_PLACEHOLDER,
     _TRAJECTORY_PLACEHOLDER,
 )
 
@@ -415,3 +420,422 @@ def test_mandatory_sections_render_in_spec_order():
     moment_pos = text.find("HEADLINE MOMENT")
     follow_pos = text.find("FOLLOW-UP")
     assert -1 < traj_pos < moment_pos < follow_pos
+
+
+# ---------------------------------------- US-068 cost ledger and tasks
+
+
+def _realistic_cost_ledger() -> CostLedgerView:
+    """Fixture: a plausible week of spend with a healthy baseline.
+
+    The numbers are sized so the formatted line ("$14.50 vs baseline
+    $8.20") exercises both the dollar formatter and the delta path
+    without sitting against the 75-char body budget.
+    """
+    return CostLedgerView(
+        this_week_usd=14.50,
+        baseline_usd=8.20,
+        biggest_model="Opus",
+        biggest_task_label="auth migration debugging",
+        biggest_line_usd=5.20,
+        biggest_line_sessions=4,
+        over_tier_sessions=3,
+        tier_fit_savings_usd=2.10,
+    )
+
+
+def _realistic_tasks() -> list[TaskRowView]:
+    """Fixture: three plausible top tasks for the week.
+
+    The labels are short enough to fit on a single body line so the
+    fixture also covers the no-wrap path; long-label wrapping has its
+    own dedicated test below.
+    """
+    return [
+        TaskRowView(
+            label="auth migration debugging",
+            sessions=4,
+            total_usd=5.20,
+            worst_dim_key="verification",
+        ),
+        TaskRowView(
+            label="ui polish",
+            sessions=3,
+            total_usd=2.40,
+            worst_dim_key="iteration",
+        ),
+        TaskRowView(
+            label="docs writing",
+            sessions=2,
+            total_usd=0.85,
+            worst_dim_key="planning",
+        ),
+    ]
+
+
+def _full_digest_with_ledger_and_tasks() -> WeeklyDigest:
+    digest = _full_digest()
+    digest.cost_ledger = _realistic_cost_ledger()
+    digest.tasks = _realistic_tasks()
+    return digest
+
+
+def test_cost_ledger_eyebrow_present():
+    """The Cost Ledger section always renders its eyebrow.
+
+    Spec section 10.1: the cost ledger panel is "always shown in the
+    digest." That contract holds whether data is provided or not.
+    """
+    text_with = _strip_ansi(render(_full_digest_with_ledger_and_tasks()))
+    text_without = _strip_ansi(render(WeeklyDigest()))
+    assert "COST LEDGER" in text_with
+    assert "COST LEDGER" in text_without
+
+
+def test_where_the_week_went_eyebrow_present():
+    """The 'Where The Week Went' section always renders its eyebrow."""
+    text_with = _strip_ansi(render(_full_digest_with_ledger_and_tasks()))
+    text_without = _strip_ansi(render(WeeklyDigest()))
+    assert "WHERE THE WEEK WENT" in text_with
+    assert "WHERE THE WEEK WENT" in text_without
+
+
+def test_cost_ledger_placeholder_when_input_missing():
+    """When ``cost_ledger`` is None, the section emits the placeholder copy."""
+    text = _strip_ansi(render(WeeklyDigest()))
+    assert _COST_LEDGER_PLACEHOLDER in text
+
+
+def test_tasks_placeholder_when_input_missing():
+    """When ``tasks`` is None, the section emits the placeholder copy."""
+    text = _strip_ansi(render(WeeklyDigest()))
+    assert _TASKS_PLACEHOLDER in text
+
+
+def test_tasks_placeholder_when_input_empty_list():
+    """An empty tasks list also triggers the placeholder.
+
+    The boundary that produces the list might emit ``[]`` when the
+    clustering pass found nothing groupable; the section should
+    degrade the same way as a missing input rather than rendering an
+    empty table that reads like a bug.
+    """
+    text = _strip_ansi(render(WeeklyDigest(tasks=[])))
+    assert _TASKS_PLACEHOLDER in text
+
+
+def test_cost_ledger_renders_spend_and_baseline():
+    """The cost ledger shows this-week spend alongside the baseline.
+
+    Locks the formatting decision ("$X.XX vs baseline $Y.YY") so a
+    future renderer change cannot drop one of the two anchors.
+    """
+    digest = WeeklyDigest(cost_ledger=_realistic_cost_ledger())
+    text = _strip_ansi(render(digest))
+    assert "$14.50" in text
+    assert "$8.20" in text
+    # The delta column shows the (signed) gap between week and baseline.
+    assert "+$6.30" in text
+
+
+def test_cost_ledger_renders_negative_delta_under_baseline():
+    """A week that came in UNDER baseline shows a minus sign on the delta.
+
+    The sign-aware formatter is the only thing distinguishing a week
+    of underspend from a week of overspend in the headline number.
+    """
+    ledger = CostLedgerView(
+        this_week_usd=4.00,
+        baseline_usd=6.50,
+        biggest_model="Sonnet",
+        biggest_task_label="quick scripts",
+        biggest_line_usd=1.20,
+        biggest_line_sessions=2,
+        over_tier_sessions=0,
+    )
+    text = _strip_ansi(render(WeeklyDigest(cost_ledger=ledger)))
+    assert "-$2.50" in text
+
+
+def test_cost_ledger_baseline_forming_when_none():
+    """No baseline yet: render the literal '--' and skip the delta.
+
+    Spec section 7 edge case: users with < 14 days of data have no
+    baseline. The digest must not invent one. The 'baseline forming'
+    annotation tells the user why no delta appears.
+    """
+    ledger = CostLedgerView(
+        this_week_usd=3.50,
+        baseline_usd=None,
+        biggest_model="Sonnet",
+        biggest_task_label="initial setup",
+        biggest_line_usd=2.00,
+        biggest_line_sessions=1,
+        over_tier_sessions=0,
+    )
+    text = _strip_ansi(render(WeeklyDigest(cost_ledger=ledger)))
+    assert "$3.50" in text
+    assert "--" in text
+    assert "baseline forming" in text
+    # No invented delta when there's no baseline to compare against.
+    assert "+$" not in text
+
+
+def test_cost_ledger_biggest_line_shows_model_task_and_meta():
+    """The biggest (model, task) line names the model, task, dollars, and sessions.
+
+    Spec section 10.1: "Biggest line: which (model, task) pair drove
+    the spend." All four pieces of information must be present so the
+    user knows which corner of their week was the heaviest.
+    """
+    digest = WeeklyDigest(cost_ledger=_realistic_cost_ledger())
+    text = _strip_ansi(render(digest))
+    assert "Opus" in text
+    assert "auth migration debugging" in text
+    assert "$5.20" in text
+    assert "4 sessions" in text
+
+
+def test_cost_ledger_tier_fit_callout_present_when_over_tier():
+    """A non-zero over-tier count surfaces a savings callout.
+
+    Spec section 10.1: tier-fit callout estimates the savings if
+    over-tier sessions had run on the cheaper model. The count and the
+    savings amount both appear on the row.
+    """
+    digest = WeeklyDigest(cost_ledger=_realistic_cost_ledger())
+    text = _strip_ansi(render(digest))
+    assert "Tier-fit" in text
+    assert "3 over-tier" in text
+    assert "$2.10" in text
+
+
+def test_cost_ledger_tier_fit_clean_when_zero():
+    """Zero over-tier sessions surface the positive 'clean' callout.
+
+    Absence of over-tier waste is itself worth flagging; suppressing
+    the row entirely would lose the reinforcement signal.
+    """
+    ledger = CostLedgerView(
+        this_week_usd=2.00,
+        baseline_usd=2.00,
+        biggest_model="Sonnet",
+        biggest_task_label="small fixes",
+        biggest_line_usd=0.80,
+        biggest_line_sessions=2,
+        over_tier_sessions=0,
+        tier_fit_savings_usd=0.0,
+    )
+    text = _strip_ansi(render(WeeklyDigest(cost_ledger=ledger)))
+    assert "Tier-fit: clean" in text
+
+
+def test_tasks_render_label_sessions_cost_and_worst_dim():
+    """US-068 acceptance: each row carries label, sessions, cost, worst dim.
+
+    All four columns must appear together so the row answers the
+    "where did my week go" question completely.
+    """
+    digest = WeeklyDigest(tasks=_realistic_tasks())
+    text = _strip_ansi(render(digest))
+    # First-task label and metadata
+    assert "1. auth migration debugging" in text
+    assert "4 sessions" in text
+    assert "$5.20" in text
+    # Worst-dim title is resolved through _dim_title, so the
+    # 'verification' key shows up as 'Verification habits'.
+    assert "Verification habits" in text
+
+
+def test_tasks_singular_session_label():
+    """A 1-session task uses 'session' (singular), not 'sessions'.
+
+    Tiny detail, but '1 sessions' is the kind of bug a careful reader
+    notices immediately and a careless renderer ships.
+    """
+    task = TaskRowView(
+        label="ad-hoc tweak",
+        sessions=1,
+        total_usd=0.30,
+        worst_dim_key="iteration",
+    )
+    text = _strip_ansi(render(WeeklyDigest(tasks=[task])))
+    assert "1 session," in text
+    assert "1 sessions" not in text
+
+
+def test_tasks_numbered_and_ordered():
+    """Top-3 tasks are rendered numbered 1., 2., 3. in input order.
+
+    Upstream is responsible for the ranking (session count, with cost
+    as tiebreaker). The renderer respects that order rather than
+    re-sorting.
+    """
+    digest = WeeklyDigest(tasks=_realistic_tasks())
+    text = _strip_ansi(render(digest))
+    assert "1. auth migration debugging" in text
+    assert "2. ui polish" in text
+    assert "3. docs writing" in text
+    one = text.find("1. auth migration")
+    two = text.find("2. ui polish")
+    three = text.find("3. docs writing")
+    assert -1 < one < two < three
+
+
+def test_tasks_caps_at_top_3():
+    """A list longer than MAX_TASKS_RENDERED is truncated to the top 3.
+
+    Spec section 5.5 fixes the digest at the top 3 tasks. The
+    renderer enforces the ceiling defensively even if the caller
+    provides a longer list.
+    """
+    assert MAX_TASKS_RENDERED == 3
+    long_list = [
+        TaskRowView(
+            label=f"task {i}",
+            sessions=10 - i,
+            total_usd=float(10 - i),
+            worst_dim_key="planning",
+        )
+        for i in range(7)
+    ]
+    text = _strip_ansi(render(WeeklyDigest(tasks=long_list)))
+    assert "1. task 0" in text
+    assert "2. task 1" in text
+    assert "3. task 2" in text
+    assert "4. task 3" not in text  # capped at top-3
+    assert "5. task 4" not in text
+
+
+def test_cost_ledger_lines_under_80_with_data():
+    """A populated cost ledger respects the 79-col budget.
+
+    Includes a long task label so the biggest-line row exercises the
+    wrap path.
+    """
+    ledger = CostLedgerView(
+        this_week_usd=123.45,
+        baseline_usd=78.90,
+        biggest_model="Claude Opus 4.7",
+        biggest_task_label=(
+            "deeply involved migration of authentication middleware "
+            "across three repositories"
+        ),
+        biggest_line_usd=45.67,
+        biggest_line_sessions=12,
+        over_tier_sessions=8,
+        tier_fit_savings_usd=23.45,
+    )
+    digest = WeeklyDigest(cost_ledger=ledger)
+    for i, line in enumerate(_all_lines(digest)):
+        assert visible_width(line) <= MAX_LINE_WIDTH, (
+            f"line {i} ({visible_width(line)} > {MAX_LINE_WIDTH}): "
+            f"{_strip_ansi(line)!r}"
+        )
+
+
+def test_tasks_lines_under_80_with_data():
+    """A populated tasks list respects the 79-col budget."""
+    digest = WeeklyDigest(tasks=_realistic_tasks())
+    for i, line in enumerate(_all_lines(digest)):
+        assert visible_width(line) <= MAX_LINE_WIDTH, (
+            f"line {i} ({visible_width(line)} > {MAX_LINE_WIDTH}): "
+            f"{_strip_ansi(line)!r}"
+        )
+
+
+def test_tasks_lines_under_80_with_long_labels():
+    """Pathologically long task labels still wrap inside the budget.
+
+    Labels can be up to 60 chars by upstream validation; this test
+    pushes that limit and asserts the wrap path stays inside 79 cols.
+    """
+    long_label = "a" * 60
+    digest = WeeklyDigest(
+        tasks=[
+            TaskRowView(
+                label=long_label,
+                sessions=4,
+                total_usd=5.20,
+                worst_dim_key="verification",
+            ),
+        ]
+    )
+    for i, line in enumerate(_all_lines(digest)):
+        assert visible_width(line) <= MAX_LINE_WIDTH, (
+            f"line {i} ({visible_width(line)} > {MAX_LINE_WIDTH}): "
+            f"{_strip_ansi(line)!r}"
+        )
+
+
+def test_full_digest_with_ledger_and_tasks_under_80():
+    """Every section populated: the assembled digest still fits the budget.
+
+    The most comprehensive width check in the suite. A future copy
+    change in any one section that pushes a line over 79 cols trips
+    here.
+    """
+    lines = _all_lines(_full_digest_with_ledger_and_tasks())
+    over = [
+        (i, _strip_ansi(line))
+        for i, line in enumerate(lines)
+        if visible_width(line) > MAX_LINE_WIDTH
+    ]
+    assert not over, f"Lines exceed {MAX_LINE_WIDTH} cols: {over}"
+
+
+def test_sections_appear_in_spec_order_with_ledger_and_tasks():
+    """Spec section 6.1 fixes the order: trajectory, moment, ledger, tasks, follow-up.
+
+    The terminal digest (US-068) places the cost ledger and tasks
+    AFTER follow-up so the editorial cadence keeps coaching content
+    before bookkeeping, matching the lock established in the prior
+    iteration's handoff notes.
+    """
+    text = _strip_ansi(render(_full_digest_with_ledger_and_tasks()))
+    traj = text.find("TRAJECTORY")
+    moment = text.find("HEADLINE MOMENT")
+    follow = text.find("FOLLOW-UP")
+    ledger = text.find("COST LEDGER")
+    week_went = text.find("WHERE THE WEEK WENT")
+    assert -1 < traj < moment < follow < ledger < week_went
+
+
+def test_cost_ledger_placeholder_absent_when_data_present():
+    """Real ledger data does not also leak the placeholder copy.
+
+    Guards against a refactor that emits the placeholder alongside
+    real content.
+    """
+    text = _strip_ansi(render(_full_digest_with_ledger_and_tasks()))
+    assert _COST_LEDGER_PLACEHOLDER not in text
+
+
+def test_tasks_placeholder_absent_when_data_present():
+    """Real tasks data does not also leak the placeholder copy."""
+    text = _strip_ansi(render(_full_digest_with_ledger_and_tasks()))
+    assert _TASKS_PLACEHOLDER not in text
+
+
+def test_cost_ledger_unknown_dim_key_does_not_crash_via_task():
+    """An unknown worst_dim_key in a task row falls through to the raw key.
+
+    The renderer must not crash on rubric drift; the test mirrors the
+    contract _dim_title established in US-067 and exercises it through
+    the new tasks section.
+    """
+    digest = WeeklyDigest(
+        tasks=[
+            TaskRowView(
+                label="some task",
+                sessions=2,
+                total_usd=1.00,
+                worst_dim_key="not_a_real_dim",
+            ),
+        ]
+    )
+    text = _strip_ansi(render(digest))
+    # The raw key (not a crash) renders when the rubric does not
+    # recognize the dim. Future rubric additions would resolve it
+    # naturally without touching this test.
+    assert "not_a_real_dim" in text

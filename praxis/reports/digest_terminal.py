@@ -9,10 +9,11 @@ compact form. The full six-dim panel SHOULD be a footer.
 This module is the terminal counterpart to ``praxis/reports/html_report.py``
 for the v0.2 weekly digest pipeline. It is distinct from the v0.1
 ``praxis/reports/terminal.py`` renderer, which is preserved unchanged
-for the legacy `praxis scan` output. Subsequent stories
-(US-068/069) flesh out the optional sections; US-066 established the
-80-column hard constraint and US-067 wired the three mandatory
-sections with placeholder degradation.
+for the legacy `praxis scan` output. US-066 established the 80-column
+hard constraint, US-067 wired the three mandatory sections with
+placeholder degradation, US-068 added the compact cost ledger and
+'Where The Week Went' task breakdown, and US-069 will land the
+six-dim footer.
 """
 from __future__ import annotations
 
@@ -101,22 +102,70 @@ class FollowUpView:
 
 
 @dataclass
+class CostLedgerView:
+    """Renderer-facing slice of the week's cost ledger (spec section 10.1).
+
+    The cost ledger panel in the HTML digest (section 6.1) carries four
+    pieces of information: this week's spend, the 90-day rolling
+    baseline, the biggest (model, task) line, and the tier-fit savings
+    callout. Each field on this view is pre-aggregated so the renderer
+    does no math beyond formatting.
+
+    ``baseline_usd`` is ``None`` when the user has less than 14 days of
+    data and no baseline can yet be computed (spec section 7's edge
+    case); in that case the renderer shows ``--`` and skips the delta.
+    ``over_tier_sessions = 0`` is rendered as a positive "clean" signal
+    rather than suppressed, because absence of over-tier waste is
+    itself worth surfacing.
+    """
+
+    this_week_usd: float
+    baseline_usd: float | None = None
+    biggest_model: str = ""
+    biggest_task_label: str = ""
+    biggest_line_usd: float = 0.0
+    biggest_line_sessions: int = 0
+    over_tier_sessions: int = 0
+    tier_fit_savings_usd: float = 0.0
+
+
+@dataclass
+class TaskRowView:
+    """One row of the 'Where The Week Went' table (spec section 5.5).
+
+    The acceptance criteria for US-068 fix the visible columns to
+    label, session count, total cost, and worst dim. ``worst_dim_key``
+    is resolved through ``_dim_title`` so an unknown key renders as
+    the raw key rather than crashing the digest.
+    """
+
+    label: str
+    sessions: int
+    total_usd: float
+    worst_dim_key: str
+
+
+@dataclass
 class WeeklyDigest:
     """Inputs the digest renderer reads.
 
     Spec section 6.2 names three MUST-render sections: trajectory
-    headline, headline moment, follow-up panel. Each lives on this
-    dataclass as an Optional field and defaults to ``None`` so the
-    renderer can fall back to a clear placeholder rather than crashing
-    when the upstream pipeline has not produced data yet. US-068's
-    cost ledger / tasks and US-069's six-dim footer land as additional
-    optional fields in later iterations.
+    headline, headline moment, follow-up panel. The cost ledger and
+    tasks breakdown ("Where The Week Went") MAY render in a compact
+    form; in v0.2 we choose to always render them, falling back to a
+    placeholder when the upstream pipeline has not produced data yet
+    (spec section 10.1: the cost ledger is "always shown"). Each
+    section's input lives on this dataclass as an Optional field and
+    defaults to ``None`` so the renderer can degrade gracefully. The
+    six-dim footer (US-069) lands as the next optional field.
     """
 
     week_label: str = ""
     trajectory_headline: str | None = None
     headline_moment: HeadlineMomentView | None = None
     follow_up: FollowUpView | None = None
+    cost_ledger: CostLedgerView | None = None
+    tasks: list[TaskRowView] | None = None
 
 
 # -------------------------------------------------------------------- helpers
@@ -197,6 +246,19 @@ _HEADLINE_MOMENT_PLACEHOLDER = (
 _FOLLOW_UP_PLACEHOLDER = (
     "No commitment in flight yet. Next week's digest will open one."
 )
+_COST_LEDGER_PLACEHOLDER = (
+    "Cost ledger pending. Pricing data fills in after the first run."
+)
+_TASKS_PLACEHOLDER = (
+    "No task breakdown yet. Clustering surfaces tasks once it runs."
+)
+
+# Spec section 10.1: spend, baseline, biggest (model, task) line, and
+# tier-fit savings. The literal "--" stands in for the baseline when
+# the user has < 14 days of data and no baseline exists yet (spec edge
+# case at section 7); keeping the placeholder as a single token keeps
+# the column alignment in the "vs baseline X" phrasing.
+_BASELINE_UNAVAILABLE = "--"
 
 
 def _dim_title(dim_key: str) -> str:
@@ -325,6 +387,139 @@ def _follow_up(follow_up: FollowUpView | None) -> list[str]:
     return lines
 
 
+def _format_spend_line(ledger: CostLedgerView) -> str:
+    """Top-of-ledger summary: this-week spend vs baseline, with delta.
+
+    Renders as ``This week: $X.XX vs baseline $Y.YY (+$Z.ZZ)`` when a
+    baseline exists, or ``This week: $X.XX vs baseline -- (baseline
+    forming)`` when fewer than 14 days of data are on file. The delta
+    label uses plus/minus signs (not arrows or em dashes) so the line
+    stays ASCII-clean across terminal emulators.
+    """
+    if ledger.baseline_usd is None:
+        return (
+            f"This week: ${ledger.this_week_usd:.2f}  "
+            f"vs baseline {_BASELINE_UNAVAILABLE} (baseline forming)"
+        )
+    delta = ledger.this_week_usd - ledger.baseline_usd
+    # Sign-aware formatting so a $0.00 delta still reads as "+$0.00"
+    # (a deliberate non-result) rather than a confusing bare $0.00.
+    sign = "+" if delta >= 0 else "-"
+    return (
+        f"This week: ${ledger.this_week_usd:.2f}  "
+        f"vs baseline ${ledger.baseline_usd:.2f} "
+        f"({sign}${abs(delta):.2f})"
+    )
+
+
+def _format_tier_fit_line(ledger: CostLedgerView) -> str:
+    """One-line tier-fit callout (spec section 10.1).
+
+    When ``over_tier_sessions`` is zero we surface the clean signal
+    instead of suppressing the line; the absence of over-tier waste is
+    itself worth flagging so the user can recognize the habit.
+    """
+    if ledger.over_tier_sessions == 0:
+        return "Tier-fit: clean (no over-tier sessions this week)"
+    return (
+        f"Tier-fit: {ledger.over_tier_sessions} over-tier "
+        f"(~${ledger.tier_fit_savings_usd:.2f} saved on the cheaper tier)"
+    )
+
+
+def _cost_ledger(ledger: CostLedgerView | None) -> list[str]:
+    """Render the cost ledger panel (spec section 10.1).
+
+    Compact form, sized for the 79-column budget. Layout, top to
+    bottom: spend-vs-baseline summary, the biggest (model, task) line
+    on its own row with a continuation row carrying the dollar amount
+    and session count, then the tier-fit callout.
+
+    When ``ledger`` is ``None`` the section degrades to a DIM
+    placeholder, matching the US-067 pattern; spec section 10.1 says
+    the panel is "always shown in the digest", so a missing input
+    still emits the eyebrow.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Cost ledger"))
+    if ledger is None:
+        lines.extend(_placeholder_lines(_COST_LEDGER_PLACEHOLDER))
+        return lines
+    for wrapped in _wrap(_format_spend_line(ledger), width=_BODY_WIDTH):
+        lines.append(_body_line(wrapped))
+    # Biggest line: "<model> on <task label>" on top, the dollar amount
+    # and session count on a continuation row. Splitting the model/task
+    # from the spend keeps long task labels from forcing a mid-phrase
+    # wrap that would split "$X.XX on N sessions" awkwardly.
+    biggest_lead = f"Biggest: {ledger.biggest_model} on {ledger.biggest_task_label}"
+    for wrapped in _wrap(biggest_lead, width=_BODY_WIDTH):
+        lines.append(_body_line(wrapped))
+    biggest_meta = (
+        f"${ledger.biggest_line_usd:.2f} over "
+        f"{ledger.biggest_line_sessions} sessions"
+    )
+    # Continuation indent ("  ") lines the meta row up with the words
+    # that follow "Biggest: " on the previous row.
+    for wrapped in _wrap(biggest_meta, width=_BODY_WIDTH - 2):
+        lines.append(_body_line("  " + wrapped, ansi=DIM))
+    for wrapped in _wrap(_format_tier_fit_line(ledger), width=_BODY_WIDTH):
+        lines.append(_body_line(wrapped))
+    return lines
+
+
+# Spec section 5.5: the digest renders the user's top-3 tasks for the
+# week. ``MAX_TASKS_RENDERED`` is the hard cap the renderer enforces in
+# case the caller hands over a longer list; ranking has already been
+# done upstream (session count, with total cost as tiebreaker).
+MAX_TASKS_RENDERED = 3
+
+
+def _format_task_meta(task: TaskRowView) -> str:
+    """One-line metadata for a task row: sessions, cost, worst dim."""
+    plural = "session" if task.sessions == 1 else "sessions"
+    return (
+        f"{task.sessions} {plural}, ${task.total_usd:.2f}, "
+        f"worst: {_dim_title(task.worst_dim_key)}"
+    )
+
+
+def _where_the_week_went(tasks: list[TaskRowView] | None) -> list[str]:
+    """Render the 'Where The Week Went' task breakdown (spec section 5.5).
+
+    Each top-3 task renders across two body lines: a numbered label
+    row (e.g. "1. auth migration debugging") and a metadata row in DIM
+    ink with the session count, total cost, and worst dim
+    (e.g. "   4 sessions, $5.20, worst: Verification habits"). The
+    two-line layout keeps long labels from forcing a mid-row wrap that
+    would visually break the column structure.
+
+    Tasks beyond the top-3 are silently dropped: the renderer trusts
+    upstream ranking but caps the visible rows regardless, so an
+    accidentally-long list from a future caller still respects the
+    spec ceiling.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Where the week went"))
+    if not tasks:
+        lines.extend(_placeholder_lines(_TASKS_PLACEHOLDER))
+        return lines
+    for rank, task in enumerate(tasks[:MAX_TASKS_RENDERED], start=1):
+        # Rank prefix is fixed-width ("1. ") so the continuation row's
+        # 3-space indent visually aligns with the label.
+        prefix = f"{rank}. "
+        wrapped_label = _wrap(task.label, width=_BODY_WIDTH - len(prefix))
+        if not wrapped_label:
+            wrapped_label = [""]
+        lines.append(_body_line(prefix + wrapped_label[0]))
+        for cont in wrapped_label[1:]:
+            lines.append(_body_line("   " + cont))
+        for wrapped in _wrap(
+            _format_task_meta(task), width=_BODY_WIDTH - 3
+        ):
+            lines.append(_body_line("   " + wrapped, ansi=DIM))
+    return lines
+
+
 # --------------------------------------------------------------------- render
 
 
@@ -344,12 +539,16 @@ def render(digest: WeeklyDigest) -> str:
     parts.extend(_masthead(digest.week_label))
     # Spec section 6.2: the trajectory headline, headline moment, and
     # follow-up panel are the three sections that MUST render. They
-    # appear in that order so the digest opens with the multi-week
-    # behavioral read (trajectory), then the single most coachable
-    # moment, then last week's commitment that closes the loop.
+    # appear first so the digest opens with the multi-week behavioral
+    # read (trajectory), then the single most coachable moment, then
+    # last week's commitment that closes the loop. The cost ledger and
+    # 'Where The Week Went' (US-068) sit after the follow-up so the
+    # editorial cadence keeps coaching content before bookkeeping.
     parts.extend(_trajectory(digest.trajectory_headline))
     parts.extend(_headline_moment(digest.headline_moment))
     parts.extend(_follow_up(digest.follow_up))
+    parts.extend(_cost_ledger(digest.cost_ledger))
+    parts.extend(_where_the_week_went(digest.tasks))
     # Trailing newline so terminals that print the next prompt without
     # a leading newline don't clash with the last section's content.
     parts.append("")
