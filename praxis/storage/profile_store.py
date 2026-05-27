@@ -25,6 +25,7 @@ def _utcnow() -> datetime:
     """Tz-aware UTC now. Wraps datetime.now(timezone.utc) for terseness."""
     return datetime.now(timezone.utc)
 
+from praxis.follow_up import FollowUp, Outcome
 from praxis.models import Moment, compute_moment_id
 from praxis.redactor import redact_secrets
 from praxis.scoring.aggregate import ProfileSnapshot, SessionScore
@@ -421,3 +422,99 @@ class ProfileStore:
                 "VALUES (?, ?, ?, ?, ?)",
                 (_utcnow().isoformat(), kind, sessions_seen, sessions_new, notes),
             )
+
+    # ---- follow-ups -----------------------------------------------------
+
+    def save_follow_up(self, follow_up: FollowUp) -> None:
+        """Persist (or replace) one row of follow_ups keyed by week_iso."""
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO follow_ups
+                (week_iso, dim_key, commitment_text, target_metric,
+                 baseline_value, measured_value, outcome)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    follow_up.week_iso,
+                    follow_up.dim_key,
+                    follow_up.commitment_text,
+                    follow_up.target_metric,
+                    follow_up.baseline_value,
+                    follow_up.measured_value,
+                    follow_up.outcome,
+                ),
+            )
+
+    def load_follow_up(self, week_iso: str) -> FollowUp | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT week_iso, dim_key, commitment_text, target_metric, "
+                "       baseline_value, measured_value, outcome "
+                "FROM follow_ups WHERE week_iso = ?",
+                (week_iso,),
+            ).fetchone()
+        if row is None:
+            return None
+        outcome: Outcome = row["outcome"]
+        return FollowUp(
+            week_iso=row["week_iso"],
+            dim_key=row["dim_key"],
+            commitment_text=row["commitment_text"],
+            target_metric=row["target_metric"],
+            baseline_value=row["baseline_value"],
+            measured_value=row["measured_value"],
+            outcome=outcome,
+        )
+
+    def prior_follow_up(self, before_week_iso: str) -> FollowUp | None:
+        """Return the most recent follow_up with week_iso strictly before the given one.
+
+        ISO week strings are zero-padded (YYYY-Www), so lexical order matches
+        chronological order; a plain `<` comparison correctly handles the
+        year boundary (e.g. '2025-W52' < '2026-W01').
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT week_iso, dim_key, commitment_text, target_metric, "
+                "       baseline_value, measured_value, outcome "
+                "FROM follow_ups WHERE week_iso < ? "
+                "ORDER BY week_iso DESC LIMIT 1",
+                (before_week_iso,),
+            ).fetchone()
+        if row is None:
+            return None
+        outcome: Outcome = row["outcome"]
+        return FollowUp(
+            week_iso=row["week_iso"],
+            dim_key=row["dim_key"],
+            commitment_text=row["commitment_text"],
+            target_metric=row["target_metric"],
+            baseline_value=row["baseline_value"],
+            measured_value=row["measured_value"],
+            outcome=outcome,
+        )
+
+    def latest_follow_up(self) -> FollowUp | None:
+        """Return the most recent follow_up by week_iso, or None if the table is empty.
+
+        Same lexical-equals-chronological argument as `prior_follow_up`.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT week_iso, dim_key, commitment_text, target_metric, "
+                "       baseline_value, measured_value, outcome "
+                "FROM follow_ups ORDER BY week_iso DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        outcome: Outcome = row["outcome"]
+        return FollowUp(
+            week_iso=row["week_iso"],
+            dim_key=row["dim_key"],
+            commitment_text=row["commitment_text"],
+            target_metric=row["target_metric"],
+            baseline_value=row["baseline_value"],
+            measured_value=row["measured_value"],
+            outcome=outcome,
+        )

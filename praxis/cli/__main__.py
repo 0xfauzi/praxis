@@ -5,6 +5,7 @@ Commands:
   report           Open or print the latest HTML report.
   status           Show what's been scored, when, and where.
   rubric           Print the scoring rubric and weights.
+  follow-up        Print the most recent weekly commitment and its outcome.
   install-daemon   Print platform-specific scheduling instructions.
 """
 from __future__ import annotations
@@ -75,6 +76,32 @@ def cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     if history:
         print(f"  Latest: {history[-1]['consolidation_date']} "
               f"({history[-1]['snapshot']['overall']:.1f}/10)")
+    return 0
+
+
+def cmd_follow_up(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Print the most recent weekly commitment status.
+
+    Exit codes:
+      0 -- a follow-up row exists and was printed.
+      3 -- no follow-up has been recorded yet (no weekly digest has run).
+    """
+    store = ProfileStore()
+    fu = store.latest_follow_up()
+    if fu is None:
+        print("No follow-up yet. Run a weekly digest first to record a commitment.")
+        return 3
+
+    measured = f"{fu.measured_value:.2f}" if fu.measured_value is not None else "--"
+    print(f"Week:       {fu.week_iso}")
+    print(f"Dimension:  {fu.dim_key}")
+    print(f"Metric:     {fu.target_metric}")
+    print("Commitment:")
+    print(f"  {fu.commitment_text}")
+    print()
+    print(f"Baseline:   {fu.baseline_value:.2f}")
+    print(f"Measured:   {measured}")
+    print(f"Outcome:    {fu.outcome}")
     return 0
 
 
@@ -278,6 +305,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     rub = sub.add_parser("rubric", help="Print the scoring rubric.")
     rub.set_defaults(func=cmd_rubric)
+
+    fup = sub.add_parser(
+        "follow-up",
+        help="Show the most recent weekly commitment and its outcome.",
+    )
+    fup.set_defaults(func=cmd_follow_up)
 
     daem = sub.add_parser("install-daemon",
                           help="Print scheduler config for running daily.")
