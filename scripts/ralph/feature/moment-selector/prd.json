@@ -1,0 +1,61 @@
+{
+  "branchName": "ralph/factory/moment-selector",
+  "userStories": [
+    {
+      "id": "US-029",
+      "title": "One LLM call selects headline + up to two supporting moments",
+      "acceptanceCriteria": [
+        "Cheap-tier model from primary_provider is used",
+        "Each candidate includes dim_key, quoted_excerpt, why_it_lost_score, suggested_alternative, severity, session_started_at, dollar_impact_estimate, recurrence_count over previous 3 weeks",
+        "Response is JSON with headline_moment_id, headline_reason (one sentence), and supporting_moment_ids (up to 2)",
+        "Supporting moments prefer different dims from the headline",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-030",
+      "title": "Validate selected IDs against candidate set; re-prompt once on failure",
+      "acceptanceCriteria": [
+        "headline_moment_id and every supporting_moment_id must exist in the input candidate set",
+        "If validation fails the model is re-prompted once with the specific error",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-031",
+      "title": "Fallback to most-recent major-then-moderate moment on protocol failure",
+      "acceptanceCriteria": [
+        "If the second selector attempt is still invalid, headline becomes the most-recent moment with severity='major'",
+        "If no major-severity moment exists, headline becomes the most-recent moderate moment",
+        "Supporting moments list is left empty in the fallback path",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-032",
+      "title": "Skip selector entirely when only one candidate exists; hard cap of 3 moments",
+      "acceptanceCriteria": [
+        "If exactly one candidate moment exists for the week, no LLM call is made and that moment is the headline",
+        "Even if the LLM returns more than two supporting IDs, only the first two are kept",
+        "Total moments rendered in the digest never exceeds 3",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
