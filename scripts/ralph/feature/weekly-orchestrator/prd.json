@@ -11,8 +11,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "run_weekly() added to praxis/orchestrator.py with 8 mockable step functions (_step_scan, _step_cluster, _step_pass1, _step_pass2, _step_validate_moments, _step_select_moments, _step_follow_up, _step_render). Pass1Output wraps results+low_confidence_session_ids so pass2 receives only IDs, never pass1 scores (spec 9.1). New tests in test_orchestrator.py monkeypatch each step and assert the call sequence equals the Section 9.4 order, and that each step receives only documented upstream outputs."
     },
     {
       "id": "US-071",

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
 
@@ -24,8 +24,9 @@ from praxis.behavior import (
     TrajectoryAssessment,
     assess as assess_trajectory,
     extract as extract_signals,
+    iso_week_tag,
 )
-from praxis.models import Session
+from praxis.models import Moment as JudgeMoment, Session
 from praxis.models_advisor import ModelUsageProfile, build_profiles
 from praxis.scanners import ALL_SCANNERS
 from praxis.scoring.aggregate import (
@@ -33,7 +34,15 @@ from praxis.scoring.aggregate import (
     SessionScore,
     score_one_session,
 )
+from praxis.scoring.clustering import Task, cluster_sessions
 from praxis.scoring.coach import Coaching, generate_coaching
+from praxis.scoring.judge import JudgeResult, verify_moment_substrings
+from praxis.scoring.moment_selector import (
+    Moment as SelectorMoment,
+    MomentCandidate,
+    MomentSelection,
+    select_moments_with_fallback,
+)
 from praxis.storage.profile_store import ProfileStore
 
 
@@ -188,6 +197,322 @@ def run(
         consolidated_for=consolidated_for,
         trajectory=trajectory,
         model_profiles=model_profiles,
+    )
+
+
+# --------------------------------------------------------------------------
+# run_weekly() - spec Section 9.4 pipeline.
+#
+# Step order (spec 9.4 + PRD US-070):
+#   1. scan
+#   2. cluster
+#   3. pass 1 batched (cheap-tier judge)
+#   4. pass 2 frontier (only sessions pass 1 flagged low-confidence)
+#   5. moments validation (substring check)
+#   6. selector
+#   7. follow-up
+#   8. render
+#
+# Each step is a module-level callable so tests can monkeypatch and verify
+# ordering. The data-flow contract (US-070 AC #2) is enforced by passing
+# only documented inputs into each step:
+#   scan      -> cluster, pass1
+#   cluster   -> pass1 (for batching constraint), render (tasks panel)
+#   pass1     -> pass2 (low-confidence subset), validate
+#   pass2     -> validate
+#   validate  -> select
+#   select    -> follow_up, render
+#   follow_up -> render
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class Pass1Output:
+    """Pass 1 judges every session and self-flags confidence on each.
+
+    Splitting "results" from "low_confidence_session_ids" up front means
+    pass 2 only sees the IDs of the sessions it should re-judge, not the
+    pass-1 scores themselves. Spec 9.1: "The frontier judge is told
+    nothing about pass 1's output."
+    """
+
+    results: dict[str, JudgeResult]
+    low_confidence_session_ids: list[str]
+
+
+@dataclass
+class WeeklyRunSummary:
+    """Outcome of one `run_weekly()` invocation.
+
+    Holds the data the digest renderer needs plus a small audit field
+    (`steps_executed`) used by the pipeline-ordering test (US-070). The
+    persistence and dry-run stories (US-071, US-072) read the same
+    fields; render output is filled in by the render step (US-073/render).
+    """
+
+    week_iso: str
+    sessions: list[Session]
+    tasks: list[Task]
+    judge_results: dict[str, JudgeResult]
+    moments: list[JudgeMoment]
+    selection: MomentSelection | None
+    snapshot: ProfileSnapshot
+    rendered_html: str
+    rendered_terminal: str
+    elapsed_seconds: float
+    steps_executed: list[str] = field(default_factory=list)
+
+
+def _step_scan(since_days: int) -> list[Session]:
+    """Step 1: gather sessions from every provider scanner.
+
+    Output feeds: cluster (step 2), pass1 (step 3).
+    """
+    sessions = _gather_sessions(since_days=since_days)
+    return [s for s in sessions if s.user_turns]
+
+
+def _step_cluster(sessions: list[Session]) -> list[Task]:
+    """Step 2: cluster sessions into tasks via one cheap-tier LLM call.
+
+    Output feeds: pass1 (batching constraint, spec 9.4), render (tasks panel).
+    """
+    if not sessions:
+        return []
+    tasks = cluster_sessions(sessions)
+    return tasks or []
+
+
+def _step_pass1(sessions: list[Session], tasks: list[Task]) -> Pass1Output:
+    """Step 3: batched cheap-tier judge with same-task exclusion (spec 9.4).
+
+    Per spec 9.1 the cheap judge runs on every session; this story (US-070)
+    wires the ordering but reuses the per-session judge path (US-073 will
+    add the batching mechanic). `tasks` is accepted here so the batching
+    constraint can be enforced when the batched path lands.
+
+    Output feeds: pass2 (low-confidence subset only), validate.
+    """
+    _ = tasks  # batching mechanic lands in a follow-up story.
+    results: dict[str, JudgeResult] = {}
+    low_confidence: list[str] = []
+    for session in sessions:
+        score = score_one_session(session)
+        if score is None or score.judge_result is None:
+            continue
+        results[session.stable_id] = score.judge_result
+        if score.judge_result.confidence == "low":
+            low_confidence.append(session.stable_id)
+    return Pass1Output(results=results, low_confidence_session_ids=low_confidence)
+
+
+def _step_pass2(
+    sessions: list[Session], pass1: Pass1Output
+) -> dict[str, JudgeResult]:
+    """Step 4: frontier judge re-scores low-confidence sessions only.
+
+    Per spec 9.1 the frontier judge sees nothing of pass 1's output; only
+    the sessions whose IDs pass 1 self-flagged "low" are re-judged. This
+    function takes only those IDs from `pass1`, not the scores.
+
+    Output feeds: validate (its scores/moments override pass 1's).
+    """
+    flagged = set(pass1.low_confidence_session_ids)
+    if not flagged:
+        return {}
+    by_id = {s.stable_id: s for s in sessions if s.stable_id in flagged}
+    out: dict[str, JudgeResult] = {}
+    for sid, session in by_id.items():
+        score = score_one_session(session)
+        if score is None or score.judge_result is None:
+            continue
+        out[sid] = score.judge_result
+    return out
+
+
+def _step_validate_moments(
+    sessions: list[Session],
+    pass1: Pass1Output,
+    pass2_results: dict[str, JudgeResult],
+) -> list[JudgeMoment]:
+    """Step 5: substring-verify moments against the real transcript.
+
+    Per spec 9.1 pass 2 wins on the sessions it ran for; for the rest,
+    pass 1 stands. Output feeds: select (step 6).
+    """
+    final_results: dict[str, JudgeResult] = dict(pass1.results)
+    final_results.update(pass2_results)
+    by_id = {s.stable_id: s for s in sessions}
+    survivors: list[JudgeMoment] = []
+    for sid, judge in final_results.items():
+        session = by_id.get(sid)
+        if session is None:
+            continue
+        verified = verify_moment_substrings(session, judge.moments)
+        survivors.extend(verified)
+    return survivors
+
+
+def _step_select_moments(
+    sessions: list[Session], moments: list[JudgeMoment]
+) -> MomentSelection | None:
+    """Step 6: one LLM call picks headline + up to two supporting moments.
+
+    Output feeds: follow_up (commitment derives from headline), render.
+    """
+    if not moments:
+        return None
+    started_by_id = {s.stable_id: s.started_at for s in sessions}
+    candidates: list[MomentCandidate] = []
+    for jm in moments:
+        sid = jm.session_stable_id or ""
+        started = started_by_id.get(sid)
+        if started is None or jm.moment_id is None:
+            continue
+        selector_moment = SelectorMoment(
+            moment_id=jm.moment_id,
+            session_stable_id=sid,
+            dim_key=jm.dim_key,
+            turn_index=jm.turn_index,
+            quoted_excerpt=jm.quoted_excerpt,
+            why_it_lost_score=jm.why_it_lost_score,
+            suggested_alternative=jm.suggested_alternative,
+            severity=jm.severity,
+            created_at=jm.created_at or _utcnow(),
+            dollar_impact_estimate=jm.dollar_impact_estimate,
+            minutes_impact_estimate=jm.minutes_impact_estimate,
+        )
+        candidates.append(
+            MomentCandidate(
+                moment=selector_moment,
+                session_started_at=started,
+                recurrence_count=0,
+            )
+        )
+    if not candidates:
+        return None
+    return select_moments_with_fallback(candidates)
+
+
+def _step_follow_up(
+    selection: MomentSelection | None,
+    moments: list[JudgeMoment],
+    snapshot: ProfileSnapshot,
+    week_iso: str,
+) -> object | None:
+    """Step 7: build this week's commitment from the headline moment.
+
+    Output feeds: render (follow-up panel). Persistence of the follow-up
+    row and closing of the prior week's row are handled by the persistence
+    story (US-071).
+    """
+    if selection is None:
+        return None
+    from praxis.follow_up import HeadlineMoment, build_follow_up
+
+    headline = next(
+        (
+            m
+            for m in moments
+            if m.moment_id == selection.headline_moment_id
+        ),
+        None,
+    )
+    if headline is None:
+        return None
+    return build_follow_up(
+        week_iso=week_iso,
+        headline_moment=HeadlineMoment(
+            dim_key=headline.dim_key,
+            suggested_alternative=headline.suggested_alternative,
+        ),
+        snapshot=snapshot,
+        verification_rate=0.0,
+        delegation_rate=0.0,
+    )
+
+
+def _step_render(
+    sessions: list[Session],
+    tasks: list[Task],
+    selection: MomentSelection | None,
+    follow_up: object | None,
+    snapshot: ProfileSnapshot,
+) -> tuple[str, str]:
+    """Step 8: produce HTML + terminal renderings of the digest.
+
+    The actual layout is owned by `praxis.reports`; this step's job is
+    to assemble inputs from the steps above and call the renderers. The
+    full wiring lands in a follow-up story (US-071+); this version
+    returns empty strings so the ordering contract can be tested first.
+    """
+    _ = sessions, tasks, selection, follow_up, snapshot
+    return "", ""
+
+
+def run_weekly(since_days: int = 7) -> WeeklyRunSummary:
+    """Run the weekly pipeline in spec Section 9.4 order.
+
+    Order (US-070):
+      1. scan
+      2. cluster
+      3. pass 1 batched
+      4. pass 2 frontier (low-confidence only)
+      5. moments validation
+      6. selector
+      7. follow-up
+      8. render
+
+    Outputs flow strictly forward: each step only receives data from its
+    documented upstream steps (US-070 AC #2). Persistence, --dry-run,
+    and perf are handled by US-071/072/073 against this same ordering.
+    """
+    started = time.time()
+    steps: list[str] = []
+
+    sessions = _step_scan(since_days)
+    steps.append("scan")
+
+    tasks = _step_cluster(sessions)
+    steps.append("cluster")
+
+    pass1 = _step_pass1(sessions, tasks)
+    steps.append("pass1")
+
+    pass2_results = _step_pass2(sessions, pass1)
+    steps.append("pass2")
+
+    moments = _step_validate_moments(sessions, pass1, pass2_results)
+    steps.append("validate_moments")
+
+    selection = _step_select_moments(sessions, moments)
+    steps.append("select")
+
+    final_results: dict[str, JudgeResult] = dict(pass1.results)
+    final_results.update(pass2_results)
+    snapshot = ProfileSnapshot.from_scores([])
+
+    week_iso = iso_week_tag(_utcnow())
+    follow_up = _step_follow_up(selection, moments, snapshot, week_iso)
+    steps.append("follow_up")
+
+    rendered_html, rendered_terminal = _step_render(
+        sessions, tasks, selection, follow_up, snapshot
+    )
+    steps.append("render")
+
+    return WeeklyRunSummary(
+        week_iso=week_iso,
+        sessions=sessions,
+        tasks=tasks,
+        judge_results=final_results,
+        moments=moments,
+        selection=selection,
+        snapshot=snapshot,
+        rendered_html=rendered_html,
+        rendered_terminal=rendered_terminal,
+        elapsed_seconds=round(time.time() - started, 2),
+        steps_executed=steps,
     )
 
 

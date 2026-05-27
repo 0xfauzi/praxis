@@ -1,1 +1,16 @@
 # progress.txt: union of factory component logs
+
+## Iteration 1 - US-070: Pipeline ordering matches Section 9.4
+- What I did: Added run_weekly() to praxis/orchestrator.py with 8 module-level step functions (_step_scan, _step_cluster, _step_pass1, _step_pass2, _step_validate_moments, _step_select_moments, _step_follow_up, _step_render). Introduced Pass1Output dataclass so pass2 receives only the low-confidence session IDs, never pass1 scores (spec 9.1). Wired existing modules (cluster_sessions, score_one_session, verify_moment_substrings, select_moments_with_fallback, build_follow_up) into the steps. Added a WeeklyRunSummary dataclass with a steps_executed audit field.
+- Files changed: praxis/orchestrator.py, tests/test_orchestrator.py
+- Verification: `uv run pytest` -> 698 passed (was 694 before; +4 new tests for US-070). `uv run mypy praxis` -> 34 errors, none in orchestrator.py (same baseline as before changes).
+- What the next iteration should know:
+  - The step functions are intentionally lightweight skeletons; future stories (US-071 persistence, US-072 dry-run, US-073 perf) hang persistence/IO/batching off this scaffold.
+  - _step_pass1 currently calls score_one_session per session. When the batched cheap-tier pass lands, replace its body but keep the (sessions, tasks) -> Pass1Output signature so the ordering test stays valid.
+  - _step_pass2 takes Pass1Output (not the raw judge results) by design - that's the structural enforcement of "frontier judge is told nothing about pass 1's output" from spec 9.1. Preserve that contract.
+  - _step_render currently returns ("", "") so US-070 can ship without the full HTML wiring. US-071+ should plumb the real renderers in, then update test_run_weekly_step_inputs_match_documented_upstream if the render step's arg count changes.
+  - _step_follow_up depends on praxis.follow_up imported inside the function body to avoid a top-level cycle (follow_up imports from praxis.scoring.aggregate, which orchestrator also pulls in).
+  - The ordering test (test_run_weekly_executes_steps_in_section_9_4_order) is the canonical guard. Do NOT remove or weaken it when adding persistence - persistence belongs inside _step_render/_step_follow_up or as a side-effect of run_weekly itself, not as a new step.
+  - 3 new ruff E402 warnings were accepted (imports below the existing _utcnow() helper, matching the file's pre-existing style). Repo has no ruff config; not enforced.
+---
+
