@@ -44,7 +44,7 @@ from praxis.scoring.aggregate import (
 )
 from praxis.scoring.clustering import Task, cluster_sessions
 from praxis.scoring.coach import Coaching, generate_coaching
-from praxis.scoring.cost import estimate_weekly_pipeline_cost
+from praxis.scoring.cost_ledger import estimate_session_cost_usd
 from praxis.scoring.judge import JudgeResult, verify_moment_substrings
 from praxis.scoring.moment_selector import (
     Moment as SelectorMoment,
@@ -198,7 +198,6 @@ def _gather_sessions(since_days: int | None = None) -> list[Session]:
 def run(
     since_days: int | None = 30,
     max_new_scored: int | None = None,
-    force_consolidate: bool = False,
 ) -> RunSummary:
     """Full pipeline. Idempotent: re-running won't re-score known sessions.
 
@@ -304,39 +303,16 @@ def run(
             high=pass1_confidence_counts["high"],
         )
 
-    # Daily consolidation: only run once per day unless forced.
-    today = _utcnow().date()
-    last_consolidation = store.latest_consolidation_date()
-    should_consolidate = force_consolidate or last_consolidation != today
-
+    # Daily consolidation was a v0.1 concept; v0.2 replaces it with the
+    # weekly digest (see run_weekly). The legacy `run()` keeps the
+    # snapshot + coaching computation so `praxis scan` still produces
+    # a one-line summary, but no longer writes a daily row.
     rows = store.load_session_scores(
         since=_utcnow() - timedelta(days=since_days or 30)
     )
     snapshot = _snapshot_from_rows(rows)
-    coaching: Coaching
-
-    if should_consolidate:
-        coaching = generate_coaching(snapshot)
-        store.save_consolidation(
-            for_date=today,
-            snapshot=snapshot,
-            coaching=asdict(coaching),
-            sessions_in_window=len(rows),
-        )
-        consolidated_for = today
-    else:
-        cached = store.load_consolidation(today)
-        if cached and cached["coaching"]:
-            c = cached["coaching"]
-            coaching = Coaching(
-                headline=c.get("headline", ""),
-                focus_areas=c.get("focus_areas", []),
-                daily_practice=c.get("daily_practice", ""),
-                generated_by=c.get("generated_by", "cached"),
-            )
-        else:
-            coaching = generate_coaching(snapshot)
-        consolidated_for = None
+    coaching = generate_coaching(snapshot)
+    consolidated_for = None
 
     # Behavioral analysis + per-model advice both need the actual Session
     # objects (not just persisted score rows), so we extract signals from
@@ -364,7 +340,7 @@ def run(
         kind="full",
         sessions_seen=len(sessions),
         sessions_new=len(new_sessions),
-        notes=f"scored={scored_count}, consolidated={'y' if should_consolidate else 'n'}, "
+        notes=f"scored={scored_count}, "
               f"trajectory={trajectory.label.value}, "
               f"models={len(model_profiles)}",
     )
@@ -485,7 +461,12 @@ def _step_cluster(sessions: list[Session]) -> list[Task]:
     return tasks or []
 
 
-def _step_pass1(sessions: list[Session], tasks: list[Task]) -> Pass1Output:
+def _step_pass1(
+    sessions: list[Session],
+    tasks: list[Task],
+    *,
+    frontier_only: bool = False,
+) -> Pass1Output:
     """Step 3: batched cheap-tier judge with same-task exclusion (spec 9.4).
 
     Per spec 9.1 the cheap judge runs on every session; this story (US-070)
@@ -506,6 +487,15 @@ def _step_pass1(sessions: list[Session], tasks: list[Task]) -> Pass1Output:
     store = ProfileStore()
     if not sessions:
         return Pass1Output(results=results, low_confidence_session_ids=low_confidence)
+
+    if frontier_only:
+        # --frontier-only (spec §9.6): skip pass-1 entirely and force the
+        # frontier judge on every session. Flag every session id as
+        # 'low confidence' so _step_pass2 picks them up.
+        return Pass1Output(
+            results={},
+            low_confidence_session_ids=[s.stable_id for s in sessions],
+        )
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
     # 5 workers matches PASS1_BATCH_SIZE = 5 from the spec. Each thread
@@ -968,9 +958,11 @@ def run_weekly(
     started = time.time()
     steps: list[str] = []
 
-    # Past-week render: do not scan or score; rebuild the snapshot
-    # from rows already persisted for that ISO week, then render with
-    # whatever moments/tasks/follow-up persisted for that week.
+    # Past-week render: do not scan or score. Rebuild the snapshot from
+    # persisted session_scores in the ISO-week range; reconstruct the
+    # rest (headline moment, follow-up, tasks, weekly_digest metadata)
+    # from the same DB so the past-week digest shows what the user saw
+    # the day that week was current.
     if week_iso is not None:
         week_start, week_end = parse_iso_week(week_iso)
         if store is None:
@@ -983,36 +975,91 @@ def run_weekly(
             if datetime.fromisoformat(row["started_at"]) < until_dt
         ]
         snapshot = _snapshot_from_rows(rows)
-        # Load the persisted follow-up for that week (if any) so the
-        # past-week digest can show the commitment + outcome.
         past_follow_up = store.load_follow_up(week_iso)
-        # Render the past-week digest. Sessions/tasks/moments are empty
-        # for past weeks today (we'd need to read from DB; deferred), so
-        # the digest mostly carries snapshot + follow-up + masthead.
+        past_digest = store.load_weekly_digest(week_iso)
+
+        # Reconstruct the headline moment for that week, if persisted.
+        past_selection = None
+        past_moments: list[JudgeMoment] = []
+        if past_digest and past_digest.get("headline_moment_id"):
+            hmid = past_digest["headline_moment_id"]
+            m_row = store.load_moment_by_id(hmid)
+            if m_row is not None:
+                past_moments.append(JudgeMoment(
+                    dim_key=m_row["dim_key"],
+                    turn_index=int(m_row["turn_index"]),
+                    quoted_excerpt=m_row["quoted_excerpt"],
+                    why_it_lost_score=m_row["why_it_lost_score"],
+                    suggested_alternative=m_row["suggested_alternative"],
+                    severity=m_row["severity"],
+                    moment_id=m_row["moment_id"],
+                    session_stable_id=m_row["session_stable_id"],
+                    created_at=datetime.fromisoformat(m_row["created_at"])
+                        if m_row.get("created_at") else None,
+                    dollar_impact_estimate=m_row.get("dollar_impact_estimate"),
+                    minutes_impact_estimate=m_row.get("minutes_impact_estimate"),
+                ))
+                past_selection = MomentSelection(
+                    headline_moment_id=hmid,
+                    headline_reason="",
+                    supporting_moment_ids=[],
+                )
+
+        # Reconstruct the trajectory line if the digest row holds one.
+        past_trajectory: TrajectoryAssessment | None = None
+        if past_digest:
+            label_str = past_digest.get("trajectory_label") or ""
+            try:
+                label = TrajectoryLabel(label_str)
+            except ValueError:
+                label = TrajectoryLabel.READING
+            past_trajectory = TrajectoryAssessment(
+                label=label,
+                engagement_slope=0.0,
+                delegation_slope=0.0,
+                headline=past_digest.get("trajectory_headline") or "",
+            )
+
+        # Load tasks that started in the week.
+        past_task_rows = store.load_tasks_for_week(since_dt, until_dt)
+        past_tasks: list[Task] = [
+            Task(
+                label=t["label"],
+                task_type=t["task_type"],
+                session_ids=list(t["session_stable_ids"]),
+                rationale="",
+                label_source=t["label_source"],
+            )
+            for t in past_task_rows
+        ]
+
+        past_cost_total = past_digest.get("cost_total_usd") if past_digest else None
+        past_cost_baseline = past_digest.get("cost_baseline_usd") if past_digest else None
+
         rendered_html, rendered_terminal = _step_render(
-            [], [], None, past_follow_up, snapshot,
+            [], past_tasks, past_selection, past_follow_up, snapshot,
             dry_run=True,
             week_iso=week_iso,
-            trajectory=None,
-            cost_total_usd=None,
-            cost_baseline_usd=None,
+            trajectory=past_trajectory,
+            cost_total_usd=past_cost_total,
+            cost_baseline_usd=past_cost_baseline,
             judge_results={},
-            moments=[],
+            moments=past_moments,
         )
         return WeeklyRunSummary(
             week_iso=week_iso,
             sessions=[],
-            tasks=[],
+            tasks=past_tasks,
             judge_results={},
-            moments=[],
-            selection=None,
+            moments=past_moments,
+            selection=past_selection,
             snapshot=snapshot,
             rendered_html=rendered_html,
             rendered_terminal=rendered_terminal,
             elapsed_seconds=round(time.time() - started, 2),
-            trajectory=None,
-            cost_total_usd=None,
-            cost_baseline_usd=None,
+            trajectory=past_trajectory,
+            cost_total_usd=past_cost_total,
+            cost_baseline_usd=past_cost_baseline,
             digest_persisted=False,
             steps_executed=[],
             judging_confidence={} if explain_judging else None,
@@ -1025,11 +1072,21 @@ def run_weekly(
     tasks = _step_cluster(sessions)
     steps.append("cluster")
 
-    pass1 = _step_pass1(sessions, tasks)
+    pass1 = _step_pass1(sessions, tasks, frontier_only=frontier_only)
     steps.append("pass1")
 
     pass2_results = _step_pass2(sessions, pass1)
     steps.append("pass2")
+
+    # Spec §9.6 (US-031): explain-judging shows the pass-1 confidence
+    # distribution. Build it from real results when --explain-judging is on.
+    confidence_dist: dict[str, int] | None = None
+    if explain_judging:
+        confidence_dist = {"high": 0, "medium": 0, "low": 0}
+        for r in pass1.results.values():
+            label = getattr(r, "confidence", None) or "medium"
+            if label in confidence_dist:
+                confidence_dist[label] += 1
 
     moments = _step_validate_moments(sessions, pass1, pass2_results)
     steps.append("validate_moments")
@@ -1122,15 +1179,20 @@ def run_weekly(
     else:
         trajectory = assess_trajectory(sessions_with_signals)
 
-    # Spec 10.1: cost_total_usd is praxis's own LLM spend on this week's
-    # pipeline. None means no priced calls happened.
-    estimated_cost = estimate_weekly_pipeline_cost(
-        sessions=sessions,
-        pass1_results=pass1.results,
-        pass2_results=pass2_results,
-        moment_count=len(moments),
-    )
-    cost_total_usd: float | None = estimated_cost if estimated_cost > 0.0 else None
+    # Spec 10.1: cost_total_usd is the USER'S spend this week across the
+    # models they actually used (estimated from prompt char volume against
+    # each model card's pricing). It is NOT praxis's own pipeline cost.
+    # Sessions whose model has no card or no per-token pricing
+    # (subscription-only Copilot) contribute None and are excluded.
+    user_week_total = 0.0
+    have_priced_session = False
+    for s in sessions:
+        chars = sum(len(t.content) for t in s.user_turns)
+        c = estimate_session_cost_usd(s.model_hint, chars)
+        if c is not None:
+            user_week_total += c
+            have_priced_session = True
+    cost_total_usd: float | None = user_week_total if have_priced_session else None
     cost_baseline_usd: float | None = None
 
     # Persist tasks/moments/follow-up and read the cost baseline before
@@ -1249,7 +1311,7 @@ def run_weekly(
         cost_baseline_usd=cost_baseline_usd,
         digest_persisted=digest_persisted,
         steps_executed=steps,
-        judging_confidence={} if explain_judging else None,
+        judging_confidence=confidence_dist,
         forced_frontier=frontier_only,
         last_week_means=last_week_means,
     )

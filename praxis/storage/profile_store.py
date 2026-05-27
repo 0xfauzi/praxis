@@ -628,27 +628,6 @@ class ProfileStore:
                 t["session_stable_ids"] = [m["session_stable_id"] for m in members]
         return task_rows
 
-    # ---- daily consolidation (v0.2: table dropped; stubs keep callers alive
-    #      until the orchestrator/CLI/reports refactor lands) ----
-
-    def latest_consolidation_date(self) -> date | None:
-        return None
-
-    def save_consolidation(
-        self,
-        for_date: date,
-        snapshot: ProfileSnapshot,
-        coaching: dict,
-        sessions_in_window: int,
-    ) -> None:
-        return None
-
-    def load_consolidation(self, for_date: date) -> dict | None:
-        return None
-
-    def consolidation_history(self, days: int = 30) -> list[dict]:
-        return []
-
     # ---- run log --------------------------------------------------------
 
     def log_run(self, kind: str, sessions_seen: int, sessions_new: int, notes: str = "") -> None:

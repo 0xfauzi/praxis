@@ -164,9 +164,11 @@ def test_run_weekly_step_inputs_match_documented_upstream(tmp_home, step_recorde
     assert len(by_name["cluster"]["args"]) == 1
     assert by_name["cluster"]["kwargs"] == {}
 
-    # pass1: sessions (scan), tasks (cluster). Nothing else.
+    # pass1: sessions (scan), tasks (cluster). The only kwarg is the
+    # CLI-level frontier_only switch (spec §9.6), which is a static
+    # mode flag, not data flowing back from a later step.
     assert len(by_name["pass1"]["args"]) == 2
-    assert by_name["pass1"]["kwargs"] == {}
+    assert set(by_name["pass1"]["kwargs"].keys()) <= {"frontier_only"}
 
     # pass2: sessions (scan), pass1 output. Spec 9.1 forbids passing
     # pass1's scores to pass2; the contract is the IDs travel via the

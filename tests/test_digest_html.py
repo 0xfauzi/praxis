@@ -260,13 +260,18 @@ def test_render_html_escapes_week_iso():
 # the order fixed by spec section 6.1. Any drift here means the document
 # is no longer spec-compliant.
 _SECTION_IDS_IN_ORDER: tuple[str, ...] = (
+    # Coaching-first reorder: trajectory hero, then the coaching trio
+    # (moment + follow-up + next-week) as one continuous editorial
+    # spread, then the data appendix (cost / tasks / dimensions).
+    # The product is a coaching tool, not a benchmark - the loop has
+    # to land before the numbers.
     "trajectory",
     "this-weeks-moment",
+    "follow-up-from-last-week",
+    "one-thing-to-try-next-week",
     "cost-ledger",
     "where-the-week-went",
     "the-six-dimensions",
-    "follow-up-from-last-week",
-    "one-thing-to-try-next-week",
 )
 
 # Human-facing section titles in the same order. Trajectory is the only
@@ -275,12 +280,13 @@ _SECTION_IDS_IN_ORDER: tuple[str, ...] = (
 # The apostrophe in "This Week's Moment" is a literal in the renderer
 # (not an escaped data value), so it shows up unescaped in the output.
 _SECTION_TITLES_IN_ORDER: tuple[str, ...] = (
+    # Coaching trio first, then the data appendix.
     "This Week's Moment",
+    "Follow-up From Last Week",
+    "One Thing To Try Next Week",
     "Cost Ledger",
     "Where The Week Went",
     "The Six Dimensions",
-    "Follow-up From Last Week",
-    "One Thing To Try Next Week",
 )
 
 

@@ -29,6 +29,7 @@ from praxis.orchestrator import (
     NO_API_KEY_MESSAGE,
     InvalidWeekError,
     ReScoreError,
+    current_iso_week,
     has_api_key_configured,
     list_persisted_weeks,
     no_sessions_message,
@@ -194,6 +195,29 @@ def cmd_week(args: argparse.Namespace) -> int:
         print(no_sessions_message(summary.week_iso), file=sys.stderr)
         return 3
 
+    # Loud-fail if the pipeline ran but the judge produced nothing.
+    # This is the audit-#24 "silent degrade" case: ANTHROPIC/OPENAI key
+    # was set, sessions were scanned, but every judge call errored. The
+    # digest would technically render (with an empty headline moment
+    # and forming dimensions) but the user should know the judge layer
+    # failed rather than discover it by an unexpectedly blank report.
+    is_current_week = summary.week_iso is None or (
+        summary.week_iso == current_iso_week()
+    )
+    judged_count = len(summary.judge_results) if summary.judge_results else 0
+    if (
+        is_current_week
+        and not args.dry_run
+        and summary.sessions
+        and judged_count == 0
+    ):
+        print(
+            "WARNING: scanned sessions but the judge produced no scores. "
+            "Check provider keys / billing (see prior stderr lines). "
+            "The digest below reflects what's persisted, not this run's work.",
+            file=sys.stderr,
+        )
+
     print(summary.rendered_terminal)
 
     target_week = summary.week_iso or "current"
@@ -253,7 +277,6 @@ def cmd_scan(args: argparse.Namespace) -> int:
     summary = run(
         since_days=args.since_days,
         max_new_scored=args.max_new,
-        force_consolidate=args.force_consolidate,
     )
 
     print(
@@ -401,7 +424,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     store = ProfileStore()
     rows = store.load_session_scores()
-    history = store.consolidation_history(days=30)
+    digest_count = store.count_weekly_digests()
     print(f"Scorecard home: {resolve_home()}")
     print(f"Sessions scored: {len(rows)}")
     if rows:
@@ -412,10 +435,7 @@ def cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
             providers[r["provider"]] = providers.get(r["provider"], 0) + 1
         for prov, count in sorted(providers.items(), key=lambda kv: -kv[1]):
             print(f"  {prov}: {count}")
-    print(f"Daily consolidations in last 30 days: {len(history)}")
-    if history:
-        print(f"  Latest: {history[-1]['consolidation_date']} "
-              f"({history[-1]['snapshot']['overall']:.1f}/10)")
+    print(f"Weekly digests on file: {digest_count}")
     return 0
 
 
@@ -719,8 +739,6 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Only consider session files modified in the last N days.")
     scan.add_argument("--max-new", type=int, default=50,
                       help="Cap on newly-discovered sessions to deep-score per run.")
-    scan.add_argument("--force-consolidate", action="store_true",
-                      help="Force the consolidation step even if it ran today.")
     scan.set_defaults(func=cmd_scan)
 
     rescore = sub.add_parser(
