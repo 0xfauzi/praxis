@@ -405,7 +405,17 @@ def _weekly_trajectory_html(summary) -> tuple:
         rows = store.load_session_scores(since=since)
     except Exception:  # noqa: BLE001
         return tuple()
+    # We bucket two streams in parallel here:
+    #   1. The standard WeeklyBucket model (used for hysteresis / labels)
+    #      which doesn't include a verification-marker rate.
+    #   2. A per-week tally of verification_marker_rate computed from
+    #      each row's features_json (marker_hit_counts) so the small-
+    #      multiples chart can plot that signal alongside the others.
+    from praxis.behavior.weekly import iso_week_tag as _iso_week_tag
+
     inputs: list[WeeklySessionInput] = []
+    # Per ISO week: (verification_hit_total, user_turn_total)
+    verify_tally: dict[str, tuple[int, int]] = {}
     for row in rows:
         raw = row.get("signals_json")
         if not raw:
@@ -414,13 +424,28 @@ def _weekly_trajectory_html(summary) -> tuple:
             sig = json.loads(raw)
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
+        started_at = datetime.fromisoformat(row["started_at"])
         inputs.append(WeeklySessionInput(
-            started_at=datetime.fromisoformat(row["started_at"]),
+            started_at=started_at,
             engagement_rate=float(sig.get("engagement_rate", 0.0)),
             delegation_rate=float(sig.get("delegation_rate", 0.0)),
             independence_rate=float(sig.get("independence_rate", 0.0)),
             dim_scores=row.get("dimension_scores") or {},
         ))
+        # Per-session verification marker rate = marker_hit_counts.verification / turn_count.
+        feats = row.get("features") or {}
+        markers = (feats.get("marker_hit_counts") or {}) if isinstance(feats, dict) else {}
+        verify_hits = int(markers.get("verification", 0) or 0)
+        # The features dict stores turn_count (total turns) but for the
+        # rate we want share of USER turns. Use the signals dict's
+        # user_turn_count as the divisor; fall back to features.turn_count
+        # so older rows still produce a usable number.
+        ut = int(sig.get("user_turn_count", feats.get("turn_count", 0)) or 0)
+        if ut > 0:
+            iso = _iso_week_tag(started_at)
+            cur_hits, cur_turns = verify_tally.get(iso, (0, 0))
+            verify_tally[iso] = (cur_hits + verify_hits, cur_turns + ut)
+
     if not inputs:
         return tuple()
     buckets = bucket_sessions_by_iso_week(inputs)
@@ -428,12 +453,62 @@ def _weekly_trajectory_html(summary) -> tuple:
     for b in buckets:
         if not b.eligible_for_fit:
             continue
+        v_hits, v_turns = verify_tally.get(b.iso_week, (0, 0))
+        verification_rate = (v_hits / v_turns) if v_turns > 0 else 0.0
         points.append(dh.WeeklyTrajectoryPoint(
             week_iso=b.iso_week,
             engagement_rate=b.engagement_rate_mean,
             delegation_rate=b.delegation_rate_mean,
+            independence_rate=b.independence_rate_mean,
+            verification_marker_rate=verification_rate,
         ))
     return tuple(points)
+
+
+def _behavioral_signals_html(
+    summary, points: tuple
+) -> tuple:
+    """Build the 4 behavioral-signal cards (Engagement, Delegation,
+    Independence, Verification) shown beneath the rubric dim cards.
+
+    Uses the same weekly trajectory points the small-multiples chart
+    uses, so the cards and the chart are computed from the same data.
+    The "current" row is this week (the last point); the baseline is the
+    mean of earlier weeks. With <2 prior weeks the baseline reads
+    "forming" rather than guessing.
+    """
+    if not points:
+        return tuple()
+    current = points[-1]
+    history = points[:-1]
+
+    def baseline_for(getter) -> float | None:
+        if not history:
+            return None
+        return sum(getter(p) for p in history) / len(history)
+
+    def row(
+        title: str,
+        getter,
+        frame: str,
+    ) -> dh.BehavioralRow:
+        rate = float(getter(current))
+        baseline = baseline_for(getter)
+        delta = (rate - baseline) if baseline is not None else None
+        return dh.BehavioralRow(
+            title=title,
+            rate=rate,
+            baseline_rate=baseline,
+            delta=delta,
+            frame=frame,
+        )
+
+    return (
+        row("Engagement", lambda p: p.engagement_rate, "supportive"),
+        row("Delegation", lambda p: p.delegation_rate, "counter"),
+        row("Independence", lambda p: p.independence_rate, "supportive"),
+        row("Verification", lambda p: p.verification_marker_rate, "supportive"),
+    )
 
 
 def _recurrence_count_for_headline(summary) -> int:
@@ -543,6 +618,9 @@ def build_html_digest(summary, follow_up=None) -> dh.WeeklyDigest:
     gets a valid WeeklyDigest.
     """
     recurrence = _recurrence_count_for_headline(summary)
+    # Trajectory points are computed once and shared with the behavioral
+    # signal cards so the cards and the small-multiples chart agree.
+    trajectory_points = _weekly_trajectory_html(summary)
     return dh.WeeklyDigest(
         week_iso=summary.week_iso or "",
         generated_at=datetime.now(timezone.utc),
@@ -554,5 +632,6 @@ def build_html_digest(summary, follow_up=None) -> dh.WeeklyDigest:
         follow_up=_follow_up_panel_html(follow_up),
         one_thing_to_try=_one_thing_to_try(summary),
         vital_signs=_vital_signs_html(summary),
-        weekly_trajectory=_weekly_trajectory_html(summary),
+        weekly_trajectory=trajectory_points,
+        behavioral_signals=_behavioral_signals_html(summary, trajectory_points),
     )

@@ -64,8 +64,8 @@ def test_ensure_config_never_overwrites_existing_file(tmp_home):
 def test_default_schedule_section(tmp_home):
     path = ensure_config_file()
     data = _load(path)
-    assert data["schedule"]["day"] == "sunday"
-    assert data["schedule"]["hour"] == 18
+    assert data["schedule"]["day"] == "monday"
+    assert data["schedule"]["hour"] == 9
     assert data["schedule"]["minute"] == 0
 
 
@@ -148,8 +148,8 @@ def test_load_config_returns_typed_object_with_all_sections(tmp_home):
 def test_load_config_returns_documented_defaults_on_first_run(tmp_home):
     cfg = load_config()
     # Mirrors the spec's section-12.2 defaults exactly.
-    assert cfg.schedule.day == "sunday"
-    assert cfg.schedule.hour == 18
+    assert cfg.schedule.day == "monday"
+    assert cfg.schedule.hour == 9
     assert cfg.schedule.minute == 0
     assert cfg.scan.since_days == 7
     assert cfg.scan.max_new == 200
@@ -158,6 +158,7 @@ def test_load_config_returns_documented_defaults_on_first_run(tmp_home):
     assert cfg.judge.cheap_model == "claude-haiku-4-5"
     assert cfg.notification.enabled is True
     assert cfg.notification.sound == "default"
+    assert cfg.notification.style == "banner"
     assert cfg.privacy.redact_secrets is True
 
 
@@ -202,7 +203,7 @@ def test_load_config_missing_fields_fall_back_to_defaults(tmp_home):
     # User-set field survives.
     assert cfg.schedule.day == "friday"
     # Missing fields use documented defaults.
-    assert cfg.schedule.hour == 18
+    assert cfg.schedule.hour == 9
     assert cfg.schedule.minute == 0
     assert cfg.scan.since_days == 7
     assert cfg.scan.max_new == 200

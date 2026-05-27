@@ -29,8 +29,8 @@ from praxis.storage.profile_store import resolve_home
 # file as a literal string.
 DEFAULT_CONFIG_TOML = """\
 [schedule]
-day = "sunday"           # any weekday name
-hour = 18                # 0-23 local time
+day = "monday"           # any weekday name
+hour = 9                 # 0-23 local time
 minute = 0
 
 [scan]
@@ -46,6 +46,15 @@ cheap_model = "claude-haiku-4-5"
 [notification]
 enabled = true           # macOS only; ignored elsewhere
 sound = "default"
+# style: "banner" | "alert" | "terminal-notifier"
+#   banner            -- non-interactive macOS notification (default).
+#   alert             -- AppleScript modal dialog with an "Open" button
+#                        that opens ~/.praxis/latest.html on click.
+#   terminal-notifier -- clickable banner via the third-party
+#                        `terminal-notifier` Homebrew binary; opens the
+#                        latest digest on click. Falls back to "banner"
+#                        if the binary is not on PATH.
+style = "banner"
 
 [privacy]
 redact_secrets = true    # MUST default true (Section 4.4)
@@ -79,8 +88,8 @@ def ensure_config_file(home: Path | None = None) -> Path:
 
 @dataclass(frozen=True)
 class ScheduleConfig:
-    day: str = "sunday"
-    hour: int = 18
+    day: str = "monday"
+    hour: int = 9
     minute: int = 0
 
 
@@ -101,6 +110,12 @@ class JudgeConfig:
 class NotificationConfig:
     enabled: bool = True
     sound: str = "default"
+    # "banner" stays the default to preserve the existing UX. The other
+    # two add a click-to-open affordance: "alert" via AppleScript modal,
+    # "terminal-notifier" via the optional Homebrew binary. Anything not
+    # in the allowed set is treated as "banner" so a typo in config.toml
+    # is harmless.
+    style: str = "banner"
 
 
 @dataclass(frozen=True)
