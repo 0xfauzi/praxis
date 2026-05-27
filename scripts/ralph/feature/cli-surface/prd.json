@@ -11,8 +11,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added run_weekly() in praxis/orchestrator.py as the CLI seam; cmd_week + week subparser in praxis/cli/__main__.py; tests in tests/test_cli.py."
     },
     {
       "id": "US-075",
@@ -26,8 +26,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added re_score_session() + list_persisted_weeks() in orchestrator.py and load_one_session_score() in profile_store.py as the CLI seams. cmd_re_score / cmd_baseline / cmd_history / cmd_show + their subparsers in praxis/cli/__main__.py. scan now prints a one-line progress summary instead of rendering the digest. Tests in tests/test_cli.py (14 new)."
     },
     {
       "id": "US-076",
@@ -38,8 +38,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added has_api_key_configured() + NO_API_KEY_MESSAGE in orchestrator.py as the CLI seam. cmd_week gates on it only for the judge-using path (no --week, no --dry-run); cmd_scan always gates. Read-only verbs (baseline/history/show/follow-up) skip the gate. cmd_re_score already returned exit 2 via ReScoreError('no_judge') from US-075, so left untouched. 8 new tests in tests/test_cli.py cover the matrix (week/scan no-key exit 2, week --week / --dry-run / baseline / history bypass, Anthropic-only / OpenAI-only proceed)."
     },
     {
       "id": "US-077",
@@ -50,8 +50,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added no_sessions_message() helper in orchestrator.py as the CLI seam. cmd_week and cmd_show now exit 3 with a clear message naming the targeted ISO week when summary.snapshot.session_count == 0. The gate runs AFTER the US-076 exit-2 gate (no API key trumps no sessions). cmd_scan deliberately does NOT exit 3 -- it is the cron-driven data-mover; a scheduled run that finds 0 sessions should not surface as a job failure. 7 new tests in tests/test_cli.py cover: current-week / past-week / dry-run all exit 3, show exits 3, precedence (no key trumps no sessions), positive case with seeded data still exits 0, scan with no sessions still exits 0. Four existing API-key-bypass tests now assert code != 2 (the original intent: the gate was bypassed) rather than == 0 (which no longer holds without seeded data)."
     },
     {
       "id": "US-078",
@@ -64,8 +64,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Deleted cmd_install_daemon() and its `install-daemon` subparser registration from praxis/cli/__main__.py. Confirmed --no-judge was already absent. Verified the v0.1 daily orchestrator entry point (`praxis.orchestrator.run`) is no longer the func default for any subparser; `cmd_scan` calls into `run()` internally but the `scan` subparser binds `func=cmd_scan`, not `func=run`. README.md updated: removed the `praxis scan --no-judge` example and the entire `## Run it daily` install-daemon section. 5 new US-078 tests in tests/test_cli.py: install-daemon subcommand absent, cmd_install_daemon handler not importable, --no-judge rejected by scan and by week, no subparser binds directly to orchestrator.run."
     }
   ]
 }
