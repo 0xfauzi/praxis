@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from praxis.models import Session
@@ -68,6 +69,17 @@ _LABEL_FORBIDDEN_PATTERN = re.compile(
     r"\b(?:" + "|".join(re.escape(t) for t in LABEL_FORBIDDEN_TOKENS) + r")\b",
     re.IGNORECASE,
 )
+
+
+# Spec 5.6 shape thresholds. Both checks use strict inequality (N > threshold).
+# - Anti-collapse: if the response collapses everything into one task while
+#   N > ANTI_COLLAPSE_THRESHOLD sessions exist, ask the model to split.
+# - Anti-singleton: if every task is a singleton while
+#   N > ANTI_SINGLETON_THRESHOLD sessions exist, ask the model to merge.
+# After the single shape retry the response is accepted regardless of shape
+# (spec 5.6 "Accept after retry").
+ANTI_COLLAPSE_THRESHOLD = 6
+ANTI_SINGLETON_THRESHOLD = 8
 
 
 @dataclass
@@ -257,6 +269,44 @@ def _validate_labels_and_types(tasks: list[Task]) -> str | None:
     return None
 
 
+def _validate_shape(tasks: list[Task], n_sessions: int) -> str | None:
+    """Spec 5.6: anti-collapse and anti-singleton shape checks.
+
+    Anti-collapse: exactly one task with N > ANTI_COLLAPSE_THRESHOLD sessions
+    suggests the LLM lumped distinct work together to be safe; ask it to split
+    when the work is genuinely distinct.
+
+    Anti-singleton: every task is a singleton AND N > ANTI_SINGLETON_THRESHOLD
+    suggests the LLM split everything to be safe; ask it to merge sessions
+    that share an underlying goal.
+
+    Returns None on success. Otherwise returns a human-readable error string
+    appended to the original prompt by the re-prompt path.
+
+    Intended to run AFTER coverage validation passes - the "every task has
+    exactly one session" check would be misleading if some input session_ids
+    were missing from the response.
+    """
+    if not tasks:
+        return None
+
+    if len(tasks) == 1 and n_sessions > ANTI_COLLAPSE_THRESHOLD:
+        return (
+            f"shape: all {n_sessions} sessions were collapsed into a single task; "
+            f"please split when the work is genuinely distinct."
+        )
+
+    if n_sessions > ANTI_SINGLETON_THRESHOLD and all(
+        len(t.session_ids) == 1 for t in tasks
+    ):
+        return (
+            f"shape: every one of {n_sessions} sessions was given its own singleton "
+            f"task; please merge sessions that share an underlying goal."
+        )
+
+    return None
+
+
 def _build_retry_message(original_prompt: str, validation_error: str) -> str:
     """Spec 5.3: re-prompt once with the validation error appended."""
     return (
@@ -302,23 +352,74 @@ def _singleton_fallback(sessions: list[Session]) -> list[Task]:
     ]
 
 
+def _run_clustering(
+    sessions: list[Session],
+    call_fn: Callable[[str], list[Task]],
+) -> list[Task]:
+    """Shared retry pipeline used by both Anthropic and OpenAI clustering paths.
+
+    Two retry gates, each with its own single-retry budget:
+
+    1. Correctness gate (spec 5.3): coverage + label/type validation. On first
+       failure, re-prompt once with the validation error. If the retry also
+       fails (validation or unparseable), fall back to one task per session
+       (US-033 / US-034 / US-035).
+
+    2. Shape gate (spec 5.6): anti-collapse + anti-singleton. On failure,
+       re-prompt once with the shape error. Per US-036 AC #3 the shape retry
+       is accepted regardless of shape; the retry response is gated only on
+       coverage + label/type so a reshape that breaks correctness falls back
+       to the original (known-correct, suboptimally-shaped) tasks rather than
+       being accepted blindly.
+
+    Worst case: 3 LLM calls (original + correctness retry + shape retry). Spec
+    5.4's <$0.10/week budget on cheap-tier models accommodates this comfortably.
+    """
+    prompt = build_prompt(sessions)
+    expected_ids = {s.stable_id for s in sessions}
+
+    tasks = call_fn(prompt)
+
+    correctness_error = (
+        _validate_coverage(tasks, expected_ids)
+        or _validate_labels_and_types(tasks)
+    )
+    if correctness_error is not None:
+        try:
+            retried = call_fn(_build_retry_message(prompt, correctness_error))
+        except ValueError:
+            return _singleton_fallback(sessions)
+        retry_error = (
+            _validate_coverage(retried, expected_ids)
+            or _validate_labels_and_types(retried)
+        )
+        if retry_error is not None:
+            return _singleton_fallback(sessions)
+        tasks = retried
+
+    shape_error = _validate_shape(tasks, len(sessions))
+    if shape_error is None:
+        return tasks
+    try:
+        reshaped = call_fn(_build_retry_message(prompt, shape_error))
+    except ValueError:
+        return tasks
+    if (
+        _validate_coverage(reshaped, expected_ids) is None
+        and _validate_labels_and_types(reshaped) is None
+    ):
+        return reshaped
+    return tasks
+
+
 def cluster_with_anthropic(
     sessions: list[Session], model: str = ANTHROPIC_CHEAP_MODEL
 ) -> list[Task]:
-    """One clustering call against the Anthropic cheap-tier model, with a single
-    validation re-prompt (spec 5.3) on any of:
-      - missing, duplicated, or invented session_ids (coverage)
-      - labels exceeding LABEL_MAX_CHARS or containing LABEL_FORBIDDEN_TOKENS
-      - task_type values outside ALLOWED_TASK_TYPES
-
-    If the re-prompt also fails (any validation error or unparseable response),
-    fall back to one task per session (spec 5.3 singleton fallback).
-    """
+    """One clustering call against the Anthropic cheap-tier model, with the
+    shared correctness + shape retry pipeline (see _run_clustering)."""
     from anthropic import Anthropic  # type: ignore
 
     client = Anthropic()
-    prompt = build_prompt(sessions)
-    expected_ids = {s.stable_id for s in sessions}
 
     def _call(content: str) -> list[Task]:
         response = client.messages.create(
@@ -333,40 +434,17 @@ def cluster_with_anthropic(
         )
         return _parse_response(text)
 
-    tasks = _call(prompt)
-    error = _validate_coverage(tasks, expected_ids) or _validate_labels_and_types(tasks)
-    if error is None:
-        return tasks
-    try:
-        retried = _call(_build_retry_message(prompt, error))
-    except ValueError:
-        return _singleton_fallback(sessions)
-    retry_error = (
-        _validate_coverage(retried, expected_ids)
-        or _validate_labels_and_types(retried)
-    )
-    if retry_error is None:
-        return retried
-    return _singleton_fallback(sessions)
+    return _run_clustering(sessions, _call)
 
 
 def cluster_with_openai(
     sessions: list[Session], model: str = OPENAI_CHEAP_MODEL
 ) -> list[Task]:
-    """One clustering call against the OpenAI cheap-tier model, with a single
-    validation re-prompt (spec 5.3) on any of:
-      - missing, duplicated, or invented session_ids (coverage)
-      - labels exceeding LABEL_MAX_CHARS or containing LABEL_FORBIDDEN_TOKENS
-      - task_type values outside ALLOWED_TASK_TYPES
-
-    If the re-prompt also fails (any validation error or unparseable response),
-    fall back to one task per session (spec 5.3 singleton fallback).
-    """
+    """One clustering call against the OpenAI cheap-tier model, with the
+    shared correctness + shape retry pipeline (see _run_clustering)."""
     from openai import OpenAI  # type: ignore
 
     client = OpenAI()
-    prompt = build_prompt(sessions)
-    expected_ids = {s.stable_id for s in sessions}
 
     def _call(content: str) -> list[Task]:
         response = client.chat.completions.create(
@@ -377,21 +455,7 @@ def cluster_with_openai(
         text = response.choices[0].message.content or ""
         return _parse_response(text)
 
-    tasks = _call(prompt)
-    error = _validate_coverage(tasks, expected_ids) or _validate_labels_and_types(tasks)
-    if error is None:
-        return tasks
-    try:
-        retried = _call(_build_retry_message(prompt, error))
-    except ValueError:
-        return _singleton_fallback(sessions)
-    retry_error = (
-        _validate_coverage(retried, expected_ids)
-        or _validate_labels_and_types(retried)
-    )
-    if retry_error is None:
-        return retried
-    return _singleton_fallback(sessions)
+    return _run_clustering(sessions, _call)
 
 
 def cluster_sessions(
@@ -429,6 +493,8 @@ def cluster_sessions(
 __all__ = [
     "ALLOWED_TASK_TYPES",
     "ANTHROPIC_CHEAP_MODEL",
+    "ANTI_COLLAPSE_THRESHOLD",
+    "ANTI_SINGLETON_THRESHOLD",
     "FIRST_TURN_MAX_CHARS",
     "LABEL_FORBIDDEN_TOKENS",
     "LABEL_MAX_CHARS",

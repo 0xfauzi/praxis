@@ -219,16 +219,25 @@ def test_session_id_in_block_matches_stable_id():
 
 
 def test_anthropic_single_call_for_all_sessions(monkeypatch):
+    # N=7 sessions split into 2 tasks: keeps the single-call contract (one
+    # LLM call carries all 7 sessions) while avoiding US-036's anti-collapse
+    # re-prompt (1 task with N > 6 would otherwise trigger a second call).
     sessions = [_make_session(f"s{i}", f"prompt {i}") for i in range(7)]
     reply = json.dumps(
         {
             "tasks": [
                 {
-                    "label": "one bucket",
+                    "label": "first bucket",
                     "task_type": "other",
-                    "session_ids": [s.stable_id for s in sessions],
+                    "session_ids": [s.stable_id for s in sessions[:4]],
                     "rationale": "stub",
-                }
+                },
+                {
+                    "label": "second bucket",
+                    "task_type": "other",
+                    "session_ids": [s.stable_id for s in sessions[4:]],
+                    "rationale": "stub",
+                },
             ]
         }
     )
@@ -244,8 +253,9 @@ def test_anthropic_single_call_for_all_sessions(monkeypatch):
     for s in sessions:
         assert s.stable_id in body
     # Parsed result reflects the reply.
-    assert len(tasks) == 1
-    assert tasks[0].session_ids == [s.stable_id for s in sessions]
+    assert len(tasks) == 2
+    assert tasks[0].session_ids == [s.stable_id for s in sessions[:4]]
+    assert tasks[1].session_ids == [s.stable_id for s in sessions[4:]]
 
 
 def test_anthropic_call_uses_cheap_tier_model_by_default(monkeypatch):
@@ -1052,3 +1062,414 @@ def test_openai_falls_back_when_retry_label_is_still_invalid(monkeypatch):
     assert len(tasks) == 1
     assert tasks[0].label_source == clustering.LABEL_SOURCE_FALLBACK
     assert tasks[0].label == "alpha solo work"
+
+
+# --- US-036: anti-collapse + anti-singleton shape re-prompts ----------------
+
+
+def _multi_task_reply(buckets: list[list[str]]) -> str:
+    """Build a JSON reply with one task per bucket of session_ids. Used to
+    construct well-shaped responses for the shape-retry tests."""
+    return json.dumps(
+        {
+            "tasks": [
+                {
+                    "label": f"bucket {i}",
+                    "task_type": "other",
+                    "session_ids": bucket,
+                    "rationale": ".",
+                }
+                for i, bucket in enumerate(buckets)
+            ]
+        }
+    )
+
+
+def _singleton_reply(session_ids: list[str]) -> str:
+    """Build a JSON reply where every session is its own task. Used to
+    drive the anti-singleton path."""
+    return _multi_task_reply([[sid] for sid in session_ids])
+
+
+def test_anti_collapse_threshold_is_6():
+    assert clustering.ANTI_COLLAPSE_THRESHOLD == 6
+
+
+def test_anti_singleton_threshold_is_8():
+    assert clustering.ANTI_SINGLETON_THRESHOLD == 8
+
+
+def test_validate_shape_returns_none_for_well_shaped_response():
+    tasks = [
+        clustering.Task(
+            label="a", task_type="other", session_ids=["x", "y", "z"], rationale="."
+        ),
+        clustering.Task(
+            label="b", task_type="other", session_ids=["q", "r"], rationale="."
+        ),
+    ]
+    assert clustering._validate_shape(tasks, n_sessions=5) is None
+
+
+def test_validate_shape_rejects_collapse_when_one_task_and_n_over_6():
+    tasks = [
+        clustering.Task(
+            label="all",
+            task_type="other",
+            session_ids=[f"s{i}" for i in range(7)],
+            rationale=".",
+        ),
+    ]
+    error = clustering._validate_shape(tasks, n_sessions=7)
+    assert error is not None
+    assert "collapsed" in error
+    assert "7" in error
+
+
+def test_validate_shape_accepts_one_task_at_collapse_boundary_n_equal_6():
+    tasks = [
+        clustering.Task(
+            label="all",
+            task_type="other",
+            session_ids=[f"s{i}" for i in range(6)],
+            rationale=".",
+        ),
+    ]
+    assert clustering._validate_shape(tasks, n_sessions=6) is None
+
+
+def test_validate_shape_accepts_one_task_under_collapse_threshold():
+    # N=3, one task, well under the threshold.
+    tasks = [
+        clustering.Task(
+            label="a", task_type="other", session_ids=["x", "y", "z"], rationale="."
+        ),
+    ]
+    assert clustering._validate_shape(tasks, n_sessions=3) is None
+
+
+def test_validate_shape_rejects_all_singletons_when_n_over_8():
+    tasks = [
+        clustering.Task(
+            label=f"t{i}", task_type="other", session_ids=[f"s{i}"], rationale="."
+        )
+        for i in range(9)
+    ]
+    error = clustering._validate_shape(tasks, n_sessions=9)
+    assert error is not None
+    assert "singleton" in error
+    assert "9" in error
+
+
+def test_validate_shape_accepts_all_singletons_at_boundary_n_equal_8():
+    tasks = [
+        clustering.Task(
+            label=f"t{i}", task_type="other", session_ids=[f"s{i}"], rationale="."
+        )
+        for i in range(8)
+    ]
+    assert clustering._validate_shape(tasks, n_sessions=8) is None
+
+
+def test_validate_shape_accepts_all_singletons_under_threshold():
+    tasks = [
+        clustering.Task(
+            label=f"t{i}", task_type="other", session_ids=[f"s{i}"], rationale="."
+        )
+        for i in range(4)
+    ]
+    assert clustering._validate_shape(tasks, n_sessions=4) is None
+
+
+def test_validate_shape_accepts_mixed_response_above_singleton_threshold():
+    # N=10 sessions across 3 tasks; one task has a single session but not all
+    # tasks are singletons, so anti-singleton does NOT fire.
+    tasks = [
+        clustering.Task(
+            label="a",
+            task_type="other",
+            session_ids=[f"s{i}" for i in range(4)],
+            rationale=".",
+        ),
+        clustering.Task(
+            label="b",
+            task_type="other",
+            session_ids=[f"s{i}" for i in range(4, 9)],
+            rationale=".",
+        ),
+        clustering.Task(
+            label="c", task_type="other", session_ids=["s9"], rationale="."
+        ),
+    ]
+    assert clustering._validate_shape(tasks, n_sessions=10) is None
+
+
+def test_validate_shape_passes_for_empty_tasks_defensive():
+    # If upstream returns no tasks (which should never happen post-validation)
+    # the shape validator is a no-op rather than asserting.
+    assert clustering._validate_shape([], n_sessions=0) is None
+
+
+def test_anthropic_retries_once_when_response_collapses_n_over_6(monkeypatch):
+    sessions = [_make_session(f"s{i}", f"prompt {i}") for i in range(7)]
+    ids = [s.stable_id for s in sessions]
+    collapsed = _ok_reply(ids, label="all in one")
+    reshape = _multi_task_reply([ids[:3], ids[3:]])
+    recorder = _CallRecorder([collapsed, reshape])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_anthropic(sessions)
+
+    # Original (collapsed) + shape retry (reshape).
+    assert len(recorder.calls) == 2
+    assert len(tasks) == 2
+    assert tasks[0].label == "bucket 0"
+    assert tasks[1].label == "bucket 1"
+    assert all(t.label_source == clustering.LABEL_SOURCE_LLM for t in tasks)
+
+
+def test_anthropic_retries_once_when_response_is_all_singletons_with_n_over_8(
+    monkeypatch,
+):
+    sessions = [_make_session(f"s{i}", f"prompt {i}") for i in range(9)]
+    ids = [s.stable_id for s in sessions]
+    singletons = _singleton_reply(ids)
+    reshape = _multi_task_reply([ids[:4], ids[4:7], ids[7:]])
+    recorder = _CallRecorder([singletons, reshape])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_anthropic(sessions)
+
+    assert len(recorder.calls) == 2
+    assert len(tasks) == 3
+
+
+def test_anthropic_no_shape_retry_when_one_task_n_equal_6(monkeypatch):
+    # Boundary: N=6 in one task is acceptable, no retry.
+    sessions = [_make_session(f"s{i}", "thing") for i in range(6)]
+    reply = _ok_reply([s.stable_id for s in sessions], label="six in one")
+    recorder = _CallRecorder([reply])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    clustering.cluster_with_anthropic(sessions)
+
+    assert len(recorder.calls) == 1
+
+
+def test_anthropic_no_shape_retry_when_all_singletons_n_equal_8(monkeypatch):
+    # Boundary: 8 singletons is acceptable, no retry.
+    sessions = [_make_session(f"s{i}", "thing") for i in range(8)]
+    reply = _singleton_reply([s.stable_id for s in sessions])
+    recorder = _CallRecorder([reply])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    clustering.cluster_with_anthropic(sessions)
+
+    assert len(recorder.calls) == 1
+
+
+def test_anthropic_shape_retry_accepts_reshape_regardless_of_shape(monkeypatch):
+    # Per US-036 AC #3: after the single shape retry, the response is accepted
+    # regardless of shape. Here both attempts collapse all 7 sessions into one
+    # task; the second response is accepted anyway (no further retry, no fallback).
+    sessions = [_make_session(f"s{i}", "thing") for i in range(7)]
+    ids = [s.stable_id for s in sessions]
+    collapse_1 = _ok_reply(ids, label="lump 1")
+    collapse_2 = _ok_reply(ids, label="lump 2")
+    recorder = _CallRecorder([collapse_1, collapse_2])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_anthropic(sessions)
+
+    # Exactly 2 calls (original + 1 shape retry), then accept.
+    assert len(recorder.calls) == 2
+    assert len(tasks) == 1
+    assert tasks[0].label == "lump 2"
+    assert tasks[0].label_source == clustering.LABEL_SOURCE_LLM
+
+
+def test_anthropic_shape_retry_accepts_singleton_reshape_regardless(monkeypatch):
+    # Same acceptance rule for the anti-singleton path: if the reshape is still
+    # all singletons, accept it (the user genuinely had a fragmented week).
+    sessions = [_make_session(f"s{i}", "thing") for i in range(9)]
+    ids = [s.stable_id for s in sessions]
+    singletons_1 = _singleton_reply(ids)
+    singletons_2 = _singleton_reply(ids)
+    recorder = _CallRecorder([singletons_1, singletons_2])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_anthropic(sessions)
+
+    assert len(recorder.calls) == 2
+    # Per AC #3 the reshape is accepted as-is: 9 singletons.
+    assert len(tasks) == 9
+
+
+def test_anthropic_shape_retry_prompt_names_collapse(monkeypatch):
+    sessions = [_make_session(f"s{i}", "thing") for i in range(7)]
+    ids = [s.stable_id for s in sessions]
+    collapsed = _ok_reply(ids, label="all in one")
+    reshape = _multi_task_reply([ids[:4], ids[4:]])
+    recorder = _CallRecorder([collapsed, reshape])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    clustering.cluster_with_anthropic(sessions)
+
+    retry_prompt = recorder.calls[1]["messages"][0]["content"]
+    assert "shape" in retry_prompt.lower()
+    assert "collapsed" in retry_prompt.lower()
+    assert "split" in retry_prompt.lower()
+
+
+def test_anthropic_shape_retry_prompt_names_singleton(monkeypatch):
+    sessions = [_make_session(f"s{i}", "thing") for i in range(9)]
+    ids = [s.stable_id for s in sessions]
+    singletons = _singleton_reply(ids)
+    reshape = _multi_task_reply([ids[:5], ids[5:]])
+    recorder = _CallRecorder([singletons, reshape])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    clustering.cluster_with_anthropic(sessions)
+
+    retry_prompt = recorder.calls[1]["messages"][0]["content"]
+    assert "shape" in retry_prompt.lower()
+    assert "singleton" in retry_prompt.lower()
+    assert "merge" in retry_prompt.lower()
+
+
+def test_anthropic_shape_retry_unparseable_keeps_original(monkeypatch):
+    # Reshape fails to parse; per US-036 AC #3 we still accept "regardless of
+    # shape", and the only well-formed response we have is the original.
+    sessions = [_make_session(f"s{i}", "thing") for i in range(7)]
+    ids = [s.stable_id for s in sessions]
+    collapsed = _ok_reply(ids, label="original")
+    garbage = "not even close to JSON"
+    recorder = _CallRecorder([collapsed, garbage])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_anthropic(sessions)
+
+    assert len(recorder.calls) == 2
+    assert len(tasks) == 1
+    assert tasks[0].label == "original"
+    assert tasks[0].label_source == clustering.LABEL_SOURCE_LLM
+
+
+def test_anthropic_shape_retry_breaking_coverage_keeps_original(monkeypatch):
+    # If the shape retry produces a well-shaped response that invents an id
+    # (or drops one), the reshape is correctness-invalid. Per AC #3 we accept
+    # regardless of SHAPE, but coverage is still a correctness gate, so we
+    # keep the (correctness-valid) original tasks.
+    sessions = [_make_session(f"s{i}", "thing") for i in range(7)]
+    ids = [s.stable_id for s in sessions]
+    collapsed = _ok_reply(ids, label="original")
+    reshape_invented = _multi_task_reply(
+        [ids[:3], ids[3:] + ["GHOST-ID"]]
+    )
+    recorder = _CallRecorder([collapsed, reshape_invented])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_anthropic(sessions)
+
+    assert len(recorder.calls) == 2
+    # Original kept since reshape broke coverage.
+    assert len(tasks) == 1
+    assert tasks[0].label == "original"
+
+
+def test_anthropic_no_shape_retry_when_first_response_is_well_shaped(monkeypatch):
+    # Multi-task response with N=7: shape is fine, no retry.
+    sessions = [_make_session(f"s{i}", "thing") for i in range(7)]
+    ids = [s.stable_id for s in sessions]
+    reply = _multi_task_reply([ids[:3], ids[3:]])
+    recorder = _CallRecorder([reply])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_anthropic(sessions)
+
+    assert len(recorder.calls) == 1
+    assert len(tasks) == 2
+
+
+def test_anthropic_coverage_fallback_short_circuits_shape_retry(monkeypatch):
+    # 9 sessions, both coverage attempts fail. The singleton fallback returns
+    # 9 tasks (would normally trigger anti-singleton since N=9 > 8), but the
+    # fallback path exits BEFORE the shape gate is reached. Total calls: 2.
+    sessions = [_make_session(f"s{i}", f"prompt {i}") for i in range(9)]
+    ids = [s.stable_id for s in sessions]
+    bad_1 = _ok_reply(ids[:5])
+    bad_2 = _ok_reply(ids[:6])
+    recorder = _CallRecorder([bad_1, bad_2])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_anthropic(sessions)
+
+    # 2 calls (original + coverage retry); no shape retry.
+    assert len(recorder.calls) == 2
+    # Singleton fallback fired: one task per session.
+    assert len(tasks) == 9
+    assert all(t.label_source == clustering.LABEL_SOURCE_FALLBACK for t in tasks)
+
+
+def test_anthropic_three_calls_when_coverage_retry_then_shape_retry(monkeypatch):
+    # Worst-case happy path: coverage error on call 1, valid coverage on call 2
+    # but bad shape (1 task with N=7), then a well-shaped reshape on call 3.
+    sessions = [_make_session(f"s{i}", f"prompt {i}") for i in range(7)]
+    ids = [s.stable_id for s in sessions]
+    coverage_bad = _ok_reply(ids[:6], label="missing one")  # missing s6
+    shape_bad = _ok_reply(ids, label="all in one")
+    well_shaped = _multi_task_reply([ids[:3], ids[3:]])
+    recorder = _CallRecorder([coverage_bad, shape_bad, well_shaped])
+    _install_fake_anthropic(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_anthropic(sessions)
+
+    assert len(recorder.calls) == 3
+    assert len(tasks) == 2
+    assert tasks[0].label == "bucket 0"
+    assert tasks[1].label == "bucket 1"
+
+
+def test_openai_retries_once_when_response_collapses_n_over_6(monkeypatch):
+    sessions = [_make_session(f"s{i}", "thing") for i in range(7)]
+    ids = [s.stable_id for s in sessions]
+    collapsed = _ok_reply(ids, label="one task")
+    reshape = _multi_task_reply([ids[:3], ids[3:]])
+    recorder = _OpenAIRecorder([collapsed, reshape])
+    _install_fake_openai(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_openai(sessions)
+
+    assert len(recorder.calls) == 2
+    assert len(tasks) == 2
+
+
+def test_openai_retries_once_when_response_is_all_singletons_with_n_over_8(
+    monkeypatch,
+):
+    sessions = [_make_session(f"s{i}", "thing") for i in range(9)]
+    ids = [s.stable_id for s in sessions]
+    singletons = _singleton_reply(ids)
+    reshape = _multi_task_reply([ids[:4], ids[4:]])
+    recorder = _OpenAIRecorder([singletons, reshape])
+    _install_fake_openai(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_openai(sessions)
+
+    assert len(recorder.calls) == 2
+    assert len(tasks) == 2
+
+
+def test_openai_shape_retry_accepts_reshape_regardless_of_shape(monkeypatch):
+    sessions = [_make_session(f"s{i}", "thing") for i in range(7)]
+    ids = [s.stable_id for s in sessions]
+    collapse_1 = _ok_reply(ids, label="still one")
+    collapse_2 = _ok_reply(ids, label="still one again")
+    recorder = _OpenAIRecorder([collapse_1, collapse_2])
+    _install_fake_openai(monkeypatch, recorder)
+
+    tasks = clustering.cluster_with_openai(sessions)
+
+    assert len(recorder.calls) == 2
+    assert len(tasks) == 1
+    assert tasks[0].label == "still one again"
