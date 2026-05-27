@@ -100,6 +100,10 @@ def run(
     for session in to_score:
         score = score_one_session(session, use_judge=use_judge)
         store.save_session_score(score)
+        if score.judge_result is not None:
+            # Persist moments only when the judge actually ran; a heuristic-only
+            # rescore must not wipe a session's moments from a prior judged run.
+            store.save_moments(session.stable_id, score.judge_result.moments)
         scored_count += 1
 
     # Daily consolidation: only run once per day unless forced.

@@ -94,3 +94,16 @@ class Moment:
     created_at: datetime | None = None
     dollar_impact_estimate: float | None = None
     minutes_impact_estimate: int | None = None
+
+
+def compute_moment_id(session_stable_id: str, dim_key: str, turn_index: int) -> str:
+    """Spec §4.1: moment_id = sha256(session.stable_id + dim_key + turn_index)[:16].
+
+    Deterministic: re-judging the same (session, dim, turn) yields the same id,
+    which makes the moments table's primary-key upserts idempotent.
+    """
+    h = hashlib.sha256()
+    h.update(session_stable_id.encode())
+    h.update(dim_key.encode())
+    h.update(str(turn_index).encode())
+    return h.hexdigest()[:16]
