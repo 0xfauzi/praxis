@@ -16,11 +16,13 @@ from praxis.scoring.baseline import (
     BASELINE_WINDOW_DAYS,
     Baseline,
     BaselineInputSession,
+    LastWeekMean,
     MIN_DAYS_FOR_BASELINE,
     OVERALL_CLIP_HIGH,
     OVERALL_CLIP_LOW,
     _iso_week_start,
     compute_baseline,
+    compute_last_week_mean,
     data_span_days,
     has_prior_week_sessions,
     is_baseline_forming,
@@ -322,3 +324,177 @@ def test_forming_and_prior_week_can_both_be_true():
     sessions = [_session(days_ago=0), _session(days_ago=3)]
     assert is_baseline_forming(sessions, as_of=AS_OF) is True
     assert has_prior_week_sessions(sessions, as_of=AS_OF) is True
+
+
+# ---------------------------------------------------------------------- US-036
+# Last-week mean (the immediately prior ISO week, Monday-to-Sunday).
+# Last week of AS_OF (Wed 2026-05-27): Mon 2026-05-18 .. Sun 2026-05-24.
+
+LAST_WEEK_MONDAY = datetime(2026, 5, 18, tzinfo=timezone.utc).date()
+LAST_WEEK_SUNDAY = datetime(2026, 5, 24, tzinfo=timezone.utc).date()
+
+
+def test_compute_last_week_mean_empty_returns_none():
+    """No sessions at all -> renderer omits the annotation."""
+    assert compute_last_week_mean([], as_of=AS_OF) is None
+
+
+def test_compute_last_week_mean_only_current_week_returns_none():
+    """A user whose entire history is in the current ISO week has no prior week."""
+    sessions = [_session(days_ago=0), _session(days_ago=1), _session(days_ago=2)]
+    assert compute_last_week_mean(sessions, as_of=AS_OF) is None
+
+
+def test_compute_last_week_mean_only_older_than_last_week_returns_none():
+    """Sessions older than the prior ISO week do NOT contribute.
+
+    A session from 2 weeks ago is not in "last week" -- it's in the
+    week before last. The annotation is specifically about the
+    immediately prior ISO week.
+    """
+    # days_ago=10 from Wed 2026-05-27 -> Sun 2026-05-17, which is the
+    # Sunday BEFORE last_week_monday (2026-05-18). So it's in week-2-ago.
+    sessions = [_session(days_ago=10), _session(days_ago=30)]
+    assert compute_last_week_mean(sessions, as_of=AS_OF) is None
+
+
+def test_compute_last_week_mean_single_prior_week_session():
+    """One session in the prior ISO week -> returns its values."""
+    # days_ago=3 from Wed -> Sun 2026-05-24 (last week).
+    s = _session(days_ago=3, overall=7.0, dim_value=7.0,
+                 engagement_rate=0.3, delegation_rate=0.5, independence_rate=0.2)
+    result = compute_last_week_mean([s], as_of=AS_OF)
+    assert result is not None
+    assert isinstance(result, LastWeekMean)
+    assert result.session_count == 1
+    assert result.overall_mean == 7.0
+    assert result.dimension_means["planning"] == 7.0
+    assert result.engagement_mean == 0.3
+    assert result.delegation_mean == 0.5
+    assert result.independence_mean == 0.2
+
+
+def test_compute_last_week_mean_multiple_sessions_averaged():
+    """Multiple prior-week sessions are averaged with equal weight."""
+    # All days_ago values 3..9 fall within Mon 2026-05-18 .. Sun 2026-05-24.
+    a = _session(days_ago=3, overall=4.0, dim_value=4.0)   # Sun
+    b = _session(days_ago=6, overall=6.0, dim_value=6.0)   # Thu
+    c = _session(days_ago=9, overall=8.0, dim_value=8.0)   # Mon
+    result = compute_last_week_mean([a, b, c], as_of=AS_OF)
+    assert result is not None
+    assert result.session_count == 3
+    assert result.overall_mean == 6.0
+    assert result.dimension_means["planning"] == 6.0
+
+
+def test_compute_last_week_mean_excludes_current_week():
+    """Sessions on/after the current ISO week's Monday do NOT count.
+
+    The contract is that this-week and last-week are disjoint windows.
+    A user with one session today and one session in last week should
+    get a last-week mean that reflects ONLY the last-week session.
+    """
+    this_week = _session(days_ago=0, overall=2.0, dim_value=2.0)
+    last_week = _session(days_ago=3, overall=8.0, dim_value=8.0)  # Sun 2026-05-24
+    result = compute_last_week_mean([this_week, last_week], as_of=AS_OF)
+    assert result is not None
+    assert result.session_count == 1
+    assert result.overall_mean == 8.0
+
+
+def test_compute_last_week_mean_excludes_older_sessions():
+    """Sessions older than the prior ISO week's Monday do NOT count."""
+    older = _session(days_ago=12, overall=2.0, dim_value=2.0)  # week before last
+    last_week = _session(days_ago=5, overall=8.0, dim_value=8.0)  # Fri 2026-05-22
+    result = compute_last_week_mean([older, last_week], as_of=AS_OF)
+    assert result is not None
+    assert result.session_count == 1
+    assert result.overall_mean == 8.0
+
+
+def test_compute_last_week_mean_week_boundaries():
+    """The Monday of last week is inclusive; the Monday of this week is exclusive.
+
+    This matches the Baseline window semantics (window_end is the
+    Monday of the current ISO week, exclusive). A session at the
+    edge of "last week" Monday IS in last week; a session at
+    "this week" Monday is NOT.
+    """
+    last_week_monday_session = BaselineInputSession(
+        started_at=datetime(2026, 5, 18, 0, 0, tzinfo=timezone.utc),
+        overall=5.0,
+        dimension_scores=_all_dims(5.0),
+        engagement_rate=0.0,
+        delegation_rate=0.0,
+        independence_rate=0.0,
+    )
+    this_week_monday_session = BaselineInputSession(
+        started_at=datetime(2026, 5, 25, 0, 0, tzinfo=timezone.utc),
+        overall=5.0,
+        dimension_scores=_all_dims(5.0),
+        engagement_rate=0.0,
+        delegation_rate=0.0,
+        independence_rate=0.0,
+    )
+    result = compute_last_week_mean(
+        [last_week_monday_session, this_week_monday_session], as_of=AS_OF
+    )
+    assert result is not None
+    assert result.session_count == 1
+    assert result.overall_mean == 5.0
+
+
+def test_compute_last_week_mean_overall_is_clipped():
+    """Same outlier clipping as compute_baseline so the two are comparable."""
+    # Both sessions in last week. Clipped contributions: 9.0, 1.0 -> mean 5.0.
+    high = _session(days_ago=3, overall=15.0, dim_value=6.0)
+    low = _session(days_ago=6, overall=-3.0, dim_value=6.0)
+    result = compute_last_week_mean([high, low], as_of=AS_OF)
+    assert result is not None
+    assert result.overall_mean == 5.0
+
+
+def test_compute_last_week_mean_window_metadata():
+    """The returned dataclass exposes the week boundaries for callers."""
+    s = _session(days_ago=3)
+    result = compute_last_week_mean([s], as_of=AS_OF)
+    assert result is not None
+    assert result.week_start == LAST_WEEK_MONDAY
+    assert result.week_end == CURRENT_WEEK_MONDAY
+    # And week_end - week_start == 7 days, matching one ISO week.
+    assert (result.week_end - result.week_start).days == 7
+
+
+def test_compute_last_week_mean_default_as_of_uses_now():
+    """Smoke test: when as_of is None, the week window anchors to today."""
+    # Empty list short-circuits with None, but it still computes the
+    # window first; we only verify the function does not raise.
+    assert compute_last_week_mean([]) is None
+
+
+def test_compute_last_week_mean_dim_means_are_NOT_clipped():
+    """Same as Baseline: only `overall` is clipped, dims average as-is."""
+    s = BaselineInputSession(
+        started_at=AS_OF - timedelta(days=3),
+        overall=6.0,
+        dimension_scores={"planning": 9.5, "context": 9.5, "iteration": 9.5,
+                          "tools": 9.5, "fit": 9.5, "verification": 9.5},
+        engagement_rate=0.0,
+        delegation_rate=0.0,
+        independence_rate=0.0,
+    )
+    result = compute_last_week_mean([s], as_of=AS_OF)
+    assert result is not None
+    assert result.dimension_means["planning"] == 9.5
+
+
+def test_compute_last_week_mean_is_immutable():
+    """Frozen dataclass guards against accidental mutation downstream."""
+    s = _session(days_ago=3)
+    result = compute_last_week_mean([s], as_of=AS_OF)
+    assert result is not None
+    try:
+        result.overall_mean = 99.0  # type: ignore[misc]
+    except Exception:
+        return
+    raise AssertionError("LastWeekMean should be frozen")

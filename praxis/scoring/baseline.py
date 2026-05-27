@@ -66,6 +66,32 @@ class Baseline:
     window_end: date      # exclusive: start of as_of's ISO week (Monday)
 
 
+@dataclass(frozen=True)
+class LastWeekMean:
+    """Mean of session scores from the immediately prior ISO week.
+
+    Returned by `compute_last_week_mean` when the user has at least
+    one session in the prior ISO week (Monday-to-Sunday before
+    `as_of`'s week). When no sessions fall in that window the function
+    returns None, which is the renderer signal to omit the last-week
+    annotation entirely.
+
+    Per spec section 8.1, this is rendered only in the HTML digest as
+    a faded secondary anchor next to the 90-day baseline; the terminal
+    digest omits it. The data shape mirrors Baseline so callers can
+    treat the two annotations symmetrically at the call site.
+    """
+
+    overall_mean: float
+    dimension_means: dict[str, float]
+    engagement_mean: float
+    delegation_mean: float
+    independence_mean: float
+    session_count: int
+    week_start: date    # inclusive: Monday of prior ISO week
+    week_end: date      # exclusive: Monday of current ISO week
+
+
 def _iso_week_start(d: date) -> date:
     """The Monday of the ISO week containing d."""
     return d - timedelta(days=d.weekday())
@@ -200,3 +226,60 @@ def has_prior_week_sessions(
         as_of = datetime.now(timezone.utc)
     current_week_start = _iso_week_start(as_of.date())
     return any(s.started_at.date() < current_week_start for s in sessions)
+
+
+def compute_last_week_mean(
+    sessions: list[BaselineInputSession],
+    as_of: datetime | None = None,
+) -> LastWeekMean | None:
+    """Mean over the prior ISO week (Monday-to-Sunday before `as_of`'s week).
+
+    Returns None when no sessions fall in that window -- the renderer
+    omits the last-week annotation entirely in that case (the "2+ weeks
+    of data" precondition from spec section 8.1 is not met).
+
+    Applies the same outlier clipping as `compute_baseline` (overall
+    clipped to [1.0, 9.0] before averaging) and the same equal-weight
+    per session, so the last-week annotation rendered next to the
+    baseline annotation is on the same scale and the two numbers are
+    directly comparable.
+
+    Week boundaries are aligned with the baseline window: ``week_end``
+    matches ``Baseline.window_end`` (the Monday of the current ISO
+    week), and ``week_start`` is the Monday of the prior ISO week
+    (``week_end - 7 days``). A session at 00:00 on ``week_start`` is
+    included; a session at 00:00 on ``week_end`` is NOT (that session
+    belongs to the current ISO week and would land in this-week's mean).
+    """
+    if as_of is None:
+        as_of = datetime.now(timezone.utc)
+    week_end = _iso_week_start(as_of.date())
+    week_start = week_end - timedelta(days=7)
+
+    included = [
+        s for s in sessions
+        if week_start <= s.started_at.date() < week_end
+    ]
+    n = len(included)
+    if n == 0:
+        return None
+
+    overall_mean = sum(_clip_overall(s.overall) for s in included) / n
+    dim_means: dict[str, float] = {
+        d.key: sum(s.dimension_scores.get(d.key, 5.0) for s in included) / n
+        for d in RUBRIC
+    }
+    engagement_mean = sum(s.engagement_rate for s in included) / n
+    delegation_mean = sum(s.delegation_rate for s in included) / n
+    independence_mean = sum(s.independence_rate for s in included) / n
+
+    return LastWeekMean(
+        overall_mean=round(overall_mean, 2),
+        dimension_means={k: round(v, 2) for k, v in dim_means.items()},
+        engagement_mean=round(engagement_mean, 4),
+        delegation_mean=round(delegation_mean, 4),
+        independence_mean=round(independence_mean, 4),
+        session_count=n,
+        week_start=week_start,
+        week_end=week_end,
+    )

@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from praxis.behavior import TrajectoryAssessment, TrajectoryLabel
 from praxis.models_advisor import ModelUsageProfile
 from praxis.orchestrator import RunSummary
+from praxis.reports.baseline_panel import format_last_week_annotation_html
 from praxis.scoring.coach import Coaching
 from praxis.scoring.rubric import RUBRIC, by_key
 
@@ -44,7 +45,11 @@ def _grade_blurb(score: float) -> str:
     return "Early days. The good news: the highest-leverage changes are also the simplest."
 
 
-def _dimension_bar_html(key: str, score: float) -> str:
+def _dimension_bar_html(
+    key: str,
+    score: float,
+    last_week_value: float | None = None,
+) -> str:
     dim = by_key(key)
     pct = max(0.0, min(100.0, score * 10.0))
     # Truncate the evidence to keep the row tidy; only append the ellipsis when
@@ -53,6 +58,10 @@ def _dimension_bar_html(key: str, score: float) -> str:
         evidence_text = dim.evidence[:140].rstrip() + "..."
     else:
         evidence_text = dim.evidence
+    # Faded last-week secondary annotation (spec section 8.1). The
+    # formatter returns "" when last_week_value is None so this span
+    # simply disappears from the row when the precondition is not met.
+    last_week_html = format_last_week_annotation_html(last_week_value)
     return f"""
     <div class="dim-row">
       <div class="dim-head">
@@ -65,6 +74,7 @@ def _dimension_bar_html(key: str, score: float) -> str:
       <div class="dim-meta">
         <span class="dim-weight">Weight {int(dim.weight * 100)}%</span>
         <span class="dim-evidence">{html.escape(evidence_text)}</span>
+        {last_week_html}
       </div>
     </div>
     """
@@ -361,8 +371,13 @@ def render(summary: RunSummary) -> str:
     coaching = summary.coaching
     score = snapshot.overall
 
+    last_week_means = summary.last_week_means or {}
     dim_rows = "".join(
-        _dimension_bar_html(d.key, snapshot.dimension_means.get(d.key, 0.0))
+        _dimension_bar_html(
+            d.key,
+            snapshot.dimension_means.get(d.key, 0.0),
+            last_week_value=last_week_means.get(d.key),
+        )
         for d in RUBRIC
     )
 
@@ -553,6 +568,12 @@ html, body {{
 }}
 .dim-weight {{ color: var(--primary); letter-spacing: 0.05em; flex-shrink: 0; }}
 .dim-evidence {{ font-style: italic; }}
+.dim-last-week {{
+  color: var(--ink-300);
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+  font-style: italic;
+}}
 
 /* Focus cards */
 .focus-grid {{ display: grid; gap: 32px; }}
