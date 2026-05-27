@@ -8,9 +8,13 @@ This module is the renderer; persistence (writing to disk, updating the
 Self-containment rules (US-061 acceptance):
 
 * All CSS lives in an inline ``<style>`` block. No ``<link rel="stylesheet">``.
-* No webfonts. The font stack lists system faces only (Georgia primary,
-  with a sans-serif fallback for chrome). A later story (US-063)
-  re-introduces Libre Baskerville via the v0.1 inlined-fallback path.
+* No webfonts. The font stack names Libre Baskerville (the v0.1
+  display face) with Georgia as the inlined fallback - if the user has
+  Libre Baskerville installed locally the digest renders identically
+  to the v0.1 scan report; otherwise the browser falls back to Georgia,
+  which ships on every default OS. The chrome stack is system sans
+  (-apple-system / BlinkMacSystemFont / Segoe UI). No ``<link>``,
+  no ``@import``, no ``url(...)`` - the file remains fully portable.
 * No ``<script>`` tags - the digest is static reading material.
 * No ``<img>`` tags. If imagery is ever required, it must be inlined as
   a ``data:`` URI so the file remains portable.
@@ -28,9 +32,12 @@ HTML string. The dataclass carries optional panels for trajectory, the
 headline moment, the cost ledger, the task breakdown, dimension rows,
 the follow-up, and the "one thing to try" sentence. Each panel renders
 as a section even when the data is missing, so the order is locked
-regardless of which fields are populated; later stories fill in the
-content side and the visual language (US-063), the file output path
-(US-064), and the no-secrets / no-synthetic-markers guarantee (US-065).
+regardless of which fields are populated. The visual language reuses
+the v0.1 cream/terracotta palette and the Libre-Baskerville-with-Georgia
+fallback font stack (spec section 6.1: "the HTML uses the existing v0.1
+visual language ... do not redesign the look"). Later stories cover the
+file output path (US-064) and the no-secrets / no-synthetic-markers
+guarantee (US-065).
 """
 from __future__ import annotations
 
@@ -354,16 +361,25 @@ def render(digest: WeeklyDigest) -> str:
 <style>
 :root {{
   --primary: #C1573B;
+  --primary-hover: #A84832;
+  --primary-soft: rgba(193, 87, 59, 0.08);
+  --primary-line: rgba(193, 87, 59, 0.15);
   --cream-100: #FAF7F2;
+  --cream-300: #F0EBE3;
+  --cream-400: #E8E3DB;
   --ink-900: #1a1a1a;
+  --ink-700: #404040;
   --ink-500: #6b6b6b;
+  --ink-300: #a3a3a3;
+  --ink-100: #e5e5e5;
   --border-light: rgba(26, 26, 26, 0.08);
+  --border-medium: rgba(26, 26, 26, 0.15);
 }}
 * {{ box-sizing: border-box; margin: 0; padding: 0; }}
 html, body {{
   background: var(--cream-100);
   color: var(--ink-900);
-  font-family: Georgia, serif;
+  font-family: Georgia, 'Libre Baskerville', serif;
   font-size: 16px;
   line-height: 1.65;
   -webkit-font-smoothing: antialiased;
@@ -384,7 +400,7 @@ html, body {{
   font-weight: 500;
 }}
 .masthead-title {{
-  font-family: Georgia, serif;
+  font-family: 'Libre Baskerville', Georgia, serif;
   font-size: 44px;
   line-height: 1.15;
   margin-top: 16px;
@@ -403,7 +419,7 @@ html, body {{
 }}
 .section:first-of-type {{ border-top: none; padding-top: 8px; }}
 .section-title {{
-  font-family: Georgia, serif;
+  font-family: 'Libre Baskerville', Georgia, serif;
   font-size: 22px;
   letter-spacing: 0.02em;
   text-transform: uppercase;
@@ -417,14 +433,14 @@ html, body {{
   font-style: italic;
 }}
 .traj-label {{
-  font-family: Georgia, serif;
+  font-family: 'Libre Baskerville', Georgia, serif;
   font-size: 28px;
   color: var(--primary);
   letter-spacing: -0.01em;
   margin-bottom: 12px;
 }}
 .traj-headline {{
-  font-family: Georgia, serif;
+  font-family: 'Libre Baskerville', Georgia, serif;
   font-size: 20px;
   line-height: 1.5;
   color: var(--ink-900);
@@ -438,7 +454,7 @@ html, body {{
   margin-top: 12px;
 }}
 .moment-quote {{
-  font-family: Georgia, serif;
+  font-family: 'Libre Baskerville', Georgia, serif;
   font-size: 18px;
   line-height: 1.55;
   color: var(--ink-900);
@@ -476,7 +492,7 @@ html, body {{
 }}
 .task-row:last-child, .dim-row:last-child {{ border-bottom: none; }}
 .task-rank, .dim-score {{
-  font-family: Georgia, serif;
+  font-family: 'Libre Baskerville', Georgia, serif;
   color: var(--primary);
   font-weight: 400;
   margin-right: 6px;
@@ -493,7 +509,7 @@ html, body {{
   color: var(--primary);
 }}
 .next-week-line {{
-  font-family: Georgia, serif;
+  font-family: 'Libre Baskerville', Georgia, serif;
   font-size: 18px;
   line-height: 1.55;
   font-style: italic;

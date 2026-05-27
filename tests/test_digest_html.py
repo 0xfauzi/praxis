@@ -425,3 +425,61 @@ def test_render_filled_digest_keeps_self_containment_contract():
     assert "https://" not in out
     assert "@import" not in out
     assert "url(" not in out
+
+
+# --------------------------------------------- US-063: v0.1 visual language
+
+# Spec section 6.1: "The HTML uses the existing v0.1 visual language
+# (cream, terracotta, Libre Baskerville). Do not redesign the look."
+# These tests lock the v0.1 design tokens into the digest so a future
+# refactor cannot quietly drift away from the established product look.
+
+
+def test_render_uses_v01_terracotta_primary():
+    """The terracotta primary (#C1573B) is the v0.1 emphasis color and
+    must appear in the rendered CSS so emphasis reads as 'Praxis'."""
+    out = render(_digest())
+    assert "#C1573B" in out
+
+
+def test_render_uses_v01_cream_background():
+    """The cream background (#FAF7F2) is the v0.1 page color; without
+    it the digest would not feel like the same product as the scan
+    report."""
+    out = render(_digest())
+    assert "#FAF7F2" in out
+
+
+def test_render_names_libre_baskerville_in_font_stack():
+    """The v0.1 display face is Libre Baskerville. The digest names it
+    first in the display font-family declarations so that, when the
+    user has the face installed locally, the digest renders identically
+    to the v0.1 scan report. The 'inlined fallback' is Georgia (see
+    test_render_uses_system_font_stack)."""
+    out = render(_digest())
+    assert "'Libre Baskerville'" in out
+
+
+def test_render_does_not_fetch_libre_baskerville():
+    """Naming Libre Baskerville in the font stack is fine; loading it
+    from a CDN is not. The self-containment contract from US-061 must
+    hold: no @import, no url(), no <link> to a font service."""
+    out = render(_digest())
+    lower = out.lower()
+    # Spot-check the common font CDNs by name in case future edits
+    # paste in a v0.1 <link rel=stylesheet>.
+    assert "fonts.googleapis.com" not in lower
+    assert "fonts.gstatic.com" not in lower
+    assert "@font-face" not in lower
+    # And the broader self-containment guards from US-061.
+    assert "<link" not in lower
+    assert "@import" not in lower
+    assert "url(" not in lower
+
+
+def test_render_keeps_georgia_as_inlined_fallback():
+    """Libre Baskerville may or may not be present on the user's
+    machine. Georgia ships on every default desktop OS, so it is the
+    inlined fallback for both body and display stacks."""
+    out = render(_digest())
+    assert "Georgia" in out

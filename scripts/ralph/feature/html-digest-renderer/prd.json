@@ -37,8 +37,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Expanded the CSS :root token block in praxis/reports/digest_html.py to mirror the full v0.1 palette (--primary #C1573B, --primary-hover, --primary-soft, --primary-line, --cream-100 #FAF7F2, --cream-300, --cream-400, --ink-900/700/500/300/100, --border-light, --border-medium) so the digest reads as the same product as the v0.1 scan report. Switched the display font-family declarations on .masthead-title, .section-title, .traj-label, .traj-headline, .moment-quote, .task-rank/.dim-score, and .next-week-line to lead with 'Libre Baskerville' and fall back to Georgia; the body stack now lists Georgia + 'Libre Baskerville' + serif (mirroring the v0.1 body declaration). Self-containment from US-061 is preserved: no <link>, @import, @font-face, url(...), or fonts.googleapis.com - the browser uses Libre Baskerville if installed locally and falls back to Georgia otherwise (the 'inlined fallback' pattern). Added 5 new tests (test_render_uses_v01_terracotta_primary, test_render_uses_v01_cream_background, test_render_names_libre_baskerville_in_font_stack, test_render_does_not_fetch_libre_baskerville, test_render_keeps_georgia_as_inlined_fallback). 732 tests pass (was 727 + 5 new); pyright clean on praxis/reports/digest_html.py and tests/test_digest_html.py."
     },
     {
       "id": "US-064",
