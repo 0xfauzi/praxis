@@ -12,3 +12,16 @@
   * No em-dashes anywhere (CLAUDE.md house rule). Use hyphens or colons. Masthead uses a literal " - " between PRAXIS and the week label.
   * The visible_width() helper strips ANSI before measuring; the test uses its own _strip_ansi helper to avoid tautology with the renderer.
 ---
+
+## Iteration 2 - US-067: Mandatory sections render
+- What I did: Wired the three MUST-render sections (trajectory, headline moment, follow-up) into the renderer with placeholder degradation when an input is None. Added HeadlineMomentView and FollowUpView lightweight dataclasses for the renderer's view; the caller maps real Moment/FollowUp objects to these.
+- Files changed: praxis/reports/digest_terminal.py (added section helpers, dataclasses, placeholders, dim_title resolver), tests/test_digest_terminal.py (added 13 new US-067 test cases), scripts/ralph/feature/terminal-digest-renderer/prd.json (US-067 passes=true).
+- Verification: `uv run pytest tests/` -> 715 passed (was 702, +13 new tests). `uvx mypy praxis/reports/digest_terminal.py tests/test_digest_terminal.py --ignore-missing-imports --follow-imports=silent` -> Success, no issues. Eyeballed real-data and empty-state renders; structure is correct, all lines under 79 cols.
+- What the next iteration should know:
+  * Section pattern is now locked: each MUST-render section's helper always emits `_section_rule(title)` first, then either real-data lines or `_placeholder_lines(...)`. US-068 / US-069 should follow this pattern. New constants `_BODY_INDENT` (4 chars) and `_BODY_WIDTH` (75 chars) standardize content-line geometry; use `_body_line(text, ansi=...)` to compose them.
+  * Placeholder copy is module-level (`_TRAJECTORY_PLACEHOLDER`, `_HEADLINE_MOMENT_PLACEHOLDER`, `_FOLLOW_UP_PLACEHOLDER`). Tests assert on them by reference, so a copy edit is a single-line change but trips the test if the rendered output drifts.
+  * `_dim_title(dim_key)` resolves rubric keys to titles via `praxis.scoring.rubric.by_key` and falls through to the raw key on unknown dims (no crash). US-068's "worst dim" label per task and US-069's dim panel should reuse this helper.
+  * Renderer-facing view dataclasses (HeadlineMomentView, FollowUpView) are intentionally narrow: only the fields the renderer shows. When wiring up real data, construct them at the boundary; don't import praxis.scoring.moment_selector.Moment or praxis.follow_up.FollowUp into digest_terminal.py.
+  * Follow-up tracking line has two branches: pending (measured_value is None) shows `(baseline 0.32, pending)`; closed shows `0.32 -> 0.58 [improved]`. Hyphens-not-arrows is required (CLAUDE.md no em dashes; also keeps ASCII for predictable terminal widths).
+  * Section order is locked by `test_mandatory_sections_render_in_spec_order`: trajectory -> headline moment -> follow-up. US-068 and US-069 add sections AFTER these (US-068's cost ledger / tasks after follow-up, US-069's six-dim panel as the footer).
+---
