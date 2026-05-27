@@ -64,8 +64,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Wired praxis.redactor.redact_secrets and a <synthetic> marker strip into the render path of praxis/reports/digest_html.py. New private helper _safe(text) replaces every prior html.escape call on user-content fields: it runs redact_secrets first (so provider API keys / AWS access keys / GitHub PATs / JWTs / labeled-secret tails become [REDACTED]), strips the literal <synthetic> placeholder used by the codex scanner's _real_model path, then html.escapes the result. Order matters: redact and strip BEFORE escape, so `<synthetic>` never even reaches the &lt;synthetic&gt; visible-but-still-leaked form. The redactor is itself idempotent and .replace is too, so _safe is idempotent. Applied to: week_iso, generated_at, Trajectory(label/headline/confidence_band), MomentPanel(quoted_excerpt/why_lost_score/next_time_try), CostLedger(biggest_line/sonnet_swap_note), TaskRow.label, DimRow.title, FollowUpPanel(commitment_text/outcome), one_thing_to_try. Added 14 tests under 'US-065: no synthetic markers, no raw secrets, no PII' covering: each provider key family is redacted, every user-content field path is sealed, surrounding prose is preserved, idempotence under double-render, on-disk write_digest output is clean, US-061 self-containment is preserved, existing html.escape behavior for non-synthetic angle brackets still holds, and an already-[REDACTED] placeholder is not re-redacted. 759 tests pass (was 745 + 14 new); pyright clean on praxis/reports/digest_html.py and tests/test_digest_html.py."
     }
   ]
 }

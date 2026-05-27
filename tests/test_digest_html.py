@@ -662,3 +662,220 @@ def test_write_digest_honors_praxis_home_env(
     assert (sandbox / "latest.html").read_text(encoding="utf-8") == written.read_text(
         encoding="utf-8"
     )
+
+
+# ------------------------- US-065: no synthetic markers, no raw secrets, no PII
+
+# Spec section 15.1 #8: "No `<synthetic>` strings, no raw API keys, no
+# obvious PII appears in any rendered digest." The renderer is the last
+# hop before the digest lands in a file the user opens in a browser, so
+# it MUST be defensive even if upstream redaction was skipped.
+
+# These fixtures are NOT real credentials. They follow the structural
+# pattern each redaction regex matches (provider prefix + sufficient
+# tail length) so the test exercises every entry in
+# ``praxis.redactor._PATTERNS``.
+_ANTHROPIC_KEY = "sk-ant-api03-FAKEfake_-1234567890ABCDEFGHIJabcdefghij"
+_OPENAI_KEY = "sk-proj-FAKEopenai1234567890ABCDEFabcdef_-XYZ09876"
+_AWS_KEY = "AROAIOSFODNN7EXAMPLE"
+_GITHUB_PAT = "gho_abcdefghijklmnopqrstuvwxyz0123456789"
+_JWT = (
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+    ".eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ"
+    ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+)
+
+
+def _digest_with_secrets() -> WeeklyDigest:
+    """A digest whose user-content fields each carry one secret and the
+    ``<synthetic>`` marker, so a single render exercises every leakage
+    path the renderer is responsible for sealing."""
+    return WeeklyDigest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        trajectory=Trajectory(
+            label="Drifting",
+            headline=f"<synthetic> headline mentioning {_ANTHROPIC_KEY} inline.",
+            confidence_band="high confidence",
+        ),
+        headline_moment=MomentPanel(
+            quoted_excerpt=f"my key is {_OPENAI_KEY} and I pasted it here <synthetic>",
+            why_lost_score=f"Token leaked: token={_GITHUB_PAT}",
+            next_time_try=f"Remove AWS=`{_AWS_KEY}` from prompts.",
+            cost_dollars=0.42,
+            cost_minutes=6,
+        ),
+        cost_ledger=CostLedger(
+            this_week_dollars=12.50,
+            baseline_dollars=9.80,
+            biggest_line=f"Opus session with leaked key sk-ant-api03 inline {_ANTHROPIC_KEY}",
+            sonnet_swap_note=f"Bearer {_JWT} appeared in transcripts",
+        ),
+        task_breakdown=(
+            TaskRow(
+                label=f"refactoring <synthetic>",
+                session_count=3,
+                dollars=5.40,
+                worst_score=4.2,
+            ),
+        ),
+        dimensions=(
+            DimRow(title="Planning <synthetic>", score=6.8, baseline=5.4, delta=1.4),
+        ),
+        follow_up=FollowUpPanel(
+            commitment_text=f"avoid leaking password={_OPENAI_KEY} in prompts",
+            outcome="improved <synthetic>",
+        ),
+        one_thing_to_try=(
+            f"Audit transcripts for {_ANTHROPIC_KEY} and strip <synthetic> markers."
+        ),
+    )
+
+
+def test_render_does_not_contain_synthetic_marker():
+    """The literal ``<synthetic>`` placeholder must not appear anywhere
+    in the rendered HTML, regardless of which field a stray marker landed
+    in. Stripping happens before html.escape so the marker is gone for
+    both source-grep and visible-text readings."""
+    out = render(_digest_with_secrets())
+    assert "<synthetic>" not in out
+    # html.escape would have turned a stray `<synthetic>` into
+    # `&lt;synthetic&gt;`. That would pass the literal check above but
+    # would still be visible to the reader, so guard the escaped form too.
+    assert "&lt;synthetic&gt;" not in out
+
+
+def test_render_does_not_contain_synthetic_marker_in_masthead():
+    """Belt-and-braces: if the week_iso or generated date were ever
+    populated with a ``<synthetic>`` token (e.g. a malformed test
+    fixture), the masthead must still be marker-free."""
+    digest = _digest(week_iso="<synthetic>")
+    out = render(digest)
+    assert "<synthetic>" not in out
+    assert "&lt;synthetic&gt;" not in out
+
+
+def test_render_redacts_anthropic_key():
+    """Anthropic API keys pasted into a moment or headline must be
+    replaced with ``[REDACTED]`` before the file is rendered."""
+    out = render(_digest_with_secrets())
+    assert _ANTHROPIC_KEY not in out
+    assert "[REDACTED]" in out
+
+
+def test_render_redacts_openai_key():
+    out = render(_digest_with_secrets())
+    assert _OPENAI_KEY not in out
+
+
+def test_render_redacts_aws_access_key():
+    out = render(_digest_with_secrets())
+    assert _AWS_KEY not in out
+
+
+def test_render_redacts_github_pat():
+    out = render(_digest_with_secrets())
+    assert _GITHUB_PAT not in out
+
+
+def test_render_redacts_jwt():
+    out = render(_digest_with_secrets())
+    assert _JWT not in out
+
+
+def test_render_redacts_secret_in_every_user_facing_field():
+    """Each user-content field on the digest is a possible leak path.
+    The fixture seeds one secret per field; this test asserts every one
+    is gone from the rendered HTML. If a future story adds a new field,
+    extend ``_digest_with_secrets`` and this assertion together."""
+    out = render(_digest_with_secrets())
+    for needle in (_ANTHROPIC_KEY, _OPENAI_KEY, _AWS_KEY, _GITHUB_PAT, _JWT):
+        assert needle not in out, f"{needle!r} leaked into rendered HTML"
+
+
+def test_render_preserves_surrounding_prose_around_redacted_secret():
+    """Redaction must not eat the rest of the sentence. The reader
+    needs the surrounding prose intact so the redaction is legible
+    (e.g. 'my key is [REDACTED] and I pasted it here')."""
+    out = render(_digest_with_secrets())
+    assert "my key is" in out
+    assert "and I pasted it here" in out
+
+
+def test_render_is_idempotent_under_sanitisation():
+    """``redact_secrets`` is idempotent, and the synthetic strip is a
+    plain ``.replace``. Running the renderer twice on the same digest
+    yields the same bytes - this is a regression guard against a future
+    edit that double-escapes or re-applies redaction in a non-idempotent
+    way."""
+    digest = _digest_with_secrets()
+    assert render(digest) == render(digest)
+
+
+def test_write_digest_strips_secrets_and_synthetic_from_disk(tmp_path: Path):
+    """The on-disk file is the artifact the user opens in a browser,
+    so the no-secrets / no-synthetic-markers contract must hold against
+    file bytes, not just the in-memory string."""
+    home = tmp_path / ".praxis"
+    written = write_digest(_digest_with_secrets(), home=home)
+    on_disk = written.read_text(encoding="utf-8")
+    for needle in (
+        _ANTHROPIC_KEY,
+        _OPENAI_KEY,
+        _AWS_KEY,
+        _GITHUB_PAT,
+        _JWT,
+        "<synthetic>",
+        "&lt;synthetic&gt;",
+    ):
+        assert needle not in on_disk, (
+            f"{needle!r} leaked into the on-disk digest at {written}"
+        )
+    assert "[REDACTED]" in on_disk
+
+
+def test_render_still_html_escapes_after_sanitisation():
+    """The sanitisation pass must not break the html.escape contract
+    from US-061: a ``<W>`` week_iso must still appear as ``&lt;W&gt;``
+    in the rendered HTML so the browser does not interpret it as a
+    tag. Only the specific ``<synthetic>`` marker is stripped; other
+    angle brackets remain escaped."""
+    out = render(_digest(week_iso="<W>"))
+    assert "<W>" not in out
+    assert "&lt;W&gt;" in out
+
+
+def test_render_does_not_re_redact_existing_placeholder():
+    """If a moment field already carries the ``[REDACTED]`` token (e.g.
+    an upstream redaction already ran), the renderer must not mangle
+    it. Idempotence depends on the redactor not matching its own
+    placeholder."""
+    digest = WeeklyDigest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        headline_moment=MomentPanel(
+            quoted_excerpt="my key is [REDACTED] in the transcript",
+            why_lost_score="leaked secret was scrubbed",
+            next_time_try="never paste keys",
+        ),
+    )
+    out = render(digest)
+    assert "[REDACTED]" in out
+    # Exactly one occurrence in the moment quote - no accidental
+    # second redaction pass that doubles the placeholder.
+    assert out.count("[REDACTED]") == 1
+
+
+def test_render_filled_digest_with_secrets_keeps_self_containment_contract():
+    """The US-061 self-containment contract must continue to hold once
+    secrets and synthetic markers are stripped. This is the regression
+    seatbelt for the cross-story interaction."""
+    out = render(_digest_with_secrets())
+    lower = out.lower()
+    assert "<link" not in lower
+    assert "<script" not in lower
+    assert "<img" not in lower
+    assert "http://" not in out
+    assert "https://" not in out
+    assert "@import" not in out
+    assert "url(" not in out

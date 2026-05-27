@@ -38,9 +38,14 @@ as a section even when the data is missing, so the order is locked
 regardless of which fields are populated. The visual language reuses
 the v0.1 cream/terracotta palette and the Libre-Baskerville-with-Georgia
 fallback font stack (spec section 6.1: "the HTML uses the existing v0.1
-visual language ... do not redesign the look"). Later stories cover the
-file output path (US-064) and the no-secrets / no-synthetic-markers
-guarantee (US-065).
+visual language ... do not redesign the look"). Persistence
+(``write_digest``) writes the file under ``~/.praxis/weeks/`` and
+refreshes the ``latest.html`` pointer (US-064). Every user-provided
+string is run through ``_safe`` before it lands in the HTML, which
+applies ``redact_secrets`` (provider API keys, AWS, GitHub PATs, JWTs,
+and labeled-secret tails become ``[REDACTED]``) and strips the
+``<synthetic>`` placeholder marker (US-065 acceptance: no raw secrets
+and no synthetic markers reach the reader).
 """
 from __future__ import annotations
 
@@ -51,6 +56,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from praxis.redactor import redact_secrets
 from praxis.storage.profile_store import resolve_home
 
 
@@ -149,14 +155,49 @@ class WeeklyDigest:
 
 _PLACEHOLDER = "Not yet - this section will fill in as the week's data lands."
 
+# The `<synthetic>` marker is the codex/claude scanner placeholder for an
+# unknown model field (see `_real_model` in praxis.scanners.codex). It
+# should never reach the rendered digest - spec section 15.1 #8: "No
+# `<synthetic>` strings, no raw API keys, no obvious PII appears in any
+# rendered digest." Stripping is defensive: under normal operation the
+# marker only attaches to model fields and never to transcript text, but
+# if a test fixture or future feature accidentally splices it into a
+# user-facing string, the renderer guarantees it does not reach the
+# reader.
+_SYNTHETIC_MARKER = "<synthetic>"
+
+
+def _safe(text: str) -> str:
+    """Sanitize user-provided text for safe inclusion in the rendered HTML.
+
+    Three transforms, in order:
+
+    1. ``redact_secrets`` replaces provider API keys, AWS access keys,
+       GitHub PATs, JWTs, and any high-entropy tail after a
+       ``key``/``token``/``secret``/``password`` label with
+       ``[REDACTED]`` (US-065 acceptance: no unredacted provider keys
+       appear in the rendered HTML).
+    2. The literal ``<synthetic>`` marker is stripped (US-065
+       acceptance: the marker never reaches the reader).
+    3. ``html.escape`` neutralises any remaining angle brackets,
+       ampersands, or quotes so the field cannot break out of its
+       enclosing tag.
+
+    The redactor is itself idempotent and the synthetic strip is a plain
+    ``.replace``, so calling ``_safe`` twice on the same input yields the
+    same result.
+    """
+    sanitized = redact_secrets(text).replace(_SYNTHETIC_MARKER, "")
+    return html.escape(sanitized)
+
 
 def _trajectory_section(traj: Trajectory | None) -> str:
     if traj is None or not (traj.label or traj.headline):
         body = f'<p class="placeholder">{_PLACEHOLDER}</p>'
     else:
-        label = html.escape(traj.label) if traj.label else ""
-        headline = html.escape(traj.headline) if traj.headline else ""
-        band = html.escape(traj.confidence_band) if traj.confidence_band else ""
+        label = _safe(traj.label) if traj.label else ""
+        headline = _safe(traj.headline) if traj.headline else ""
+        band = _safe(traj.confidence_band) if traj.confidence_band else ""
         label_html = f'<div class="traj-label">{label}</div>' if label else ""
         headline_html = (
             f'<p class="traj-headline">{headline}</p>' if headline else ""
@@ -174,9 +215,9 @@ def _moment_section(moment: MomentPanel | None) -> str:
     if moment is None or not (moment.quoted_excerpt or moment.why_lost_score):
         body = f'<p class="placeholder">{_PLACEHOLDER}</p>'
     else:
-        quote = html.escape(moment.quoted_excerpt) if moment.quoted_excerpt else ""
-        why = html.escape(moment.why_lost_score) if moment.why_lost_score else ""
-        nxt = html.escape(moment.next_time_try) if moment.next_time_try else ""
+        quote = _safe(moment.quoted_excerpt) if moment.quoted_excerpt else ""
+        why = _safe(moment.why_lost_score) if moment.why_lost_score else ""
+        nxt = _safe(moment.next_time_try) if moment.next_time_try else ""
         cost_bits: list[str] = []
         if moment.cost_dollars is not None:
             cost_bits.append(f"${moment.cost_dollars:.2f}")
@@ -229,11 +270,11 @@ def _cost_ledger_section(ledger: CostLedger | None) -> str:
         if ledger.biggest_line:
             rows.append(
                 f'<p class="ledger-row"><span class="ledger-label">Biggest line:</span> '
-                f"{html.escape(ledger.biggest_line)}</p>"
+                f"{_safe(ledger.biggest_line)}</p>"
             )
         if ledger.sonnet_swap_note:
             rows.append(
-                f'<p class="ledger-row">{html.escape(ledger.sonnet_swap_note)}</p>'
+                f'<p class="ledger-row">{_safe(ledger.sonnet_swap_note)}</p>'
             )
         body = "".join(rows)
     return f"""
@@ -257,7 +298,7 @@ def _task_breakdown_section(rows: tuple[TaskRow, ...]) -> str:
             items.append(
                 f'<li class="task-row">'
                 f'<span class="task-rank">{idx}.</span> '
-                f'<span class="task-label">{html.escape(row.label)}</span> '
+                f'<span class="task-label">{_safe(row.label)}</span> '
                 f'&middot; {row.session_count} session'
                 f'{"s" if row.session_count != 1 else ""} '
                 f'&middot; ${row.dollars:.2f}{worst}'
@@ -290,7 +331,7 @@ def _dimensions_section(rows: tuple[DimRow, ...]) -> str:
                 delta_bit = ")"
             items.append(
                 f'<li class="dim-row">'
-                f'<span class="dim-title">{html.escape(row.title)}</span> '
+                f'<span class="dim-title">{_safe(row.title)}</span> '
                 f'<span class="dim-score">{row.score:.1f}</span>'
                 f'<span class="dim-aside">{baseline_bit}{delta_bit}</span>'
                 f"</li>"
@@ -307,9 +348,9 @@ def _follow_up_section(follow_up: FollowUpPanel | None) -> str:
     if follow_up is None or not follow_up.commitment_text:
         body = f'<p class="placeholder">{_PLACEHOLDER}</p>'
     else:
-        commitment = html.escape(follow_up.commitment_text)
+        commitment = _safe(follow_up.commitment_text)
         outcome = (
-            html.escape(follow_up.outcome) if follow_up.outcome else "pending"
+            _safe(follow_up.outcome) if follow_up.outcome else "pending"
         )
         body = (
             f'<p class="follow-up-line">Last week we asked you to {commitment}.</p>'
@@ -327,7 +368,7 @@ def _next_week_section(sentence: str) -> str:
     if not sentence:
         body = f'<p class="placeholder">{_PLACEHOLDER}</p>'
     else:
-        body = f'<p class="next-week-line">{html.escape(sentence)}</p>'
+        body = f'<p class="next-week-line">{_safe(sentence)}</p>'
     return f"""
   <section class="section next-week" id="one-thing-to-try-next-week">
     <h2 class="section-title">One Thing To Try Next Week</h2>
@@ -347,8 +388,8 @@ def render(digest: WeeklyDigest) -> str:
     The masthead carries the week title and generation date only - the
     overall /10 is intentionally not the lead.
     """
-    week = html.escape(digest.week_iso)
-    generated = html.escape(digest.generated_at.strftime("%B %d, %Y"))
+    week = _safe(digest.week_iso)
+    generated = _safe(digest.generated_at.strftime("%B %d, %Y"))
     body_sections = "".join(
         [
             _trajectory_section(digest.trajectory),
