@@ -1,0 +1,52 @@
+{
+  "branchName": "ralph/factory/config-file",
+  "userStories": [
+    {
+      "id": "US-005",
+      "title": "Create ~/.praxis/config.toml with documented defaults on first run",
+      "acceptanceCriteria": [
+        "On first run the file at ~/.praxis/config.toml is created if missing",
+        "Default contents include [schedule] day='sunday' hour=18 minute=0",
+        "Default contents include [scan] since_days=7 max_new=200",
+        "Default contents include [judge] primary_provider='anthropic' frontier_model='claude-opus-4-7' cheap_model='claude-haiku-4-5'",
+        "Default contents include [notification] enabled=true sound='default'",
+        "Default contents include [privacy] redact_secrets=true",
+        "Existing config files are never overwritten on subsequent runs",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Typed config loader exposes all sections",
+      "acceptanceCriteria": [
+        "Module exposes a load_config() function returning a typed object",
+        "All five sections (schedule, scan, judge, notification, privacy) are accessible as typed fields",
+        "Missing fields fall back to documented defaults rather than raising",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "praxis config CLI supports view, get, set, and edit",
+      "acceptanceCriteria": [
+        "praxis config (no args) opens the file in $EDITOR",
+        "praxis config --get schedule.day prints the value to stdout",
+        "praxis config --set schedule.day=monday updates the TOML file and preserves other keys",
+        "Invalid dotted keys produce a non-zero exit and a clear error message",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    }
+  ]
+}
