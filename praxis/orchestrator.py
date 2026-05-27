@@ -62,6 +62,23 @@ def has_api_key_configured() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY"))
 
 
+def no_sessions_message(week_iso: str | None) -> str:
+    """Compose the exit-3 message for ``praxis week`` / ``praxis show``.
+
+    Spec section 12.3 reserves exit code 3 for "no sessions found in the
+    window". The CLI surfaces this via a clear message that names the
+    affected ISO week so the user knows which window was searched.
+    Past-week branches pass the explicit tag; the current-week branch
+    passes the current ISO week so the message stays specific.
+    """
+    label = week_iso if week_iso else "the current week"
+    return (
+        f"No sessions found in {label}. "
+        f"Use an AI coding tool (Claude / Codex / Copilot) "
+        f"and run 'praxis scan' to populate the digest."
+    )
+
+
 @dataclass
 class RunSummary:
     sessions_seen: int

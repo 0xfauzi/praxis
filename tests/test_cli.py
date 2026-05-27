@@ -28,6 +28,13 @@ US-076 acceptance criteria (exit code 2 when no API key):
   - Read-only paths (`--week`, `--dry-run`, baseline, history, show, follow-up)
     do not gate on the API key (they never invoke the judge)
 
+US-077 acceptance criteria (exit code 3 when no sessions in the window):
+  - `praxis week` / `praxis show` exit with code 3 and a clear message when
+    the targeted ISO week has zero sessions (spec section 12.3)
+  - The exit-2 gate (no API key) takes precedence over exit-3
+  - `praxis scan` is the cron-driven data-mover and does NOT exit 3 on an
+    empty window, so scheduled runs do not surface spurious failures
+
 Tests go through the argparse entry point (`praxis.cli.__main__.main`) so
 the subparser registration is exercised end-to-end, not just the handler.
 """
@@ -223,12 +230,13 @@ def test_week_subcommand_is_registered():
     assert args.write_html is True
 
 
-def test_week_with_no_data_exits_zero(tmp_home, capsys, fake_api_key):
-    """`praxis week` on an empty machine still renders and exits cleanly."""
+def test_week_with_data_renders_and_exits_zero(tmp_home, capsys, fake_api_key):
+    """`praxis week` renders the digest masthead when sessions exist in the window."""
+    _seed_score("sess-current", datetime.now(timezone.utc))
     code = main(["week"])
     out = capsys.readouterr().out
     assert code == 0
-    # Masthead renders even with zero sessions.
+    # Masthead renders when there is data.
     assert "PRAXIS" in out
 
 
@@ -275,7 +283,13 @@ def test_week_write_html_creates_file(tmp_home, capsys):
 
 
 def test_week_dry_run_does_not_create_html(tmp_home, capsys):
-    """--dry-run without --write-html leaves no files behind."""
+    """--dry-run without --write-html leaves no files behind.
+
+    Seeds one current-week session so the run reaches the HTML-decision
+    point (otherwise US-077's zero-session gate short-circuits to exit 3
+    and the assertion would be vacuous).
+    """
+    _seed_score("sess-dry", datetime.now(timezone.utc))
     code = main(["week", "--dry-run"])
     capsys.readouterr()
     assert code == 0
@@ -283,7 +297,12 @@ def test_week_dry_run_does_not_create_html(tmp_home, capsys):
 
 
 def test_week_explain_judging_prints_explainer(tmp_home, capsys, fake_api_key):
-    """--explain-judging surfaces the pass-1 confidence block (or a clear stub)."""
+    """--explain-judging surfaces the pass-1 confidence block (or a clear stub).
+
+    Seeds one current-week session so the digest renders past the
+    US-077 zero-session gate and the explainer block is printed.
+    """
+    _seed_score("sess-explain", datetime.now(timezone.utc))
     code = main(["week", "--explain-judging"])
     out = capsys.readouterr().out
     assert code == 0
@@ -292,7 +311,12 @@ def test_week_explain_judging_prints_explainer(tmp_home, capsys, fake_api_key):
 
 def test_week_explain_judging_notes_frontier_only(tmp_home, capsys, fake_api_key):
     """When both --frontier-only and --explain-judging are set, the explainer
-    notes that pass-1 was skipped."""
+    notes that pass-1 was skipped.
+
+    Seeds one current-week session so the digest renders past the
+    US-077 zero-session gate.
+    """
+    _seed_score("sess-frontier", datetime.now(timezone.utc))
     code = main(["week", "--frontier-only", "--explain-judging"])
     out = capsys.readouterr().out
     assert code == 0
@@ -613,36 +637,52 @@ def test_week_without_api_key_exits_2(tmp_home, capsys):
 
 
 def test_week_with_only_anthropic_key_proceeds(tmp_home, capsys, monkeypatch):
-    """One key is enough -- the gate is OR, not AND (spec 12.2 fallback)."""
+    """One key is enough -- the gate is OR, not AND (spec 12.2 fallback).
+
+    Asserts the run is not blocked by the exit-2 gate. Exit 3 (no
+    sessions in window) is fine here -- the point of this test is to
+    prove the API-key gate is OR not AND, not to exercise the digest.
+    """
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
     code = main(["week"])
-    assert code == 0
+    assert code != 2
     capsys.readouterr()
 
 
 def test_week_with_only_openai_key_proceeds(tmp_home, capsys, monkeypatch):
-    """OpenAI alone is also enough -- mirrors the Claude-only case."""
+    """OpenAI alone is also enough -- mirrors the Claude-only case.
+
+    Exit 3 (no sessions in window) is acceptable; we only require that
+    the API-key gate did not short-circuit the run with exit 2.
+    """
     monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-real")
     code = main(["week"])
-    assert code == 0
+    assert code != 2
     capsys.readouterr()
 
 
 def test_week_iso_bypasses_api_key_check(tmp_home, capsys):
-    """`praxis week --week <iso>` is read-only; it must run without API keys."""
+    """`praxis week --week <iso>` is read-only; it must run without API keys.
+
+    With no seeded data the past-week branch exits 3 (no sessions in
+    window), which is the correct US-077 behavior. The test only asserts
+    the API-key gate (exit 2) did not fire.
+    """
     code = main(["week", "--week", "2026-W21"])
-    out = capsys.readouterr().out
+    capsys.readouterr()
     # No keys set, but the past-week branch never calls the judge.
-    assert code == 0
-    assert "PRAXIS" in out
+    assert code != 2
 
 
 def test_week_dry_run_bypasses_api_key_check(tmp_home, capsys):
-    """`praxis week --dry-run` is read-only; it must run without API keys."""
+    """`praxis week --dry-run` is read-only; it must run without API keys.
+
+    With no seeded data the dry-run branch exits 3 (no sessions in
+    window). The test only asserts the API-key gate did not fire.
+    """
     code = main(["week", "--dry-run"])
-    out = capsys.readouterr().out
-    assert code == 0
-    assert "PRAXIS" in out
+    capsys.readouterr()
+    assert code != 2
 
 
 def test_scan_without_api_key_exits_2(tmp_home, capsys):
@@ -669,3 +709,98 @@ def test_history_does_not_gate_on_api_key(tmp_home, capsys):
     assert code == 0
     # Empty history message is fine -- the point is we didn't exit 2.
     assert "history" in out.lower() or "No history" in out
+
+
+# ---------------------------------------------------------------------------
+# US-077 - exit code 3 when no sessions in the window (spec section 12.3).
+# ---------------------------------------------------------------------------
+
+
+def test_week_current_window_with_no_sessions_exits_3(
+    tmp_home, capsys, fake_api_key
+):
+    """`praxis week` on an empty DB exits 3 with a clear message.
+
+    With an API key set the exit-2 gate is bypassed; the exit-3 gate
+    fires because the snapshot's session_count is zero. The message
+    must identify what is missing so the user knows what to do next.
+    """
+    code = main(["week"])
+    err = capsys.readouterr().err
+    assert code == 3
+    assert "No sessions found" in err
+
+
+def test_week_past_week_with_no_sessions_exits_3(tmp_home, capsys):
+    """`praxis week --week <iso>` exits 3 when zero rows fall in that week.
+
+    No API key is required (the past-week branch is read-only) so this
+    exercises the exit-3 gate in isolation from the exit-2 gate.
+    """
+    code = main(["week", "--week", "2026-W21"])
+    err = capsys.readouterr().err
+    assert code == 3
+    # The message names the targeted ISO week so the user knows which
+    # window was searched.
+    assert "2026-W21" in err
+    assert "No sessions found" in err
+
+
+def test_week_dry_run_with_no_sessions_exits_3(tmp_home, capsys):
+    """`praxis week --dry-run` exits 3 when the current week has no data.
+
+    --dry-run is read-only (skips the exit-2 gate), so we land directly
+    on the exit-3 gate when the DB is empty.
+    """
+    code = main(["week", "--dry-run"])
+    err = capsys.readouterr().err
+    assert code == 3
+    assert "No sessions found" in err
+
+
+def test_show_with_no_sessions_exits_3(tmp_home, capsys):
+    """`praxis show <iso>` exits 3 when no rows exist for that ISO week."""
+    code = main(["show", "2026-W21"])
+    err = capsys.readouterr().err
+    assert code == 3
+    assert "2026-W21" in err
+    assert "No sessions found" in err
+
+
+def test_no_api_key_trumps_no_sessions(tmp_home, capsys):
+    """Exit-2 (no API key) takes precedence over exit-3 (no sessions).
+
+    On a fresh machine with no keys and no data, both gates would fire;
+    the more actionable message (set an API key) is the right one to
+    show, so the API-key gate runs first.
+    """
+    code = main(["week"])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "ANTHROPIC_API_KEY" in err
+
+
+def test_week_with_seeded_session_does_not_exit_3(
+    tmp_home, capsys, fake_api_key
+):
+    """Positive case: a seeded session in the current window yields exit 0."""
+    _seed_score("sess-positive", datetime.now(timezone.utc))
+    code = main(["week"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "PRAXIS" in out
+
+
+def test_scan_with_no_sessions_does_not_exit_3(
+    tmp_home, capsys, fake_api_key
+):
+    """`praxis scan` is the cron-driven data-mover, not a digest renderer.
+
+    With zero sessions in the window scan still exits 0 (so the launchd /
+    systemd / Task Scheduler job does not surface a spurious failure);
+    the exit-3 contract is for ``praxis week`` / ``praxis show``.
+    """
+    code = main(["scan"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Scanned" in out

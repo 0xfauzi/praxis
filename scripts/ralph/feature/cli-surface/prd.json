@@ -50,8 +50,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added no_sessions_message() helper in orchestrator.py as the CLI seam. cmd_week and cmd_show now exit 3 with a clear message naming the targeted ISO week when summary.snapshot.session_count == 0. The gate runs AFTER the US-076 exit-2 gate (no API key trumps no sessions). cmd_scan deliberately does NOT exit 3 -- it is the cron-driven data-mover; a scheduled run that finds 0 sessions should not surface as a job failure. 7 new tests in tests/test_cli.py cover: current-week / past-week / dry-run all exit 3, show exits 3, precedence (no key trumps no sessions), positive case with seeded data still exits 0, scan with no sessions still exits 0. Four existing API-key-bypass tests now assert code != 2 (the original intent: the gate was bypassed) rather than == 0 (which no longer holds without seeded data)."
     },
     {
       "id": "US-078",

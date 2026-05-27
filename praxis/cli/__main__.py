@@ -31,6 +31,7 @@ from praxis.orchestrator import (
     ReScoreError,
     has_api_key_configured,
     list_persisted_weeks,
+    no_sessions_message,
     re_score_session,
     run,
     run_weekly,
@@ -117,6 +118,9 @@ def cmd_week(args: argparse.Namespace) -> int:
       2  current-week run requested but no API key configured
          (read-only ``--week`` and ``--dry-run`` paths skip this check
          since they never invoke the judge).
+      3  zero sessions in the targeted window. Short-circuits before
+         rendering / writing HTML / posting a notification so an empty
+         digest is never produced as a side effect.
     """
     needs_judge = args.week is None and not args.dry_run
     if needs_judge and not has_api_key_configured():
@@ -133,6 +137,10 @@ def cmd_week(args: argparse.Namespace) -> int:
     except InvalidWeekError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+    if summary.snapshot.session_count == 0:
+        print(no_sessions_message(summary.week_iso), file=sys.stderr)
+        return 3
 
     print(render_terminal(summary))
 
@@ -306,15 +314,21 @@ def cmd_show(args: argparse.Namespace) -> int:
     """Render a past week's digest from persisted data.
 
     Read-only: equivalent to ``praxis week --week <iso>`` but skips the
-    HTML/notify side-effect flags. Exits 0 if the week has data, 0 with
-    a "no sessions" masthead otherwise (the renderer handles the empty
-    case gracefully), or 1 on a malformed ISO-week string.
+    HTML/notify side-effect flags.
+
+    Exit codes (spec 12.3):
+      0  digest rendered.
+      1  malformed ISO-week string.
+      3  zero sessions persisted for that ISO week.
     """
     try:
         summary = run_weekly(week_iso=args.week_iso)
     except InvalidWeekError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    if summary.snapshot.session_count == 0:
+        print(no_sessions_message(summary.week_iso), file=sys.stderr)
+        return 3
     print(render_terminal(summary))
     return 0
 
