@@ -25,13 +25,14 @@ def _utcnow() -> datetime:
     """Tz-aware UTC now. Wraps datetime.now(timezone.utc) for terseness."""
     return datetime.now(timezone.utc)
 
+from praxis.models import Moment, compute_moment_id
+from praxis.redactor import redact_secrets
+from praxis.scoring.aggregate import ProfileSnapshot, SessionScore
+
 
 class MigrationError(RuntimeError):
     """Raised when the v0.2 schema migration fails. The message includes the
     absolute path of the pre-migration backup so the user can recover."""
-
-
-from praxis.scoring.aggregate import ProfileSnapshot, SessionScore
 
 
 def resolve_home() -> Path:
@@ -296,6 +297,99 @@ class ProfileStore:
                 json.loads(row["judge_result_json"]) if row["judge_result_json"] else None
             )
         return rows
+
+    # ---- moments --------------------------------------------------------
+
+    def save_moments(
+        self, session_stable_id: str, moments: list[Moment]
+    ) -> list[Moment]:
+        """Replace this session's moments with the given list, after redaction.
+
+        Per spec §4.4 + AC for US-020:
+        - Each surviving moment is redacted before insert.
+        - moment_id is sha256(session_stable_id + dim_key + turn_index)[:16].
+        - Re-judging a session replaces its moments deterministically: the
+          whole prior set for this session is removed first, then the new
+          set is inserted. An empty `moments` list therefore clears the row.
+        - `redacted=1` is set on rows where at least one of the three
+          free-text fields changed under `redact_secrets`.
+
+        Returns the persisted Moment objects with moment_id, session_stable_id,
+        and created_at filled in. Caller may use these for rendering without
+        re-reading the database.
+        """
+        now = _utcnow().isoformat()
+        persisted: list[Moment] = []
+        rows: list[tuple[Any, ...]] = []
+        for m in moments:
+            redacted_excerpt = redact_secrets(m.quoted_excerpt)
+            redacted_why = redact_secrets(m.why_it_lost_score)
+            redacted_alt = redact_secrets(m.suggested_alternative)
+            was_redacted = (
+                redacted_excerpt != m.quoted_excerpt
+                or redacted_why != m.why_it_lost_score
+                or redacted_alt != m.suggested_alternative
+            )
+            moment_id = compute_moment_id(session_stable_id, m.dim_key, m.turn_index)
+            rows.append(
+                (
+                    moment_id,
+                    session_stable_id,
+                    m.dim_key,
+                    m.turn_index,
+                    redacted_excerpt,
+                    redacted_why,
+                    redacted_alt,
+                    m.dollar_impact_estimate,
+                    m.minutes_impact_estimate,
+                    m.severity,
+                    now,
+                    1 if was_redacted else 0,
+                )
+            )
+            persisted.append(
+                Moment(
+                    dim_key=m.dim_key,
+                    turn_index=m.turn_index,
+                    quoted_excerpt=redacted_excerpt,
+                    why_it_lost_score=redacted_why,
+                    suggested_alternative=redacted_alt,
+                    severity=m.severity,
+                    moment_id=moment_id,
+                    session_stable_id=session_stable_id,
+                    created_at=_utcnow(),
+                    dollar_impact_estimate=m.dollar_impact_estimate,
+                    minutes_impact_estimate=m.minutes_impact_estimate,
+                )
+            )
+        with self._conn() as conn:
+            conn.execute(
+                "DELETE FROM moments WHERE session_stable_id = ?",
+                (session_stable_id,),
+            )
+            if rows:
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO moments
+                    (moment_id, session_stable_id, dim_key, turn_index,
+                     quoted_excerpt, why_it_lost_score, suggested_alternative,
+                     dollar_impact_estimate, minutes_impact_estimate,
+                     severity, created_at, redacted)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+        return persisted
+
+    def load_moments(self, session_stable_id: str) -> list[dict[str, Any]]:
+        """Return every persisted moment for the given session, oldest first."""
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM moments WHERE session_stable_id = ? "
+                "ORDER BY turn_index ASC, dim_key ASC",
+                (session_stable_id,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
 
     # ---- daily consolidation (v0.2: table dropped; stubs keep callers alive
     #      until the orchestrator/CLI/reports refactor lands) ----

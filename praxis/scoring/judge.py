@@ -14,11 +14,23 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any, cast
 
-from praxis.models import Session
+from praxis.models import Confidence, Moment, Session, Severity
 from praxis.scoring.rubric import RUBRIC
+
+
+_VALID_SEVERITIES: frozenset[str] = frozenset({"minor", "moderate", "major"})
+_VALID_CONFIDENCES: frozenset[str] = frozenset({"low", "medium", "high"})
+_VALID_DIM_KEYS: frozenset[str] = frozenset(d.key for d in RUBRIC)
+_EXCERPT_MAX = 240
+_WHY_MAX = 180
+_ALT_MAX = 220
+_CONFIDENCE_REASON_MAX = 240
+_WHITESPACE_RE = re.compile(r"\s+")
 
 
 # Cap per session — empirically enough signal for nuanced judgment.
@@ -35,6 +47,12 @@ class JudgeResult:
     failure_modes: list[str]            # specific things to improve
     overall_note: str
     judge_model: str
+    moments: list[Moment] = field(default_factory=list)
+    # Spec §9.3: the judge self-rates whether its read deserves a second
+    # opinion. "medium" is the default when the model omits the field, so
+    # missing/invalid confidence does NOT trigger pass 2 escalation.
+    confidence: Confidence = "medium"
+    confidence_reason: str = ""
 
 
 def _compact_transcript(session: Session) -> str:
@@ -117,6 +135,35 @@ Vague rationale is useless. Two examples:
 
 Aim for specific. Quote or paraphrase what you actually saw.
 
+# Moments
+
+Alongside the dim scores, return a `moments` array: structured pointers to specific transcript spans where one rubric dimension dropped, with a concrete suggested alternative.
+
+Rules:
+
+- Emit AT MOST ONE moment per `dim_key` per session. Many sessions will have zero moments. That is fine.
+- Only emit a moment when you actually saw a specific coachable lapse in the transcript. The judge decides this, not a score threshold. Do not emit a moment for a dim where you have nothing specific to coach on. A score of 5 with no specific lapse is not a moment; a score of 7 with one clearly avoidable mistake is. Use your judgment.
+- If the session contains no specific coachable lapse, return an empty `moments` array (`"moments": []`).
+
+Each moment object has six required fields:
+
+- `dim_key`: one of {{planning, context, iteration, tools, fit, verification}}.
+- `turn_index`: integer, the 0-indexed user turn where the lapse occurred.
+- `quoted_excerpt`: <= 240 chars, copied VERBATIM from the transcript (usually the user's own words; may be the assistant's words if that is what shows the missed verification). Substring-faithfulness is non-negotiable; do not paraphrase here.
+- `why_it_lost_score`: <= 180 chars, one specific sentence naming what was missing or wrong.
+- `suggested_alternative`: <= 220 chars, what to do next time. Concrete enough to act on.
+- `severity`: one of {{minor, moderate, major}}.
+
+# Confidence
+
+After scoring, self-rate how solid your read of this session is. Return a `confidence` field with one of three values, plus a one-sentence `confidence_reason`:
+
+- **high**: every dim has clear signal, no contradictions, the transcript is long enough to ground each rationale.
+- **medium**: most dims have clear signal but one or two are weak. Default to this when uncertain about an individual dim.
+- **low**: the transcript was ambiguous, very short, or you felt out of depth on the subject matter (for example, a deep-architecture session where you cannot reliably assess fit). A low rating triggers a second, more expensive pass; use it when you genuinely want a second opinion.
+
+This is your own judgment, not a rule. We trust your answer; do not inflate or deflate it.
+
 # Voice
 
 Be direct, warm, and practical. Write like a senior engineer giving honest feedback to a colleague — not like a corporate training module. Don't moralize. Don't use empty enthusiasm. Don't say "great job" unless something was genuinely great. Avoid corporate jargon ("delve", "showcase", "leverage" as a verb). Active voice. Numbers with context.
@@ -150,10 +197,22 @@ Return ONLY valid JSON, no preamble, no markdown fences, in exactly this shape:
     "<specific behavior to improve>",
     "..."
   ],
+  "moments": [
+    {{
+      "dim_key": "<one of planning|context|iteration|tools|fit|verification>",
+      "turn_index": <int, 0-indexed user turn>,
+      "quoted_excerpt": "<verbatim substring from the transcript, <= 240 chars>",
+      "why_it_lost_score": "<one specific sentence, <= 180 chars>",
+      "suggested_alternative": "<concrete next-time action, <= 220 chars>",
+      "severity": "<minor|moderate|major>"
+    }}
+  ],
+  "confidence": "<low|medium|high>",
+  "confidence_reason": "<one short sentence explaining your confidence>",
   "overall_note": "<2-3 sentences capturing the pattern>"
 }}
 
-standout_moments and failure_modes should each have 1-3 entries."""
+standout_moments and failure_modes should each have 1-3 entries. The moments array is empty if you saw no specific coachable lapse; otherwise it has at most one entry per dim_key."""
 
 
 def _parse_response(text: str, model: str) -> JudgeResult:
@@ -189,6 +248,11 @@ def _parse_response(text: str, model: str) -> JudgeResult:
         except (TypeError, ValueError):
             scores[k] = 5.0  # Spec §8.5: "insufficient signal" defaults to neutral.
 
+    confidence, confidence_reason = _parse_confidence(
+        payload.get("confidence"),
+        payload.get("confidence_reason"),
+    )
+
     return JudgeResult(
         dimension_scores=scores,
         rationale=dict(payload.get("rationale", {}) or {}),
@@ -196,7 +260,143 @@ def _parse_response(text: str, model: str) -> JudgeResult:
         failure_modes=list(payload.get("failure_modes", []) or []),
         overall_note=str(payload.get("overall_note", "") or ""),
         judge_model=model,
+        moments=_parse_moments(payload.get("moments", []) or []),
+        confidence=confidence,
+        confidence_reason=confidence_reason,
     )
+
+
+def _parse_confidence(
+    raw_confidence: Any, raw_reason: Any
+) -> tuple[Confidence, str]:
+    """Coerce the judge's confidence fields per spec §9.3.
+
+    Missing or invalid `confidence` defaults to "medium" - a missing
+    self-rating should not trigger pass 2 escalation. The reason field
+    is truncated to a soft cap; it is free-text and not load-bearing.
+    """
+    if isinstance(raw_confidence, str) and raw_confidence in _VALID_CONFIDENCES:
+        confidence: Confidence = cast(Confidence, raw_confidence)
+    else:
+        confidence = "medium"
+    reason = raw_reason if isinstance(raw_reason, str) else ""
+    return confidence, reason[:_CONFIDENCE_REASON_MAX]
+
+
+def _parse_moments(raw: Any) -> list[Moment]:
+    """Build Moment objects from the judge's `moments` JSON array.
+
+    Drops moments with missing or malformed required fields, unknown
+    dim_key, invalid severity, or quoted_excerpt longer than 240 chars
+    (truncating an excerpt would break the substring check in US-018).
+    why_it_lost_score and suggested_alternative are length-capped by
+    truncation since they are free-text explanations, not anchors.
+
+    Caps to one moment per dim_key (spec §4.2). Later entries for the
+    same dim_key are dropped with a log line.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[Moment] = []
+    seen_dims: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            print("[scorer] moment dropped: not a JSON object", file=sys.stderr)
+            continue
+        dim_key = item.get("dim_key")
+        if not isinstance(dim_key, str) or dim_key not in _VALID_DIM_KEYS:
+            print(f"[scorer] moment dropped: invalid dim_key {dim_key!r}", file=sys.stderr)
+            continue
+        if dim_key in seen_dims:
+            print(
+                f"[scorer] moment dropped: duplicate dim_key {dim_key!r} in same session",
+                file=sys.stderr,
+            )
+            continue
+        turn_index = item.get("turn_index")
+        if not isinstance(turn_index, int) or isinstance(turn_index, bool) or turn_index < 0:
+            print(f"[scorer] moment dropped: invalid turn_index {turn_index!r}", file=sys.stderr)
+            continue
+        excerpt = item.get("quoted_excerpt")
+        if not isinstance(excerpt, str) or not excerpt:
+            print("[scorer] moment dropped: missing quoted_excerpt", file=sys.stderr)
+            continue
+        if len(excerpt) > _EXCERPT_MAX:
+            print(
+                f"[scorer] moment dropped: quoted_excerpt exceeds {_EXCERPT_MAX} chars",
+                file=sys.stderr,
+            )
+            continue
+        why = item.get("why_it_lost_score")
+        if not isinstance(why, str) or not why:
+            print("[scorer] moment dropped: missing why_it_lost_score", file=sys.stderr)
+            continue
+        alt = item.get("suggested_alternative")
+        if not isinstance(alt, str) or not alt:
+            print("[scorer] moment dropped: missing suggested_alternative", file=sys.stderr)
+            continue
+        severity = item.get("severity")
+        if not isinstance(severity, str) or severity not in _VALID_SEVERITIES:
+            print(f"[scorer] moment dropped: invalid severity {severity!r}", file=sys.stderr)
+            continue
+        out.append(
+            Moment(
+                dim_key=dim_key,
+                turn_index=turn_index,
+                quoted_excerpt=excerpt,
+                why_it_lost_score=why[:_WHY_MAX],
+                suggested_alternative=alt[:_ALT_MAX],
+                severity=cast(Severity, severity),
+            )
+        )
+        seen_dims.add(dim_key)
+    return out
+
+
+def _normalize_whitespace(text: str) -> str:
+    """Collapse runs of whitespace to a single space and strip ends.
+
+    Spec §4.4 mandates whitespace-normalized substring verification: a
+    quoted_excerpt from the judge may differ from the transcript only in
+    its whitespace shape (newlines, tabs, runs of spaces), nothing else.
+    """
+    return _WHITESPACE_RE.sub(" ", text).strip()
+
+
+def _session_corpus(session: Session) -> str:
+    """Full-text corpus used to verify moment excerpts.
+
+    Joins every turn's content with a single space. The judge sees the
+    *compacted* transcript (per spec §9.2), but verification runs against
+    the full text stored locally - the judge is not allowed to quote
+    spans it never saw. Tool-call metadata is deliberately excluded:
+    the judge prompt directs the model to quote rendered text only.
+    """
+    return " ".join(turn.content for turn in session.turns)
+
+
+def verify_moment_substrings(session: Session, moments: list[Moment]) -> list[Moment]:
+    """Drop moments whose quoted_excerpt is not a substring of the transcript.
+
+    Per spec §4.4: the whitespace-normalized excerpt MUST be a substring
+    of the whitespace-normalized session transcript. On failure, emit a
+    `[scorer] moment failed substring check` log line and discard the
+    moment. There is no fuzzy or approximate match fallback - a wrong
+    quote is worse than no quote.
+    """
+    transcript = _normalize_whitespace(_session_corpus(session))
+    survivors: list[Moment] = []
+    for m in moments:
+        excerpt = _normalize_whitespace(m.quoted_excerpt)
+        if excerpt and excerpt in transcript:
+            survivors.append(m)
+            continue
+        print(
+            f"[scorer] moment failed substring check "
+            f"(dim={m.dim_key}, turn={m.turn_index})",
+            file=sys.stderr,
+        )
+    return survivors
 
 
 def score_with_claude(session: Session, model: str = "claude-opus-4-7") -> JudgeResult:
@@ -219,7 +419,9 @@ def score_with_claude(session: Session, model: str = "claude-opus-4-7") -> Judge
     text = "".join(
         block.text for block in response.content if getattr(block, "type", None) == "text"
     )
-    return _parse_response(text, model)
+    result = _parse_response(text, model)
+    result.moments = verify_moment_substrings(session, result.moments)
+    return result
 
 
 def score_with_openai(session: Session, model: str = "gpt-5") -> JudgeResult:
@@ -240,7 +442,9 @@ def score_with_openai(session: Session, model: str = "gpt-5") -> JudgeResult:
         response_format={"type": "json_object"},
     )
     text = response.choices[0].message.content or ""
-    return _parse_response(text, model)
+    result = _parse_response(text, model)
+    result.moments = verify_moment_substrings(session, result.moments)
+    return result
 
 
 def score_session(session: Session, prefer: str = "claude") -> JudgeResult | None:

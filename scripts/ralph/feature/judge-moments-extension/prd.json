@@ -1,0 +1,63 @@
+{
+  "branchName": "ralph/factory/judge-moments-extension",
+  "userStories": [
+    {
+      "id": "US-017",
+      "title": "Judge response includes a moments array with required fields",
+      "acceptanceCriteria": [
+        "Judge prompt instructs the model to emit at most one moment per dim per session",
+        "Each moment includes dim_key, turn_index, quoted_excerpt (<=240 chars), why_it_lost_score (<=180 chars), suggested_alternative (<=220 chars), severity in {minor,moderate,major}",
+        "Sessions with no specific coachable lapse return an empty moments array",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-018",
+      "title": "Substring-verify every quoted_excerpt against the source transcript",
+      "acceptanceCriteria": [
+        "Whitespace-normalized excerpt MUST be a substring of the actual session transcript",
+        "Moments that fail the substring check are discarded (not persisted, not rendered)",
+        "A '[scorer] moment failed substring check' log line is emitted on each failure",
+        "No fuzzy or approximate match fallback is used",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-019",
+      "title": "Judge emits confidence (low/medium/high) and confidence_reason",
+      "acceptanceCriteria": [
+        "Each session's judge output includes confidence in {low, medium, high}",
+        "Each session's judge output includes a one-sentence confidence_reason",
+        "Calibration instructions are present in the prompt as specified in Section 9.3",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-020",
+      "title": "Persist surviving moments to the moments table after redaction",
+      "acceptanceCriteria": [
+        "Each surviving moment is redacted before insert",
+        "moment_id is sha256(session.stable_id + dim_key + turn_index)[:16]",
+        "Inserts are upserts: re-judging a session replaces its moments deterministically",
+        "redacted=1 is set on rows that had at least one redaction applied",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    }
+  ]
+}
