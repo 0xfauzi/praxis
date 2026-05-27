@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,12 @@ from typing import Any
 def _utcnow() -> datetime:
     """Tz-aware UTC now. Wraps datetime.now(timezone.utc) for terseness."""
     return datetime.now(timezone.utc)
+
+
+class MigrationError(RuntimeError):
+    """Raised when the v0.2 schema migration fails. The message includes the
+    absolute path of the pre-migration backup so the user can recover."""
+
 
 from praxis.scoring.aggregate import ProfileSnapshot, SessionScore
 
@@ -59,13 +66,7 @@ CREATE TABLE IF NOT EXISTS session_scores (
 CREATE INDEX IF NOT EXISTS idx_session_started_at ON session_scores(started_at);
 CREATE INDEX IF NOT EXISTS idx_session_provider ON session_scores(provider);
 
-CREATE TABLE IF NOT EXISTS daily_consolidations (
-    consolidation_date TEXT PRIMARY KEY,
-    snapshot_json TEXT NOT NULL,
-    coaching_json TEXT NOT NULL,
-    sessions_in_window INTEGER NOT NULL,
-    generated_at TEXT NOT NULL
-);
+DROP TABLE IF EXISTS daily_consolidations;
 
 CREATE TABLE IF NOT EXISTS run_log (
     run_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,6 +75,64 @@ CREATE TABLE IF NOT EXISTS run_log (
     sessions_seen INTEGER NOT NULL,
     sessions_new INTEGER NOT NULL,
     notes TEXT
+);
+
+CREATE TABLE IF NOT EXISTS moments (
+    moment_id TEXT PRIMARY KEY,
+    session_stable_id TEXT NOT NULL,
+    dim_key TEXT NOT NULL,
+    turn_index INTEGER NOT NULL,
+    quoted_excerpt TEXT NOT NULL,
+    why_it_lost_score TEXT NOT NULL,
+    suggested_alternative TEXT NOT NULL,
+    dollar_impact_estimate REAL,
+    minutes_impact_estimate INTEGER,
+    severity TEXT NOT NULL CHECK (severity IN ('minor','moderate','major')),
+    created_at TEXT NOT NULL,
+    redacted INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_moments_session ON moments(session_stable_id);
+CREATE INDEX IF NOT EXISTS idx_moments_created ON moments(created_at);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    task_id TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    task_type TEXT NOT NULL,
+    project_hint TEXT,
+    started_at TEXT NOT NULL,
+    ended_at TEXT NOT NULL,
+    session_count INTEGER NOT NULL,
+    total_cost_estimate_usd REAL,
+    label_source TEXT NOT NULL CHECK (label_source IN ('llm','fallback'))
+);
+
+CREATE TABLE IF NOT EXISTS task_members (
+    task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+    session_stable_id TEXT NOT NULL,
+    PRIMARY KEY (task_id, session_stable_id)
+);
+
+CREATE TABLE IF NOT EXISTS weekly_digests (
+    week_iso TEXT PRIMARY KEY,
+    generated_at TEXT NOT NULL,
+    trajectory_label TEXT NOT NULL,
+    trajectory_headline TEXT NOT NULL,
+    headline_moment_id TEXT REFERENCES moments(moment_id),
+    cost_total_usd REAL,
+    cost_baseline_usd REAL,
+    snapshot_json TEXT NOT NULL,
+    html_path TEXT
+);
+
+CREATE TABLE IF NOT EXISTS follow_ups (
+    week_iso TEXT PRIMARY KEY,
+    dim_key TEXT NOT NULL,
+    commitment_text TEXT NOT NULL,
+    target_metric TEXT NOT NULL,
+    baseline_value REAL NOT NULL,
+    measured_value REAL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('improved','unchanged','worse','pending'))
 );
 """
 
@@ -88,8 +147,79 @@ class ProfileStore:
         self._init_schema()
 
     def _init_schema(self) -> None:
-        with self._conn() as conn:
-            conn.executescript(SCHEMA)
+        # Check existence before opening a connection: sqlite3.connect creates
+        # the file as a side effect, which would hide whether this was a fresh
+        # install or an upgrade.
+        db_existed = self.db_path.exists()
+        if db_existed:
+            with self._conn() as conn:
+                if self._has_schema_v2_marker(conn):
+                    return
+
+        # Migration needed (either fresh DB or v0.1 DB without the marker).
+        # Per spec Appendix A.7: back up the live DB before any DDL, and on
+        # failure restore from backup so the DB is never half-migrated.
+        backup_path = self._backup_db_if_exists()
+        try:
+            with self._conn() as conn:
+                self._apply_v2_schema(conn)
+                self._mark_schema_v2(conn)
+        except Exception as exc:
+            if backup_path is not None:
+                self._restore_db_from_backup(backup_path)
+            raise MigrationError(
+                self._migration_failure_message(backup_path, exc)
+            ) from exc
+
+    def _apply_v2_schema(self, conn: sqlite3.Connection) -> None:
+        # Wrapped in a method so tests can monkeypatch it to inject failures
+        # without having to corrupt the SCHEMA constant.
+        conn.executescript(SCHEMA)
+
+    def _backup_db_if_exists(self) -> Path | None:
+        if not self.db_path.exists():
+            return None
+        ts = _utcnow().strftime("%Y%m%dT%H%M%S%fZ")
+        backup_path = self.db_path.parent / f"profile.db.backup-{ts}"
+        shutil.copy2(self.db_path, backup_path)
+        return backup_path
+
+    def _restore_db_from_backup(self, backup_path: Path) -> None:
+        shutil.copy2(backup_path, self.db_path)
+
+    @staticmethod
+    def _migration_failure_message(backup_path: Path | None, exc: Exception) -> str:
+        if backup_path is None:
+            return (
+                f"v0.2 schema migration failed (no backup made; fresh DB): {exc}"
+            )
+        return (
+            f"v0.2 schema migration failed: {exc}\n"
+            f"Database has been restored from backup at: {backup_path.resolve()}"
+        )
+
+    @staticmethod
+    def _has_schema_v2_marker(conn: sqlite3.Connection) -> bool:
+        # Detection is from existing schema state, not from a config flag:
+        # fresh DBs have no run_log table at all, and v0.1 DBs have run_log
+        # without a schema_version row. Either case means migration is needed.
+        cur = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'run_log'"
+        )
+        if cur.fetchone() is None:
+            return False
+        cur = conn.execute(
+            "SELECT 1 FROM run_log WHERE kind = 'schema_version' AND notes = '2' LIMIT 1"
+        )
+        return cur.fetchone() is not None
+
+    @staticmethod
+    def _mark_schema_v2(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "INSERT INTO run_log (run_at, kind, sessions_seen, sessions_new, notes) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (_utcnow().isoformat(), "schema_version", 0, 0, "2"),
+        )
 
     @contextmanager
     def _conn(self):
@@ -170,17 +300,11 @@ class ProfileStore:
             )
         return rows
 
-    # ---- daily consolidation --------------------------------------------
+    # ---- daily consolidation (v0.2: table dropped; stubs keep callers alive
+    #      until the orchestrator/CLI/reports refactor lands) ----
 
     def latest_consolidation_date(self) -> date | None:
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT consolidation_date FROM daily_consolidations "
-                "ORDER BY consolidation_date DESC LIMIT 1"
-            ).fetchone()
-        if row is None:
-            return None
-        return date.fromisoformat(row["consolidation_date"])
+        return None
 
     def save_consolidation(
         self,
@@ -189,67 +313,13 @@ class ProfileStore:
         coaching: dict,
         sessions_in_window: int,
     ) -> None:
-        with self._conn() as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO daily_consolidations
-                (consolidation_date, snapshot_json, coaching_json,
-                 sessions_in_window, generated_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    for_date.isoformat(),
-                    json.dumps(
-                        {
-                            "overall": snapshot.overall,
-                            "dimension_means": snapshot.dimension_means,
-                            "session_count": snapshot.session_count,
-                            "provider_breakdown": snapshot.provider_breakdown,
-                            "strongest_dimension": snapshot.strongest_dimension,
-                            "weakest_dimension": snapshot.weakest_dimension,
-                            "standout_moments": snapshot.standout_moments,
-                            "failure_modes": snapshot.failure_modes,
-                        }
-                    ),
-                    json.dumps(coaching),
-                    sessions_in_window,
-                    _utcnow().isoformat(),
-                ),
-            )
+        return None
 
     def load_consolidation(self, for_date: date) -> dict | None:
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM daily_consolidations WHERE consolidation_date = ?",
-                (for_date.isoformat(),),
-            ).fetchone()
-        if row is None:
-            return None
-        return {
-            "consolidation_date": row["consolidation_date"],
-            "snapshot": json.loads(row["snapshot_json"]),
-            "coaching": json.loads(row["coaching_json"]),
-            "sessions_in_window": row["sessions_in_window"],
-            "generated_at": row["generated_at"],
-        }
+        return None
 
     def consolidation_history(self, days: int = 30) -> list[dict]:
-        cutoff = (_utcnow().date() - timedelta(days=days)).isoformat()
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM daily_consolidations "
-                "WHERE consolidation_date >= ? "
-                "ORDER BY consolidation_date ASC",
-                (cutoff,),
-            ).fetchall()
-        return [
-            {
-                "consolidation_date": r["consolidation_date"],
-                "snapshot": json.loads(r["snapshot_json"]),
-                "sessions_in_window": r["sessions_in_window"],
-            }
-            for r in rows
-        ]
+        return []
 
     # ---- run log --------------------------------------------------------
 
