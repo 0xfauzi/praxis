@@ -441,21 +441,30 @@ def cmd_install_weekly(args: argparse.Namespace) -> int:  # noqa: ARG001
     unloaded first, the plist is overwritten, and the new job is
     loaded.
 
+    On non-macOS, no scheduling is attempted. Instead, the equivalent
+    systemd user timer (Linux) or Task Scheduler XML (Windows) is
+    printed to stdout AND saved to
+    ``~/.praxis/install-weekly-snippet.txt`` so the user can install it
+    themselves (spec 12.4).
+
     Exit codes (spec 12.3):
-      0  plist generated and loaded (macOS), or non-macOS placeholder
-         path completed without scheduling anything.
+      0  plist generated and loaded (macOS), or snippet printed/saved
+         (non-macOS).
       4  launchd installation failed (launchctl returned non-zero, or
          the config schedule has an invalid day/hour/minute).
     """
     if sys.platform != "darwin":
-        # Non-macOS systemd/Task Scheduler output lands in US-083.
-        # Until that story lands, exit cleanly so other platforms are
-        # not blocked by this verb.
-        print(
-            "install-weekly: non-macOS scheduling is printed (not loaded). "
-            "This branch is not yet implemented; coming in a follow-up story.",
-            file=sys.stderr,
+        from praxis.cli.install_weekly import (
+            InstallWeeklyError as _InstallWeeklyError,
+            write_non_macos_snippet,
         )
+        try:
+            path, content = write_non_macos_snippet()
+        except _InstallWeeklyError as exc:
+            print(f"install-weekly failed: {exc}", file=sys.stderr)
+            return 4
+        print(content)
+        print(f"Saved snippet to: {path}")
         return 0
     from praxis.cli.install_weekly import (
         InstallWeeklyError,

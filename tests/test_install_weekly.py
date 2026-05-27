@@ -1,4 +1,4 @@
-"""Tests for the macOS install-weekly / uninstall-weekly paths (US-079, US-080).
+"""Tests for the install-weekly / uninstall-weekly paths (US-079, US-080, US-083).
 
 Acceptance criteria covered:
   - ``praxis install-weekly`` writes ~/Library/LaunchAgents/co.praxis.weekly.plist
@@ -9,6 +9,10 @@ Acceptance criteria covered:
   - launchctl failure surfaces as CLI exit code 4 with a clear message.
   - ``praxis uninstall-weekly`` unloads and deletes the plist.
   - ``praxis uninstall-weekly`` is a no-op (exit 0) when no plist exists.
+  - On non-macOS, install-weekly prints the equivalent systemd timer
+    or Task Scheduler XML and saves it to
+    ``~/.praxis/install-weekly-snippet.txt``, exiting 0 without
+    scheduling anything.
 
 Subprocess is monkeypatched: real ``launchctl`` is not invoked. The
 tmp_home fixture patches ``Path.home()`` so the plist lands inside
@@ -28,10 +32,15 @@ from praxis.cli.install_weekly import (
     InstallWeeklyError,
     PlistContext,
     build_plist,
+    build_systemd_snippet,
+    build_task_scheduler_snippet,
     install_weekly_macos,
     plist_path,
+    snippet_path,
     uninstall_weekly_macos,
+    write_non_macos_snippet,
 )
+from praxis.config import ScheduleConfig
 
 
 # ---------------------------------------------------------------------------
@@ -363,3 +372,189 @@ def test_cli_uninstall_weekly_non_macos_exits_0(tmp_home, capsys, monkeypatch):
 
     assert code == 0
     assert "non-macOS" in err
+
+
+# ---------------------------------------------------------------------------
+# US-083 -- non-macOS install-weekly snippet.
+#
+# Renderers are pure: we exercise build_systemd_snippet /
+# build_task_scheduler_snippet directly with known inputs, then verify
+# the CLI / dispatch wrapper writes the file and exits 0 without
+# scheduling anything.
+# ---------------------------------------------------------------------------
+
+
+def test_build_systemd_snippet_uses_day_and_time():
+    """The OnCalendar line reflects the configured day/hour/minute."""
+    text = build_systemd_snippet(
+        ScheduleConfig(day="wednesday", hour=9, minute=30),
+        ["/usr/local/bin/praxis"],
+    )
+    assert "OnCalendar=Wed *-*-* 09:30:00" in text
+
+
+def test_build_systemd_snippet_invokes_praxis_week_notify():
+    """The ExecStart line ends with ``week --notify`` for the configured argv."""
+    text = build_systemd_snippet(
+        ScheduleConfig(),
+        ["/usr/local/bin/praxis"],
+    )
+    assert "ExecStart=/usr/local/bin/praxis week --notify" in text
+
+
+def test_build_systemd_snippet_rejects_invalid_day():
+    """A typo in schedule.day surfaces as InstallWeeklyError, not a bad snippet."""
+    with pytest.raises(InstallWeeklyError):
+        build_systemd_snippet(
+            ScheduleConfig(day="someday", hour=18, minute=0),
+            ["praxis"],
+        )
+
+
+def test_build_systemd_snippet_documents_install_steps():
+    """The snippet teaches the user how to enable the timer."""
+    text = build_systemd_snippet(
+        ScheduleConfig(),
+        ["praxis"],
+    )
+    # The three install steps must appear so the user is not left to
+    # guess where the unit files go or how to activate them.
+    assert "co.praxis.weekly.service" in text
+    assert "co.praxis.weekly.timer" in text
+    assert "systemctl --user daemon-reload" in text
+    assert "systemctl --user enable --now co.praxis.weekly.timer" in text
+
+
+def test_build_task_scheduler_snippet_uses_day_and_time():
+    """Task Scheduler XML encodes the day inside <DaysOfWeek>."""
+    text = build_task_scheduler_snippet(
+        ScheduleConfig(day="monday", hour=7, minute=15),
+        ["praxis.exe"],
+    )
+    assert "<DaysOfWeek><Monday/></DaysOfWeek>" in text
+    assert "<StartBoundary>2020-01-01T07:15:00</StartBoundary>" in text
+
+
+def test_build_task_scheduler_snippet_runs_praxis_week_notify():
+    """Command + Arguments split praxis_argv[0] from the trailing 'week --notify'."""
+    text = build_task_scheduler_snippet(
+        ScheduleConfig(),
+        ["praxis.exe"],
+    )
+    assert "<Command>praxis.exe</Command>" in text
+    assert "<Arguments>week --notify</Arguments>" in text
+
+
+def test_build_task_scheduler_snippet_rejects_invalid_day():
+    """Invalid day strings raise InstallWeeklyError instead of producing bad XML."""
+    with pytest.raises(InstallWeeklyError):
+        build_task_scheduler_snippet(
+            ScheduleConfig(day="someday", hour=12, minute=0),
+            ["praxis.exe"],
+        )
+
+
+def test_write_non_macos_snippet_linux_writes_systemd_to_default_path(tmp_home):
+    """On Linux, the snippet file lands at ~/.praxis/install-weekly-snippet.txt."""
+    path, content = write_non_macos_snippet(platform_override="linux")
+    expected = tmp_home / ".praxis" / "install-weekly-snippet.txt"
+    assert path == expected
+    assert path.exists()
+    assert path.read_text(encoding="utf-8") == content
+    assert "[Timer]" in content
+    assert "OnCalendar=" in content
+
+
+def test_write_non_macos_snippet_windows_writes_xml(tmp_home):
+    """On Windows (``win32``), the snippet contains Task Scheduler XML."""
+    path, content = write_non_macos_snippet(platform_override="win32")
+    assert path.exists()
+    assert content.startswith("<?xml")
+    assert "<Task" in content
+    assert "<ScheduleByWeek>" in content
+
+
+def test_write_non_macos_snippet_unknown_unix_falls_back_to_systemd(tmp_home):
+    """FreeBSD / other UNIXes get systemd output (easier to adapt than TaskSched XML)."""
+    _path, content = write_non_macos_snippet(platform_override="freebsd13")
+    assert "[Timer]" in content
+
+
+def test_cli_install_weekly_non_macos_prints_snippet_to_stdout(
+    tmp_home, capsys, monkeypatch
+):
+    """``praxis install-weekly`` on Linux prints the snippet to stdout and exits 0."""
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    # Tripwire: this code path must not shell out to anything. If a
+    # future refactor reintroduces a subprocess call here, the test
+    # will fail loudly.
+    def _fail(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("install-weekly on non-macOS must not call subprocess.")
+
+    monkeypatch.setattr("praxis.cli.install_weekly.subprocess.run", _fail)
+
+    code = main(["install-weekly"])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    # Snippet body goes to stdout (per AC: "printed to stdout").
+    assert "OnCalendar=" in captured.out
+    assert "co.praxis.weekly.service" in captured.out
+    # The CLI also tells the user where the saved copy lives.
+    assert "Saved snippet to:" in captured.out
+    assert "install-weekly-snippet.txt" in captured.out
+
+
+def test_cli_install_weekly_non_macos_saves_snippet_to_disk(
+    tmp_home, capsys, monkeypatch
+):
+    """The snippet is persisted to ~/.praxis/install-weekly-snippet.txt."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        "praxis.cli.install_weekly.subprocess.run",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("must not shell out on non-macOS")
+        ),
+    )
+
+    code = main(["install-weekly"])
+    _ = capsys.readouterr()
+
+    expected = tmp_home / ".praxis" / "install-weekly-snippet.txt"
+    assert code == 0
+    assert expected.exists()
+    saved = expected.read_text(encoding="utf-8")
+    assert "[Timer]" in saved
+    assert "OnCalendar=" in saved
+
+
+def test_cli_install_weekly_windows_saves_task_scheduler_xml(
+    tmp_home, capsys, monkeypatch
+):
+    """On Windows, the saved snippet is Task Scheduler XML (not systemd)."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    # Real shutil.which calls into _winapi on a "win32" sys.platform,
+    # which crashes when the test host is actually macOS. Stub it.
+    monkeypatch.setattr(
+        "praxis.cli.install_weekly.shutil.which",
+        lambda name: None,
+    )
+
+    code = main(["install-weekly"])
+    captured = capsys.readouterr()
+
+    expected = tmp_home / ".praxis" / "install-weekly-snippet.txt"
+    assert code == 0
+    assert expected.exists()
+    saved = expected.read_text(encoding="utf-8")
+    assert saved.startswith("<?xml")
+    assert "<ScheduleByWeek>" in saved
+    # And stdout shows the same content.
+    assert "<ScheduleByWeek>" in captured.out
+
+
+def test_snippet_path_uses_home_override(tmp_path):
+    """snippet_path honors an explicit home= the same way plist_path does."""
+    expected = tmp_path / "install-weekly-snippet.txt"
+    assert snippet_path(home=tmp_path) == expected

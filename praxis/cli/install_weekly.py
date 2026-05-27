@@ -6,12 +6,21 @@ and time, which writes the HTML digest under ``~/.praxis/weeks/`` and
 posts a macOS notification. ``install_weekly_macos`` generates and
 loads the launchd plist; ``uninstall_weekly_macos`` reverses it.
 
+On non-macOS platforms (Linux, Windows), install-weekly does NOT
+schedule anything. Instead it renders the equivalent systemd user
+timer or Task Scheduler XML to stdout and saves it to
+``~/.praxis/install-weekly-snippet.txt`` so the user can install it
+manually (spec 12.4, AC US-083). The platform-dispatching wrapper is
+:func:`write_non_macos_snippet`; the pure renderers are
+:func:`build_systemd_snippet` and :func:`build_task_scheduler_snippet`.
+
 This module is intentionally testable: the plist text is built by a
 pure function (:func:`build_plist`) and the launchctl calls go through
 ``subprocess.run`` so tests can monkeypatch them.
 """
 from __future__ import annotations
 
+import shlex
 import shutil
 import subprocess
 import sys
@@ -263,3 +272,218 @@ def uninstall_weekly_macos(home: Path | None = None) -> bool:
     )
     plist_file.unlink()
     return True
+
+
+# ---------------------------------------------------------------------------
+# Non-macOS snippets (spec 12.4 / AC US-083).
+#
+# On Linux / Windows we do not invoke systemctl / schtasks ourselves --
+# we print the equivalent unit text or XML and tell the user how to
+# install it. The renderers below are pure functions so tests can
+# pin their output without a real config file or subprocess.
+# ---------------------------------------------------------------------------
+
+
+# systemd OnCalendar accepts short weekday tokens (Sun, Mon, ...). Mirror
+# the launchd ordering so a hand-edited config.toml works identically
+# across platforms.
+_SYSTEMD_DAY_BY_NAME: dict[str, str] = {
+    "sunday": "Sun",
+    "monday": "Mon",
+    "tuesday": "Tue",
+    "wednesday": "Wed",
+    "thursday": "Thu",
+    "friday": "Fri",
+    "saturday": "Sat",
+}
+
+
+# Task Scheduler XML uses full English weekday element names inside
+# <DaysOfWeek>. Same lowercased keys as the rest of the module so the
+# config schema is consistent.
+_TASKSCHEDULER_DAY_BY_NAME: dict[str, str] = {
+    "sunday": "Sunday",
+    "monday": "Monday",
+    "tuesday": "Tuesday",
+    "wednesday": "Wednesday",
+    "thursday": "Thursday",
+    "friday": "Friday",
+    "saturday": "Saturday",
+}
+
+
+def _normalize_systemd_day(day: str) -> str:
+    key = day.strip().lower()
+    if key not in _SYSTEMD_DAY_BY_NAME:
+        valid = ", ".join(_SYSTEMD_DAY_BY_NAME.keys())
+        raise InstallWeeklyError(
+            f"Invalid schedule.day {day!r}: expected one of {valid}."
+        )
+    return _SYSTEMD_DAY_BY_NAME[key]
+
+
+def _normalize_taskscheduler_day(day: str) -> str:
+    key = day.strip().lower()
+    if key not in _TASKSCHEDULER_DAY_BY_NAME:
+        valid = ", ".join(_TASKSCHEDULER_DAY_BY_NAME.keys())
+        raise InstallWeeklyError(
+            f"Invalid schedule.day {day!r}: expected one of {valid}."
+        )
+    return _TASKSCHEDULER_DAY_BY_NAME[key]
+
+
+def _format_praxis_exec(praxis_argv: Sequence[str]) -> str:
+    """Shell-quote the argv that runs ``praxis week --notify`` end to end."""
+    parts = [*praxis_argv, "week", "--notify"]
+    return " ".join(shlex.quote(p) for p in parts)
+
+
+def build_systemd_snippet(
+    schedule: ScheduleConfig,
+    praxis_argv: Sequence[str],
+) -> str:
+    """Render a systemd user-timer snippet for Linux installs.
+
+    The output contains both the ``.service`` and ``.timer`` units plus
+    the ``systemctl --user`` commands to enable them. We deliberately
+    render a single text file (rather than two separate units) because
+    spec 12.4 says the snippet is "printed and saved" -- a single file
+    is what the user copy-pastes from, with comments marking which lines
+    belong in which unit file.
+
+    Raises :class:`InstallWeeklyError` for an invalid day/hour/minute --
+    same contract as :func:`install_weekly_macos`.
+    """
+    weekday = _normalize_systemd_day(schedule.day)
+    hour = _normalize_hour(schedule.hour)
+    minute = _normalize_minute(schedule.minute)
+    exec_line = _format_praxis_exec(praxis_argv)
+    return (
+        f"# Praxis weekly digest -- systemd user timer (Linux)\n"
+        f"#\n"
+        f"# 1. Save the block below as:\n"
+        f"#    ~/.config/systemd/user/co.praxis.weekly.service\n"
+        f"# ---------------- co.praxis.weekly.service ----------------\n"
+        f"[Unit]\n"
+        f"Description=Praxis weekly digest\n"
+        f"\n"
+        f"[Service]\n"
+        f"Type=oneshot\n"
+        f"ExecStart={exec_line}\n"
+        f"# ----------------------------------------------------------\n"
+        f"#\n"
+        f"# 2. Save the block below as:\n"
+        f"#    ~/.config/systemd/user/co.praxis.weekly.timer\n"
+        f"# ---------------- co.praxis.weekly.timer ------------------\n"
+        f"[Unit]\n"
+        f"Description=Run Praxis weekly digest on schedule\n"
+        f"\n"
+        f"[Timer]\n"
+        f"OnCalendar={weekday} *-*-* {hour:02d}:{minute:02d}:00\n"
+        f"Persistent=true\n"
+        f"Unit=co.praxis.weekly.service\n"
+        f"\n"
+        f"[Install]\n"
+        f"WantedBy=timers.target\n"
+        f"# ----------------------------------------------------------\n"
+        f"#\n"
+        f"# 3. Reload and enable:\n"
+        f"#    systemctl --user daemon-reload\n"
+        f"#    systemctl --user enable --now co.praxis.weekly.timer\n"
+    )
+
+
+def build_task_scheduler_snippet(
+    schedule: ScheduleConfig,
+    praxis_argv: Sequence[str],
+) -> str:
+    """Render a Windows Task Scheduler XML snippet.
+
+    The XML is meant for ``schtasks /Create /TN PraxisWeekly /XML <path>``.
+    StartBoundary is a fixed date in the past so the weekly trigger
+    becomes valid immediately; the wall-clock hour/minute come from the
+    user's schedule. Like the systemd renderer, this is pure and
+    deterministic so tests can pin the output.
+
+    Raises :class:`InstallWeeklyError` for an invalid day/hour/minute.
+    """
+    weekday = _normalize_taskscheduler_day(schedule.day)
+    hour = _normalize_hour(schedule.hour)
+    minute = _normalize_minute(schedule.minute)
+    if not praxis_argv:
+        raise InstallWeeklyError("praxis_argv must contain at least the command.")
+    command = praxis_argv[0]
+    arg_parts = [*praxis_argv[1:], "week", "--notify"]
+    arguments = " ".join(arg_parts)
+    return (
+        f'<?xml version="1.0" encoding="UTF-16"?>\n'
+        f"<!-- Praxis weekly digest -- Task Scheduler XML (Windows)\n"
+        f"     Import with:\n"
+        f"       schtasks /Create /TN PraxisWeekly /XML "
+        f"%USERPROFILE%\\.praxis\\install-weekly-snippet.txt -->\n"
+        f'<Task version="1.4" '
+        f'xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n'
+        f"  <Triggers>\n"
+        f"    <CalendarTrigger>\n"
+        f"      <StartBoundary>2020-01-01T"
+        f"{hour:02d}:{minute:02d}:00</StartBoundary>\n"
+        f"      <Enabled>true</Enabled>\n"
+        f"      <ScheduleByWeek>\n"
+        f"        <DaysOfWeek><{weekday}/></DaysOfWeek>\n"
+        f"        <WeeksInterval>1</WeeksInterval>\n"
+        f"      </ScheduleByWeek>\n"
+        f"    </CalendarTrigger>\n"
+        f"  </Triggers>\n"
+        f"  <Actions>\n"
+        f"    <Exec>\n"
+        f"      <Command>{_xml_escape(command)}</Command>\n"
+        f"      <Arguments>{_xml_escape(arguments)}</Arguments>\n"
+        f"    </Exec>\n"
+        f"  </Actions>\n"
+        f"</Task>\n"
+    )
+
+
+def snippet_path(home: Path | None = None) -> Path:
+    """Canonical path of the printed snippet: ``~/.praxis/install-weekly-snippet.txt``.
+
+    Honors the ``home`` override the same way :func:`plist_path` does,
+    except this one is rooted at the Praxis home (``~/.praxis``) rather
+    than the macOS LaunchAgents dir. Tests pass ``home=tmp_path / ".praxis"``
+    explicitly when calling renderers directly; the CLI uses
+    :func:`praxis.storage.profile_store.resolve_home` so the
+    ``PRAXIS_HOME`` env var still wins in the tmp_home fixture.
+    """
+    from praxis.storage.profile_store import resolve_home
+
+    base = home if home is not None else resolve_home()
+    return base / "install-weekly-snippet.txt"
+
+
+def write_non_macos_snippet(
+    praxis_home: Path | None = None,
+    *,
+    platform_override: str | None = None,
+) -> tuple[Path, str]:
+    """Dispatch by platform, write the snippet to disk, return (path, content).
+
+    Windows (``sys.platform`` startswith ``"win"`` or ``"cygwin"``) gets
+    Task Scheduler XML; everything else gets the systemd snippet. We
+    deliberately fall back to systemd for unknown UNIXes (FreeBSD, etc.)
+    because the user can adapt a systemd snippet more easily than they
+    can adapt Task Scheduler XML.
+
+    The ``platform_override`` argument is for tests; production callers
+    leave it as ``None`` and we read ``sys.platform`` directly.
+    """
+    cfg = load_config(praxis_home)
+    argv = _resolve_praxis_command()
+    platform = platform_override if platform_override is not None else sys.platform
+    if platform.startswith("win") or platform == "cygwin":
+        content = build_task_scheduler_snippet(cfg.schedule, argv)
+    else:
+        content = build_systemd_snippet(cfg.schedule, argv)
+    out = snippet_path(praxis_home)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(content, encoding="utf-8")
+    return out, content
