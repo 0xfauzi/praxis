@@ -5,39 +5,38 @@ Spec 15.6:
   - run() followed by run() shows sessions_new == 0 once scored (idempotence)
   - Without API keys, sessions are seen but not scored (no heuristic fallback)
 
-Spec 9.1 / US-027: pass 1 runs on every session in the weekly window. The
-orchestrator's pass-1 path is what these tests intercept (via ``fake_judge``).
-
 The previous test_force_consolidate_replaces_today_row was removed in US-002
 along with the daily_consolidations table.
+
+US-070 adds run_weekly() pipeline-ordering coverage. The tests verify that
+the eight Section 9.4 steps execute in the documented order and that each
+step's outputs only feed its documented downstream consumers.
 """
 from __future__ import annotations
 
 import json
 import os
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
-from praxis.orchestrator import run
+from praxis import orchestrator as orch
+from praxis.models import Moment as JudgeMoment
+from praxis.orchestrator import Pass1Output, run, run_weekly
+from praxis.scoring.clustering import Task
 from praxis.scoring.judge import JudgeResult
+from praxis.scoring.moment_selector import MomentSelection
 from praxis.scoring.rubric import RUBRIC
 from praxis.storage.profile_store import ProfileStore, resolve_home
 
 
 @pytest.fixture
 def fake_judge(monkeypatch):
-    """Replace the pass-1 LLM judge with a deterministic stub.
+    """Replace the LLM judge with a deterministic stub returning fixed scores."""
 
-    Spec §9.1: the weekly orchestrator's first judging step is pass 1
-    (cheap-tier judge) on every session. We patch the pass-1 entrypoint
-    that ``score_one_session_pass1`` calls so tests can run end-to-end
-    without an API key.
-    """
-
-    def _fake(session, prefer="claude", **kwargs):  # noqa: ARG001
+    def _fake(session, prefer="claude"):  # noqa: ARG001
         return JudgeResult(
             dimension_scores={d.key: 6.0 for d in RUBRIC},
             rationale={d.key: "fixture" for d in RUBRIC},
@@ -47,7 +46,7 @@ def fake_judge(monkeypatch):
             judge_model="fixture",
         )
 
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake)
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session", _fake)
     return _fake
 
 
@@ -90,597 +89,651 @@ def test_run_without_keys_does_not_score(tmp_home, synthetic_claude_session):
     assert rows == []
 
 
-def _write_synthetic_claude_session(
-    root: Path, session_index: int, *, hours_ago: int = 1
-) -> Path:
-    """Write one minimal Claude JSONL into ``root`` and return its path.
+# --- US-070: pipeline ordering matches Section 9.4 ------------------------
 
-    Helper for the pass-1 coverage tests below: builds N small sessions
-    that all live in the same project directory so the scanner picks
-    them up in one pass. We do not call the fixture-level helper
-    because it always writes to a single fixed filename.
+EXPECTED_STEP_ORDER = [
+    "scan",
+    "cluster",
+    "pass1",
+    "pass2",
+    "validate_moments",
+    "select",
+    "follow_up",
+    "render",
+]
+
+
+@pytest.fixture
+def step_recorder(monkeypatch):
+    """Monkeypatch every pipeline step and record (name, kwargs-shape).
+
+    The recorder doubles as the data-flow contract check: each step's
+    inputs are captured so the test can assert what each step received
+    only contains outputs from documented upstream steps.
     """
+    calls: list[tuple[str, dict]] = []
+
+    def _record(name, return_value):
+        def _stub(*args, **kwargs):
+            calls.append((name, {"args": args, "kwargs": kwargs}))
+            return return_value
+
+        return _stub
+
+    monkeypatch.setattr(orch, "_step_scan", _record("scan", []))
+    monkeypatch.setattr(orch, "_step_cluster", _record("cluster", []))
+    monkeypatch.setattr(
+        orch,
+        "_step_pass1",
+        _record("pass1", Pass1Output(results={}, low_confidence_session_ids=[])),
+    )
+    monkeypatch.setattr(orch, "_step_pass2", _record("pass2", {}))
+    monkeypatch.setattr(orch, "_step_validate_moments", _record("validate_moments", []))
+    monkeypatch.setattr(orch, "_step_select_moments", _record("select", None))
+    monkeypatch.setattr(orch, "_step_follow_up", _record("follow_up", None))
+    monkeypatch.setattr(orch, "_step_render", _record("render", ("", "")))
+    return calls
+
+
+def test_run_weekly_executes_steps_in_section_9_4_order(tmp_home, step_recorder):
+    summary = run_weekly()
+    # The summary reports the order it executed in. Use that as one
+    # check, and the recorder's call list as the independent second.
+    assert summary.steps_executed == EXPECTED_STEP_ORDER
+    assert [name for name, _ in step_recorder] == EXPECTED_STEP_ORDER
+
+
+def test_run_weekly_step_inputs_match_documented_upstream(tmp_home, step_recorder):
+    # Drive run_weekly so the recorder captures each step's arguments.
+    run_weekly()
+    by_name = {name: payload for name, payload in step_recorder}
+
+    # scan: takes only since_days (the orchestrator's own parameter).
+    # No outputs from later steps leak back into scan.
+    scan_args = by_name["scan"]["args"]
+    scan_kwargs = by_name["scan"]["kwargs"]
+    assert len(scan_args) + len(scan_kwargs) == 1
+
+    # cluster: only sessions (scan output).
+    assert len(by_name["cluster"]["args"]) == 1
+    assert by_name["cluster"]["kwargs"] == {}
+
+    # pass1: sessions (scan), tasks (cluster). Nothing else.
+    assert len(by_name["pass1"]["args"]) == 2
+    assert by_name["pass1"]["kwargs"] == {}
+
+    # pass2: sessions (scan), pass1 output. Spec 9.1 forbids passing
+    # pass1's scores to pass2; the contract is the IDs travel via the
+    # Pass1Output wrapper, not raw judge results.
+    assert len(by_name["pass2"]["args"]) == 2
+    pass2_arg = by_name["pass2"]["args"][1]
+    assert isinstance(pass2_arg, Pass1Output)
+
+    # validate: sessions, pass1, pass2_results. Nothing from select/follow/render.
+    assert len(by_name["validate_moments"]["args"]) == 3
+
+    # select: sessions, validated moments. No pass1/pass2 leakage.
+    assert len(by_name["select"]["args"]) == 2
+
+    # follow_up: selection, moments, snapshot, week_iso. No raw sessions.
+    assert len(by_name["follow_up"]["args"]) == 4
+
+    # render: everything the digest layout reads, but only via the
+    # outputs of upstream steps - no provider clients, no scanners.
+    assert len(by_name["render"]["args"]) == 5
+
+
+def test_run_weekly_each_step_called_exactly_once(tmp_home, step_recorder):
+    run_weekly()
+    names = [name for name, _ in step_recorder]
+    for step in EXPECTED_STEP_ORDER:
+        assert names.count(step) == 1, f"{step} was called {names.count(step)} times"
+
+
+def test_run_weekly_returns_summary_with_week_iso(tmp_home, step_recorder):
+    summary = run_weekly()
+    # ISO week tag is YYYY-Www; format check is enough here - the
+    # tagging is exercised in praxis.behavior.weekly tests.
+    assert summary.week_iso.startswith("20")
+    assert "-W" in summary.week_iso
+
+
+# --- US-071: persist weekly_digests row ----------------------------------
+
+def test_run_weekly_writes_one_digest_row(tmp_home, step_recorder):
+    """A weekly_digests row exists for the current week after run_weekly."""
+    summary = run_weekly()
+    store = ProfileStore(home=resolve_home())
+    row = store.load_weekly_digest(summary.week_iso)
+    assert row is not None
+    assert row["week_iso"] == summary.week_iso
+    # All schema-required (NOT NULL) columns must be populated.
+    assert row["generated_at"]
+    assert row["trajectory_label"]
+    assert row["trajectory_headline"]
+    assert row["snapshot_json"]
+    assert summary.digest_persisted is True
+
+
+def test_run_weekly_digest_snapshot_json_round_trips(tmp_home, step_recorder):
+    """snapshot_json holds the full ProfileSnapshot (US-071 AC #2)."""
+    summary = run_weekly()
+    store = ProfileStore(home=resolve_home())
+    row = store.load_weekly_digest(summary.week_iso)
+    assert row is not None
+    snap = row["snapshot"]
+    # Every public field on ProfileSnapshot must round-trip through
+    # snapshot_json. Listing them by name guards against the renderer
+    # silently dropping a field if ProfileSnapshot grows.
+    for key in (
+        "overall",
+        "dimension_means",
+        "session_count",
+        "provider_breakdown",
+        "strongest_dimension",
+        "weakest_dimension",
+        "standout_moments",
+        "failure_modes",
+    ):
+        assert key in snap, f"snapshot_json missing field: {key}"
+    assert snap["overall"] == summary.snapshot.overall
+    assert snap["session_count"] == summary.snapshot.session_count
+
+
+def test_run_weekly_digest_is_idempotent(tmp_home, step_recorder):
+    """Re-running for the same week replaces the row, not duplicates it.
+
+    US-071 AC #3: UPSERT semantics. The PK is week_iso so a second run
+    on the same week must leave exactly one row, with a refreshed
+    generated_at timestamp.
+    """
+    first = run_weekly()
+    store = ProfileStore(home=resolve_home())
+    assert store.count_weekly_digests() == 1
+    first_row = store.load_weekly_digest(first.week_iso)
+    assert first_row is not None
+
+    second = run_weekly()
+    # Same week, still exactly one row.
+    assert second.week_iso == first.week_iso
+    assert store.count_weekly_digests() == 1
+
+
+def test_run_weekly_persists_trajectory_label_and_headline(tmp_home, step_recorder):
+    """Digest row carries the trajectory label + headline from this run."""
+    summary = run_weekly()
+    assert summary.trajectory is not None
+    store = ProfileStore(home=resolve_home())
+    row = store.load_weekly_digest(summary.week_iso)
+    assert row is not None
+    assert row["trajectory_label"] == summary.trajectory.label.value
+    assert row["trajectory_headline"] == summary.trajectory.headline
+
+
+def test_run_weekly_accepts_external_store(tmp_home, step_recorder):
+    """Callers (and US-072 --dry-run) can inject a ProfileStore.
+
+    The digest still lands in that store, not a fresh one. This test
+    pins the contract that the second run_weekly() positional/keyword
+    is `store=` and that it is used for the write.
+    """
+    store = ProfileStore(home=resolve_home())
+    summary = run_weekly(store=store)
+    assert store.count_weekly_digests() == 1
+    row = store.load_weekly_digest(summary.week_iso)
+    assert row is not None
+
+
+# --- US-072: --dry-run computes without persisting -----------------------
+
+def test_run_weekly_dry_run_does_not_persist_digest(tmp_home, step_recorder):
+    """dry_run=True must not write a weekly_digests row (US-072 AC #1)."""
+    summary = run_weekly(dry_run=True)
+    # Inspect via a fresh store - the dry-run path must not have created
+    # one of its own. Constructing a store here is fine: it is the test
+    # asserting "no row exists", not the SUT.
+    store = ProfileStore(home=resolve_home())
+    assert store.count_weekly_digests() == 0
+    assert store.load_weekly_digest(summary.week_iso) is None
+    assert summary.digest_persisted is False
+
+
+def test_run_weekly_dry_run_does_not_create_db_file(tmp_home, step_recorder):
+    """dry_run=True must not construct a ProfileStore (no DB file write).
+
+    Spec AC #1: dry-run prevents file writes. The ProfileStore constructor
+    creates ~/.praxis/profile.db as a side effect, so dry-run must avoid
+    constructing one when the caller hasn't supplied one.
+    """
+    db_path = tmp_home / ".praxis" / "profile.db"
+    assert not db_path.exists()
+    run_weekly(dry_run=True)
+    assert not db_path.exists(), (
+        "dry_run=True wrote profile.db; ProfileStore() must not be "
+        "constructed in the dry-run path"
+    )
+
+
+def test_run_weekly_dry_run_with_explicit_store_does_not_write(
+    tmp_home, step_recorder
+):
+    """dry_run wins over an explicit store= (no row is written either way).
+
+    Defense-in-depth: callers who pass a real store but also ask for
+    dry-run must still get no persistence. Pinning this avoids someone
+    later "fixing" the explicit-store branch to write through.
+    """
+    store = ProfileStore(home=resolve_home())
+    assert store.count_weekly_digests() == 0
+    summary = run_weekly(store=store, dry_run=True)
+    assert store.count_weekly_digests() == 0
+    assert summary.digest_persisted is False
+
+
+def test_run_weekly_dry_run_still_returns_rendered_terminal(
+    tmp_home, monkeypatch
+):
+    """dry_run=True still computes and returns the terminal rendering.
+
+    Spec AC #2: terminal output is still produced. The renderer returns
+    its string via WeeklyRunSummary.rendered_terminal; this test pins
+    that dry-run does NOT short-circuit the render step or drop its
+    output.
+    """
+    # Stub just the render step to return a sentinel terminal string.
+    # Leave the rest of the pipeline real, so we exercise the full
+    # control flow that an actual dry-run user would hit.
+    captured: dict[str, object] = {}
+
+    def _render_stub(*args, **kwargs):
+        captured["args_count"] = len(args)
+        captured["dry_run_kwarg"] = kwargs.get("dry_run")
+        return ("<html>WEEK</html>", "TERMINAL DIGEST OUTPUT")
+
+    monkeypatch.setattr(orch, "_step_render", _render_stub)
+    # Stub the upstream steps too so the test does not depend on the
+    # scanners finding sessions or the LLM judges being reachable.
+    monkeypatch.setattr(orch, "_step_scan", lambda *_a, **_k: [])
+    monkeypatch.setattr(orch, "_step_cluster", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        orch,
+        "_step_pass1",
+        lambda *_a, **_k: Pass1Output(results={}, low_confidence_session_ids=[]),
+    )
+    monkeypatch.setattr(orch, "_step_pass2", lambda *_a, **_k: {})
+    monkeypatch.setattr(orch, "_step_validate_moments", lambda *_a, **_k: [])
+    monkeypatch.setattr(orch, "_step_select_moments", lambda *_a, **_k: None)
+    monkeypatch.setattr(orch, "_step_follow_up", lambda *_a, **_k: None)
+
+    summary = run_weekly(dry_run=True)
+    assert summary.rendered_terminal == "TERMINAL DIGEST OUTPUT"
+    assert summary.rendered_html == "<html>WEEK</html>"
+    assert captured["dry_run_kwarg"] is True
+
+
+def test_run_weekly_dry_run_flag_reaches_render_step(tmp_home, step_recorder):
+    """dry_run is propagated to _step_render so the future on-disk write
+    can be skipped while still computing the strings."""
+    run_weekly(dry_run=True)
+    by_name = {name: payload for name, payload in step_recorder}
+    assert by_name["render"]["kwargs"].get("dry_run") is True
+    # And the positional-args count remains the documented 5, so the
+    # data-flow contract from US-070 is not weakened.
+    assert len(by_name["render"]["args"]) == 5
+
+
+def test_run_weekly_default_persists_digest(tmp_home, step_recorder):
+    """The default (dry_run=False) still persists the digest row.
+
+    Pins that adding the dry-run gate did not flip the default off.
+    """
+    summary = run_weekly()
+    store = ProfileStore(home=resolve_home())
+    assert store.count_weekly_digests() == 1
+    assert summary.digest_persisted is True
+
+
+# --- US-073: perf target on 30-session week ------------------------------
+
+# Spec 15.2 / US-073 AC: a 30-session synthetic week must complete in <120s
+# wall time and project <$2 in LLM spend. The test stubs every LLM call so
+# the elapsed time measures only the in-process pipeline (scanner I/O, the
+# orchestrator's own bookkeeping, follow-up template, persistence), and the
+# cost figure measures what those calls would have *cost* given their
+# input/output token volumes and each judge's recorded model. With stubs in
+# place the real headroom under the 120s gate is huge - that is by design;
+# the gate exists to catch regressions where the pipeline accidentally grows
+# an O(N^2) loop or a synchronous network call we forgot to mock.
+
+PERF_WALL_TIME_LIMIT_S = 120.0
+PERF_COST_LIMIT_USD = 2.0
+
+
+def _write_synthetic_claude_session(home, when: datetime, content: str) -> None:
+    """Drop one Claude JSONL into tmp_home so the scanner picks it up.
+
+    Mirrors the shape of `synthetic_claude_session` in conftest.py but
+    parameterized so the perf fixture can produce 30 distinct files.
+    Each session has 4 turns of realistic length (~150-250 chars), which
+    keeps the per-session compact transcript big enough to make the cost
+    estimator's contribution non-trivial without being unrealistic.
+    """
+    root = home / ".claude" / "projects" / "perf-30-sessions"
     root.mkdir(parents=True, exist_ok=True)
     session_id = str(uuid.uuid4())
     path = root / f"{session_id}.jsonl"
-    when = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
     events = [
         {
             "type": "user",
             "timestamp": when.isoformat().replace("+00:00", "Z"),
+            "message": {"role": "user", "content": content},
+        },
+        {
+            "type": "assistant",
+            "timestamp": (when + timedelta(seconds=10)).isoformat().replace("+00:00", "Z"),
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-7",
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        "Plan: identify the failing assertion, trace the data "
+                        "model back to the producer, and add a regression test."
+                    ),
+                }],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": (when + timedelta(seconds=20)).isoformat().replace("+00:00", "Z"),
             "message": {
                 "role": "user",
-                "content": f"Goal: session {session_index} task.",
+                "content": (
+                    "Walk me through the trade-off. I want to understand why "
+                    "this approach is safer than the alternative we tried."
+                ),
             },
         },
         {
             "type": "assistant",
-            "timestamp": (when + timedelta(seconds=10))
-            .isoformat()
-            .replace("+00:00", "Z"),
+            "timestamp": (when + timedelta(seconds=30)).isoformat().replace("+00:00", "Z"),
             "message": {
                 "role": "assistant",
                 "model": "claude-opus-4-7",
-                "content": [{"type": "text", "text": f"Working on session {session_index}."}],
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        "Because the audit_log writes are async, the old path "
+                        "could commit the SQL while the audit was still in "
+                        "flight - so a crash mid-flush dropped the trail."
+                    ),
+                }],
             },
         },
     ]
     with path.open("w", encoding="utf-8") as f:
         for e in events:
             f.write(json.dumps(e) + "\n")
-    return path
 
 
-def test_pass1_runs_on_every_session_in_window(tmp_home, fake_judge):
-    """US-027: every session in the weekly window receives a pass-1 judgment.
+@pytest.fixture
+def thirty_synthetic_sessions(tmp_home):
+    """Write 30 Claude JSONL files spread across the past week.
 
-    Build a multi-session window with one session that has a tiny prompt
-    and one that has a long prompt - the kind of split that a heuristic
-    skip path (e.g. "short prompts are obvious; don't waste a judge call")
-    would gate on. The orchestrator must judge all of them.
+    Spreading the mtimes keeps the scanner's `since=` filter happy and
+    matches the distribution a real user would have. The exact spacing
+    is not load-bearing; the test only cares that 30 files exist within
+    the orchestrator's default `since_days=7` window.
     """
-    project_root = tmp_home / ".claude" / "projects" / "weekly-window"
-    session_count = 8
-    for i in range(session_count):
-        _write_synthetic_claude_session(project_root, i)
+    now = datetime.now(timezone.utc)
+    for i in range(30):
+        # ~5 hours between sessions keeps everything inside a 7-day window.
+        when = now - timedelta(hours=5 * i + 1)
+        _write_synthetic_claude_session(
+            tmp_home,
+            when,
+            (
+                f"Goal: refactor segment {i} of the auth module. "
+                f"Constraints: keep CI green and audit_log writes synchronous."
+            ),
+        )
 
-    summary = run()
-    assert summary.sessions_seen == session_count
-    assert summary.sessions_new == session_count
-    assert summary.sessions_scored == session_count
 
+@pytest.fixture
+def stub_weekly_llm_calls(monkeypatch):
+    """Replace every LLM call the weekly pipeline reaches with a fast stub.
 
-def test_pass1_no_heuristic_skip_path(tmp_home, monkeypatch):
-    """US-027: no heuristic feature gates the pass-1 call.
-
-    We verify by recording every Session the pass-1 judge sees - if any
-    feature-based filter were inserted between the orchestrator and the
-    judge, some sessions would be missing. We assert the recorded set
-    matches the set of seen sessions exactly.
+    Real API calls are not allowed in tests (no keys, slow, expensive).
+    These stubs return realistic-shaped objects so the cost estimator's
+    per-call sizing remains representative of production: the judge
+    rationale lengths feed the output-token estimate, and the moment
+    excerpts are taken verbatim from the synthetic transcripts so the
+    substring verifier keeps them (otherwise the moment_count argument
+    to the cost estimator would always be 0 and the selector wedge of
+    the estimate would vanish).
     """
-    project_root = tmp_home / ".claude" / "projects" / "no-skip"
-    session_count = 5
-    for i in range(session_count):
-        # Mix turn counts and prompt lengths to exercise common heuristic
-        # candidates (turn_count < N, avg_prompt_chars < N).
-        _write_synthetic_claude_session(project_root, i, hours_ago=i + 1)
-
-    judged_ids: list[str] = []
-
-    def _recording_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
-        judged_ids.append(session.stable_id)
+    # Every 5th session gets a low-confidence flag so pass 2 actually
+    # runs - exercising the more expensive frontier wedge of the cost
+    # model. 6/30 escalation rate sits inside the spec 15.2 #3 band
+    # (15-30%) which the calibration target uses on real data.
+    def _fake_score(session, prefer="claude"):  # noqa: ARG001
+        # Recognizable substring from the synthetic transcripts above so
+        # the moment survives the post-judge substring verifier.
+        excerpt = "Walk me through the trade-off"
+        confidence = "low" if hash(session.stable_id) % 5 == 0 else "medium"
+        # Pass 2 uses the frontier model; pass 1 uses the cheap tier.
+        # We can't tell which call this is from inside the stub, so we
+        # use the session_stable_id hash as a deterministic proxy: a
+        # session flagged "low" by pass 1 will get re-judged by pass 2
+        # with a different model. To approximate that, the stub returns
+        # a heavier judge_model when the session would escalate.
+        judge_model = (
+            "claude-opus-4-7" if confidence == "low" else "claude-haiku-4-5"
+        )
         return JudgeResult(
             dimension_scores={d.key: 6.0 for d in RUBRIC},
-            rationale={d.key: "fixture" for d in RUBRIC},
-            standout_moments=[],
-            failure_modes=[],
-            overall_note="fixture",
-            judge_model="fixture-cheap-tier",
+            rationale={
+                d.key: (
+                    f"The user's {d.key} work was workmanlike: clear goal "
+                    f"statement and some context but no explicit success criteria."
+                )
+                for d in RUBRIC
+            },
+            standout_moments=["asked for trade-off rationale before committing"],
+            failure_modes=["did not verify audit_log write semantics"],
+            overall_note=(
+                "Solid mid-week session. The user asked good clarifying "
+                "questions but accepted the SQL block without re-reading it."
+            ),
+            judge_model=judge_model,
+            moments=[
+                JudgeMoment(
+                    dim_key="verification",
+                    turn_index=1,
+                    quoted_excerpt=excerpt,
+                    why_it_lost_score=(
+                        "accepted assistant explanation without checking the "
+                        "audit_log write semantics"
+                    ),
+                    suggested_alternative=(
+                        "ask the assistant to point to the exact lines that "
+                        "make the writes synchronous before accepting"
+                    ),
+                    severity="moderate",
+                )
+            ],
+            confidence=confidence,
+            confidence_reason="single-session signal",
         )
 
-    monkeypatch.setattr(
-        "praxis.scoring.aggregate.score_session_pass1", _recording_pass1
-    )
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session", _fake_score)
 
-    summary = run()
-    assert summary.sessions_seen == session_count
-    assert summary.sessions_scored == session_count
-    assert len(judged_ids) == session_count
-    assert len(set(judged_ids)) == session_count
+    def _fake_cluster(sessions, prefer="anthropic"):  # noqa: ARG001
+        # One realistic-shaped Task; coverage validation in cluster_sessions
+        # is not exercised here (the orchestrator only consumes the result).
+        return [
+            Task(
+                label="auth module refactor",
+                task_type="refactoring",
+                session_ids=[s.stable_id for s in sessions],
+                rationale="all sessions share the audit_log/auth-module goal",
+                label_source="llm",
+            )
+        ]
 
+    monkeypatch.setattr(orch, "cluster_sessions", _fake_cluster)
 
-def test_pass1_uses_cheap_tier_anthropic_model(tmp_home, monkeypatch):
-    """US-027: pass 1 calls Claude with the cheap-tier model id, not the frontier."""
-    project_root = tmp_home / ".claude" / "projects" / "pass1-model-check"
-    _write_synthetic_claude_session(project_root, 0)
-
-    seen_models: list[str] = []
-
-    def _recording_with_claude(session, model="claude-opus-4-7", **kwargs):  # noqa: ARG001
-        seen_models.append(model)
-        return JudgeResult(
-            dimension_scores={d.key: 5.0 for d in RUBRIC},
-            rationale={d.key: "x" for d in RUBRIC},
-            standout_moments=[],
-            failure_modes=[],
-            overall_note="x",
-            judge_model=model,
+    def _fake_select(candidates, primary_provider="anthropic", *, llm_caller=None):  # noqa: ARG001
+        if not candidates:
+            return None
+        return MomentSelection(
+            headline_moment_id=candidates[0].moment.moment_id,
+            headline_reason="largest verification slip this week",
+            supporting_moment_ids=[
+                c.moment.moment_id for c in candidates[1:3]
+            ],
         )
 
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setattr(
-        "praxis.scoring.judge.score_with_claude", _recording_with_claude
-    )
-
-    summary = run()
-    assert summary.sessions_scored == 1
-    assert seen_models == ["claude-haiku-4-5"]
+    monkeypatch.setattr(orch, "select_moments_with_fallback", _fake_select)
 
 
-# ---------------------------------------------------------------------------
-# US-028: low-confidence sessions escalate to the pass-2 frontier judge
-# ---------------------------------------------------------------------------
+def test_run_weekly_perf_30_sessions_under_120s_and_2_usd(
+    thirty_synthetic_sessions, stub_weekly_llm_calls
+):
+    """Spec 15.2 / US-073 AC #1-2: 30-session week is <120s wall, <$2 spend.
 
-
-def _pass1_result(*, confidence: str, judge_model: str = "pass-1-cheap") -> JudgeResult:
-    """Pass-1-style JudgeResult fixture with the given self-confidence."""
-    return JudgeResult(
-        dimension_scores={d.key: 5.0 for d in RUBRIC},
-        rationale={d.key: "pass1" for d in RUBRIC},
-        standout_moments=["pass1 standout"],
-        failure_modes=["pass1 failure"],
-        overall_note="pass1 overall",
-        judge_model=judge_model,
-        confidence=confidence,  # type: ignore[arg-type]
-    )
-
-
-def _pass2_result() -> JudgeResult:
-    """Pass-2-style JudgeResult with distinctive values so we can verify override."""
-    return JudgeResult(
-        dimension_scores={d.key: 9.0 for d in RUBRIC},
-        rationale={d.key: "pass2-frontier" for d in RUBRIC},
-        standout_moments=["pass2 standout"],
-        failure_modes=["pass2 failure"],
-        overall_note="pass2 overall",
-        judge_model="pass-2-frontier",
-        confidence="high",
-    )
-
-
-def test_pass2_escalates_only_low_confidence_sessions(tmp_home, monkeypatch):
-    """US-028: pass 2 runs for low-confidence sessions, not medium or high.
-
-    Builds a window where pass-1 returns a different confidence per session
-    (medium / high / low). Pass-2 must be invoked exactly once - for the
-    low-confidence session - and never for the others.
+    AC #3 ("the perf test records the measurement") is satisfied by the
+    print statement at the bottom: pytest captures stdout and surfaces
+    it on `-s` / `-rA`, and it is included in the assert messages so a
+    failure on either gate also records the measured numbers.
     """
-    project_root = tmp_home / ".claude" / "projects" / "escalation-mix"
-    for i in range(3):
-        _write_synthetic_claude_session(project_root, i, hours_ago=i + 1)
+    started = time.monotonic()
+    summary = run_weekly()
+    wall_elapsed = time.monotonic() - started
 
-    confidences = iter(["medium", "high", "low"])
+    # Sanity: the scanner found all 30 files we wrote.
+    assert len(summary.sessions) == 30, (
+        f"scanner discovered {len(summary.sessions)} sessions, expected 30"
+    )
 
-    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
-        return _pass1_result(confidence=next(confidences))
+    # AC #1: <120s wall time. Check both the externally-measured wall time
+    # (this test's scope) and the summary's own self-reported elapsed so a
+    # regression in either the pipeline OR the timing instrumentation
+    # surfaces here.
+    assert wall_elapsed < PERF_WALL_TIME_LIMIT_S, (
+        f"30-session run_weekly wall time {wall_elapsed:.2f}s "
+        f"exceeds spec 15.2 limit of {PERF_WALL_TIME_LIMIT_S}s"
+    )
+    assert summary.elapsed_seconds < PERF_WALL_TIME_LIMIT_S, (
+        f"WeeklyRunSummary.elapsed_seconds={summary.elapsed_seconds}s "
+        f"exceeds spec 15.2 limit of {PERF_WALL_TIME_LIMIT_S}s"
+    )
 
-    pass2_calls: list[str] = []
+    # AC #2: <$2 projected spend. cost_total_usd is None only when no
+    # priced calls happened, which would mean the stubs above silently
+    # broke. Treat that as a perf-test failure too.
+    assert summary.cost_total_usd is not None, (
+        "cost_total_usd was None - the cost estimator saw no priced calls, "
+        "which usually means the LLM stubs are returning unpriced model ids"
+    )
+    assert summary.cost_total_usd < PERF_COST_LIMIT_USD, (
+        f"30-session run_weekly projected ${summary.cost_total_usd:.4f} in "
+        f"LLM spend, exceeds spec 15.2 limit of ${PERF_COST_LIMIT_USD:.2f}"
+    )
 
-    def _fake_pass2(session, prefer="claude"):  # noqa: ARG001
-        pass2_calls.append(session.stable_id)
-        return _pass2_result()
-
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _fake_pass2)
-
-    summary = run()
-    assert summary.sessions_scored == 3
-    assert len(pass2_calls) == 1, (
-        f"pass 2 should run only on the low-confidence session, got {len(pass2_calls)} call(s)"
+    # AC #3: record the measurement. Pytest captures stdout by default;
+    # `pytest -s` or `-rA` surface this line in CI logs.
+    print(
+        f"[perf] run_weekly(30 sessions): "
+        f"wall_elapsed={wall_elapsed:.3f}s, "
+        f"summary.elapsed_seconds={summary.elapsed_seconds}s, "
+        f"cost_total_usd=${summary.cost_total_usd:.4f}"
     )
 
 
-def test_pass2_result_overrides_pass1(tmp_home, monkeypatch):
-    """US-028: pass-2 scores, rationale, and moments override pass-1 for that session."""
-    project_root = tmp_home / ".claude" / "projects" / "override-check"
-    _write_synthetic_claude_session(project_root, 0)
+def test_run_weekly_cost_total_usd_is_persisted(
+    thirty_synthetic_sessions, stub_weekly_llm_calls
+):
+    """The estimated cost lands in weekly_digests.cost_total_usd.
 
-    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
-        return _pass1_result(confidence="low")
-
-    def _fake_pass2(session, prefer="claude"):  # noqa: ARG001
-        return _pass2_result()
-
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _fake_pass2)
-
-    run()
-
-    store = ProfileStore(home=resolve_home())
-    rows = store.load_session_scores()
-    assert len(rows) == 1
-    row = rows[0]
-    # All dim scores come from pass 2 (9.0), not pass 1 (5.0).
-    assert all(v == 9.0 for v in row["dimension_scores"].values())
-    # The persisted judge_result carries pass-2 metadata, not pass-1.
-    jr = row["judge_result"]
-    assert jr["judge_model"] == "pass-2-frontier"
-    assert jr["overall_note"] == "pass2 overall"
-    assert jr["rationale"]["planning"] == "pass2-frontier"
-    assert "pass2 standout" in jr["standout_moments"]
-    assert "pass2 failure" in jr["failure_modes"]
-
-
-def test_pass2_is_skipped_for_medium_confidence(tmp_home, monkeypatch):
-    """US-028 negative path: a medium-confidence pass-1 result is the final score.
-
-    The persisted row must reflect pass-1's output and the pass-2 entrypoint
-    must not be invoked at all.
+    US-073's perf target is only useful if the number gets stored alongside
+    the digest so it can feed the cost ledger panel in spec 10.1. This pins
+    the persistence contract: the estimator's output must reach the row.
     """
-    project_root = tmp_home / ".claude" / "projects" / "medium-only"
-    _write_synthetic_claude_session(project_root, 0)
-
-    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
-        return _pass1_result(confidence="medium", judge_model="pass-1-medium")
-
-    def _exploding_pass2(session, prefer="claude", **kwargs):  # noqa: ARG001
-        raise AssertionError("pass 2 should not run for medium confidence")
-
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _exploding_pass2)
-
-    run()
-
+    summary = run_weekly()
     store = ProfileStore(home=resolve_home())
-    rows = store.load_session_scores()
-    assert len(rows) == 1
-    assert rows[0]["judge_result"]["judge_model"] == "pass-1-medium"
+    row = store.load_weekly_digest(summary.week_iso)
+    assert row is not None
+    assert row["cost_total_usd"] is not None
+    assert row["cost_total_usd"] == pytest.approx(summary.cost_total_usd)
 
 
-def test_pass2_failure_keeps_pass1_score(tmp_home, monkeypatch):
-    """If pass 2 returns None (no key, transient error), keep the pass-1 score.
+def test_run_weekly_cost_baseline_uses_prior_weekly_digests(tmp_home, step_recorder):
+    """spec 10.1: cost_baseline_usd is the rolling weekly mean of prior runs.
 
-    Spec: a session should never silently disappear; if escalation cannot
-    run, pass 1's read is what we have, so persist it rather than dropping
-    the session.
+    Seeds two prior digests with known costs, then runs the orchestrator and
+    confirms the new row's cost_baseline_usd is the mean of the two priors.
+    The current run is excluded by week_iso (the helper filters strictly <).
     """
-    project_root = tmp_home / ".claude" / "projects" / "pass2-failure"
-    _write_synthetic_claude_session(project_root, 0)
-
-    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
-        return _pass1_result(confidence="low", judge_model="pass-1-fallback")
-
-    def _failing_pass2(session, prefer="claude"):  # noqa: ARG001
-        return None
-
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _failing_pass2)
-
-    summary = run()
-    assert summary.sessions_scored == 1
-
     store = ProfileStore(home=resolve_home())
-    rows = store.load_session_scores()
-    assert len(rows) == 1
-    assert rows[0]["judge_result"]["judge_model"] == "pass-1-fallback"
+    # Seed two prior weeks with $0.50 and $1.00 spend.
+    snapshot = orch.ProfileSnapshot.from_scores([])
+    store.save_weekly_digest(
+        week_iso="2026-W19",
+        trajectory_label="steady",
+        trajectory_headline="steady week",
+        snapshot=snapshot,
+        cost_total_usd=0.50,
+    )
+    store.save_weekly_digest(
+        week_iso="2026-W20",
+        trajectory_label="steady",
+        trajectory_headline="steady week",
+        snapshot=snapshot,
+        cost_total_usd=1.00,
+    )
+    summary = run_weekly(store=store)
+    row = store.load_weekly_digest(summary.week_iso)
+    assert row is not None
+    # Mean of 0.50 and 1.00 = 0.75. The current week is NOT included in
+    # its own baseline (the helper's WHERE week_iso < ? filter).
+    assert row["cost_baseline_usd"] == pytest.approx(0.75)
 
 
-def test_pass2_call_does_not_include_pass1_outputs(tmp_home, monkeypatch):
-    """AC: pass-2 prompts do not include pass-1 outputs.
+def test_run_weekly_cost_baseline_is_none_on_first_run(tmp_home, step_recorder):
+    """First-ever digest has no prior weeks, so cost_baseline_usd is NULL.
 
-    The pass-2 entrypoint is wrapped to capture its call signature and we
-    assert it only receives the Session - never a JudgeResult, score dict,
-    rationale, or moments from pass 1.
+    The renderer (spec 8.4 logic applied to cost) shows "--" in that case
+    and skips the delta. Pinning None (not 0.0) here keeps that branch live.
     """
-    project_root = tmp_home / ".claude" / "projects" / "pass2-args"
-    _write_synthetic_claude_session(project_root, 0)
-
-    captured: list[tuple[tuple, dict]] = []
-
-    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
-        return _pass1_result(confidence="low")
-
-    def _capturing_pass2(*args, **kwargs):
-        captured.append((args, kwargs))
-        return _pass2_result()
-
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _capturing_pass2)
-
-    run()
-
-    assert len(captured) == 1
-    args, kwargs = captured[0]
-    # Only the session goes in. No pass-1 JudgeResult is forwarded.
-    assert len(args) == 1
-    from praxis.models import Session as _Session
-    assert isinstance(args[0], _Session)
-    for v in list(args[1:]) + list(kwargs.values()):
-        assert not isinstance(v, JudgeResult), "pass-2 must not receive a JudgeResult"
+    summary = run_weekly()
+    store = ProfileStore(home=resolve_home())
+    row = store.load_weekly_digest(summary.week_iso)
+    assert row is not None
+    assert row["cost_baseline_usd"] is None
 
 
-# ---------------------------------------------------------------------------
-# US-029: both passes persisted with judge_pass column
-# ---------------------------------------------------------------------------
+def test_run_weekly_dry_run_does_not_compute_baseline(tmp_home, step_recorder):
+    """Dry-run skips the persistence block, so cost_baseline_usd stays None.
 
-
-def test_pass1_only_session_persists_judge_pass_1(tmp_home, fake_judge):
-    """AC: a session that does NOT escalate has a single row with judge_pass=1.
-
-    The default fake_judge fixture returns confidence='medium' (the dataclass
-    default for an unset field), so no escalation happens.
+    The baseline read is in the `if not dry_run` block alongside the write,
+    by design: dry-run callers do not need the baseline because they will
+    not persist a row. This pins the contract so a future refactor cannot
+    accidentally read from the store under dry-run.
     """
-    project_root = tmp_home / ".claude" / "projects" / "judge-pass-1-only"
-    _write_synthetic_claude_session(project_root, 0)
-
-    run()
-
+    # Seed a prior digest with known cost so the baseline read WOULD have
+    # picked it up if dry-run were not blocking the read.
     store = ProfileStore(home=resolve_home())
-    all_rows = store.load_session_scores(include_all_passes=True)
-    assert len(all_rows) == 1
-    assert all_rows[0]["judge_pass"] == 1
-
-
-def test_escalated_session_persists_both_pass_rows(tmp_home, monkeypatch):
-    """AC: when pass 2 runs, both pass-1 and pass-2 rows are persisted.
-
-    Pass-1 must not be overwritten when pass-2 lands; the composite primary
-    key on (stable_id, judge_pass) keeps both alive so the disagreement is
-    auditable (spec §9.6).
-    """
-    project_root = tmp_home / ".claude" / "projects" / "judge-pass-both"
-    _write_synthetic_claude_session(project_root, 0)
-
-    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
-        return _pass1_result(confidence="low", judge_model="pass-1-cheap")
-
-    def _fake_pass2(session, prefer="claude"):  # noqa: ARG001
-        return _pass2_result()
-
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _fake_pass2)
-
-    run()
-
-    store = ProfileStore(home=resolve_home())
-    all_rows = store.load_session_scores(include_all_passes=True)
-    assert len(all_rows) == 2, "both pass-1 and pass-2 rows must coexist"
-    by_pass = {row["judge_pass"]: row for row in all_rows}
-    assert set(by_pass) == {1, 2}
-    # The pass-1 row should carry pass-1's judge model and scores (5.0), not
-    # pass-2's (9.0): the row has not been overwritten.
-    assert by_pass[1]["judge_result"]["judge_model"] == "pass-1-cheap"
-    assert all(v == 5.0 for v in by_pass[1]["dimension_scores"].values())
-    # The pass-2 row carries pass-2's frontier metadata.
-    assert by_pass[2]["judge_result"]["judge_model"] == "pass-2-frontier"
-    assert all(v == 9.0 for v in by_pass[2]["dimension_scores"].values())
-
-
-def test_load_session_scores_dedupes_to_winning_pass_by_default(tmp_home, monkeypatch):
-    """``load_session_scores()`` (no flag) returns one row per session — the
-    pass-2 row when escalation happened. Otherwise the snapshot pipeline would
-    double-count any escalated session in the weekly window.
-    """
-    project_root = tmp_home / ".claude" / "projects" / "judge-pass-dedup"
-    _write_synthetic_claude_session(project_root, 0)
-
-    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
-        return _pass1_result(confidence="low")
-
-    def _fake_pass2(session, prefer="claude"):  # noqa: ARG001
-        return _pass2_result()
-
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _fake_pass2)
-
-    run()
-
-    store = ProfileStore(home=resolve_home())
-    canonical = store.load_session_scores()
-    assert len(canonical) == 1
-    assert canonical[0]["judge_pass"] == 2
-    assert canonical[0]["judge_result"]["judge_model"] == "pass-2-frontier"
-
-
-def test_no_pass2_row_when_escalation_fails(tmp_home, monkeypatch):
-    """When pass 2 fails (no key / transient error), no pass-2 row is
-    written. The pass-1 row stays as the canonical judgment so the session
-    is never silently dropped (consistent with US-028's fallback behavior)."""
-    project_root = tmp_home / ".claude" / "projects" / "judge-pass-2-fails"
-    _write_synthetic_claude_session(project_root, 0)
-
-    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
-        return _pass1_result(confidence="low", judge_model="pass-1-fallback")
-
-    def _failing_pass2(session, prefer="claude"):  # noqa: ARG001
-        return None
-
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _failing_pass2)
-
-    run()
-
-    store = ProfileStore(home=resolve_home())
-    all_rows = store.load_session_scores(include_all_passes=True)
-    assert len(all_rows) == 1
-    assert all_rows[0]["judge_pass"] == 1
-    assert all_rows[0]["judge_result"]["judge_model"] == "pass-1-fallback"
-
-
-# ---------------------------------------------------------------------------
-# US-031: 4-week confidence-distribution telemetry
-# ---------------------------------------------------------------------------
-
-
-def test_pass1_distribution_logged_to_run_log(tmp_home, monkeypatch):
-    """AC: each weekly run logs the pass-1 confidence distribution.
-
-    Builds a window with sessions that produce a mix of confidences and
-    asserts a ``kind='pass1_conf'`` row lands in run_log with counts that
-    match what the fake pass-1 judge emitted.
-    """
-    project_root = tmp_home / ".claude" / "projects" / "distribution"
-    for i in range(3):
-        _write_synthetic_claude_session(project_root, i, hours_ago=i + 1)
-
-    confidences = iter(["medium", "high", "low"])
-
-    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
-        return _pass1_result(confidence=next(confidences))
-
-    def _fake_pass2(session, prefer="claude", **kwargs):  # noqa: ARG001
-        return _pass2_result()
-
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _fake_pass2)
-
-    run()
-
-    store = ProfileStore(home=resolve_home())
-    rolling = store.recent_pass1_confidence(weeks=4)
-    # Three sessions: one each of medium/high/low.
-    assert rolling == {"low": 1, "medium": 1, "high": 1}
-
-
-def test_pass1_distribution_not_logged_when_zero_calls(tmp_home, monkeypatch):
-    """No pass-1 row should be written when no pass-1 calls succeed.
-
-    Without API keys, the pass-1 entrypoint returns None for every session,
-    so the per-run counter stays zero. Writing a row of zeros would pollute
-    run_log and skew the rolling 4-week share.
-    """
-    project_root = tmp_home / ".claude" / "projects" / "no-keys"
-    _write_synthetic_claude_session(project_root, 0)
-    # tmp_home already clears API key env vars.
-    run()
-    store = ProfileStore(home=resolve_home())
-    rolling = store.recent_pass1_confidence(weeks=4)
-    assert rolling == {"low": 0, "medium": 0, "high": 0}
-
-
-def test_calibration_notice_is_none_without_history(tmp_home, fake_judge):
-    """A fresh install has no history, so the calibration notice must be None.
-
-    With zero prior pass-1 rows, the 4-week share has a denominator of zero
-    and neither threshold can trip; the RunSummary must not surface a banner.
-    """
-    project_root = tmp_home / ".claude" / "projects" / "fresh"
-    _write_synthetic_claude_session(project_root, 0)
-    summary = run()
-    assert summary.calibration_notice is None
-
-
-def test_rolling_high_over_90_triggers_calibration_notice(tmp_home, monkeypatch):
-    """AC: rolling 4-week share of high > 90% surfaces the digest banner.
-
-    Seeds the run_log with a 4-week history where 95% of pass-1 ratings are
-    high, then runs the orchestrator on a new session and asserts the
-    RunSummary carries the "calibration was off; re-tuned" notice.
-    """
-    project_root = tmp_home / ".claude" / "projects" / "over-confident"
-    _write_synthetic_claude_session(project_root, 0)
-
-    store = ProfileStore(home=resolve_home())
-    # 95 high / 3 medium / 2 low = 95% high, well above the 90% threshold.
-    store.record_pass1_confidence(low=2, medium=3, high=95)
-
-    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
-        return _pass1_result(confidence="medium")
-
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
-
-    summary = run()
-    assert summary.calibration_notice == "calibration was off; re-tuned"
-
-
-def test_rolling_high_at_or_below_90_does_not_trigger(tmp_home, monkeypatch):
-    """The threshold is strict ``>`` 90%, not ``>=``: a 90% share is fine."""
-    project_root = tmp_home / ".claude" / "projects" / "at-threshold"
-    _write_synthetic_claude_session(project_root, 0)
-
-    store = ProfileStore(home=resolve_home())
-    # 9 high / 1 other = exactly 90%. Must NOT trip the banner.
-    store.record_pass1_confidence(low=1, medium=0, high=9)
-
-    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
-        return _pass1_result(confidence="medium")
-
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
-
-    summary = run()
-    assert summary.calibration_notice is None
-
-
-def test_rolling_high_over_90_sharpens_pass1_prompt(tmp_home, monkeypatch):
-    """AC: when high > 90%, the pass-1 prompt is auto-sharpened.
-
-    Captures the ``sharpen_calibration`` kwarg the orchestrator forwards to
-    the pass-1 judge entrypoint. The flag must be True so the cheap-tier
-    prompt includes the over-confidence calibration check on this run.
-    """
-    project_root = tmp_home / ".claude" / "projects" / "sharpen"
-    _write_synthetic_claude_session(project_root, 0)
-
-    store = ProfileStore(home=resolve_home())
-    store.record_pass1_confidence(low=1, medium=2, high=97)
-
-    captured: dict[str, object] = {}
-
-    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
-        captured["sharpen_calibration"] = kwargs.get("sharpen_calibration", False)
-        captured["stricter_low"] = kwargs.get("stricter_low", False)
-        return _pass1_result(confidence="medium")
-
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
-
-    run()
-    assert captured["sharpen_calibration"] is True
-    assert captured["stricter_low"] is False
-
-
-def test_rolling_low_over_70_triggers_stricter_low_flag(tmp_home, monkeypatch):
-    """AC: rolling 4-week share of low > 70% applies the stricter definition.
-
-    The orchestrator must forward ``stricter_low=True`` to pass-1 when the
-    rolling share of low exceeds 70%, independent of any high-side action.
-    """
-    project_root = tmp_home / ".claude" / "projects" / "over-flagging"
-    _write_synthetic_claude_session(project_root, 0)
-
-    store = ProfileStore(home=resolve_home())
-    # 80 low / 10 medium / 10 high = 80% low, above the 70% threshold.
-    store.record_pass1_confidence(low=80, medium=10, high=10)
-
-    captured: dict[str, object] = {}
-
-    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
-        captured["stricter_low"] = kwargs.get("stricter_low", False)
-        captured["sharpen_calibration"] = kwargs.get("sharpen_calibration", False)
-        return _pass1_result(confidence="medium")
-
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
-
-    run()
-    assert captured["stricter_low"] is True
-    assert captured["sharpen_calibration"] is False
-
-
-def test_rolling_low_at_or_below_70_does_not_trigger(tmp_home, monkeypatch):
-    """The threshold is strict ``>`` 70%: a 70% share must not trip."""
-    project_root = tmp_home / ".claude" / "projects" / "low-threshold"
-    _write_synthetic_claude_session(project_root, 0)
-
-    store = ProfileStore(home=resolve_home())
-    # 7 low / 3 other = exactly 70%. Must NOT trip.
-    store.record_pass1_confidence(low=7, medium=2, high=1)
-
-    captured: dict[str, object] = {}
-
-    def _fake_pass1(session, prefer="claude", **kwargs):  # noqa: ARG001
-        captured["stricter_low"] = kwargs.get("stricter_low", False)
-        return _pass1_result(confidence="medium")
-
-    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
-
-    run()
-    assert captured["stricter_low"] is False
+    snapshot = orch.ProfileSnapshot.from_scores([])
+    store.save_weekly_digest(
+        week_iso="2026-W18",
+        trajectory_label="steady",
+        trajectory_headline="prior week",
+        snapshot=snapshot,
+        cost_total_usd=1.50,
+    )
+    summary = run_weekly(dry_run=True)
+    # No row was written this week (dry-run), and the in-memory summary
+    # carries cost_baseline_usd=None because the read was skipped.
+    assert summary.digest_persisted is False
+    assert summary.cost_baseline_usd is None

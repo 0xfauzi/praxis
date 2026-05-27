@@ -11,8 +11,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "run_weekly() added to praxis/orchestrator.py with 8 mockable step functions (_step_scan, _step_cluster, _step_pass1, _step_pass2, _step_validate_moments, _step_select_moments, _step_follow_up, _step_render). Pass1Output wraps results+low_confidence_session_ids so pass2 receives only IDs, never pass1 scores (spec 9.1). New tests in test_orchestrator.py monkeypatch each step and assert the call sequence equals the Section 9.4 order, and that each step receives only documented upstream outputs."
     },
     {
       "id": "US-071",
@@ -25,8 +25,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added ProfileStore.save_weekly_digest / load_weekly_digest / count_weekly_digests with INSERT OR REPLACE on the week_iso PK. snapshot_json is asdict(ProfileSnapshot). run_weekly() now computes trajectory via extract_signals + assess_trajectory (off scanned sessions, not via a new pipeline step) and UPSERTs the digest row after render. WeeklyRunSummary gains trajectory/cost_total_usd/cost_baseline_usd/digest_persisted fields. cost_total_usd and cost_baseline_usd are wired through as None pending US-073. html_path is None until the render step starts writing files."
     },
     {
       "id": "US-072",
@@ -38,8 +38,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added `dry_run: bool = False` parameter to run_weekly(). When True: skips ProfileStore construction (no profile.db write), skips save_weekly_digest call (no DB row), and passes dry_run=True kwarg through to _step_render so future file-write logic can short-circuit while still computing rendered strings. Explicit store= injection does NOT override dry_run - defense-in-depth so the flag cannot be defeated. The full pipeline still executes; only side effects are suppressed. WeeklyRunSummary.rendered_terminal is populated as usual so terminal output remains available."
     },
     {
       "id": "US-073",
@@ -52,8 +52,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added praxis/scoring/cost.py with estimate_weekly_pipeline_cost() that sums per-call costs across cluster + pass1 + pass2 + selector using model-card pricing (chars/4 -> tokens, then per-million rate). run_weekly() now populates cost_total_usd from the estimate (clamped to None when 0.0) and reads cost_baseline_usd via new ProfileStore.weekly_cost_baseline(before_week_iso, lookback_days=90), which AVG()s prior weekly_digests.cost_total_usd over the last 90 days excluding the current week. Baseline read is inside the `if not dry_run` block (dry-run never touches the store). New perf test writes 30 synthetic Claude JSONL files into tmp_home with mtimes spread across the past week, stubs score_session/cluster_sessions/select_moments_with_fallback (no real LLM keys available in tests), runs run_weekly(), and asserts wall<120s + cost_total<$2 + prints the measurement. Real-stub measurement: ~8ms wall, ~$0.33 projected spend. Headroom is huge by design - the gate exists to catch regressions where the pipeline grows an O(N^2) loop or a synchronous network call we forgot to mock."
     }
   ]
 }
