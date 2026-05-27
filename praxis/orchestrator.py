@@ -15,9 +15,12 @@ import os
 import re
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from praxis.follow_up import FollowUp
 
 
 def _utcnow() -> datetime:
@@ -152,7 +155,7 @@ def _task_project_hint(task, sessions) -> str | None:
     counts: dict[str, int] = {}
     for h in hints:
         counts[h] = counts.get(h, 0) + 1
-    return max(counts, key=counts.get)
+    return max(counts, key=lambda k: counts[k])
 
 
 @dataclass
@@ -686,7 +689,7 @@ def _step_follow_up(
     week_iso: str,
     verification_rate: float = 0.0,
     delegation_rate: float = 0.0,
-) -> object | None:
+) -> "FollowUp | None":
     """Step 7: build this week's commitment from the headline moment.
 
     `verification_rate` and `delegation_rate` capture this week's actual
@@ -697,7 +700,7 @@ def _step_follow_up(
     """
     if selection is None:
         return None
-    from praxis.follow_up import HeadlineMoment, build_follow_up
+    from praxis.follow_up import FollowUp, HeadlineMoment, build_follow_up  # noqa: F401
 
     headline = next(
         (
@@ -1084,9 +1087,9 @@ def run_weekly(
     if explain_judging:
         confidence_dist = {"high": 0, "medium": 0, "low": 0}
         for r in pass1.results.values():
-            label = getattr(r, "confidence", None) or "medium"
-            if label in confidence_dist:
-                confidence_dist[label] += 1
+            conf_label: str = getattr(r, "confidence", None) or "medium"
+            if conf_label in confidence_dist:
+                confidence_dist[conf_label] += 1
 
     moments = _step_validate_moments(sessions, pass1, pass2_results)
     steps.append("validate_moments")

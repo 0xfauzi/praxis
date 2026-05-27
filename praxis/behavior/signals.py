@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from praxis.models import Role, Session
+from praxis.models import Session
 
 
 # Engagement signals — user is staying cognitively in the loop

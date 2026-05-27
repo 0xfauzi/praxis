@@ -16,7 +16,7 @@ import shutil
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 

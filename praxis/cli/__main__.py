@@ -40,8 +40,6 @@ from praxis.orchestrator import (
     run,
     run_weekly,
 )
-from praxis.reports.html_report import render as render_html_legacy
-from praxis.reports.terminal import render as render_terminal_legacy
 from praxis.scoring.baseline import (
     BaselineInputSession,
     compute_baseline,
@@ -516,7 +514,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         f"scored {summary.sessions_scored} via judge "
         f"({summary.elapsed_seconds}s)."
     )
-    print(f"Render the digest with: praxis week")
+    print("Render the digest with: praxis week")
     return 0
 
 
@@ -581,7 +579,7 @@ def cmd_baseline(args: argparse.Namespace) -> int:  # noqa: ARG001
     print(f"  Sessions in window: {baseline.session_count}")
     if forming:
         print("  Baseline forming. Come back in 2 more weeks for week-over-week.")
-        print(f"  Overall:           --")
+        print("  Overall:           --")
         for d in RUBRIC:
             print(f"  {d.title.ljust(22)} --")
         return 0
@@ -620,8 +618,8 @@ def cmd_history(args: argparse.Namespace) -> int:  # noqa: ARG001
             f"{entry['overall_mean']:.2f}/10  "
             f"{html_marker}"
         )
-    print(f"\nInspect one week: praxis show <week_iso>")
-    print(f"Open this week:   praxis open")
+    print("\nInspect one week: praxis show <week_iso>")
+    print("Open this week:   praxis open")
     return 0
 
 
@@ -1105,7 +1103,7 @@ def cmd_models(args: argparse.Namespace) -> int:
             print(f"    {card.id.ljust(28)} {card.tier.ljust(12)} {card.display_name}")
         print()
     print(f"Custom cards: drop JSON files in {resolve_home() / 'model_cards'}")
-    print(f"Inspect one card: praxis models --show <id>")
+    print("Inspect one card: praxis models --show <id>")
     return 0
 
 

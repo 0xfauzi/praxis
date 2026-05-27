@@ -248,6 +248,7 @@ class WeeklyDigest:
 # requires changing the spec and the tests.
 
 _PLACEHOLDER = "Not yet - this section will fill in as the week's data lands."
+_DOT = '<span class="w-meta-dot">·</span>'
 
 # The `<synthetic>` marker is the codex/claude scanner placeholder for an
 # unknown model field (see `_real_model` in praxis.scanners.codex). It
@@ -522,7 +523,7 @@ def _cost_ledger_section(ledger: CostLedger | None) -> str:
     breakdown.
     """
     if ledger is None or ledger.this_week_dollars <= 0.0:
-        return f"""
+        return """
   <section class="c-section" id="cost-ledger">
     <div class="s-eyebrow">Cost Ledger</div>
     <p class="placeholder">No priced model spend this week.</p>
@@ -592,7 +593,7 @@ def _task_breakdown_section(rows: tuple[TaskRow, ...]) -> str:
     separates rows. No card chrome.
     """
     if not rows:
-        return f"""
+        return """
   <section class="w-section" id="where-the-week-went">
     <div class="s-eyebrow">Where The Week Went</div>
     <p class="placeholder">No tasks identified yet.</p>
@@ -616,7 +617,7 @@ def _task_breakdown_section(rows: tuple[TaskRow, ...]) -> str:
             f'<span class="w-meta-stat">{row.session_count} session{"s" if row.session_count != 1 else ""}</span>'
             f'<span class="w-meta-dot">·</span>'
             f'<span class="w-meta-stat">{cost_str}</span>'
-            f'{("<span class=\"w-meta-dot\">·</span>" + worst_html) if worst_html else ""}'
+            f'{_DOT + worst_html if worst_html else ""}'
             f'</div>'
             f'</div>'  # close w-body
             f"</article>"
@@ -871,7 +872,7 @@ def _dimensions_section(
     behavioral: tuple[BehavioralRow, ...] = (),
 ) -> str:
     if not rows and not behavioral:
-        return f"""
+        return """
   <section class="d-section" id="the-six-dimensions">
     <div class="s-eyebrow">The Six Dimensions</div>
     <p class="placeholder">No dimension data yet.</p>
@@ -950,7 +951,7 @@ def _dimensions_section(
 
 def _follow_up_section(follow_up: FollowUpPanel | None) -> str:
     if follow_up is None or not follow_up.commitment_text:
-        return f"""
+        return """
   <section class="f-section" id="follow-up-from-last-week">
     <div class="s-eyebrow">Follow-up From Last Week</div>
     <p class="placeholder">No commitment in flight yet. Next week's digest will open one.</p>
@@ -1056,7 +1057,7 @@ def _weekly_trajectory_section(
     occupies its spec-section-6.1 slot.
     """
     if not points:
-        return f"""
+        return """
   <section class="wt-section" id="weekly-trajectory">
     <div class="s-eyebrow">Your Learning Trajectory</div>
     <p class="placeholder">A multi-week trajectory chart will appear here once you have at least 4 weeks of digests on file. (This week is week 1.)</p>
@@ -1147,7 +1148,7 @@ def _cost_split_bar(model_split: tuple[ModelSpend, ...], total: float) -> str:
 
 def _next_week_section(sentence: str) -> str:
     if not sentence:
-        return f"""
+        return """
   <section class="n-section" id="one-thing-to-try-next-week">
     <div class="s-eyebrow">One Thing To Try Next Week</div>
     <p class="placeholder">Next week's commitment will be drawn from this week's headline moment.</p>

@@ -229,8 +229,8 @@ Return ONLY valid JSON, no preamble:
             text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
         else:
             from openai import OpenAI  # type: ignore
-            client = OpenAI()
-            resp = client.chat.completions.create(
+            client = OpenAI()  # type: ignore[assignment]
+            resp = client.chat.completions.create(  # type: ignore[attr-defined]
                 model="gpt-5",
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -238,7 +238,7 @@ Return ONLY valid JSON, no preamble:
                 ],
                 response_format={"type": "json_object"},
             )
-            text = resp.choices[0].message.content or ""
+            text = resp.choices[0].message.content or ""  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001
         print(f"[model_advisor] LLM call failed: {exc!r}", file=sys.stderr)
         return None

@@ -209,8 +209,8 @@ Exactly 2 focus areas. Exactly 3 drills per focus area."""
         else:
             from openai import OpenAI  # type: ignore
 
-            client = OpenAI()
-            response = client.chat.completions.create(
+            client = OpenAI()  # type: ignore[assignment]
+            response = client.chat.completions.create(  # type: ignore[attr-defined]
                 model="gpt-5",
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -218,7 +218,7 @@ Exactly 2 focus areas. Exactly 3 drills per focus area."""
                 ],
                 response_format={"type": "json_object"},
             )
-            text = response.choices[0].message.content or ""
+            text = response.choices[0].message.content or ""  # type: ignore[attr-defined]
             generated_by = "gpt-5"
     except Exception as exc:  # noqa: BLE001
         print(f"[coach] LLM call failed: {exc!r}", file=sys.stderr)
