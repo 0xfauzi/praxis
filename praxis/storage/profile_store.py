@@ -52,7 +52,7 @@ DEFAULT_HOME = resolve_home()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS session_scores (
-    stable_id TEXT PRIMARY KEY,
+    stable_id TEXT NOT NULL,
     provider TEXT NOT NULL,
     started_at TEXT NOT NULL,
     scored_at TEXT NOT NULL,
@@ -61,7 +61,9 @@ CREATE TABLE IF NOT EXISTS session_scores (
     judge_result_json TEXT,
     features_json TEXT NOT NULL,
     source_path TEXT NOT NULL,
-    judge_model TEXT
+    judge_model TEXT,
+    judge_pass INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (stable_id, judge_pass)
 );
 
 CREATE INDEX IF NOT EXISTS idx_session_started_at ON session_scores(started_at);
@@ -154,17 +156,17 @@ class ProfileStore:
         db_existed = self.db_path.exists()
         if db_existed:
             with self._conn() as conn:
-                if self._has_schema_v2_marker(conn):
+                if self._has_schema_v3_marker(conn):
                     return
 
-        # Migration needed (either fresh DB or v0.1 DB without the marker).
+        # Migration needed (fresh DB, v0.1, or v0.2 DB without the v3 marker).
         # Per spec Appendix A.7: back up the live DB before any DDL, and on
         # failure restore from backup so the DB is never half-migrated.
         backup_path = self._backup_db_if_exists()
         try:
             with self._conn() as conn:
                 self._apply_v2_schema(conn)
-                self._mark_schema_v2(conn)
+                self._mark_schema_v3(conn)
         except Exception as exc:
             if backup_path is not None:
                 self._restore_db_from_backup(backup_path)
@@ -174,8 +176,61 @@ class ProfileStore:
 
     def _apply_v2_schema(self, conn: sqlite3.Connection) -> None:
         # Wrapped in a method so tests can monkeypatch it to inject failures
-        # without having to corrupt the SCHEMA constant.
+        # without having to corrupt the SCHEMA constant. The name is kept for
+        # back-compat with existing monkeypatch tests; despite the v2 suffix,
+        # the method now also runs the v0.3 session_scores migration so any
+        # prior state (fresh, v0.1, v0.2) is brought to v0.3 in one shot.
         conn.executescript(SCHEMA)
+        self._migrate_session_scores_to_v3(conn)
+
+    def _migrate_session_scores_to_v3(self, conn: sqlite3.Connection) -> None:
+        """Spec §9.6 (US-029): add ``judge_pass`` to session_scores and make
+        (stable_id, judge_pass) the composite primary key so both pass-1 and
+        pass-2 rows can coexist for the same session.
+
+        SQLite can't ALTER a primary key in place, so we recreate the table.
+        Idempotent: if ``judge_pass`` is already a column the method returns
+        without touching the table.
+        """
+        cur = conn.execute("PRAGMA table_info(session_scores)")
+        existing_cols = {row[1] for row in cur.fetchall()}
+        if "judge_pass" in existing_cols:
+            return
+        # We rebuild the table to drop the unused v0.1 ``heuristic_scores_json``
+        # column (carried forward through the v0.2 migration via CREATE TABLE
+        # IF NOT EXISTS) and to install the composite PK.
+        conn.executescript(
+            """
+            CREATE TABLE session_scores_v3 (
+                stable_id TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                scored_at TEXT NOT NULL,
+                overall REAL NOT NULL,
+                dimension_scores_json TEXT NOT NULL,
+                judge_result_json TEXT,
+                features_json TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                judge_model TEXT,
+                judge_pass INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (stable_id, judge_pass)
+            );
+            INSERT INTO session_scores_v3
+                (stable_id, provider, started_at, scored_at, overall,
+                 dimension_scores_json, judge_result_json, features_json,
+                 source_path, judge_model, judge_pass)
+            SELECT stable_id, provider, started_at, scored_at, overall,
+                   dimension_scores_json, judge_result_json, features_json,
+                   source_path, judge_model, 1
+            FROM session_scores;
+            DROP TABLE session_scores;
+            ALTER TABLE session_scores_v3 RENAME TO session_scores;
+            CREATE INDEX IF NOT EXISTS idx_session_started_at
+                ON session_scores(started_at);
+            CREATE INDEX IF NOT EXISTS idx_session_provider
+                ON session_scores(provider);
+            """
+        )
 
     def _backup_db_if_exists(self) -> Path | None:
         if not self.db_path.exists():
@@ -200,26 +255,28 @@ class ProfileStore:
         )
 
     @staticmethod
-    def _has_schema_v2_marker(conn: sqlite3.Connection) -> bool:
+    def _has_schema_v3_marker(conn: sqlite3.Connection) -> bool:
         # Detection is from existing schema state, not from a config flag:
-        # fresh DBs have no run_log table at all, and v0.1 DBs have run_log
-        # without a schema_version row. Either case means migration is needed.
+        # fresh DBs have no run_log table, v0.1 DBs have run_log without any
+        # schema_version row, and v0.2 DBs have ``schema_version='2'``. In
+        # all of those cases the v0.3 migration still needs to run, so the
+        # gate keys on the v3 marker specifically.
         cur = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'run_log'"
         )
         if cur.fetchone() is None:
             return False
         cur = conn.execute(
-            "SELECT 1 FROM run_log WHERE kind = 'schema_version' AND notes = '2' LIMIT 1"
+            "SELECT 1 FROM run_log WHERE kind = 'schema_version' AND notes = '3' LIMIT 1"
         )
         return cur.fetchone() is not None
 
     @staticmethod
-    def _mark_schema_v2(conn: sqlite3.Connection) -> None:
+    def _mark_schema_v3(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT INTO run_log (run_at, kind, sessions_seen, sessions_new, notes) "
             "VALUES (?, ?, ?, ?, ?)",
-            (_utcnow().isoformat(), "schema_version", 0, 0, "2"),
+            (_utcnow().isoformat(), "schema_version", 0, 0, "3"),
         )
 
     @contextmanager
@@ -263,8 +320,8 @@ class ProfileStore:
                 INSERT OR REPLACE INTO session_scores
                 (stable_id, provider, started_at, scored_at, overall,
                  dimension_scores_json, judge_result_json,
-                 features_json, source_path, judge_model)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 features_json, source_path, judge_model, judge_pass)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     score.session_stable_id,
@@ -277,18 +334,30 @@ class ProfileStore:
                     json.dumps(asdict(score.features)),
                     score.source_path,
                     judge_model,
+                    score.judge_pass,
                 ),
             )
 
     def load_session_scores(
-        self, since: datetime | None = None
+        self,
+        since: datetime | None = None,
+        *,
+        include_all_passes: bool = False,
     ) -> list[dict[str, Any]]:
+        """Return persisted session_scores rows ordered by ``started_at``.
+
+        By default, when a session has both a pass-1 and a pass-2 row, only
+        the pass-2 (winning frontier judgment) is returned so callers that
+        snapshot or count sessions don't see the same session twice. Pass
+        ``include_all_passes=True`` to retrieve every persisted row (US-029
+        auditing: pass-1 + pass-2 disagreement analysis).
+        """
         sql = "SELECT * FROM session_scores"
         args: tuple = ()
         if since is not None:
             sql += " WHERE started_at >= ?"
             args = (since.isoformat(),)
-        sql += " ORDER BY started_at ASC"
+        sql += " ORDER BY started_at ASC, judge_pass ASC"
         with self._conn() as conn:
             rows = [dict(row) for row in conn.execute(sql, args).fetchall()]
         for row in rows:
@@ -297,7 +366,15 @@ class ProfileStore:
             row["judge_result"] = (
                 json.loads(row["judge_result_json"]) if row["judge_result_json"] else None
             )
-        return rows
+        if include_all_passes:
+            return rows
+        # Dedupe to highest pass per session, preserving order from the SQL
+        # ordering (rows are already sorted by started_at then judge_pass ASC,
+        # so the last-seen row for each stable_id is the winning pass).
+        by_session: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            by_session[row["stable_id"]] = row
+        return list(by_session.values())
 
     # ---- moments --------------------------------------------------------
 

@@ -397,3 +397,111 @@ def test_pass2_call_does_not_include_pass1_outputs(tmp_home, monkeypatch):
     assert isinstance(args[0], _Session)
     for v in list(args[1:]) + list(kwargs.values()):
         assert not isinstance(v, JudgeResult), "pass-2 must not receive a JudgeResult"
+
+
+# ---------------------------------------------------------------------------
+# US-029: both passes persisted with judge_pass column
+# ---------------------------------------------------------------------------
+
+
+def test_pass1_only_session_persists_judge_pass_1(tmp_home, fake_judge):
+    """AC: a session that does NOT escalate has a single row with judge_pass=1.
+
+    The default fake_judge fixture returns confidence='medium' (the dataclass
+    default for an unset field), so no escalation happens.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "judge-pass-1-only"
+    _write_synthetic_claude_session(project_root, 0)
+
+    run()
+
+    store = ProfileStore(home=resolve_home())
+    all_rows = store.load_session_scores(include_all_passes=True)
+    assert len(all_rows) == 1
+    assert all_rows[0]["judge_pass"] == 1
+
+
+def test_escalated_session_persists_both_pass_rows(tmp_home, monkeypatch):
+    """AC: when pass 2 runs, both pass-1 and pass-2 rows are persisted.
+
+    Pass-1 must not be overwritten when pass-2 lands; the composite primary
+    key on (stable_id, judge_pass) keeps both alive so the disagreement is
+    auditable (spec §9.6).
+    """
+    project_root = tmp_home / ".claude" / "projects" / "judge-pass-both"
+    _write_synthetic_claude_session(project_root, 0)
+
+    def _fake_pass1(session, prefer="claude"):  # noqa: ARG001
+        return _pass1_result(confidence="low", judge_model="pass-1-cheap")
+
+    def _fake_pass2(session, prefer="claude"):  # noqa: ARG001
+        return _pass2_result()
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _fake_pass2)
+
+    run()
+
+    store = ProfileStore(home=resolve_home())
+    all_rows = store.load_session_scores(include_all_passes=True)
+    assert len(all_rows) == 2, "both pass-1 and pass-2 rows must coexist"
+    by_pass = {row["judge_pass"]: row for row in all_rows}
+    assert set(by_pass) == {1, 2}
+    # The pass-1 row should carry pass-1's judge model and scores (5.0), not
+    # pass-2's (9.0): the row has not been overwritten.
+    assert by_pass[1]["judge_result"]["judge_model"] == "pass-1-cheap"
+    assert all(v == 5.0 for v in by_pass[1]["dimension_scores"].values())
+    # The pass-2 row carries pass-2's frontier metadata.
+    assert by_pass[2]["judge_result"]["judge_model"] == "pass-2-frontier"
+    assert all(v == 9.0 for v in by_pass[2]["dimension_scores"].values())
+
+
+def test_load_session_scores_dedupes_to_winning_pass_by_default(tmp_home, monkeypatch):
+    """``load_session_scores()`` (no flag) returns one row per session — the
+    pass-2 row when escalation happened. Otherwise the snapshot pipeline would
+    double-count any escalated session in the weekly window.
+    """
+    project_root = tmp_home / ".claude" / "projects" / "judge-pass-dedup"
+    _write_synthetic_claude_session(project_root, 0)
+
+    def _fake_pass1(session, prefer="claude"):  # noqa: ARG001
+        return _pass1_result(confidence="low")
+
+    def _fake_pass2(session, prefer="claude"):  # noqa: ARG001
+        return _pass2_result()
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _fake_pass2)
+
+    run()
+
+    store = ProfileStore(home=resolve_home())
+    canonical = store.load_session_scores()
+    assert len(canonical) == 1
+    assert canonical[0]["judge_pass"] == 2
+    assert canonical[0]["judge_result"]["judge_model"] == "pass-2-frontier"
+
+
+def test_no_pass2_row_when_escalation_fails(tmp_home, monkeypatch):
+    """When pass 2 fails (no key / transient error), no pass-2 row is
+    written. The pass-1 row stays as the canonical judgment so the session
+    is never silently dropped (consistent with US-028's fallback behavior)."""
+    project_root = tmp_home / ".claude" / "projects" / "judge-pass-2-fails"
+    _write_synthetic_claude_session(project_root, 0)
+
+    def _fake_pass1(session, prefer="claude"):  # noqa: ARG001
+        return _pass1_result(confidence="low", judge_model="pass-1-fallback")
+
+    def _failing_pass2(session, prefer="claude"):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass1", _fake_pass1)
+    monkeypatch.setattr("praxis.scoring.aggregate.score_session_pass2", _failing_pass2)
+
+    run()
+
+    store = ProfileStore(home=resolve_home())
+    all_rows = store.load_session_scores(include_all_passes=True)
+    assert len(all_rows) == 1
+    assert all_rows[0]["judge_pass"] == 1
+    assert all_rows[0]["judge_result"]["judge_model"] == "pass-1-fallback"

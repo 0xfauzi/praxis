@@ -25,3 +25,15 @@
   - For tests that build a JudgeResult fixture with a custom confidence, the field name is `confidence` (literal "low"|"medium"|"high"). Mypy needs `# type: ignore[arg-type]` when passing a str variable (the field is a Literal); the new `_pass1_result` helper in test_orchestrator.py shows the pattern.
   - mypy baseline unchanged at 34 errors across `behavior/trajectory.py`, `cli/__main__.py`, `models_advisor/advisor.py`, `scoring/aggregate.py`, `scoring/coach.py`, `scoring/judge.py`.
 ---
+
+## Iteration 3 - US-029: Both passes persisted with judge_pass column
+- What I did: Added a `judge_pass` column to `session_scores` (composite primary key on `(stable_id, judge_pass)`), bumped the on-disk schema marker from "2" to "3", and added a v0.3 migration that rebuilds `session_scores` (also dropping the dead v0.1 `heuristic_scores_json` column) while preserving existing rows as `judge_pass=1`. `SessionScore` gained a `judge_pass` field (default 1); `score_one_session_pass1` / `_pass2` stamp 1 / 2 respectively. Orchestrator now persists the pass-1 row first, then on low-confidence escalation persists a second pass-2 row alongside it - both rows live in the DB. Moments still come from the winning judgment only.
+- Files changed: praxis/orchestrator.py, praxis/scoring/aggregate.py, praxis/storage/profile_store.py, tests/test_orchestrator.py, tests/test_storage_schema.py
+- Verification: `uv run pytest -q` (715 passed, up from 711 baseline; +4 new US-029 tests). `uv run mypy praxis` (34 errors, same as pre-change baseline; no new errors introduced).
+- What the next iteration should know:
+  - Schema marker is now "3"; `_has_schema_v3_marker` / `_mark_schema_v3` replaced the v2 helpers. The migration entrypoint `_apply_v2_schema(conn)` was kept under that name for monkeypatch back-compat (test_storage_schema.py patches it to simulate failures), but it now also runs `_migrate_session_scores_to_v3`. If you add a v0.4 migration, follow the same pattern: extend `_apply_v2_schema` and bump the marker.
+  - `load_session_scores()` dedupes to the winning (highest) `judge_pass` per session by default. Pass `include_all_passes=True` to retrieve every persisted row - the US-029 tests in test_orchestrator.py use this to verify both rows survive escalation. Any downstream caller that wants to inspect pass-1 vs pass-2 disagreement needs the flag.
+  - `has_session(stable_id)` still keys on `stable_id` alone, so a session that already has any pass row is treated as "seen" and won't be re-judged on the next run. This is intentional: idempotence is per-session, not per-pass.
+  - The pass-1 row carries the cheap-tier judge_model + scores even when pass 2 later wins. Don't try to "upgrade" the pass-1 row in place; the disagreement is the signal (spec §9.6).
+  - mypy baseline unchanged at 34 errors across `behavior/trajectory.py`, `cli/__main__.py`, `models_advisor/advisor.py`, `scoring/aggregate.py`, `scoring/coach.py`, `scoring/judge.py`.
+---

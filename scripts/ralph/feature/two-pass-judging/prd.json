@@ -38,8 +38,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added judge_pass column to session_scores with composite primary key (stable_id, judge_pass) so pass-1 and pass-2 rows coexist instead of overwriting. SessionScore dataclass gained a judge_pass field (default 1); score_one_session_pass1/_pass2 set it to 1/2 respectively. Orchestrator now persists pass-1 first (judge_pass=1) and, when escalating, persists pass-2 as a second row (judge_pass=2) - both rows live in the DB. Moments come from the winning judgment only. load_session_scores dedupes to the highest pass per session by default; include_all_passes=True returns every row for audit/disagreement analysis. Schema version bumped to 3; v0.3 migration is a single-pass session_scores rebuild that also drops the unused v0.1 heuristic_scores_json column."
     },
     {
       "id": "US-030",

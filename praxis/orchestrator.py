@@ -113,25 +113,34 @@ def run(
     for session in to_score:
         # Spec §9.1 (US-027): pass 1 runs on every session in the window using
         # the cheap-tier judge. No heuristic features gate this call.
-        score = score_one_session_pass1(session)
-        if score is None:
+        pass1_score = score_one_session_pass1(session)
+        if pass1_score is None:
             # No judge available (no API keys, or judge errored) - skip the
             # session rather than substituting a fallback score.
             continue
+        # Spec §9.6 (US-029): persist pass-1 first so the cheap-tier read is
+        # always recorded (judge_pass=1), even when escalation will later add
+        # a pass-2 row. Both rows then coexist for audit / disagreement
+        # analysis instead of being overwritten.
+        store.save_session_score(pass1_score)
+        winning_score = pass1_score
         # Spec §9.1 (US-028): when pass 1 self-flags as low confidence, re-judge
         # on the frontier model in a fresh call (no pass-1 context). The pass-2
         # result overrides pass-1's scores, rationale, and moments. If pass 2
         # fails (no key, transient error), keep the pass-1 score rather than
         # leaving the session unjudged.
-        if score.judge_result.confidence == "low":
+        if pass1_score.judge_result.confidence == "low":
             pass2_score = score_one_session_pass2(session)
             if pass2_score is not None:
-                score = pass2_score
-        store.save_session_score(score)
-        if score.judge_result is not None:
-            # Persist moments only when the judge actually ran; a heuristic-only
-            # rescore must not wipe a session's moments from a prior judged run.
-            store.save_moments(session.stable_id, score.judge_result.moments)
+                # Persist pass-2 alongside the existing pass-1 row (composite
+                # primary key on (stable_id, judge_pass) keeps both alive).
+                store.save_session_score(pass2_score)
+                winning_score = pass2_score
+        if winning_score.judge_result is not None:
+            # Moments come from the winning judgment (pass 2 when escalation
+            # happened, pass 1 otherwise). Only one set of moments per session
+            # is persisted to avoid surfacing duplicate coaching items.
+            store.save_moments(session.stable_id, winning_score.judge_result.moments)
         scored_count += 1
 
     # Daily consolidation: only run once per day unless forced.
@@ -246,6 +255,7 @@ def _snapshot_from_rows(rows: list[dict]) -> ProfileSnapshot:
                 judge_result=judge,
                 features=features,
                 source_path=row["source_path"],
+                judge_pass=row.get("judge_pass", 1),
             )
         )
     return ProfileSnapshot.from_scores(scores)

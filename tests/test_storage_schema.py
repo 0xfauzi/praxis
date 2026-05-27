@@ -383,16 +383,24 @@ def test_session_scores_rows_preserved_across_v0_2_migration(tmp_home):
 
 
 def test_session_scores_schema_unchanged_across_v0_2_migration(tmp_home):
+    """v0.3 (US-029): session_scores gains a ``judge_pass`` column and a
+    composite (stable_id, judge_pass) primary key so pass-1 and pass-2 rows
+    coexist. The v0.1 ``heuristic_scores_json`` column is also dropped as
+    part of the table recreation (it has no live writer or reader)."""
     _seed_v0_1_db(tmp_home)
     ProfileStore(home=resolve_home())
     with _open_db() as conn:
         cols = _table_columns(conn, "session_scores")
     assert set(cols.keys()) == {
         "stable_id", "provider", "started_at", "scored_at", "overall",
-        "dimension_scores_json", "heuristic_scores_json", "judge_result_json",
-        "features_json", "source_path", "judge_model",
+        "dimension_scores_json", "judge_result_json",
+        "features_json", "source_path", "judge_model", "judge_pass",
     }
+    # Composite PK on (stable_id, judge_pass): pk indices reflect column order.
     assert cols["stable_id"]["pk"] == 1
+    assert cols["judge_pass"]["pk"] == 2
+    assert cols["judge_pass"]["type"] == "INTEGER"
+    assert cols["judge_pass"]["notnull"] == 1
 
 
 def test_run_log_rows_preserved_across_v0_2_migration(tmp_home):
@@ -442,7 +450,7 @@ def test_drop_is_idempotent_on_fresh_v0_2_db(tmp_home):
 
 def _schema_version_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
-        "SELECT * FROM run_log WHERE kind = 'schema_version' AND notes = '2'"
+        "SELECT * FROM run_log WHERE kind = 'schema_version' AND notes = '3'"
     ).fetchall()
 
 
@@ -453,7 +461,7 @@ def test_fresh_db_records_schema_version_2_in_run_log(tmp_home):
     assert len(rows) == 1
     row = rows[0]
     assert row["kind"] == "schema_version"
-    assert row["notes"] == "2"
+    assert row["notes"] == "3"
     assert row["sessions_seen"] == 0
     assert row["sessions_new"] == 0
     assert row["run_at"]  # ISO timestamp, non-empty
@@ -465,7 +473,7 @@ def test_v0_1_migration_records_schema_version_2_marker(tmp_home):
     with _open_db() as conn:
         rows = _schema_version_rows(conn)
     assert len(rows) == 1
-    assert rows[0]["notes"] == "2"
+    assert rows[0]["notes"] == "3"
 
 
 def test_reopen_when_marker_present_is_a_no_op(tmp_home):

@@ -32,6 +32,11 @@ class SessionScore:
     judge_result: JudgeResult
     features: SessionFeatures
     source_path: str
+    # Spec §9.6 (US-029): which pass of the two-pass judge produced this
+    # score. 1 = cheap-tier pass 1 (always runs), 2 = frontier pass 2
+    # (only for sessions pass 1 self-flagged as low confidence). Both rows
+    # are persisted when escalation happens so disagreement is auditable.
+    judge_pass: int = 1
 
 
 def _weighted_overall(dimension_scores: dict[str, float]) -> float:
@@ -41,7 +46,9 @@ def _weighted_overall(dimension_scores: dict[str, float]) -> float:
     return round(total, 2)
 
 
-def _session_score_from_judge(session: Session, judge: JudgeResult) -> SessionScore:
+def _session_score_from_judge(
+    session: Session, judge: JudgeResult, *, judge_pass: int = 1
+) -> SessionScore:
     """Build a SessionScore from a session and its judge output.
 
     Shared by the frontier-judge path (``score_one_session``) and the
@@ -61,6 +68,7 @@ def _session_score_from_judge(session: Session, judge: JudgeResult) -> SessionSc
         judge_result=judge,
         features=features,
         source_path=session.source_path,
+        judge_pass=judge_pass,
     )
 
 
@@ -89,7 +97,7 @@ def score_one_session_pass1(session: Session) -> SessionScore | None:
     judge = score_session_pass1(session)
     if judge is None:
         return None
-    return _session_score_from_judge(session, judge)
+    return _session_score_from_judge(session, judge, judge_pass=1)
 
 
 def score_one_session_pass2(session: Session) -> SessionScore | None:
@@ -104,7 +112,7 @@ def score_one_session_pass2(session: Session) -> SessionScore | None:
     judge = score_session_pass2(session)
     if judge is None:
         return None
-    return _session_score_from_judge(session, judge)
+    return _session_score_from_judge(session, judge, judge_pass=2)
 
 
 @dataclass
