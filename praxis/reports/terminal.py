@@ -13,6 +13,7 @@ import textwrap
 
 from praxis.behavior import TrajectoryLabel
 from praxis.orchestrator import RunSummary
+from praxis.reports.cost_ledger_panel import format_cost_disclaimer
 from praxis.scoring.rubric import RUBRIC
 
 
@@ -275,6 +276,7 @@ def _footer(summary: RunSummary) -> list[str]:
     return [
         "",
         f"{INDENT}{DIM}{note}  ·  {summary.elapsed_seconds}s elapsed{RESET}",
+        f"{INDENT}{DIM}{format_cost_disclaimer()}{RESET}",
         "",
     ]
 

@@ -11,8 +11,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "praxis/scoring/cost_ledger.py: pure aggregator (compute_cost_ledger) + card-resolution helper (estimate_session_cost_usd). Baseline = mean of per-ISO-week totals over weeks with >=1 priced session (quiet weeks not zero-padded). Cost constants (4 chars/token, 1.5x output) match models_advisor/advisor.py._estimate_cost. Unpriced sessions (no card or null pricing -- e.g. Copilot) skipped, not zeroed."
     },
     {
       "id": "US-048",
@@ -24,8 +24,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "praxis/scoring/cost_ledger.py: sibling aggregator (compute_biggest_line) over BiggestLineInputSession (started_at, cost_usd, model_hint, task_label). Groups by (model_hint, task_label) within the current ISO week only; baseline window is out of scope (CostLedger already covers it). Skips sessions with None cost_usd / model_hint / task_label -- 'unknown / unknown' would be a regression in panel clarity, not a fallback. Deterministic tiebreak: max spend -> max session_count -> ascending (model_hint, task_label). Empty winner = BiggestLine(None, None, 0.0, 0) so renderers can omit the row."
     },
     {
       "id": "US-049",
@@ -38,8 +38,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "praxis/scoring/cost_ledger.py: pure aggregator (compute_tier_fit_savings) over TierFitInputSession(started_at, user_turn_count, avg_prompt_chars, tier_fit_savings_usd). Card-lookup helper (estimate_tier_fit_savings_for_session) resolves the frontier card and the family's fast-tier card via find_card_for_model_hint + a local _find_fast_tier_card_in_family (mirrors advisor.py). Qualifying rule: in-current-ISO-week AND user_turn_count <= 3 AND avg_prompt_chars <= 200 AND tier_fit_savings_usd is not None. 'Opus/GPT-5' is interpreted as 'frontier-tier card with a fast-tier sibling' so the rule generalizes to any frontier model with a cheaper alternative (Gemini has no fast sibling so it naturally drops out). Constants TIER_FIT_MAX_USER_TURNS=3 and TIER_FIT_MAX_AVG_PROMPT_CHARS=200 expose the thresholds. Token + output assumptions reuse COST_CHARS_PER_TOKEN/COST_OUTPUT_TO_INPUT_RATIO so frontier-half of the savings agrees with estimate_session_cost_usd."
     },
     {
       "id": "US-050",
@@ -53,8 +53,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "praxis/scoring/cost_ledger.py: pure dispatcher `compute_moment_dollar_impact_usd(dim_key, model_hint, *, next_two_turn_chars, accepted_response_chars, session_total_input_chars)` applies the spec 10.2 rule for the given dim_key by delegating to the existing per-session helpers. verification + iteration -> estimate_session_cost_usd; fit -> estimate_tier_fit_savings_for_session; planning/context/tools/unknown -> None. The dispatcher itself stays pure (no disk I/O); the underlying helpers handle card resolution. None propagates from no-signal kwargs, no card, or no per-token pricing. Zero chars -> $0 (a legitimate 'no work redone / empty session' signal, mirrors estimate_session_cost_usd's contract). Each dim_key consults exactly one kwarg; cross-wiring is locked out by test_moment_impact_only_relevant_kwarg_consulted."
     },
     {
       "id": "US-051",
@@ -66,8 +66,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "praxis/reports/cost_ledger_panel.py: new renderer helper module with COST_LEDGER_DISCLAIMER constant ('rough estimate from token volume + tier pricing') + format_cost_disclaimer (plain text) + format_cost_disclaimer_html (faded span with cost-disclaimer CSS class). Wired into praxis/reports/terminal.py._footer (one DIM line after the consolidation/elapsed line) and praxis/reports/html_report.py colophon (one <p> with the wrapped span). HTML stylesheet adds a .cost-disclaimer rule using var(--ink-300), italic + letter-spacing for the faded footer-caveat look. Disclaimer is unconditional -- it renders regardless of consolidation state, last-week data, trajectory state, or whether the orchestrator has wired the cost ledger panel yet. Moment rendering is not in scope here (no orchestrator code surfaces Moment.dollar_impact_estimate yet); the renderer-side framing contract is enforced by no-invoice-language tests on both surfaces."
     }
   ]
 }
