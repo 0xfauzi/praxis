@@ -59,28 +59,58 @@ def _weekly_html_path(week_iso: str) -> Path:
     return weeks_dir / f"{week_iso}.html"
 
 
-def _post_notify(week_iso: str, trajectory_label: str | None) -> None:
+_TRAJECTORY_LABEL_DISPLAY: dict[str, str] = {
+    "learning": "Learning",
+    "stable_engaged": "Engaged",
+    "stable_passive": "Passive",
+    "atrophying": "Atrophying",
+    "insufficient_data": "Reading",
+}
+
+
+def _post_notify(trajectory_label: str | None = None) -> None:
     """Best-effort macOS notification (spec section 13.2).
 
+    Posts a ``display notification`` AppleScript with the fixed title
+    "Praxis weekly read is ready" and a body that points the user at
+    ``~/.praxis/latest.html`` (the symlink maintained by the HTML
+    digest writer always tracks the most recent week).
+
+    When ``trajectory_label`` is provided, the body is prefixed with the
+    label (per spec 13.2 example: "Drifting this week. ..."), so the
+    user gets the gist without opening the HTML. The label string is
+    the user-facing form (e.g., "Drifting", "Atrophying"), not the raw
+    enum value.
+
     Silent no-op on non-macOS so the same flag is portable. ``osascript``
-    failures (notifications disabled, sandboxed env) are logged to stderr
-    and do not fail the run -- the digest is still rendered.
+    failures (binary missing, notifications disabled, non-zero exit,
+    sandboxed env) are logged to stderr and do not fail the run -- the
+    digest is still rendered.
     """
     if sys.platform != "darwin":
         return
     title = "Praxis weekly read is ready"
-    body = f"Open ~/.praxis/weeks/{week_iso}.html to read."
     if trajectory_label:
-        title = f"Praxis: {trajectory_label} this week"
+        body = f"{trajectory_label} this week. Open ~/.praxis/latest.html for the detail."
+    else:
+        body = "Open ~/.praxis/latest.html to read."
     try:
-        subprocess.run(
+        result = subprocess.run(
             [
                 "osascript",
                 "-e",
                 f'display notification "{body}" with title "{title}" sound name "default"',
             ],
             check=False,
+            capture_output=True,
+            text=True,
         )
+        if result.returncode != 0:
+            print(
+                f"[cli] osascript notification failed: "
+                f"exit {result.returncode}: {result.stderr.strip()}",
+                file=sys.stderr,
+            )
     except Exception as exc:  # noqa: BLE001
         print(f"[cli] osascript notification failed: {exc!r}", file=sys.stderr)
 
@@ -167,12 +197,11 @@ def cmd_week(args: argparse.Namespace) -> int:
             )
 
     if args.notify:
-        traj_label = (
-            summary.trajectory.label.value.title()
-            if summary.trajectory is not None
-            else None
-        )
-        _post_notify(target_week, traj_label)
+        traj_label: str | None = None
+        if summary.trajectory is not None:
+            raw = summary.trajectory.label.value
+            traj_label = _TRAJECTORY_LABEL_DISPLAY.get(raw, raw.title())
+        _post_notify(trajectory_label=traj_label)
 
     return 0
 
@@ -400,6 +429,90 @@ def cmd_rubric(args: argparse.Namespace) -> int:  # noqa: ARG001
         print(f"    {d.description}")
         print(f"    Evidence: {d.evidence}")
         print()
+    return 0
+
+
+def cmd_install_weekly(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Generate and load the macOS LaunchAgent for ``praxis week --notify``.
+
+    On macOS, writes ``~/Library/LaunchAgents/co.praxis.weekly.plist``
+    with the day/time from ``~/.praxis/config.toml`` and loads it via
+    ``launchctl``. Re-running is idempotent: the existing job is
+    unloaded first, the plist is overwritten, and the new job is
+    loaded.
+
+    On non-macOS, no scheduling is attempted. Instead, the equivalent
+    systemd user timer (Linux) or Task Scheduler XML (Windows) is
+    printed to stdout AND saved to
+    ``~/.praxis/install-weekly-snippet.txt`` so the user can install it
+    themselves (spec 12.4).
+
+    Exit codes (spec 12.3):
+      0  plist generated and loaded (macOS), or snippet printed/saved
+         (non-macOS).
+      4  launchd installation failed (launchctl returned non-zero, or
+         the config schedule has an invalid day/hour/minute).
+    """
+    if sys.platform != "darwin":
+        from praxis.cli.install_weekly import (
+            InstallWeeklyError as _InstallWeeklyError,
+            write_non_macos_snippet,
+        )
+        try:
+            path, content = write_non_macos_snippet()
+        except _InstallWeeklyError as exc:
+            print(f"install-weekly failed: {exc}", file=sys.stderr)
+            return 4
+        print(content)
+        print(f"Saved snippet to: {path}")
+        return 0
+    from praxis.cli.install_weekly import (
+        InstallWeeklyError,
+        install_weekly_macos,
+    )
+
+    try:
+        path = install_weekly_macos()
+    except InstallWeeklyError as exc:
+        print(f"install-weekly failed: {exc}", file=sys.stderr)
+        return 4
+    print(f"Installed weekly LaunchAgent: {path}")
+    return 0
+
+
+def cmd_uninstall_weekly(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Unload and delete the macOS LaunchAgent installed by ``install-weekly``.
+
+    On macOS, runs ``launchctl unload`` on
+    ``~/Library/LaunchAgents/co.praxis.weekly.plist`` (best-effort) and
+    then deletes the plist file. Running this when no job is installed
+    is not an error: per AC US-080, the user contract is "after
+    uninstall-weekly, the weekly job is not scheduled," which is
+    trivially satisfied when nothing was scheduled to begin with.
+
+    Exit codes:
+      0  always (job removed, or never installed).
+    """
+    if sys.platform != "darwin":
+        # Non-macOS is a no-op symmetric with install-weekly's
+        # placeholder branch -- there is nothing to remove because
+        # nothing was scheduled.
+        print(
+            "uninstall-weekly: non-macOS has no scheduled job to remove.",
+            file=sys.stderr,
+        )
+        return 0
+    from praxis.cli.install_weekly import (
+        plist_path,
+        uninstall_weekly_macos,
+    )
+
+    removed = uninstall_weekly_macos()
+    path = plist_path()
+    if removed:
+        print(f"Removed weekly LaunchAgent: {path}")
+    else:
+        print(f"No weekly LaunchAgent found at: {path}")
     return 0
 
 
@@ -664,6 +777,29 @@ def build_parser() -> argparse.ArgumentParser:
     mod.add_argument("--show", type=str, default=None,
                      help="Show full details for one model card (by id or alias).")
     mod.set_defaults(func=cmd_models)
+
+    iw = sub.add_parser(
+        "install-weekly",
+        help="Install the macOS LaunchAgent that runs 'praxis week --notify'.",
+        description=(
+            "Generate ~/Library/LaunchAgents/co.praxis.weekly.plist from "
+            "the schedule in ~/.praxis/config.toml and load it via "
+            "launchctl. Idempotent. On non-macOS this command prints the "
+            "equivalent snippet without scheduling anything (spec 12.4)."
+        ),
+    )
+    iw.set_defaults(func=cmd_install_weekly)
+
+    uw = sub.add_parser(
+        "uninstall-weekly",
+        help="Unload and remove the macOS LaunchAgent installed by install-weekly.",
+        description=(
+            "Run 'launchctl unload' against "
+            "~/Library/LaunchAgents/co.praxis.weekly.plist and delete the "
+            "file. Exits 0 even when no job is currently installed."
+        ),
+    )
+    uw.set_defaults(func=cmd_uninstall_weekly)
 
     cfg = sub.add_parser("config",
                          help="View, --get, or --set ~/.praxis/config.toml.")
