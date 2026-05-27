@@ -1,0 +1,52 @@
+{
+  "branchName": "ralph/factory/follow-up-loop",
+  "userStories": [
+    {
+      "id": "US-045",
+      "title": "Persist next-week commitment from this week's headline moment",
+      "acceptanceCriteria": [
+        "Each weekly digest run writes one follow_ups row keyed by week_iso",
+        "commitment_text is taken from the headline moment's suggested_alternative",
+        "dim_key matches the headline moment's dim",
+        "target_metric is verification_rate, delegation_rate, or '<dim>_dim_mean' as appropriate to the dim",
+        "baseline_value records the current value of target_metric at digest generation",
+        "outcome is initialized to 'pending'",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-046",
+      "title": "Compute outcome from data (improved/unchanged/worse), not LLM",
+      "acceptanceCriteria": [
+        "On the next weekly run, the prior week's follow_ups row is updated with measured_value from the new week's data",
+        "outcome = 'improved' iff measured_value > baseline_value + 0.5 (or inverse for delegation_rate)",
+        "outcome = 'worse' iff measured_value < baseline_value - 0.5 (or inverse for delegation_rate)",
+        "Otherwise outcome = 'unchanged'",
+        "The LLM is never asked to decide the outcome",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-047",
+      "title": "praxis follow-up CLI prints current commitment status",
+      "acceptanceCriteria": [
+        "praxis follow-up prints the most recent follow_ups row in human-readable form",
+        "Output includes commitment_text, baseline_value, measured_value (or '--' if pending), and outcome",
+        "Exits 0 when a follow-up exists, exits 3 with a clear message when none exist yet",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

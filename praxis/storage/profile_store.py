@@ -24,6 +24,7 @@ def _utcnow() -> datetime:
     """Tz-aware UTC now. Wraps datetime.now(timezone.utc) for terseness."""
     return datetime.now(timezone.utc)
 
+from praxis.follow_up import FollowUp, Outcome
 from praxis.scoring.aggregate import ProfileSnapshot, SessionScore
 
 
@@ -74,6 +75,16 @@ CREATE TABLE IF NOT EXISTS run_log (
     sessions_seen INTEGER NOT NULL,
     sessions_new INTEGER NOT NULL,
     notes TEXT
+);
+
+CREATE TABLE IF NOT EXISTS follow_ups (
+    week_iso TEXT PRIMARY KEY,
+    dim_key TEXT NOT NULL,
+    commitment_text TEXT NOT NULL,
+    target_metric TEXT NOT NULL,
+    baseline_value REAL NOT NULL,
+    measured_value REAL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('improved','unchanged','worse','pending'))
 );
 """
 
@@ -260,3 +271,47 @@ class ProfileStore:
                 "VALUES (?, ?, ?, ?, ?)",
                 (_utcnow().isoformat(), kind, sessions_seen, sessions_new, notes),
             )
+
+    # ---- follow-ups -----------------------------------------------------
+
+    def save_follow_up(self, follow_up: FollowUp) -> None:
+        """Persist (or replace) one row of follow_ups keyed by week_iso."""
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO follow_ups
+                (week_iso, dim_key, commitment_text, target_metric,
+                 baseline_value, measured_value, outcome)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    follow_up.week_iso,
+                    follow_up.dim_key,
+                    follow_up.commitment_text,
+                    follow_up.target_metric,
+                    follow_up.baseline_value,
+                    follow_up.measured_value,
+                    follow_up.outcome,
+                ),
+            )
+
+    def load_follow_up(self, week_iso: str) -> FollowUp | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT week_iso, dim_key, commitment_text, target_metric, "
+                "       baseline_value, measured_value, outcome "
+                "FROM follow_ups WHERE week_iso = ?",
+                (week_iso,),
+            ).fetchone()
+        if row is None:
+            return None
+        outcome: Outcome = row["outcome"]
+        return FollowUp(
+            week_iso=row["week_iso"],
+            dim_key=row["dim_key"],
+            commitment_text=row["commitment_text"],
+            target_metric=row["target_metric"],
+            baseline_value=row["baseline_value"],
+            measured_value=row["measured_value"],
+            outcome=outcome,
+        )
