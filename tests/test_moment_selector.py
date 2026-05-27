@@ -207,7 +207,9 @@ def test_select_moments_passes_haiku_to_caller_for_anthropic():
             }
         )
 
-    out = select_moments([_candidate()], primary_provider="anthropic", llm_caller=stub)
+    # Two candidates so the LLM short-circuit (US-032) doesn't fire.
+    cands = [_candidate(moment_id="m1"), _candidate(moment_id="m2")]
+    out = select_moments(cands, primary_provider="anthropic", llm_caller=stub)
     assert out is not None
     assert seen["model"] == "claude-haiku-4-5"
 
@@ -225,7 +227,8 @@ def test_select_moments_passes_gpt5_mini_to_caller_for_openai():
             }
         )
 
-    select_moments([_candidate()], primary_provider="openai", llm_caller=stub)
+    cands = [_candidate(moment_id="m1"), _candidate(moment_id="m2")]
+    select_moments(cands, primary_provider="openai", llm_caller=stub)
     assert seen["model"] == "gpt-5-mini"
 
 
@@ -369,10 +372,13 @@ def test_select_moments_serializes_recurrence_and_dollar_impact_in_prompt():
             }
         )
 
-    cand = _candidate(
-        moment_id="m1", recurrence_count=2, dollar_impact_estimate=4.5
-    )
-    select_moments([cand], primary_provider="anthropic", llm_caller=stub)
+    # Two candidates so the US-032 single-candidate short-circuit
+    # doesn't fire and the LLM stub is actually invoked.
+    cands = [
+        _candidate(moment_id="m1", recurrence_count=2, dollar_impact_estimate=4.5),
+        _candidate(moment_id="m2"),
+    ]
+    select_moments(cands, primary_provider="anthropic", llm_caller=stub)
     # Both numbers are in the JSON payload the LLM saw.
     assert '"recurrence_count": 2' in captured["user"]
     assert '"dollar_impact_estimate": 4.5' in captured["user"]
@@ -461,7 +467,9 @@ def test_select_moments_reprompts_when_headline_id_unknown():
             }
         )
 
-    cands = [_candidate(moment_id="m1")]
+    # Two candidates to bypass the US-032 single-candidate short-circuit
+    # and actually exercise the LLM retry path.
+    cands = [_candidate(moment_id="m1"), _candidate(moment_id="m2")]
     out = select_moments(cands, primary_provider="anthropic", llm_caller=stub)
     assert out is not None
     assert out.headline_moment_id == "m1"
@@ -523,7 +531,8 @@ def test_select_moments_retry_prompt_lists_every_invalid_id():
             }
         )
 
-    cands = [_candidate(moment_id="m1")]
+    # Two candidates to avoid the US-032 short-circuit.
+    cands = [_candidate(moment_id="m1"), _candidate(moment_id="m2")]
     select_moments(cands, primary_provider="anthropic", llm_caller=stub)
     retry_user = calls[1][1]
     assert "BAD1" in retry_user
@@ -584,7 +593,8 @@ def test_select_moments_raises_when_retry_response_still_invalid():
             }
         )
 
-    cands = [_candidate(moment_id="m1")]
+    # Two candidates to avoid the US-032 short-circuit.
+    cands = [_candidate(moment_id="m1"), _candidate(moment_id="m2")]
     with pytest.raises(InvalidMomentSelectionError) as excinfo:
         select_moments(cands, primary_provider="anthropic", llm_caller=stub)
     assert "STILL_BAD" in str(excinfo.value)
@@ -607,7 +617,9 @@ def test_select_moments_never_calls_llm_a_third_time():
             }
         )
 
-    cands = [_candidate(moment_id="m1")]
+    # Two candidates to avoid the US-032 short-circuit; the retry-budget
+    # invariant under test is independent of candidate count.
+    cands = [_candidate(moment_id="m1"), _candidate(moment_id="m2")]
     with pytest.raises(InvalidMomentSelectionError):
         select_moments(cands, primary_provider="anthropic", llm_caller=stub)
     assert n == 2
@@ -715,7 +727,12 @@ def test_select_moments_with_fallback_passes_through_on_success():
             }
         )
 
-    cands = [_candidate(moment_id="m1", severity="major")]
+    # Two candidates so the US-032 short-circuit does not bypass the
+    # LLM stub whose response this test is asserting on.
+    cands = [
+        _candidate(moment_id="m1", severity="major"),
+        _candidate(moment_id="m2", severity="moderate"),
+    ]
     out = select_moments_with_fallback(
         cands, primary_provider="anthropic", llm_caller=stub
     )
@@ -782,7 +799,13 @@ def test_select_moments_with_fallback_reraises_when_no_major_or_moderate():
     nothing the deterministic fallback can pick -- the original
     InvalidMomentSelectionError propagates so the digest pipeline
     knows the headline slot is empty."""
-    cands = [_candidate(moment_id="minA", severity="minor")]
+    # Two minor candidates so the US-032 short-circuit doesn't elect
+    # one of them as headline -- this test is specifically about the
+    # LLM-failure-and-no-fallback path.
+    cands = [
+        _candidate(moment_id="minA", severity="minor"),
+        _candidate(moment_id="minB", severity="minor"),
+    ]
     with pytest.raises(InvalidMomentSelectionError):
         select_moments_with_fallback(
             cands, primary_provider="anthropic", llm_caller=_bad_stub
@@ -800,11 +823,18 @@ def test_select_moments_with_fallback_makes_at_most_two_llm_calls():
         n += 1
         return _bad_stub(system, user, model)
 
-    cands = [_candidate(moment_id="m1", severity="major")]
+    # Two candidates so the US-032 short-circuit doesn't bypass the
+    # LLM entirely -- this test asserts exactly two calls are made.
+    cands = [
+        _candidate(moment_id="m1", severity="major"),
+        _candidate(moment_id="m2", severity="major"),
+    ]
     out = select_moments_with_fallback(
         cands, primary_provider="anthropic", llm_caller=counting_bad_stub
     )
     assert out is not None
+    # Fallback picks one of the two majors (same session_started_at; the
+    # `max` tie-breaker returns the first one in input order).
     assert out.headline_moment_id == "m1"
     assert n == 2
 
@@ -847,3 +877,145 @@ def test_select_moments_with_fallback_prefers_major_over_more_recent_moderate():
     )
     assert out is not None
     assert out.headline_moment_id == "OLDMAJ"
+
+
+# ---------- US-032: single-candidate short-circuit + 3-moment cap ----------
+
+
+def test_select_moments_skips_llm_when_only_one_candidate():
+    """Acceptance: 'If exactly one candidate moment exists for the
+    week, no LLM call is made and that moment is the headline.' The
+    stub records every call; with one candidate it must record zero."""
+    calls: list[tuple[str, str, str]] = []
+
+    def stub(system: str, user: str, model: str) -> str:
+        calls.append((system, user, model))
+        return json.dumps(
+            {
+                "headline_moment_id": "should_not_be_used",
+                "headline_reason": "y.",
+                "supporting_moment_ids": [],
+            }
+        )
+
+    out = select_moments(
+        [_candidate(moment_id="solo")],
+        primary_provider="anthropic",
+        llm_caller=stub,
+    )
+    assert out is not None
+    assert out.headline_moment_id == "solo"
+    assert out.supporting_moment_ids == []
+    # No LLM call -- the stub recorded nothing.
+    assert calls == []
+
+
+def test_select_moments_single_candidate_has_empty_reason_and_supporting():
+    """Deterministic short-circuit produces no coaching prose (no LLM
+    was called to generate one) and an empty supporting list, mirroring
+    the US-031 fallback path's invariants."""
+    out = select_moments(
+        [_candidate(moment_id="onlyOne", severity="major")],
+        primary_provider="anthropic",
+        llm_caller=_bad_stub,  # Never called; still safe to wire up.
+    )
+    assert out is not None
+    assert out.headline_reason == ""
+    assert out.supporting_moment_ids == []
+
+
+def test_select_moments_two_candidates_still_calls_llm():
+    """Regression guard: the short-circuit fires ONLY at exactly one
+    candidate. Two or more candidates must still invoke the selector
+    LLM. Without this check, future refactors could silently widen the
+    short-circuit to (e.g.) <= 1 or 'most candidates same dim'."""
+    calls: list[tuple[str, str, str]] = []
+
+    def stub(system: str, user: str, model: str) -> str:
+        calls.append((system, user, model))
+        return json.dumps(
+            {
+                "headline_moment_id": "m1",
+                "headline_reason": "x.",
+                "supporting_moment_ids": ["m2"],
+            }
+        )
+
+    cands = [_candidate(moment_id="m1"), _candidate(moment_id="m2")]
+    select_moments(cands, primary_provider="anthropic", llm_caller=stub)
+    assert len(calls) == 1
+
+
+def test_select_moments_with_fallback_short_circuits_single_candidate():
+    """The fallback wrapper delegates to select_moments, so it inherits
+    the single-candidate short-circuit for free. Verify end-to-end that
+    a one-candidate week never touches the LLM via the wrapper either."""
+    calls: list[tuple[str, str, str]] = []
+
+    def stub(system: str, user: str, model: str) -> str:
+        calls.append((system, user, model))
+        return json.dumps(
+            {
+                "headline_moment_id": "noop",
+                "headline_reason": "x.",
+                "supporting_moment_ids": [],
+            }
+        )
+
+    out = select_moments_with_fallback(
+        [_candidate(moment_id="lone", severity="major")],
+        primary_provider="anthropic",
+        llm_caller=stub,
+    )
+    assert out is not None
+    assert out.headline_moment_id == "lone"
+    assert calls == []
+
+
+def test_select_moments_hard_caps_total_moments_at_three():
+    """Acceptance: 'Even if the LLM returns more than two supporting
+    IDs, only the first two are kept. Total moments rendered in the
+    digest never exceeds 3.' Verified through the public select_moments
+    API (not just _parse_selection) so the cap survives any future
+    refactor that moves parsing around."""
+    def stub(system: str, user: str, model: str) -> str:
+        return json.dumps(
+            {
+                "headline_moment_id": "m1",
+                "headline_reason": "x.",
+                "supporting_moment_ids": ["m2", "m3", "m4", "m5", "m6"],
+            }
+        )
+
+    cands = [
+        _candidate(moment_id=f"m{i}") for i in range(1, 7)
+    ]  # m1..m6 all valid
+    out = select_moments(cands, primary_provider="anthropic", llm_caller=stub)
+    assert out is not None
+    assert out.headline_moment_id == "m1"
+    assert out.supporting_moment_ids == ["m2", "m3"]
+    # Hard cap: headline (1) + supporting (<=2) <= 3 total moments.
+    total = 1 + len(out.supporting_moment_ids)
+    assert total <= 3
+
+
+def test_select_moments_with_fallback_hard_caps_at_three():
+    """Same cap via the fallback wrapper, which is the entry point the
+    digest pipeline actually uses. Even a chatty LLM cannot push more
+    than two supporting moments through."""
+    def stub(system: str, user: str, model: str) -> str:
+        return json.dumps(
+            {
+                "headline_moment_id": "m1",
+                "headline_reason": "x.",
+                "supporting_moment_ids": ["m2", "m3", "m4", "m5"],
+            }
+        )
+
+    cands = [_candidate(moment_id=f"m{i}") for i in range(1, 6)]
+    out = select_moments_with_fallback(
+        cands, primary_provider="anthropic", llm_caller=stub
+    )
+    assert out is not None
+    assert len(out.supporting_moment_ids) <= 2
+    assert 1 + len(out.supporting_moment_ids) <= 3

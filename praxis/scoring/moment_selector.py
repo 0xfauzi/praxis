@@ -259,9 +259,18 @@ def select_moments(
             real provider SDK matching primary_provider.
 
     Returns None when candidates is empty (no selector call is made).
+    With exactly one candidate, that moment becomes the headline with
+    no LLM call (spec section 4.3: the selector's job is to choose
+    among multiple candidates; a single candidate has nothing to choose).
     """
     if not candidates:
         return None
+    if len(candidates) == 1:
+        return MomentSelection(
+            headline_moment_id=candidates[0].moment.moment_id,
+            headline_reason="",
+            supporting_moment_ids=[],
+        )
 
     model = cheap_model_for(primary_provider)
     system_prompt = _SYSTEM_PROMPT
