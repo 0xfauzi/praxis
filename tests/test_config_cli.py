@@ -37,11 +37,11 @@ def _load(path: Path) -> dict:
 
 
 def test_get_string_value(tmp_home):
-    assert get_value("schedule.day") == "sunday"
+    assert get_value("schedule.day") == "monday"
 
 
 def test_get_int_value(tmp_home):
-    assert get_value("schedule.hour") == "18"
+    assert get_value("schedule.hour") == "9"
 
 
 def test_get_bool_value_true(tmp_home):
@@ -61,7 +61,7 @@ def test_get_via_cli_prints_to_stdout(tmp_home, capsys):
     rc = main(["config", "--get", "schedule.day"])
     assert rc == 0
     out, err = capsys.readouterr()
-    assert out.strip() == "sunday"
+    assert out.strip() == "monday"
     assert err == ""
 
 
@@ -157,22 +157,26 @@ def test_set_bool_accepts_truthy_aliases(tmp_home):
 
 
 def test_set_preserves_other_keys_in_same_section(tmp_home):
-    set_value("schedule.day", "monday")
+    set_value("schedule.day", "friday")
     data = _load(config_path())
     # Other keys in [schedule] keep their defaults.
-    assert data["schedule"]["hour"] == 18
+    assert data["schedule"]["hour"] == 9
     assert data["schedule"]["minute"] == 0
 
 
 def test_set_preserves_other_sections(tmp_home):
-    set_value("schedule.day", "monday")
+    set_value("schedule.day", "friday")
     data = _load(config_path())
     # All four other sections are untouched.
     assert data["scan"] == {"since_days": 7, "max_new": 200}
     assert data["judge"]["primary_provider"] == "anthropic"
     assert data["judge"]["frontier_model"] == "claude-opus-4-7"
     assert data["judge"]["cheap_model"] == "claude-haiku-4-5"
-    assert data["notification"] == {"enabled": True, "sound": "default"}
+    assert data["notification"] == {
+        "enabled": True,
+        "sound": "default",
+        "style": "banner",
+    }
     assert data["privacy"] == {"redact_secrets": True}
 
 

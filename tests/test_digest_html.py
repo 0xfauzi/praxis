@@ -438,35 +438,43 @@ def test_render_filled_digest_keeps_self_containment_contract():
 
 # --------------------------------------------- US-063: v0.1 visual language
 
-# Spec section 6.1: "The HTML uses the existing v0.1 visual language
-# (cream, terracotta, Libre Baskerville). Do not redesign the look."
-# These tests lock the v0.1 design tokens into the digest so a future
-# refactor cannot quietly drift away from the established product look.
+# Spec section 6.1 originally read "do not redesign the look" - the
+# v0.2 redesign pass replaced the hex-only tokens with OKLCH (per the
+# impeccable design rules: perceptually uniform color, no hard-coded
+# hex), kept terracotta as the emphasis hue, kept cream as the warm
+# page ground, and swapped Libre Baskerville for a well-drawn system
+# serif stack (Iowan Old Style first) so the digest renders with the
+# OS's editorial face instead of a web-font default. These tests now
+# lock the v0.2 design tokens.
 
 
-def test_render_uses_v01_terracotta_primary():
-    """The terracotta primary (#C1573B) is the v0.1 emphasis color and
-    must appear in the rendered CSS so emphasis reads as 'Praxis'."""
+def test_render_uses_terracotta_primary_in_oklch():
+    """The terracotta primary anchors emphasis across the digest.
+    Expressed in OKLCH per the impeccable design rules; the exact
+    OKLCH triplet for the emphasis hue must appear in the rendered
+    CSS so a refactor cannot quietly drift away from it."""
     out = render(_digest())
-    assert "#C1573B" in out
+    assert "oklch(56% 0.135 38)" in out
 
 
-def test_render_uses_v01_cream_background():
-    """The cream background (#FAF7F2) is the v0.1 page color; without
-    it the digest would not feel like the same product as the scan
-    report."""
+def test_render_uses_warm_cream_ground():
+    """The warm cream ground (high lightness, low chroma, hue ~80 in
+    OKLCH) is preserved from v0.1 in spirit but expressed in OKLCH so
+    its perceptual lightness is honest."""
     out = render(_digest())
-    assert "#FAF7F2" in out
+    assert "oklch(96.5% 0.005 80)" in out
 
 
-def test_render_names_libre_baskerville_in_font_stack():
-    """The v0.1 display face is Libre Baskerville. The digest names it
-    first in the display font-family declarations so that, when the
-    user has the face installed locally, the digest renders identically
-    to the v0.1 scan report. The 'inlined fallback' is Georgia (see
-    test_render_uses_system_font_stack)."""
+def test_render_uses_system_serif_stack_with_iowan_old_style_first():
+    """v0.2: the display face is the OS's best editorial serif. Iowan
+    Old Style (macOS / iOS) leads; Sitka Text (Windows) follows;
+    Hoefler Text and Charter as further macOS fallbacks; Cambria and
+    Georgia as ultimate cross-platform fallbacks. Libre Baskerville is
+    intentionally NOT in the stack (it was the v0.1 default and is on
+    the impeccable reflex-reject list)."""
     out = render(_digest())
-    assert "'Libre Baskerville'" in out
+    assert "'Iowan Old Style'" in out
+    assert "'Libre Baskerville'" not in out
 
 
 def test_render_does_not_fetch_libre_baskerville():

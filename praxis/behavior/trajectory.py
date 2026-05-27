@@ -23,6 +23,7 @@ from statistics import mean
 
 from praxis.behavior.signals import BehavioralSignals
 from praxis.models import Session
+from praxis.scoring.features import extract as _extract_features
 
 
 class TrajectoryLabel(str, Enum):
@@ -49,6 +50,12 @@ class TrajectoryAssessment:
     evidence: list[str] = field(default_factory=list)   # specific observations
     risks: list[str] = field(default_factory=list)      # what to watch
     interventions: list[str] = field(default_factory=list)  # what to do
+    # v0.3 — the small-multiples chart in the report shows 4 signals,
+    # so the trajectory assessment now exposes 4 slopes (defaulted to
+    # 0.0 so older fixtures and persisted rows keep loading). The headline
+    # itself names whichever of the four are actually moving.
+    independence_slope: float = 0.0
+    verification_slope: float = 0.0
 
 
 def _linear_slope(values: list[float]) -> float:
@@ -81,16 +88,31 @@ def assess_trajectory_heuristic(
     sorted_pairs = sorted(sessions_with_signals, key=lambda p: p[0].started_at)
     engagement_series = [p[1].engagement_rate for p in sorted_pairs]
     delegation_series = [p[1].delegation_rate for p in sorted_pairs]
+    independence_series = [p[1].independence_rate for p in sorted_pairs]
+    # Verification marker rate is derived from session features (not
+    # carried on BehavioralSignals) so we extract per session here.
+    verification_series: list[float] = []
+    for sess, _sig in sorted_pairs:
+        feats = _extract_features(sess)
+        turns = max(feats.turn_count, 1)
+        verification_series.append(
+            feats.marker_hit_counts.get("verification", 0) / turns
+        )
 
     eng_slope = _linear_slope(engagement_series)
     del_slope = _linear_slope(delegation_series)
+    ind_slope = _linear_slope(independence_series)
+    ver_slope = _linear_slope(verification_series)
 
     avg_eng = mean(engagement_series)
     avg_del = mean(delegation_series)
     pure_delegator_count = sum(1 for _s, sig in sorted_pairs if sig.is_pure_delegator)
     pure_delegator_rate = pure_delegator_count / n
 
-    # Decision logic
+    # Decision logic. The label still keys off engagement/delegation;
+    # the headline gets a secondary clause that names independence /
+    # verification when they're actually moving so the prose covers all
+    # 4 signals shown in the small-multiples chart.
     if eng_slope > 0.02 and del_slope < 0.0:
         label = TrajectoryLabel.LEARNING
         headline = (
@@ -122,6 +144,10 @@ def assess_trajectory_heuristic(
             f"Low but steady engagement across {n} sessions. Plenty of "
             f"room to shift from outputs to learning."
         )
+
+    secondary = _secondary_signal_clause(ind_slope, ver_slope)
+    if secondary:
+        headline = f"{headline} {secondary}"
 
     evidence: list[str] = []
     if pure_delegator_count > 0:
@@ -180,7 +206,41 @@ def assess_trajectory_heuristic(
         evidence=evidence,
         risks=risks,
         interventions=interventions,
+        independence_slope=round(ind_slope, 4),
+        verification_slope=round(ver_slope, 4),
     )
+
+
+# Threshold for naming a 3rd/4th signal in the headline. Below this slope
+# magnitude the secondary signal is treated as flat and skipped to avoid
+# narrating noise.
+_SECONDARY_SLOPE_THRESHOLD: float = 0.01
+
+
+def _secondary_signal_clause(
+    independence_slope: float,
+    verification_slope: float,
+) -> str:
+    """Name independence/verification when they're materially moving.
+
+    The primary headline already covers engagement + delegation. This
+    appends a short clause so the prose accounts for the other two
+    signals the small-multiples chart shows. Returns empty string when
+    neither signal is moving enough to mention; the primary headline
+    stands on its own in that case.
+    """
+    movers: list[str] = []
+    if abs(independence_slope) >= _SECONDARY_SLOPE_THRESHOLD:
+        direction = "rising" if independence_slope > 0 else "falling"
+        movers.append(f"independence {direction}")
+    if abs(verification_slope) >= _SECONDARY_SLOPE_THRESHOLD:
+        direction = "up" if verification_slope > 0 else "down"
+        movers.append(f"verification {direction}")
+    if not movers:
+        return ""
+    if len(movers) == 1:
+        return f"({movers[0]} too)."
+    return f"({movers[0]}, {movers[1]})."
 
 
 def assess_trajectory_with_llm(
@@ -198,12 +258,27 @@ def assess_trajectory_with_llm(
 
     sorted_pairs = sorted(sessions_with_signals, key=lambda p: p[0].started_at)
 
-    # Build a compact behavior timeline
+    # Per-session verification rate is derived from features (markers/turn).
+    # Kept aligned with sorted_pairs so the slope and the per-row timeline
+    # share an index.
+    verification_per_session: list[float] = []
+    for sess, _sig in sorted_pairs:
+        feats = _extract_features(sess)
+        turns = max(feats.turn_count, 1)
+        verification_per_session.append(
+            feats.marker_hit_counts.get("verification", 0) / turns
+        )
+
+    # Build a compact behavior timeline. independence_rate + verification
+    # are included so the LLM can name all 4 signals in its headline.
     timeline = []
-    for sess, sig in sorted_pairs[-20:]:  # Last 20 sessions to control cost
+    for i, (sess, sig) in enumerate(sorted_pairs[-20:]):
         first_prompt = sess.user_turns[0].content if sess.user_turns else ""
         if len(first_prompt) > 300:
             first_prompt = first_prompt[:300] + "..."
+        # Index into the full verification list: the last 20-slice starts
+        # at len(sorted_pairs)-20 (clamped).
+        full_idx = max(0, len(sorted_pairs) - 20) + i
         timeline.append({
             "date": sess.started_at.strftime("%Y-%m-%d"),
             "provider": sess.provider.value,
@@ -212,6 +287,8 @@ def assess_trajectory_with_llm(
             "turns": sess.turn_count,
             "engagement_rate": round(sig.engagement_rate, 2),
             "delegation_rate": round(sig.delegation_rate, 2),
+            "independence_rate": round(sig.independence_rate, 2),
+            "verification_rate": round(verification_per_session[full_idx], 2),
             "why_questions": sig.why_question_count,
             "comprehension_checks": sig.comprehension_check_count,
             "own_attempts": sig.own_attempt_count,
@@ -220,6 +297,8 @@ def assess_trajectory_with_llm(
 
     eng_slope = _linear_slope([p[1].engagement_rate for p in sorted_pairs])
     del_slope = _linear_slope([p[1].delegation_rate for p in sorted_pairs])
+    ind_slope = _linear_slope([p[1].independence_rate for p in sorted_pairs])
+    ver_slope = _linear_slope(verification_per_session)
 
     system_prompt = """You are a behavioral analyst studying how people learn (or fail to learn) from AI assistants. You read a timeline of one person's chat sessions over time and judge their learning trajectory.
 
@@ -293,7 +372,14 @@ evidence: 1-4 items. risks: 0-3 items (empty for learning/engaged labels). inter
     user_msg = (
         f"Engagement slope: {eng_slope:+.4f} per session\n"
         f"Delegation slope: {del_slope:+.4f} per session\n"
+        f"Independence slope: {ind_slope:+.4f} per session\n"
+        f"Verification-marker slope: {ver_slope:+.4f} per session\n"
         f"Total sessions: {n}\n\n"
+        f"Headline guidance: the digest renders a small-multiples chart "
+        f"with all four signals (engagement, delegation, independence, "
+        f"verification). Your 2-sentence headline should account for the "
+        f"signals that are actually moving; do not narrate one or two and "
+        f"silently drop the others when they are moving as well.\n\n"
         f"Behavior timeline (oldest first, last 20 sessions):\n"
         f"{json.dumps(timeline, indent=2)}"
     )
@@ -348,6 +434,8 @@ evidence: 1-4 items. risks: 0-3 items (empty for learning/engaged labels). inter
             evidence=list(payload.get("evidence", [])),
             risks=list(payload.get("risks", [])),
             interventions=list(payload.get("interventions", [])),
+            independence_slope=round(ind_slope, 4),
+            verification_slope=round(ver_slope, 4),
         )
     except (ValueError, json.JSONDecodeError) as exc:
         print(f"[behavior] failed to parse LLM trajectory: {exc!r}", file=sys.stderr)

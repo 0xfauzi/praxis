@@ -141,6 +141,31 @@ class DimRow:
 
 
 @dataclass(frozen=True)
+class BehavioralRow:
+    """One behavioral-signal card in the dimensions grid.
+
+    Distinct from `DimRow`: behavioral signals are 0-1 rates (% of user
+    turns showing the signal), not 0-10 rubric scores. They render in the
+    same grid below the rubric cards but with a % glyph and a ring filled
+    against 1.0 instead of 10.
+
+    `rate` and `baseline_rate` are 0.0..1.0. `delta` is in rate-points
+    (rate - baseline_rate); negative for falling, positive for rising.
+    `frame` is "supportive" (terracotta accent for a rising signal that's
+    good news, like Engagement or Verification) or "counter" (ink-blue
+    accent for a signal whose rise is a warning, like Delegation). Used
+    only for arc colour; baseline tick logic is identical for both.
+    """
+
+    title: str = ""
+    rate: float = 0.0
+    baseline_rate: float | None = None
+    delta: float | None = None
+    evidence_citation: str = ""
+    frame: str = "supportive"   # "supportive" | "counter"
+
+
+@dataclass(frozen=True)
 class FollowUpPanel:
     """Follow-up from last week (spec section 6.3)."""
 
@@ -169,11 +194,24 @@ class VitalSigns:
 
 @dataclass(frozen=True)
 class WeeklyTrajectoryPoint:
-    """One bucket on the multi-week trajectory line chart."""
+    """One bucket on the multi-week trajectory line chart.
+
+    The four signals are the spec's behavioral triad plus the
+    "delegation" atrophy axis:
+      - engagement_rate: share of user turns with engagement signals
+        (why-questions, comprehension checks, explanation requests)
+      - delegation_rate: share with atrophy signals (pure delegation,
+        outsourced debug, telegraphic prompts) — atrophy axis
+      - independence_rate: share showing own attempt before asking
+      - verification_marker_rate: share of user turns containing a
+        verification marker word (source, verify, cite, check, etc.)
+    """
 
     week_iso: str
     engagement_rate: float
     delegation_rate: float
+    independence_rate: float = 0.0
+    verification_marker_rate: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -200,6 +238,7 @@ class WeeklyDigest:
     # New v0.2+ fields below; defaults keep older test fixtures working.
     vital_signs: VitalSigns | None = None
     weekly_trajectory: tuple[WeeklyTrajectoryPoint, ...] = ()
+    behavioral_signals: tuple[BehavioralRow, ...] = ()
 
 
 # ---------------------------------------------------------------- section text
@@ -474,6 +513,14 @@ def _moment_section(moment: MomentPanel | None, dim_title: str = "") -> str:
 
 
 def _cost_ledger_section(ledger: CostLedger | None) -> str:
+    """Cost rendered as narrative + bar, not as a dashboard tile grid.
+
+    The previous version used a 3-column stat-tile row ("This week /
+    Baseline / vs baseline"), which is the SaaS-dashboard hero-metric
+    template the impeccable rules call out. This version puts the big
+    number inline with a serif sentence and lets the stacked bar do the
+    breakdown.
+    """
     if ledger is None or ledger.this_week_dollars <= 0.0:
         return f"""
   <section class="c-section" id="cost-ledger">
@@ -481,88 +528,69 @@ def _cost_ledger_section(ledger: CostLedger | None) -> str:
     <p class="placeholder">No priced model spend this week.</p>
   </section>"""
 
-    # Big number formatted with smaller cents (typographic convention)
-    cents_part = f"{ledger.this_week_dollars:.2f}".split(".")
-    big = cents_part[0]
-    cents = cents_part[1] if len(cents_part) > 1 else "00"
+    full_amount = f"${ledger.this_week_dollars:,.2f}"
+    cents_split = f"{ledger.this_week_dollars:.2f}".split(".")
+    big = cents_split[0]
+    cents = cents_split[1] if len(cents_split) > 1 else "00"
 
-    # Delta line
+    # Inline narrative that explains the week's spend in one sentence.
+    # No tile chrome, no big-number/small-label template; the prose
+    # carries the comparison.
     if ledger.baseline_dollars and ledger.baseline_dollars > 0:
         diff = ledger.this_week_dollars - ledger.baseline_dollars
         if abs(diff) < 0.005:
-            delta_str = "on baseline"
+            comparison = (
+                f"on the 90-day baseline of ${ledger.baseline_dollars:,.2f}."
+            )
+        elif diff > 0:
+            comparison = (
+                f"about ${diff:,.2f} above your 90-day "
+                f"baseline of ${ledger.baseline_dollars:,.2f}."
+            )
         else:
-            sign = "over" if diff > 0 else "under"
-            delta_str = f"{sign} baseline by ${abs(diff):,.2f}"
-        delta_html = (
-            f"<div class=\"c-delta\">vs ${ledger.baseline_dollars:,.2f} 90-day baseline · {delta_str}</div>"
-        )
+            comparison = (
+                f"about ${abs(diff):,.2f} below your 90-day "
+                f"baseline of ${ledger.baseline_dollars:,.2f}."
+            )
     else:
-        delta_html = '<div class="c-delta">Baseline forming — second week onward.</div>'
+        comparison = (
+            "the first weekly digest on file; the 90-day baseline starts "
+            "forming next week."
+        )
 
-    # Biggest line as a visual breakdown
-    biggest_html = ""
+    biggest_clause = ""
     if ledger.biggest_line:
-        biggest_html = (
-            f'<div class="c-biggest"><span class="c-inline-label">Biggest line</span>'
-            f'<span class="c-biggest-text">{_safe(ledger.biggest_line)}</span></div>'
+        biggest_clause = (
+            f' <span class="c-narrative-em">Most of it</span> went to '
+            f'{_safe(ledger.biggest_line)}.'
         )
 
-    sonnet_html = ""
+    tier_clause = ""
     if ledger.sonnet_swap_note:
-        sonnet_html = (
-            f'<p class="c-tier-fit">{_safe(ledger.sonnet_swap_note)}</p>'
-        )
+        tier_clause = f' {_safe(ledger.sonnet_swap_note)}'
 
-    full_amount = f"${ledger.this_week_dollars:,.2f}"
-    # Stat tiles - 3-col row that sits above the model split bar.
-    baseline_tile = (
-        f'<div class="stat-tile">'
-        f'<div class="stat-tile-label">90-day baseline</div>'
-        f'<div class="stat-tile-value">${ledger.baseline_dollars:,.2f}</div>'
-        f'</div>'
-        if ledger.baseline_dollars and ledger.baseline_dollars > 0
-        else (
-            '<div class="stat-tile">'
-            '<div class="stat-tile-label">90-day baseline</div>'
-            '<div class="stat-tile-value stat-tile-value--forming">forming</div>'
-            '</div>'
-        )
-    )
-    delta_tile = ""
-    if ledger.baseline_dollars and ledger.baseline_dollars > 0:
-        diff = ledger.this_week_dollars - ledger.baseline_dollars
-        sign = "+" if diff >= 0 else "-"
-        delta_str = f"{sign}${abs(diff):,.2f}"
-        delta_tile = (
-            f'<div class="stat-tile">'
-            f'<div class="stat-tile-label">vs baseline</div>'
-            f'<div class="stat-tile-value">{delta_str}</div>'
-            f'</div>'
-        )
-    stat_tiles = (
-        '<div class="stat-tiles">'
-        f'<div class="stat-tile stat-tile--accent">'
-        f'<div class="stat-tile-label">This week</div>'
-        f'<div class="stat-tile-value">{full_amount}</div>'
-        f'</div>'
-        f'{baseline_tile}'
-        f'{delta_tile}'
-        '</div>'
-    )
     split_bar = _cost_split_bar(ledger.model_split, ledger.this_week_dollars)
+
     return f"""
   <section class="c-section" id="cost-ledger">
     <div class="s-eyebrow">Cost Ledger</div>
-    <div class="c-amount-plain" aria-hidden="true">{full_amount}</div>
-    {stat_tiles}
+    <div class="c-amount" aria-label="{full_amount}">
+      <span class="c-currency">$</span><span class="c-big">{big}</span><span class="c-cents">.{cents}</span>
+      <span class="c-amount-plain">{full_amount}</span>
+    </div>
+    <p class="c-narrative">This week's priced spend was {comparison}{biggest_clause}{tier_clause}</p>
     {split_bar}
-    {biggest_html}
-    {sonnet_html}
   </section>"""
 
 
 def _task_breakdown_section(rows: tuple[TaskRow, ...]) -> str:
+    """Tasks as a numbered editorial list, not a card grid.
+
+    Film-festival-lineup typography: large display numeral at left,
+    task label in serif at the right, meta line below. The numeral
+    is what carries the visual weight; a thin terracotta hairline
+    separates rows. No card chrome.
+    """
     if not rows:
         return f"""
   <section class="w-section" id="where-the-week-went">
@@ -570,27 +598,27 @@ def _task_breakdown_section(rows: tuple[TaskRow, ...]) -> str:
     <p class="placeholder">No tasks identified yet.</p>
   </section>"""
     items: list[str] = []
-    max_sessions = max((r.session_count for r in rows), default=1) or 1
-    for row in rows:
+    for idx, row in enumerate(rows, start=1):
         worst_html = ""
         if row.worst_score is not None:
             worst_html = (
-                f'<span class="w-worst">Lowest dim score: {row.worst_score:.1f}</span>'
+                f'<span class="w-worst">Lowest dim score this task: {row.worst_score:.1f}</span>'
             )
-        bar_pct = max(8, int(round((row.session_count / max_sessions) * 100)))
         cost_str = (
             f"${row.dollars:.2f}" if row.dollars > 0 else "—"
         )
         items.append(
             f'<article class="w-task">'
+            f'<div class="w-num">{idx:02d}</div>'
+            f'<div class="w-body">'
             f'<h3 class="w-label">{_safe(row.label)}</h3>'
-            f'<div class="w-bar"><div class="w-fill" style="width: {bar_pct}%"></div></div>'
             f'<div class="w-meta">'
             f'<span class="w-meta-stat">{row.session_count} session{"s" if row.session_count != 1 else ""}</span>'
             f'<span class="w-meta-dot">·</span>'
             f'<span class="w-meta-stat">{cost_str}</span>'
             f'{("<span class=\"w-meta-dot\">·</span>" + worst_html) if worst_html else ""}'
             f'</div>'
+            f'</div>'  # close w-body
             f"</article>"
         )
     return f"""
@@ -600,187 +628,323 @@ def _task_breakdown_section(rows: tuple[TaskRow, ...]) -> str:
   </section>"""
 
 
-_DIM_AXIS_LABELS: dict[str, str] = {
-    "Planning before prompting": "Planning",
-    "Context richness": "Context",
-    "Iteration & evaluation": "Iteration",
-    "Tool & multi-step use": "Tools",
-    "Model–task fit": "Fit",
-    "Verification habits": "Verify",
-}
 
 
-def _radar_svg(rows: tuple[DimRow, ...]) -> str:
-    """Hexagonal radar chart of the six dimensions.
+def _dim_ring_svg(score: float, baseline: float | None) -> str:
+    """The arc-indicator ring used inside each dim card.
 
-    Six vertices, one per rubric dim, at evenly-spaced angles starting
-    at -90° (so the first dim sits at the top). The filled polygon is
-    this week's scores; the ghost outline (when present) is the prior
-    week's 90-day baseline for each dim. Pure SVG, no JS, scales via
-    viewBox so the same markup looks crisp at any width.
-
-    The scale rings (at 25/50/75/100% of the outer radius) give the
-    reader an at-a-glance sense of magnitude without numeric gridlines.
+    A circular score gauge (FIFA-card aesthetic) drawn as an SVG arc.
+    The full circle represents a 10/10 ceiling; the filled arc spans
+    (score/10) of the circumference. When a 90-day baseline is on
+    file, a small tick mark sits ON the ring at the baseline's
+    position so the reader can see "you are above/below baseline"
+    without a separate chart.
     """
     import math
 
-    if not rows:
-        return ""
+    score = max(0.0, min(10.0, score))
+    size, stroke = 56, 4
+    cx = cy = size / 2
+    r = (size - stroke) / 2
 
-    cx, cy, r = 200, 200, 140
-    n = len(rows)
-    # Angles in radians; vertex 0 sits at the top (-pi/2).
-    angles = [(-math.pi / 2) + (2 * math.pi * i / n) for i in range(n)]
+    # Path math: angles in radians, starting from the top (-pi/2) and
+    # sweeping clockwise. Arc length = score/10 of the full circumference.
+    start_angle = -math.pi / 2
+    sweep_angle = (score / 10.0) * 2 * math.pi
+    end_angle = start_angle + sweep_angle
 
-    # Outer axis lines + concentric scale rings.
-    axis_lines: list[str] = []
-    for ang in angles:
-        x = cx + r * math.cos(ang)
-        y = cy + r * math.sin(ang)
-        axis_lines.append(
-            f'<line x1="{cx}" y1="{cy}" x2="{x:.2f}" y2="{y:.2f}" '
-            f'class="r-axis"/>'
+    # SVG arc command needs the large-arc flag if sweep > pi.
+    large_arc = 1 if sweep_angle > math.pi else 0
+
+    def polar(theta: float) -> tuple[float, float]:
+        return (cx + r * math.cos(theta), cy + r * math.sin(theta))
+
+    x0, y0 = polar(start_angle)
+    x1, y1 = polar(end_angle)
+
+    # Edge case: full circle (score = 10) — SVG arc can't draw a full
+    # 360° arc, so split into two half-arcs.
+    if score >= 9.99:
+        fill_path = (
+            f'<circle cx="{cx}" cy="{cy}" r="{r:.2f}" '
+            f'class="dim-card__ring-fill" stroke-width="{stroke}"/>'
+        )
+    elif score <= 0.01:
+        fill_path = ""
+    else:
+        fill_path = (
+            f'<path d="M {x0:.2f} {y0:.2f} '
+            f'A {r:.2f} {r:.2f} 0 {large_arc} 1 {x1:.2f} {y1:.2f}" '
+            f'class="dim-card__ring-fill" stroke-width="{stroke}"/>'
         )
 
-    rings: list[str] = []
-    for frac in (0.25, 0.5, 0.75, 1.0):
-        pts = []
-        for ang in angles:
-            x = cx + r * frac * math.cos(ang)
-            y = cy + r * frac * math.sin(ang)
-            pts.append(f"{x:.2f},{y:.2f}")
-        ring_class = "r-ring r-ring--outer" if frac == 1.0 else "r-ring"
-        rings.append(
-            f'<polygon points="{" ".join(pts)}" class="{ring_class}"/>'
-        )
-
-    # This week's score polygon.
-    score_pts = []
-    for ang, row in zip(angles, rows):
-        score = max(0.0, min(10.0, row.score))
-        radius_frac = score / 10.0
-        x = cx + r * radius_frac * math.cos(ang)
-        y = cy + r * radius_frac * math.sin(ang)
-        score_pts.append(f"{x:.2f},{y:.2f}")
-    score_polygon = (
-        f'<polygon points="{" ".join(score_pts)}" class="r-score"/>'
-    )
-
-    # Optional baseline polygon (ghost outline).
-    baseline_polygon = ""
-    have_baseline = any(r.baseline is not None for r in rows)
-    if have_baseline:
-        bl_pts = []
-        for ang, row in zip(angles, rows):
-            bl = row.baseline if row.baseline is not None else 0.0
-            bl = max(0.0, min(10.0, bl))
-            x = cx + r * (bl / 10.0) * math.cos(ang)
-            y = cy + r * (bl / 10.0) * math.sin(ang)
-            bl_pts.append(f"{x:.2f},{y:.2f}")
-        baseline_polygon = (
-            f'<polygon points="{" ".join(bl_pts)}" class="r-baseline"/>'
-        )
-
-    # Vertex dots on this week's polygon.
-    score_dots = []
-    for ang, row in zip(angles, rows):
-        score = max(0.0, min(10.0, row.score))
-        radius_frac = score / 10.0
-        x = cx + r * radius_frac * math.cos(ang)
-        y = cy + r * radius_frac * math.sin(ang)
-        score_dots.append(
-            f'<circle cx="{x:.2f}" cy="{y:.2f}" r="3.5" class="r-dot"/>'
-        )
-
-    # Axis labels: dim name + score, placed just outside each vertex.
-    labels: list[str] = []
-    label_radius = r + 28
-    for ang, row in zip(angles, rows):
-        x = cx + label_radius * math.cos(ang)
-        y = cy + label_radius * math.sin(ang)
-        # Anchor based on horizontal position.
-        cos_a = math.cos(ang)
-        if abs(cos_a) < 0.25:
-            anchor = "middle"
-        elif cos_a > 0:
-            anchor = "start"
-        else:
-            anchor = "end"
-        # Vertical alignment: lift labels above the top vertex, drop
-        # below for the lower ones.
-        sin_a = math.sin(ang)
-        if sin_a < -0.5:
-            dy = "0"
-        elif sin_a > 0.5:
-            dy = "0.9em"
-        else:
-            dy = "0.35em"
-        short_label = _DIM_AXIS_LABELS.get(row.title, row.title.split()[0])
-        labels.append(
-            f'<g class="r-label-group">'
-            f'<text x="{x:.2f}" y="{y:.2f}" dy="{dy}" '
-            f'text-anchor="{anchor}" class="r-label">{_safe(short_label)}</text>'
-            f'<text x="{x:.2f}" y="{y:.2f}" dy="calc({dy} + 1.1em)" '
-            f'text-anchor="{anchor}" class="r-label-score">{row.score:.1f}</text>'
-            f'</g>'
+    # Baseline tick: a short radial tick at the baseline position.
+    baseline_tick = ""
+    if baseline is not None:
+        bl = max(0.0, min(10.0, baseline))
+        bl_angle = -math.pi / 2 + (bl / 10.0) * 2 * math.pi
+        # Tick from r-2 to r+3 along the radial direction.
+        t_in_x = cx + (r - 3) * math.cos(bl_angle)
+        t_in_y = cy + (r - 3) * math.sin(bl_angle)
+        t_out_x = cx + (r + 4) * math.cos(bl_angle)
+        t_out_y = cy + (r + 4) * math.sin(bl_angle)
+        baseline_tick = (
+            f'<line x1="{t_in_x:.2f}" y1="{t_in_y:.2f}" '
+            f'x2="{t_out_x:.2f}" y2="{t_out_y:.2f}" '
+            f'class="dim-card__ring-base-tick"/>'
         )
 
     return (
-        # Inline SVG inside an HTML5 document does not need an xmlns;
-        # adding one would trip the self-containment check (which
-        # disallows any "http://" substring on the page).
-        f'<svg class="r-chart" viewBox="0 0 400 400" '
-        f'role="img" aria-label="Six-dimension radar chart">'
-        f'{"".join(rings)}'
-        f'{"".join(axis_lines)}'
-        f'{baseline_polygon}'
-        f'{score_polygon}'
-        f'{"".join(score_dots)}'
-        f'{"".join(labels)}'
+        f'<svg class="dim-card__ring-svg" viewBox="0 0 {size} {size}" '
+        f'role="img" aria-label="score gauge">'
+        f'<circle cx="{cx}" cy="{cy}" r="{r:.2f}" '
+        f'class="dim-card__ring-track" stroke-width="{stroke}"/>'
+        f'{fill_path}'
+        f'{baseline_tick}'
         f'</svg>'
     )
 
 
-def _dimensions_section(rows: tuple[DimRow, ...]) -> str:
-    if not rows:
+# A short evidence citation per dim. Drawn from the rubric's evidence
+# strings; truncated to a single line so the cards keep a uniform
+# baseline height.
+_DIM_EVIDENCE: dict[str, str] = {
+    "Planning before prompting":
+        "Sarkar 2025 — experienced agent users plan first; +6% accept rate per SD of experience.",
+    "Context richness":
+        "OpenRouter 2025 — average prompt length grew 4× to ~6K tokens.",
+    "Iteration & evaluation":
+        "Sarkar 2025 — abstraction, clarity, evaluation are the core skills of effective users.",
+    "Tool & multi-step use":
+        "OpenRouter 2025 — agentic patterns are rising; tool-capable sequences tripled in length.",
+    "Model–task fit":
+        "OpenRouter — model–task fit (\"Glass Slipper\" retention) predicts long-term usage.",
+    "Verification habits":
+        "Anthropic safety guidance — verification is the dividing line between practitioners and casual users.",
+}
+
+
+# Evidence citations for the behavioral signal cards. These sit beneath
+# the rubric cards in the same grid, separated by a thin divider. The
+# rubric reads dimensions on a 0-10 LLM-judged scale; behavioral
+# signals are 0-100% rates from the regex extractor and the marker
+# pipeline, so they need their own evidence anchoring.
+_BEHAVIORAL_EVIDENCE: dict[str, str] = {
+    "Engagement":
+        "Shen & Tamkin 2026 — high-engagement users (why-questions, "
+        "comprehension checks) scored 17pp higher on comprehension.",
+    "Delegation":
+        "Shen & Tamkin 2026 — ~20% of users were \"pure delegators\": "
+        "fastest, worst learning outcomes.",
+    "Independence":
+        "Anthropic 2026 — own-attempt-before-asking correlates with "
+        "long-term skill retention.",
+    "Verification":
+        "Anthropic safety guidance — verification is the dividing line "
+        "between practitioners and casual users.",
+}
+
+
+def _behavioral_ring_svg(rate: float, baseline_rate: float | None) -> str:
+    """A ring identical in geometry to the dim ring but scaled to 0-1.
+
+    Reuses the same `dim-card__ring-*` CSS classes so the cards look
+    visually consistent in the grid. The caller decides whether to add
+    a `dim-card--counter` modifier on the wrapping article to swap the
+    fill colour (terracotta vs ink-blue).
+    """
+    import math
+
+    rate = max(0.0, min(1.0, rate))
+    size, stroke = 56, 4
+    cx = cy = size / 2
+    r = (size - stroke) / 2
+
+    start_angle = -math.pi / 2
+    sweep_angle = rate * 2 * math.pi
+    end_angle = start_angle + sweep_angle
+    large_arc = 1 if sweep_angle > math.pi else 0
+
+    def polar(theta: float) -> tuple[float, float]:
+        return (cx + r * math.cos(theta), cy + r * math.sin(theta))
+
+    x0, y0 = polar(start_angle)
+    x1, y1 = polar(end_angle)
+
+    if rate >= 0.999:
+        fill_path = (
+            f'<circle cx="{cx}" cy="{cy}" r="{r:.2f}" '
+            f'class="dim-card__ring-fill" stroke-width="{stroke}"/>'
+        )
+    elif rate <= 0.001:
+        fill_path = ""
+    else:
+        fill_path = (
+            f'<path d="M {x0:.2f} {y0:.2f} '
+            f'A {r:.2f} {r:.2f} 0 {large_arc} 1 {x1:.2f} {y1:.2f}" '
+            f'class="dim-card__ring-fill" stroke-width="{stroke}"/>'
+        )
+
+    baseline_tick = ""
+    if baseline_rate is not None:
+        bl = max(0.0, min(1.0, baseline_rate))
+        bl_angle = -math.pi / 2 + bl * 2 * math.pi
+        t_in_x = cx + (r - 3) * math.cos(bl_angle)
+        t_in_y = cy + (r - 3) * math.sin(bl_angle)
+        t_out_x = cx + (r + 4) * math.cos(bl_angle)
+        t_out_y = cy + (r + 4) * math.sin(bl_angle)
+        baseline_tick = (
+            f'<line x1="{t_in_x:.2f}" y1="{t_in_y:.2f}" '
+            f'x2="{t_out_x:.2f}" y2="{t_out_y:.2f}" '
+            f'class="dim-card__ring-base-tick"/>'
+        )
+
+    return (
+        f'<svg class="dim-card__ring-svg" viewBox="0 0 {size} {size}" '
+        f'role="img" aria-label="rate gauge">'
+        f'<circle cx="{cx}" cy="{cy}" r="{r:.2f}" '
+        f'class="dim-card__ring-track" stroke-width="{stroke}"/>'
+        f'{fill_path}'
+        f'{baseline_tick}'
+        f'</svg>'
+    )
+
+
+def _behavioral_card(row: BehavioralRow) -> str:
+    """Render one behavioral-signal card.
+
+    Same grid cell as a dim card but uses % glyph instead of /10 and
+    shows the rate-point delta (e.g. \"+3pp vs baseline 42%\").
+    """
+    ring = _behavioral_ring_svg(row.rate, row.baseline_rate)
+    pct = int(round(row.rate * 100))
+
+    # Delta line. Behavioral rates move in smaller steps than rubric
+    # scores, so the noise band is in rate points; 3pp = visible change.
+    delta_line = ""
+    if row.baseline_rate is not None and row.delta is not None:
+        delta_pp = row.delta * 100
+        if abs(delta_pp) >= 3:
+            sign = "+" if delta_pp > 0 else "−"
+            cls = (
+                "dim-card__delta--up" if delta_pp > 0 else "dim-card__delta--down"
+            )
+            delta_line = (
+                f'<div class="dim-card__delta {cls}">'
+                f'{sign}{abs(delta_pp):.0f}pp vs baseline {int(round(row.baseline_rate*100))}%'
+                f'</div>'
+            )
+        else:
+            delta_line = (
+                f'<div class="dim-card__delta">'
+                f'on baseline ({int(round(row.baseline_rate*100))}%)'
+                f'</div>'
+            )
+    elif row.baseline_rate is None:
+        delta_line = '<div class="dim-card__delta">baseline forming</div>'
+
+    evidence = row.evidence_citation or _BEHAVIORAL_EVIDENCE.get(row.title, "")
+    evidence_html = (
+        f'<div class="dim-card__evidence">{_safe(evidence)}</div>'
+        if evidence else ""
+    )
+    modifier = (
+        " dim-card--counter" if row.frame == "counter" else ""
+    )
+    return (
+        f'<article class="dim-card{modifier}">'
+        f'<div class="dim-card__head">'
+        f'<div class="dim-card__title">{_safe(row.title)}</div>'
+        f'<div class="dim-card__ring">'
+        f'{ring}'
+        f'<div class="dim-card__ring-score">{pct}<span class="dim-card__ring-unit">%</span></div>'
+        f'</div>'
+        f'</div>'
+        f'{delta_line}'
+        f'{evidence_html}'
+        f'</article>'
+    )
+
+
+def _dimensions_section(
+    rows: tuple[DimRow, ...],
+    behavioral: tuple[BehavioralRow, ...] = (),
+) -> str:
+    if not rows and not behavioral:
         return f"""
   <section class="d-section" id="the-six-dimensions">
     <div class="s-eyebrow">The Six Dimensions</div>
     <p class="placeholder">No dimension data yet.</p>
   </section>"""
-    radar = _radar_svg(rows)
-    items: list[str] = []
+
+    cards: list[str] = []
     for row in rows:
-        score = max(0.0, min(10.0, row.score))
-        pct = score * 10.0
-        baseline_html = ""
-        if row.baseline is not None:
-            if row.delta is None or abs(row.delta) < 0.05:
-                baseline_html = f'<span class="d-baseline">baseline {row.baseline:.1f}</span>'
-            else:
-                sign = "↑" if row.delta > 0 else "↓"
-                delta_class = "d-delta-up" if row.delta > 0 else "d-delta-down"
-                baseline_html = (
-                    f'<span class="d-baseline">baseline {row.baseline:.1f}</span>'
-                    f'<span class="{delta_class}">{sign} {abs(row.delta):.1f}</span>'
+        ring = _dim_ring_svg(row.score, row.baseline)
+        # Delta line: render only when the baseline is on file AND the
+        # movement clears the noise band (0.3 per spec §8.3). Below the
+        # band we say "on baseline" rather than show a misleading ±0.x.
+        delta_line = ""
+        if row.baseline is not None and row.delta is not None:
+            if abs(row.delta) >= 0.3:
+                sign = "+" if row.delta > 0 else "−"
+                cls = "dim-card__delta--up" if row.delta > 0 else "dim-card__delta--down"
+                delta_line = (
+                    f'<div class="dim-card__delta {cls}">'
+                    f'{sign}{abs(row.delta):.1f} vs baseline {row.baseline:.1f}'
+                    f'</div>'
                 )
-        else:
-            baseline_html = '<span class="d-baseline d-baseline--forming">forming</span>'
-        items.append(
-            f'<li class="d-row">'
-            f'<div class="d-head">'
-            f'<span class="d-title">{_safe(row.title)}</span>'
-            f'<span class="d-score">{row.score:.1f}</span>'
-            f'</div>'
-            f'<div class="d-bar-track"><div class="d-bar-fill" style="width: {pct:.1f}%"></div></div>'
-            f'<div class="d-meta">{baseline_html}</div>'
-            f"</li>"
+            else:
+                delta_line = (
+                    f'<div class="dim-card__delta">'
+                    f'on baseline ({row.baseline:.1f})'
+                    f'</div>'
+                )
+        elif row.baseline is None:
+            delta_line = (
+                '<div class="dim-card__delta">baseline forming</div>'
+            )
+
+        evidence = row.evidence_citation or _DIM_EVIDENCE.get(row.title, "")
+        evidence_html = (
+            f'<div class="dim-card__evidence">{_safe(evidence)}</div>'
+            if evidence else ""
         )
+        cards.append(
+            f'<article class="dim-card">'
+            f'<div class="dim-card__head">'
+            f'<div class="dim-card__title">{_safe(row.title)}</div>'
+            f'<div class="dim-card__ring">'
+            f'{ring}'
+            f'<div class="dim-card__ring-score">{row.score:.1f}</div>'
+            f'</div>'
+            f'</div>'
+            f'{delta_line}'
+            f'{evidence_html}'
+            f'</article>'
+        )
+
+    behavioral_block = ""
+    if behavioral:
+        beh_cards = "".join(_behavioral_card(b) for b in behavioral)
+        # Thin rule + eyebrow groups behavioral rates beneath the rubric
+        # cards in the same dimensions section, so the reader sees them
+        # as part of the same answer to "how am I doing?" but understands
+        # the different unit (% rate vs /10 score).
+        behavioral_block = (
+            '<div class="d-divider" aria-hidden="true"></div>'
+            '<div class="d-subhead">'
+            '<div class="s-eyebrow s-eyebrow--inline">Behavioral signals</div>'
+            '<div class="d-subhead-note">From regex extractors over user '
+            'turns. Rates (% of turns showing the signal), not /10 scores.</div>'
+            '</div>'
+            f'<div class="dims-grid">{beh_cards}</div>'
+        )
+
     return f"""
   <section class="d-section" id="the-six-dimensions">
     <div class="s-eyebrow">The Six Dimensions</div>
-    <div class="r-wrap">{radar}</div>
-    <ul class="d-list">{"".join(items)}</ul>
+    <div class="dims-grid">{"".join(cards)}</div>
+    {behavioral_block}
   </section>"""
 
 
@@ -814,14 +978,82 @@ def _follow_up_section(follow_up: FollowUpPanel | None) -> str:
   </section>"""
 
 
+def _mini_line_chart(
+    points: tuple[WeeklyTrajectoryPoint, ...],
+    signal: str,
+    *,
+    accent: str,
+    title: str,
+    rule_of_thumb: str,
+) -> str:
+    """One mini line chart (small-multiples). Compact: ~200×96 viewBox."""
+    if not points:
+        return ""
+    width, height = 220, 110
+    pad_left, pad_right, pad_top, pad_bottom = 8, 8, 22, 22
+    inner_w = width - pad_left - pad_right
+    inner_h = height - pad_top - pad_bottom
+    n = len(points)
+
+    values = [getattr(p, signal) for p in points]
+    if not values:
+        return ""
+    # Always anchor y to [0,1] so the four small multiples share a scale.
+    vmin, vmax = 0.0, 1.0
+
+    def to_xy(i: int, v: float) -> tuple[float, float]:
+        x = pad_left + (i / max(1, n - 1)) * inner_w
+        y = pad_top + (1.0 - max(vmin, min(vmax, v))) * inner_h
+        return x, y
+
+    xy = [to_xy(i, v) for i, v in enumerate(values)]
+    path = " ".join(f"{x:.1f},{y:.1f}" for x, y in xy)
+    end_x, end_y = xy[-1]
+    current = values[-1]
+
+    # First and last labels along the x-axis.
+    first_w = points[0].week_iso.split("-W")[-1] if "-W" in points[0].week_iso else points[0].week_iso
+    last_w = points[-1].week_iso.split("-W")[-1] if "-W" in points[-1].week_iso else points[-1].week_iso
+
+    # Light gridline at y=0.5 only.
+    mid_y = pad_top + 0.5 * inner_h
+    gridline = (
+        f'<line x1="{pad_left}" y1="{mid_y:.1f}" '
+        f'x2="{width - pad_right}" y2="{mid_y:.1f}" class="mc-midline"/>'
+    )
+
+    line_class = f"mc-line mc-line--{accent}"
+    dot_class = f"mc-dot mc-dot--{accent}"
+
+    return (
+        f'<figure class="mc">'
+        f'<figcaption class="mc-title">{title}'
+        f'<span class="mc-current">{current:.2f}</span></figcaption>'
+        f'<svg class="mc-chart" viewBox="0 0 {width} {height}" role="img" aria-label="{title} over time">'
+        f'{gridline}'
+        f'<polyline points="{path}" fill="none" class="{line_class}"/>'
+        f'<circle cx="{end_x:.1f}" cy="{end_y:.1f}" r="3.5" class="{dot_class}"/>'
+        f'<text x="{pad_left}" y="{height - 6}" class="mc-axis">W{first_w}</text>'
+        f'<text x="{width - pad_right}" y="{height - 6}" text-anchor="end" class="mc-axis">W{last_w}</text>'
+        f'</svg>'
+        f'<div class="mc-note">{rule_of_thumb}</div>'
+        f'</figure>'
+    )
+
+
 def _weekly_trajectory_section(
     points: tuple[WeeklyTrajectoryPoint, ...]
 ) -> str:
-    """Multi-week trajectory line chart of engagement and delegation rates.
+    """Multi-week trajectory rendered as Tufte small multiples.
 
-    This is the literal "trajectory" the spec section 7 talks about,
-    visualized. Renders as an SVG line chart with two series. Falls
-    back to a placeholder card when fewer than 2 weeks of data exist.
+    Four mini line charts side-by-side, one per behavioral signal,
+    sharing a [0,1] y-axis. The reader scans across to see which
+    signals are moving. The single-chart "2 overlaid lines" approach
+    that preceded this is gone because it hid 2 signals (independence,
+    verification) the pipeline already computes.
+
+    Sub-4-weeks falls back to a placeholder card so the section still
+    occupies its spec-section-6.1 slot.
     """
     if not points:
         return f"""
@@ -835,76 +1067,45 @@ def _weekly_trajectory_section(
         return f"""
   <section class="wt-section" id="weekly-trajectory">
     <div class="s-eyebrow">Your Learning Trajectory</div>
-    <p class="placeholder">Building. {weeks_have} week{"s" if weeks_have != 1 else ""} of buckets on file; {weeks_need} more before the line chart fits.</p>
+    <p class="placeholder">Building. {weeks_have} week{"s" if weeks_have != 1 else ""} of buckets on file; {weeks_need} more before the chart fits.</p>
   </section>"""
 
-    # Build the SVG.
-    width, height = 640, 220
-    pad_left, pad_right, pad_top, pad_bottom = 64, 24, 20, 40
-    inner_w = width - pad_left - pad_right
-    inner_h = height - pad_top - pad_bottom
+    # Four small multiples. Engagement and Independence are accented in
+    # terracotta (the "good" signals that earn skill); Delegation and
+    # Verification are accented in the ink-blue counterweight (one is
+    # the atrophy axis, the other is a quality control habit that
+    # complements them all).
+    charts = (
+        _mini_line_chart(
+            points, "engagement_rate",
+            accent="accent",
+            title="Engagement",
+            rule_of_thumb="why-questions, comprehension checks, follow-ups",
+        ),
+        _mini_line_chart(
+            points, "independence_rate",
+            accent="accent",
+            title="Independence",
+            rule_of_thumb="share showing own attempt before asking",
+        ),
+        _mini_line_chart(
+            points, "verification_marker_rate",
+            accent="counter",
+            title="Verification",
+            rule_of_thumb="asking for sources, traces, proof",
+        ),
+        _mini_line_chart(
+            points, "delegation_rate",
+            accent="counter",
+            title="Delegation",
+            rule_of_thumb="pure-delegation, outsourced debug, telegraphic",
+        ),
+    )
     n = len(points)
-
-    def to_xy(i: int, val: float) -> tuple[float, float]:
-        x = pad_left + (i / max(1, n - 1)) * inner_w
-        # values are 0-1 rates; map to inner_h with y inverted.
-        v = max(0.0, min(1.0, val))
-        y = pad_top + (1.0 - v) * inner_h
-        return x, y
-
-    eng_pts = [to_xy(i, p.engagement_rate) for i, p in enumerate(points)]
-    del_pts = [to_xy(i, p.delegation_rate) for i, p in enumerate(points)]
-
-    eng_path = " ".join(f"{x:.1f},{y:.1f}" for x, y in eng_pts)
-    del_path = " ".join(f"{x:.1f},{y:.1f}" for x, y in del_pts)
-
-    # Y-axis gridlines at 0, 0.5, 1.0
-    gridlines: list[str] = []
-    for frac, label in ((0.0, "0.0"), (0.5, "0.5"), (1.0, "1.0")):
-        y = pad_top + (1.0 - frac) * inner_h
-        gridlines.append(
-            f'<line x1="{pad_left}" y1="{y:.1f}" x2="{width - pad_right}" y2="{y:.1f}" class="wt-grid"/>'
-            f'<text x="{pad_left - 12}" y="{y:.1f}" dy="0.35em" text-anchor="end" class="wt-axis-label">{label}</text>'
-        )
-
-    # X-axis: week labels (shorten to "W22" from "2026-W22")
-    x_labels: list[str] = []
-    for i, p in enumerate(points):
-        x = pad_left + (i / max(1, n - 1)) * inner_w
-        short = p.week_iso.split("-W")[-1] if "-W" in p.week_iso else p.week_iso
-        x_labels.append(
-            f'<text x="{x:.1f}" y="{height - pad_bottom + 18}" text-anchor="middle" class="wt-axis-label">W{short}</text>'
-        )
-
-    # End-point dots and labels for the most recent week
-    eng_x, eng_y = eng_pts[-1]
-    del_x, del_y = del_pts[-1]
-    end_dots = (
-        f'<circle cx="{eng_x:.1f}" cy="{eng_y:.1f}" r="3.5" class="wt-dot wt-dot--eng"/>'
-        f'<circle cx="{del_x:.1f}" cy="{del_y:.1f}" r="3.5" class="wt-dot wt-dot--del"/>'
-    )
-
-    # Legend
-    legend = (
-        '<g class="wt-legend" transform="translate(64, 4)">'
-        '<rect x="0" y="0" width="14" height="2" class="wt-legend-eng"/>'
-        '<text x="20" y="0" dy="0.4em" class="wt-legend-text">Engagement</text>'
-        '<rect x="110" y="0" width="14" height="2" class="wt-legend-del"/>'
-        '<text x="130" y="0" dy="0.4em" class="wt-legend-text">Delegation</text>'
-        '</g>'
-    )
-
     return f"""
   <section class="wt-section" id="weekly-trajectory">
     <div class="s-eyebrow">Your Learning Trajectory · {n} weeks</div>
-    <svg class="wt-chart" viewBox="0 0 {width} {height}" role="img" aria-label="Engagement and delegation over time">
-      {"".join(gridlines)}
-      {legend}
-      <polyline points="{eng_path}" fill="none" stroke-width="1.8" class="wt-line-eng"/>
-      <polyline points="{del_path}" fill="none" stroke-width="1.8" class="wt-line-del"/>
-      {end_dots}
-      {"".join(x_labels)}
-    </svg>
+    <div class="mc-grid">{"".join(charts)}</div>
   </section>"""
 
 
@@ -1002,7 +1203,7 @@ def render(digest: WeeklyDigest) -> str:
         '<div class="data-block__label">The numbers behind it</div>'
         f'{_cost_ledger_section(digest.cost_ledger)}'
         f'{_task_breakdown_section(digest.task_breakdown)}'
-        f'{_dimensions_section(digest.dimensions)}'
+        f'{_dimensions_section(digest.dimensions, digest.behavioral_signals)}'
         f'{_weekly_trajectory_section(digest.weekly_trajectory)}'
         '</div>'
     )
@@ -1026,21 +1227,53 @@ def render(digest: WeeklyDigest) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Praxis · Week of {week}</title>
 <style>
+/* =================================================================
+   Praxis weekly digest — editorial design system
+   ================================================================= */
 :root {{
-  --cream:        #FAF7F2;
-  --cream-edge:   #F2EDE4;
-  --ink:          #1F1B16;
-  --ink-muted:    #6E665B;
-  --ink-faded:    #A79E91;
-  --accent:       #C1573B;
-  --accent-soft:  rgba(193, 87, 59, 0.10);
-  --accent-faint: rgba(193, 87, 59, 0.05);
-  --rule:         rgba(31, 27, 22, 0.06);
-  --rule-strong:  rgba(31, 27, 22, 0.12);
-  --serif: 'Libre Baskerville', 'Iowan Old Style', 'Hoefler Text',
-           'Times New Roman', Georgia, serif;
-  --sans:  'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Text',
-           system-ui, 'Helvetica Neue', sans-serif;
+  /* Cream ground, ink primary, two accents (terracotta = emphasis /
+     warning / low score; ink-blue = citation / counterweight /
+     considered detail). All in OKLCH so perceptual lightness steps
+     are uniform; near-extreme lightness uses lower chroma to avoid
+     the AI-design garish-on-light look. */
+  --cream:           oklch(96.5% 0.005 80);     /* warm page ground */
+  --cream-edge:      oklch(93.5% 0.008 75);     /* hairline cards */
+  --cream-deep:      oklch(91% 0.012 75);       /* slightly stronger fill */
+  --ink:             oklch(22% 0.012 60);       /* primary text, warm dark */
+  --ink-muted:       oklch(46% 0.010 55);       /* secondary text */
+  --ink-faded:       oklch(63% 0.008 55);       /* tertiary / chrome text */
+  --ink-hint:        oklch(80% 0.006 55);       /* faintest, near-invisible */
+  --accent:          oklch(56% 0.135 38);       /* terracotta */
+  --accent-deep:     oklch(45% 0.130 35);       /* darker terracotta */
+  --accent-soft:     oklch(56% 0.135 38 / 0.10);
+  --accent-faint:    oklch(56% 0.135 38 / 0.05);
+  --counter:         oklch(38% 0.070 232);      /* ink-blue counterweight */
+  --counter-soft:    oklch(38% 0.070 232 / 0.10);
+  --counter-faint:   oklch(38% 0.070 232 / 0.05);
+  --rule:            oklch(22% 0.012 60 / 0.08);
+  --rule-strong:     oklch(22% 0.012 60 / 0.15);
+
+  /* Serif stack: prefers well-drawn system serifs on each OS before
+     falling back to Georgia. Avoids the Libre Baskerville / Fraunces
+     monoculture. Iowan Old Style ships on macOS / iOS by default;
+     Sitka Text ships on Windows; Charter on macOS as a backup;
+     Cambria as a Windows backup. */
+  --serif: 'Iowan Old Style', 'Sitka Text', 'Hoefler Text',
+           'Charter', 'Cambria', 'Georgia', serif;
+  --sans:  -apple-system, BlinkMacSystemFont, 'SF Pro Text',
+           'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+
+  /* 4pt-grid spacing. Semantic names. */
+  --space-2:  4px;
+  --space-3:  8px;
+  --space-4:  12px;
+  --space-5:  16px;
+  --space-6:  24px;
+  --space-7:  32px;
+  --space-8:  48px;
+  --space-9:  64px;
+  --space-10: 96px;
+  --space-11: 128px;
 }}
 * {{ box-sizing: border-box; margin: 0; padding: 0; }}
 html, body {{
@@ -1240,19 +1473,33 @@ html, body {{
   font-family: var(--sans);
 }}
 
-/* --- Recurrence callout on the moment -------------------------------- */
+/* --- Recurrence callout on the moment.
+       Notable design choice: we DO NOT use a left-border accent stripe
+       (the single most overused AI design touch). Instead, the
+       recurrence chip uses an inline marker glyph + small caps text
+       on a tinted background. The reader feels the escalation through
+       typography, not through a colored bar. */
 .m-recurrence {{
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
   font-family: var(--sans);
   font-size: 11px;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: var(--ink);
+  color: var(--accent-deep);
   background: var(--accent-soft);
-  border-left: 3px solid var(--accent);
-  padding: 10px 14px 10px 14px;
-  margin-bottom: 24px;
+  padding: 8px 14px;
+  margin-bottom: var(--space-6);
   font-weight: 500;
+}}
+.m-recurrence::before {{
+  content: "\21BB";   /* ↻ — recurrence glyph */
+  font-family: var(--serif);
+  font-size: 16px;
+  letter-spacing: 0;
+  line-height: 1;
+  color: var(--accent);
 }}
 .m-quote-context {{
   font-family: var(--sans);
@@ -1285,41 +1532,6 @@ html, body {{
 }}
 
 /* --- Stat tiles (cost summary 3-col grid) ---------------------------- */
-.stat-tiles {{
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 1px;
-  background: var(--rule);
-  margin-bottom: 28px;
-}}
-.stat-tile {{
-  background: var(--cream);
-  padding: 20px 18px 22px;
-}}
-.stat-tile--accent {{
-  background: var(--accent-faint);
-}}
-.stat-tile-label {{
-  font-family: var(--sans);
-  font-size: 9.5px;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  color: var(--ink-muted);
-  margin-bottom: 12px;
-  font-weight: 500;
-}}
-.stat-tile-value {{
-  font-family: var(--serif);
-  font-size: 22px;
-  color: var(--ink);
-  letter-spacing: -0.01em;
-}}
-.stat-tile-value--forming {{
-  color: var(--ink-faded);
-  font-style: italic;
-  font-size: 17px;
-}}
-
 /* --- Cost stacked-bar with legend ----------------------------------- */
 .cost-bar-wrap {{
   margin-bottom: 24px;
@@ -1370,37 +1582,78 @@ html, body {{
 
 /* --- Weekly trajectory chart ---------------------------------------- */
 .wt-section {{
-  margin-bottom: 96px;
+  margin-bottom: var(--space-10);
 }}
-.wt-chart {{
+/* Tufte small multiples: 4 mini line charts arranged in a row at wide
+   viewports, 2x2 on tablet, stacked on phone. Each chart shares the
+   y-axis range [0,1] so the eye can compare amplitude across signals. */
+.mc-grid {{
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1px;
+  background: var(--rule);
+  margin-top: var(--space-7);
+}}
+.mc {{
+  background: var(--cream);
+  padding: var(--space-6) var(--space-6) var(--space-5);
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}}
+.mc-title {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-weight: 500;
+}}
+.mc-current {{
+  font-family: var(--serif);
+  font-size: 18px;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  font-weight: 400;
+  color: var(--ink);
+}}
+.mc-chart {{
   width: 100%;
   height: auto;
-  max-width: 640px;
-  margin-top: 16px;
+  display: block;
 }}
-.wt-grid {{
+.mc-midline {{
   stroke: var(--rule);
   stroke-width: 1;
 }}
-.wt-axis-label {{
+.mc-line {{
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}}
+.mc-line--accent   {{ stroke: var(--accent); }}
+.mc-line--counter  {{ stroke: var(--counter); }}
+.mc-dot--accent   {{ fill: var(--accent); }}
+.mc-dot--counter  {{ fill: var(--counter); }}
+.mc-axis {{
   font-family: var(--sans);
-  font-size: 10px;
+  font-size: 9.5px;
   letter-spacing: 0.06em;
   fill: var(--ink-faded);
 }}
-.wt-line-eng {{ stroke: var(--accent); }}
-.wt-line-del {{ stroke: var(--ink-muted); stroke-dasharray: 4 4; }}
-.wt-dot--eng {{ fill: var(--accent); }}
-.wt-dot--del {{ fill: var(--ink-muted); }}
-.wt-legend-text {{
-  font-family: var(--sans);
-  font-size: 10.5px;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  fill: var(--ink-muted);
+.mc-note {{
+  font-family: var(--serif);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--ink-muted);
+  font-style: italic;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--rule);
 }}
-.wt-legend-eng {{ fill: var(--accent); }}
-.wt-legend-del {{ fill: var(--ink-muted); }}
 
 /* --- Coaching block: visual continuity across moment + follow-up + next-week.
        Three sections, one editorial spread. */
@@ -1548,90 +1801,80 @@ html, body {{
   color: var(--ink-muted);
   letter-spacing: -0.01em;
 }}
-.c-delta {{
-  font-family: var(--sans);
-  font-size: 13px;
-  color: var(--ink-muted);
-  letter-spacing: 0.01em;
-  margin-bottom: 28px;
-}}
-.c-biggest {{
-  display: block;
-  padding: 18px 0;
-  border-top: 1px solid var(--rule);
-  border-bottom: 1px solid var(--rule);
-}}
-.c-inline-label {{
-  display: block;
-  font-family: var(--sans);
-  font-size: 10.5px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--ink-muted);
-  margin-bottom: 6px;
-  font-weight: 500;
-}}
-.c-biggest-text {{
+/* Narrative paragraph that carries the comparison + biggest line + tier
+   note in one sentence, instead of a 3-tile dashboard grid. The big
+   amount sits inline above this paragraph; this prose tells the reader
+   what the amount means. */
+.c-narrative {{
   font-family: var(--serif);
   font-size: 17px;
+  line-height: 1.55;
   color: var(--ink);
+  max-width: 62ch;
+  margin: 14px 0 32px 0;
 }}
-.c-tier-fit {{
-  font-family: var(--sans);
-  font-size: 13px;
-  color: var(--ink-muted);
-  margin-top: 16px;
+.c-narrative-em {{
   font-style: italic;
+  color: var(--ink-muted);
 }}
 
 /* --- 4. Where the week went (tasks) --------------------------------- */
 .w-section {{
-  margin-bottom: 96px;
+  margin-bottom: var(--space-10);
 }}
+/* Tasks as a film-festival-lineup typography list. A large display
+   serif numeral anchors the row at left; the task label is the body
+   serif at right. A thin terracotta hairline separates rows. No card
+   chrome; the numeral does the work. */
 .w-task {{
-  padding: 24px 0;
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  align-items: baseline;
+  gap: var(--space-6);
+  padding: var(--space-7) 0;
   border-top: 1px solid var(--rule);
 }}
-.w-task:last-child {{
-  border-bottom: 1px solid var(--rule);
+.w-task:last-child {{ border-bottom: 1px solid var(--rule); }}
+.w-num {{
+  font-family: var(--serif);
+  font-size: 56px;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  color: var(--accent);
+  font-feature-settings: 'lnum';
+}}
+.w-body {{
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
 }}
 .w-label {{
   font-family: var(--serif);
-  font-size: 21px;
-  line-height: 1.3;
+  font-size: 24px;
+  line-height: 1.25;
   color: var(--ink);
   font-weight: 400;
-  margin-bottom: 12px;
-}}
-.w-bar {{
-  height: 3px;
-  background: var(--cream-edge);
-  border-radius: 1.5px;
-  margin-bottom: 12px;
-  overflow: hidden;
-}}
-.w-fill {{
-  height: 100%;
-  background: var(--accent);
-  opacity: 0.7;
+  letter-spacing: -0.01em;
+  margin: 0;
 }}
 .w-meta {{
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: 12.5px;
   color: var(--ink-muted);
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-3);
+  letter-spacing: 0.02em;
 }}
 .w-meta-stat {{
   color: var(--ink);
 }}
 .w-meta-dot {{
-  color: var(--ink-faded);
+  color: var(--ink-hint);
 }}
 .w-worst {{
-  color: var(--ink-muted);
+  color: var(--accent-deep);
   font-style: italic;
 }}
 
@@ -1640,60 +1883,138 @@ html, body {{
   margin-bottom: 96px;
 }}
 
-/* Radar chart: hexagonal visual of the six dimensions.
-   Sized to the column width via the SVG viewBox; the wrap centers it. */
-.r-wrap {{
+/* Dimension card (FIFA-style arc-indicator + small-multiples grid).
+   Six cards in a 3-by-2 grid on wide viewports, 2-by-3 on tablet,
+   1-by-6 on phone. Each card carries the dim's title in serif, the
+   score as a big serif number, an arc-fill ring indicating the score
+   on a ten-point scale, a tick mark for the 90-day baseline (when on
+   file), and the dim's evidence citation as a footnote. The arc ring
+   is the FIFA-card moment: it conveys "where on the scale you are"
+   without the polygon-radar's notorious illegibility. */
+.dims-grid {{
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1px;
+  background: var(--rule);
+  margin: var(--space-7) 0 var(--space-8);
+}}
+.dim-card {{
+  background: var(--cream);
+  padding: var(--space-7) var(--space-6) var(--space-6);
   display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  position: relative;
+}}
+.dim-card__head {{
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-5);
+}}
+.dim-card__title {{
+  font-family: var(--serif);
+  font-size: 16px;
+  line-height: 1.3;
+  color: var(--ink);
+  letter-spacing: -0.005em;
+  max-width: 12ch;
+}}
+.dim-card__ring {{
+  width: 56px;
+  height: 56px;
+  flex: 0 0 56px;
+  position: relative;
+}}
+.dim-card__ring-score {{
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
   justify-content: center;
-  margin: 16px -16px 48px;
+  font-family: var(--serif);
+  font-size: 18px;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+  font-feature-settings: 'lnum';
 }}
-.r-chart {{
-  width: 100%;
-  max-width: 460px;
-  height: auto;
-}}
-.r-axis {{
-  stroke: var(--rule);
-  stroke-width: 1;
-}}
-.r-ring {{
-  fill: none;
-  stroke: var(--rule);
-  stroke-width: 1;
-}}
-.r-ring--outer {{
-  stroke: var(--rule-strong);
-}}
-.r-score {{
-  fill: var(--accent);
-  fill-opacity: 0.18;
+.dim-card__ring-track {{ stroke: var(--rule-strong); fill: none; }}
+.dim-card__ring-fill {{
   stroke: var(--accent);
-  stroke-width: 1.5;
-  stroke-linejoin: round;
-}}
-.r-baseline {{
   fill: none;
-  stroke: var(--ink-faded);
-  stroke-width: 1;
-  stroke-dasharray: 3 4;
-  stroke-linejoin: round;
+  stroke-linecap: butt;
+  transition: none;
 }}
-.r-dot {{
-  fill: var(--accent);
+.dim-card__ring-base-tick {{
+  stroke: var(--counter);
+  stroke-width: 2;
 }}
-.r-label {{
+.dim-card__delta {{
   font-family: var(--sans);
-  font-size: 10.5px;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  fill: var(--ink-muted);
-  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--ink-muted);
 }}
-.r-label-score {{
+.dim-card__delta--up    {{ color: var(--counter); }}
+.dim-card__delta--down  {{ color: var(--accent); }}
+.dim-card__evidence {{
+  font-family: var(--serif);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-muted);
+  font-style: italic;
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--rule);
+}}
+
+/* Behavioral signal card variant: swaps the ring fill colour to ink-blue
+   (the secondary "considered counterweight" accent) so rising-is-bad
+   signals (Delegation) read differently from rising-is-good signals
+   (Engagement, Independence, Verification). Geometry is identical to
+   the dim card; only the colour and the unit glyph change. */
+.dim-card--counter .dim-card__ring-fill {{
+  stroke: var(--counter);
+}}
+.dim-card--counter .dim-card__delta--up {{
+  color: var(--accent);
+}}
+.dim-card--counter .dim-card__delta--down {{
+  color: var(--counter);
+}}
+.dim-card__ring-unit {{
+  font-size: 11px;
+  font-family: var(--sans);
+  color: var(--ink-muted);
+  letter-spacing: 0.02em;
+  margin-left: 1px;
+  vertical-align: 0.6em;
+}}
+
+/* Divider between rubric cards (0-10) and behavioral cards (0-100%).
+   A single hairline plus an inline eyebrow makes the unit shift legible
+   without breaking the dim section into two top-level blocks. */
+.d-divider {{
+  height: 1px;
+  background: var(--rule);
+  margin: var(--space-8) 0 var(--space-6) 0;
+}}
+.d-subhead {{
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-5);
+  margin-bottom: var(--space-5);
+  flex-wrap: wrap;
+}}
+.d-subhead-note {{
   font-family: var(--serif);
   font-size: 13px;
-  fill: var(--accent);
-  font-weight: 400;
+  font-style: italic;
+  color: var(--ink-muted);
+  max-width: 56ch;
+}}
+.s-eyebrow--inline {{
+  margin-bottom: 0;
 }}
 
 .d-list {{

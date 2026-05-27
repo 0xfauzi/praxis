@@ -17,8 +17,11 @@ Commands (v0.2 surface):
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import subprocess
 import sys
+import traceback
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,39 +94,41 @@ _TRAJECTORY_LABEL_DISPLAY: dict[str, str] = {
 }
 
 
-def _post_notify(trajectory_label: str | None = None) -> None:
-    """Best-effort macOS notification (spec section 13.2).
+_NOTIFY_TITLE = "Praxis weekly read is ready"
+_NOTIFY_FAILURE_TITLE = "Praxis weekly digest failed"
 
-    Posts a ``display notification`` AppleScript with the fixed title
-    "Praxis weekly read is ready" and a body that points the user at
-    ``~/.praxis/latest.html`` (the symlink maintained by the HTML
-    digest writer always tracks the most recent week).
 
-    When ``trajectory_label`` is provided, the body is prefixed with the
-    label (per spec 13.2 example: "Drifting this week. ..."), so the
-    user gets the gist without opening the HTML. The label string is
-    the user-facing form (e.g., "Drifting", "Atrophying"), not the raw
-    enum value.
+def _applescript_quote(s: str) -> str:
+    """Escape a string for safe inclusion inside an AppleScript string literal.
 
-    Silent no-op on non-macOS so the same flag is portable. ``osascript``
-    failures (binary missing, notifications disabled, non-zero exit,
-    sandboxed env) are logged to stderr and do not fail the run -- the
-    digest is still rendered.
+    AppleScript string literals only need backslash and double-quote
+    escaped; newlines are passed through (display alert renders them).
+    """
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _post_notify_banner(
+    title: str,
+    body: str,
+    sound: str,
+    open_path: Path | None = None,  # noqa: ARG001
+) -> None:
+    """Non-interactive macOS banner via `osascript display notification`.
+
+    `open_path` is accepted for signature parity with the alert /
+    terminal-notifier helpers but ignored here: native banners are not
+    clickable. The body is expected to tell the user the path.
     """
     if sys.platform != "darwin":
         return
-    title = "Praxis weekly read is ready"
-    if trajectory_label:
-        body = f"{trajectory_label} this week. Open ~/.praxis/latest.html for the detail."
-    else:
-        body = "Open ~/.praxis/latest.html to read."
+    script = (
+        f'display notification "{_applescript_quote(body)}" '
+        f'with title "{_applescript_quote(title)}" '
+        f'sound name "{_applescript_quote(sound)}"'
+    )
     try:
         result = subprocess.run(
-            [
-                "osascript",
-                "-e",
-                f'display notification "{body}" with title "{title}" sound name "default"',
-            ],
+            ["osascript", "-e", script],
             check=False,
             capture_output=True,
             text=True,
@@ -136,6 +141,209 @@ def _post_notify(trajectory_label: str | None = None) -> None:
             )
     except Exception as exc:  # noqa: BLE001
         print(f"[cli] osascript notification failed: {exc!r}", file=sys.stderr)
+
+
+def _post_notify_alert(
+    title: str,
+    body: str,
+    sound: str,  # noqa: ARG001
+    open_path: Path | None = None,
+) -> None:
+    """Modal AppleScript alert with an Open button.
+
+    The user sees a dialog with two buttons -- Dismiss (default cancel)
+    and Open (default action). Clicking Open invokes `open <path>` on
+    `open_path` so the digest comes up in the default browser. When
+    `open_path` is None or missing, only the Dismiss button is shown.
+
+    Tradeoff: modal alerts interrupt the active window. That's exactly
+    the point of opting in to this style -- the user wanted a notification
+    that cannot be dismissed by accident.
+    """
+    if sys.platform != "darwin":
+        return
+    has_open = open_path is not None and Path(open_path).exists()
+    if has_open:
+        script = (
+            f'set theResult to display alert '
+            f'"{_applescript_quote(title)}" '
+            f'message "{_applescript_quote(body)}" '
+            f'buttons {{"Dismiss", "Open"}} '
+            f'default button "Open" '
+            f'cancel button "Dismiss"\n'
+            f'if button returned of theResult is "Open" then\n'
+            f'  do shell script "open " & '
+            f'quoted form of "{_applescript_quote(str(open_path))}"\n'
+            f'end if'
+        )
+    else:
+        script = (
+            f'display alert "{_applescript_quote(title)}" '
+            f'message "{_applescript_quote(body)}" '
+            f'buttons {{"Dismiss"}} default button "Dismiss"'
+        )
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        # `display alert` returns non-zero when the user closes via Cmd-.
+        # (a "user cancelled" error). That isn't a failure -- swallow it.
+        if result.returncode != 0 and "User canceled" not in (result.stderr or ""):
+            print(
+                f"[cli] osascript alert failed: "
+                f"exit {result.returncode}: {result.stderr.strip()}",
+                file=sys.stderr,
+            )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[cli] osascript alert failed: {exc!r}", file=sys.stderr)
+
+
+def _post_notify_terminal_notifier(
+    title: str,
+    body: str,
+    sound: str,
+    open_path: Path | None = None,
+) -> None:
+    """Click-to-open banner via the optional `terminal-notifier` binary.
+
+    Falls back to `_post_notify_banner` (with a one-line stderr note)
+    when the binary isn't on PATH. The `-open` flag carries a URL that
+    `terminal-notifier` runs when the user clicks the banner; we pass
+    a file:// URL pointing at `open_path` so the latest digest opens in
+    the default browser.
+    """
+    if sys.platform != "darwin":
+        return
+    tn = shutil.which("terminal-notifier")
+    if tn is None:
+        print(
+            "[cli] terminal-notifier not found on PATH; "
+            "falling back to plain banner. Install via "
+            "`brew install terminal-notifier` to enable click-to-open.",
+            file=sys.stderr,
+        )
+        _post_notify_banner(title, body, sound, open_path)
+        return
+    argv = [tn, "-title", title, "-message", body, "-sound", sound]
+    if open_path is not None and Path(open_path).exists():
+        argv.extend(["-open", Path(open_path).as_uri()])
+    try:
+        result = subprocess.run(
+            argv,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print(
+                f"[cli] terminal-notifier failed: "
+                f"exit {result.returncode}: {result.stderr.strip()}",
+                file=sys.stderr,
+            )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[cli] terminal-notifier failed: {exc!r}", file=sys.stderr)
+
+
+_NOTIFY_STYLE_DISPATCH = {
+    "banner": _post_notify_banner,
+    "alert": _post_notify_alert,
+    "terminal-notifier": _post_notify_terminal_notifier,
+}
+
+
+def _post_notify(
+    trajectory_label: str | None = None,
+    *,
+    title: str | None = None,
+    body: str | None = None,
+    open_path: Path | None = None,
+) -> None:
+    """Best-effort macOS notification (spec section 13.2).
+
+    Dispatches on `notification.style` from config.toml; falls back to
+    `banner` for any unrecognised style. When called without overrides
+    this preserves the legacy "weekly read is ready" framing.
+
+    `open_path` defaults to `~/.praxis/latest.html` so the click-to-open
+    styles (alert, terminal-notifier) actually have something to open.
+    Callers (e.g. the failure path) override this to point at a log
+    file instead.
+    """
+    if sys.platform != "darwin":
+        return
+
+    from praxis.config import load_config
+
+    try:
+        cfg = load_config()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[cli] could not load config for notify: {exc!r}", file=sys.stderr)
+        return
+
+    if not cfg.notification.enabled:
+        return
+
+    resolved_title = title if title is not None else _NOTIFY_TITLE
+    if body is None:
+        if trajectory_label:
+            resolved_body = (
+                f"{trajectory_label} this week. "
+                f"Open ~/.praxis/latest.html for the detail."
+            )
+        else:
+            resolved_body = "Open ~/.praxis/latest.html to read."
+    else:
+        resolved_body = body
+    resolved_path = (
+        open_path if open_path is not None else _latest_html_path()
+    )
+
+    style = cfg.notification.style or "banner"
+    fn = _NOTIFY_STYLE_DISPATCH.get(style, _post_notify_banner)
+    fn(resolved_title, resolved_body, cfg.notification.sound, resolved_path)
+
+
+def _weekly_error_log_path() -> Path:
+    """Append-only log used by the failure-surfacing wrapper.
+
+    Path mirrors the launchd plist's StandardErrorPath (`weekly.err.log`)
+    so the user has one place to look when a notification says "failed".
+    Created lazily; the parent dir is the same one install-weekly creates.
+    """
+    log_dir = resolve_home() / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir / "weekly.err.log"
+
+
+def _handle_week_failure(exc: BaseException) -> None:
+    """Surface an unhandled `cmd_week --notify` crash.
+
+    Two effects: append a timestamped traceback to
+    `~/.praxis/logs/weekly.err.log`, and post a distinct failure
+    notification (reusing whichever notification style is configured so
+    the click-to-open helpers still work -- pointing at the log file
+    instead of the digest, so clicking jumps straight to the diagnosis).
+    """
+    log_path = _weekly_error_log_path()
+    stamp = datetime.now(timezone.utc).isoformat()
+    tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    entry = f"\n[{stamp}] praxis week --notify failed\n{tb}\n"
+    try:
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(entry)
+    except OSError as log_exc:
+        print(
+            f"[cli] could not append to {log_path}: {log_exc!r}",
+            file=sys.stderr,
+        )
+    _post_notify(
+        title=_NOTIFY_FAILURE_TITLE,
+        body=f"Check {log_path}",
+        open_path=log_path,
+    )
 
 
 def cmd_week(args: argparse.Namespace) -> int:
@@ -160,6 +368,10 @@ def cmd_week(args: argparse.Namespace) -> int:
                         explicitly rather than fabricating numbers.
       --notify          Post a macOS notification when the digest is
                         ready. Silent no-op on non-Darwin platforms.
+                        When this flag is set the entire run is wrapped
+                        in a failure handler that logs and notifies on
+                        crash (exit 4) so launchd-fired runs never
+                        silently disappear.
       --write-html      Write the HTML digest to ``~/.praxis/weeks/
                         <iso>.html``. The terminal render always happens;
                         the HTML file is written only when this flag (or
@@ -174,7 +386,26 @@ def cmd_week(args: argparse.Namespace) -> int:
       3  zero sessions in the targeted window. Short-circuits before
          rendering / writing HTML / posting a notification so an empty
          digest is never produced as a side effect.
+      4  unexpected exception during a --notify run; details in
+         ``~/.praxis/logs/weekly.err.log``.
     """
+    if args.notify:
+        # The daemon path. Catch any unhandled exception so the run
+        # produces SOMETHING the user can see -- a notification plus a
+        # logged traceback -- instead of disappearing into launchd's
+        # stderr. Direct (non-notify) invocations skip this wrap so
+        # debugging stays Pythonic.
+        try:
+            return _cmd_week_impl(args)
+        except SystemExit:
+            raise
+        except BaseException as exc:  # noqa: BLE001
+            _handle_week_failure(exc)
+            return 4
+    return _cmd_week_impl(args)
+
+
+def _cmd_week_impl(args: argparse.Namespace) -> int:
     needs_judge = args.week is None and not args.dry_run
     if needs_judge and not has_api_key_configured():
         print(NO_API_KEY_MESSAGE, file=sys.stderr)
@@ -374,14 +605,23 @@ def cmd_history(args: argparse.Namespace) -> int:  # noqa: ARG001
         print("No history yet. Run: praxis scan, then praxis week.")
         return 0
     print("\nPRAXIS - WEEKLY HISTORY\n")
-    print(f"  {'Week'.ljust(12)} {'Sessions'.rjust(8)}   Overall")
+    print(f"  {'Week'.ljust(12)} {'Sessions'.rjust(8)}   Overall  HTML")
+    weeks_dir = resolve_home() / "weeks"
     for entry in weeks:
+        # Surface the per-week HTML path when it exists on disk so the
+        # listing is actionable (the user can `open` it directly).
+        html_marker = ""
+        if weeks_dir.exists():
+            candidate = weeks_dir / f"{entry['week_iso']}.html"
+            html_marker = str(candidate) if candidate.exists() else ""
         print(
             f"  {entry['week_iso'].ljust(12)} "
             f"{str(entry['session_count']).rjust(8)}   "
-            f"{entry['overall_mean']:.2f}/10"
+            f"{entry['overall_mean']:.2f}/10  "
+            f"{html_marker}"
         )
     print(f"\nInspect one week: praxis show <week_iso>")
+    print(f"Open this week:   praxis open")
     return 0
 
 
@@ -418,6 +658,108 @@ def cmd_report(args: argparse.Namespace) -> int:
     else:
         webbrowser.open(html_path.as_uri())
         print(f"Opened: {html_path}")
+        print("Note: `praxis report` opens the legacy v0.1 report; "
+              "for the weekly digest use `praxis open`.")
+    return 0
+
+
+def _latest_html_path() -> Path:
+    """Resolve the `~/.praxis/latest.html` symlink.
+
+    Always returns the *target* path the symlink points at when one is on
+    disk; falls back to the literal `~/.praxis/latest.html` path so the
+    `.exists()` check tells the caller whether anything is there to open.
+    """
+    latest = resolve_home() / "latest.html"
+    if latest.is_symlink():
+        target = Path(os.readlink(latest))
+        if not target.is_absolute():
+            target = (latest.parent / target).resolve()
+        return target
+    return latest
+
+
+def _touch_last_opened() -> None:
+    """Record that the user opened the latest digest.
+
+    The shell-startup nudge compares this marker's mtime against
+    `latest.html`'s mtime to decide whether to print a reminder. We
+    write a single ISO timestamp into the file rather than just
+    touch()ing it so a casual `cat .last_opened` is human-readable.
+    """
+    marker = resolve_home() / ".last_opened"
+    try:
+        marker.write_text(
+            datetime.now(timezone.utc).isoformat() + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        print(f"[cli] could not write {marker}: {exc!r}", file=sys.stderr)
+
+
+def cmd_open(args: argparse.Namespace) -> int:
+    """Open this week's digest in the default browser.
+
+    Resolves `~/.praxis/latest.html` (symlink maintained by the daemon),
+    opens it via `webbrowser.open`, and touches `~/.praxis/.last_opened`
+    so the shell-startup nudge stops nagging. `--print` writes the HTML
+    to stdout instead of opening a window.
+
+    Exit codes:
+      0  digest opened (or printed).
+      1  no digest on disk yet.
+    """
+    html = _latest_html_path()
+    if not html.exists():
+        print(
+            "No weekly digest yet. Run `praxis week --write-html` or "
+            "install the daemon with `praxis install-weekly`.",
+            file=sys.stderr,
+        )
+        return 1
+    if args.print:
+        print(html.read_text(encoding="utf-8"))
+    else:
+        webbrowser.open(html.as_uri())
+        print(f"Opened: {html}")
+    _touch_last_opened()
+    return 0
+
+
+def cmd_last(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Print metadata about the latest digest without opening it.
+
+    Useful in scripts (`open "$(praxis last --path-only)"`) and as a
+    no-window sanity check that the daemon ran. Prints: path, ISO week,
+    and (when available) the trajectory label.
+    """
+    html = _latest_html_path()
+    if not html.exists():
+        print(
+            "No weekly digest yet. Run `praxis week --write-html` or "
+            "install the daemon with `praxis install-weekly`.",
+            file=sys.stderr,
+        )
+        return 1
+    if getattr(args, "path_only", False):
+        print(html)
+        return 0
+    # The week_iso lives in the filename: weeks/<iso>.html.
+    week_iso = html.stem
+    print(f"Week:  {week_iso}")
+    print(f"Path:  {html}")
+    # Best-effort trajectory label from the persisted weekly_digests row.
+    try:
+        store = ProfileStore()
+        row = store.load_weekly_digest(week_iso)
+        if row and row.get("trajectory_label"):
+            label = _TRAJECTORY_LABEL_DISPLAY.get(
+                row["trajectory_label"], row["trajectory_label"].title()
+            )
+            print(f"Label: {label}")
+    except Exception as exc:  # noqa: BLE001
+        # Read-only metadata fetch; never block the user on a DB issue.
+        print(f"[cli] could not read trajectory label: {exc!r}", file=sys.stderr)
     return 0
 
 
@@ -520,6 +862,120 @@ def cmd_install_weekly(args: argparse.Namespace) -> int:  # noqa: ARG001
         print(f"install-weekly failed: {exc}", file=sys.stderr)
         return 4
     print(f"Installed weekly LaunchAgent: {path}")
+
+    # Offer the shell-startup reminder. The notification UX is best-
+    # effort -- the user can miss the banner / dismiss it / be in Focus
+    # mode -- so a once-per-shell reminder closes the surfacing gap.
+    _maybe_prompt_shell_nudge(args)
+    return 0
+
+
+def _maybe_prompt_shell_nudge(args: argparse.Namespace) -> None:
+    """Optionally install the shell-startup reminder.
+
+    Decision tree:
+      --no-shell-nudge       skip entirely.
+      --yes                  install without prompting.
+      no TTY (e.g. piped CI) skip entirely (default = don't).
+      otherwise              prompt; default Yes.
+    """
+    from praxis.cli.shell_nudge import install_into_all, rc_candidates
+
+    no_nudge = getattr(args, "no_shell_nudge", False)
+    assume_yes = getattr(args, "yes", False)
+
+    if no_nudge:
+        return
+    if not assume_yes:
+        if not sys.stdin.isatty():
+            # Non-interactive shell: don't surprise scripts with edits
+            # to ~/.zshrc. The user can run `praxis install-shell-nudge`
+            # later if they want it.
+            return
+        try:
+            reply = input(
+                "Add a shell-startup reminder so you don't miss the digest? [Y/n] "
+            ).strip().lower()
+        except EOFError:
+            return
+        if reply not in {"", "y", "yes"}:
+            print(
+                "Skipped. You can install it later with "
+                "`praxis install-shell-nudge`."
+            )
+            return
+
+    modified = install_into_all()
+    if not modified:
+        existing = [p for p in rc_candidates() if p.exists()]
+        if existing:
+            print(
+                "Shell-startup reminder already present in: "
+                + ", ".join(str(p) for p in existing)
+            )
+        else:
+            print(
+                "No ~/.zshrc or ~/.bashrc found; shell-startup reminder "
+                "not installed. Create one of those files and re-run "
+                "`praxis install-shell-nudge`."
+            )
+        return
+    for p in modified:
+        print(f"Installed shell-startup reminder in: {p}")
+    print("Open a new shell to start receiving the reminder.")
+
+
+def cmd_shell_nudge(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Print the shell snippet that `eval "$(praxis shell-nudge)"` consumes.
+
+    The snippet is pure shell (no Python invoked per shell startup) and
+    is safe to eval in both zsh and bash. When `latest.html` is fresh
+    and `.last_opened` is missing/stale, one line is printed to stderr
+    on shell startup.
+    """
+    from praxis.cli.shell_nudge import emit_snippet
+    print(emit_snippet(), end="")
+    return 0
+
+
+def cmd_install_shell_nudge(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Append the shell-nudge eval line to ~/.zshrc and ~/.bashrc.
+
+    Idempotent: re-running is a no-op when the line is already there.
+    Reports which file(s) were touched.
+    """
+    from praxis.cli.shell_nudge import install_into_all, rc_candidates
+
+    modified = install_into_all()
+    if modified:
+        for p in modified:
+            print(f"Installed shell-startup reminder in: {p}")
+        print("Open a new shell to start receiving the reminder.")
+        return 0
+    existing = [p for p in rc_candidates() if p.exists()]
+    if existing:
+        print(
+            "Shell-startup reminder already present in: "
+            + ", ".join(str(p) for p in existing)
+        )
+        return 0
+    print(
+        "No ~/.zshrc or ~/.bashrc found. Create one and re-run this command.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def cmd_uninstall_shell_nudge(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Remove the shell-nudge eval line (and its comment marker) from RC files."""
+    from praxis.cli.shell_nudge import uninstall_from_all
+
+    modified = uninstall_from_all()
+    if modified:
+        for p in modified:
+            print(f"Removed shell-startup reminder from: {p}")
+    else:
+        print("No shell-startup reminder found to remove.")
     return 0
 
 
@@ -796,10 +1252,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     show.set_defaults(func=cmd_show)
 
-    rep = sub.add_parser("report", help="Open or print the latest HTML report.")
+    rep = sub.add_parser("report", help="Open or print the legacy v0.1 HTML report.")
     rep.add_argument("--print", action="store_true",
                      help="Print HTML to stdout instead of opening browser.")
     rep.set_defaults(func=cmd_report)
+
+    opn = sub.add_parser(
+        "open",
+        help="Open this week's digest in the default browser.",
+        description=(
+            "Open ~/.praxis/latest.html (the symlink the daemon updates "
+            "on every weekly run). Touches ~/.praxis/.last_opened so the "
+            "shell-startup reminder stops nagging once read."
+        ),
+    )
+    opn.add_argument("--print", action="store_true",
+                     help="Print HTML to stdout instead of opening a window.")
+    opn.set_defaults(func=cmd_open)
+
+    lst = sub.add_parser(
+        "last",
+        help="Print the latest digest's path, ISO week, and trajectory label.",
+        description=(
+            "Read-only metadata about ~/.praxis/latest.html. Does not "
+            "open a browser window. Use --path-only for scripting "
+            "(e.g. `open \"$(praxis last --path-only)\"`)."
+        ),
+    )
+    lst.add_argument("--path-only", action="store_true",
+                     help="Print only the absolute path (one line, no labels).")
+    lst.set_defaults(func=cmd_last)
 
     sts = sub.add_parser("status", help="Show current scorecard status.")
     sts.set_defaults(func=cmd_status)
@@ -829,6 +1311,15 @@ def build_parser() -> argparse.ArgumentParser:
             "equivalent snippet without scheduling anything (spec 12.4)."
         ),
     )
+    iw.add_argument(
+        "--no-shell-nudge", action="store_true",
+        help="Skip the shell-startup reminder prompt entirely.",
+    )
+    iw.add_argument(
+        "--yes", action="store_true",
+        help="Assume yes for the shell-startup reminder prompt "
+             "(useful in scripted installs).",
+    )
     iw.set_defaults(func=cmd_install_weekly)
 
     uw = sub.add_parser(
@@ -841,6 +1332,35 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     uw.set_defaults(func=cmd_uninstall_weekly)
+
+    sn = sub.add_parser(
+        "shell-nudge",
+        help="Print the shell snippet for `eval` in ~/.zshrc / ~/.bashrc.",
+        description=(
+            "Emit a tiny shell function that prints one reminder line "
+            "when ~/.praxis/latest.html is fresh and unread. Designed "
+            "to be wired in via `eval \"$(praxis shell-nudge)\"` -- the "
+            "install-shell-nudge command does that for you."
+        ),
+    )
+    sn.set_defaults(func=cmd_shell_nudge)
+
+    isn = sub.add_parser(
+        "install-shell-nudge",
+        help="Append the shell-nudge eval line to ~/.zshrc and ~/.bashrc.",
+        description=(
+            "Idempotent. Adds `eval \"$(praxis shell-nudge)\"` to every "
+            "existing RC file (zsh and/or bash). Skips files that "
+            "already have the line."
+        ),
+    )
+    isn.set_defaults(func=cmd_install_shell_nudge)
+
+    usn = sub.add_parser(
+        "uninstall-shell-nudge",
+        help="Remove the shell-nudge eval line from ~/.zshrc and ~/.bashrc.",
+    )
+    usn.set_defaults(func=cmd_uninstall_shell_nudge)
 
     cfg = sub.add_parser("config",
                          help="View, --get, or --set ~/.praxis/config.toml.")

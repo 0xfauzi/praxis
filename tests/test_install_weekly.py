@@ -139,8 +139,8 @@ def test_install_weekly_uses_config_day_and_time(tmp_home, fake_launchctl, monke
     # Hand-edit the toml file so install-weekly reads non-default values.
     cfg_path = tmp_home / ".praxis" / "config.toml"
     text = cfg_path.read_text()
-    text = text.replace('day = "sunday"', 'day = "wednesday"')
-    text = text.replace("hour = 18", "hour = 9")
+    text = text.replace('day = "monday"', 'day = "wednesday"')
+    # Hour is already 9 in the new defaults so leave that line alone.
     text = text.replace("minute = 0", "minute = 30")
     cfg_path.write_text(text)
 
