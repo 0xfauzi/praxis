@@ -26,12 +26,14 @@ from praxis.scoring.moment_selector import (
     MomentSelection,
     _build_user_prompt,
     _candidate_payload,
+    _fallback_selection,
     _invalid_ids,
     _parse_selection,
     _retry_user_prompt,
     _SYSTEM_PROMPT,
     cheap_model_for,
     select_moments,
+    select_moments_with_fallback,
 )
 
 
@@ -616,3 +618,232 @@ def test_invalid_moment_selection_error_is_a_value_error():
     that catch the broad shape still work; US-031 can catch the narrow
     type for its fallback path."""
     assert issubclass(InvalidMomentSelectionError, ValueError)
+
+
+# ---------- US-031: fallback on protocol failure ----------
+
+
+def _bad_stub(system: str, user: str, model: str) -> str:
+    """Stub that always returns an id not in any sane candidate set,
+    forcing select_moments to exhaust its one retry and raise."""
+    return json.dumps(
+        {
+            "headline_moment_id": "NOT_IN_SET",
+            "headline_reason": "x.",
+            "supporting_moment_ids": [],
+        }
+    )
+
+
+def test_fallback_selection_picks_most_recent_major_by_session_time():
+    """Most-recent here means largest session_started_at -- the
+    conversation that happened most recently in wall time, not when
+    the moment was emitted."""
+    older_major = _candidate(
+        moment_id="OLD",
+        severity="major",
+        session_started_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+    )
+    newer_major = _candidate(
+        moment_id="NEW",
+        severity="major",
+        session_started_at=datetime(2026, 5, 20, 10, 0, tzinfo=timezone.utc),
+    )
+    moderate_more_recent = _candidate(
+        moment_id="MODERATE_RECENT",
+        severity="moderate",
+        session_started_at=datetime(2026, 5, 21, 10, 0, tzinfo=timezone.utc),
+    )
+    out = _fallback_selection([older_major, newer_major, moderate_more_recent])
+    assert out is not None
+    # Major precedence beats raw recency: the more-recent moderate
+    # is still skipped because any major exists.
+    assert out.headline_moment_id == "NEW"
+
+
+def test_fallback_selection_falls_through_to_moderate_when_no_major():
+    """When no major-severity candidate exists, the most-recent
+    moderate becomes the headline."""
+    older_moderate = _candidate(
+        moment_id="OLD_MOD",
+        severity="moderate",
+        session_started_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+    )
+    newer_moderate = _candidate(
+        moment_id="NEW_MOD",
+        severity="moderate",
+        session_started_at=datetime(2026, 5, 21, 10, 0, tzinfo=timezone.utc),
+    )
+    minor = _candidate(
+        moment_id="MINOR",
+        severity="minor",
+        session_started_at=datetime(2026, 5, 22, 10, 0, tzinfo=timezone.utc),
+    )
+    out = _fallback_selection([older_moderate, newer_moderate, minor])
+    assert out is not None
+    assert out.headline_moment_id == "NEW_MOD"
+
+
+def test_fallback_selection_returns_none_when_no_major_or_moderate():
+    """If only minor candidates exist, the spec's fallback ordering
+    has nothing to fall back to -- return None so the wrapper can
+    re-raise the original protocol-failure error."""
+    minor = _candidate(moment_id="MINOR", severity="minor")
+    assert _fallback_selection([minor]) is None
+
+
+def test_fallback_selection_has_empty_supporting_and_reason():
+    """Acceptance: supporting_moment_ids is left empty in the
+    fallback path. headline_reason is also empty -- the deterministic
+    path has no LLM-generated coaching prose to attach."""
+    major = _candidate(moment_id="M", severity="major")
+    out = _fallback_selection([major])
+    assert out is not None
+    assert out.supporting_moment_ids == []
+    assert out.headline_reason == ""
+
+
+def test_select_moments_with_fallback_passes_through_on_success():
+    """If the LLM succeeds (any path inside select_moments), the
+    fallback wrapper just returns that selection unchanged."""
+    def stub(system: str, user: str, model: str) -> str:
+        return json.dumps(
+            {
+                "headline_moment_id": "m1",
+                "headline_reason": "the LLM was happy.",
+                "supporting_moment_ids": [],
+            }
+        )
+
+    cands = [_candidate(moment_id="m1", severity="major")]
+    out = select_moments_with_fallback(
+        cands, primary_provider="anthropic", llm_caller=stub
+    )
+    assert out is not None
+    assert out.headline_moment_id == "m1"
+    assert out.headline_reason == "the LLM was happy."
+
+
+def test_select_moments_with_fallback_recovers_when_llm_fails_twice():
+    """When the LLM returns bad ids on both attempts, the wrapper
+    catches InvalidMomentSelectionError and returns the most-recent
+    major-severity candidate as the headline."""
+    cands = [
+        _candidate(
+            moment_id="oldMajor",
+            severity="major",
+            session_started_at=datetime(2026, 5, 17, 9, 0, tzinfo=timezone.utc),
+        ),
+        _candidate(
+            moment_id="newMajor",
+            severity="major",
+            session_started_at=datetime(2026, 5, 22, 9, 0, tzinfo=timezone.utc),
+        ),
+        _candidate(
+            moment_id="oldModerate",
+            severity="moderate",
+            session_started_at=datetime(2026, 5, 23, 9, 0, tzinfo=timezone.utc),
+        ),
+    ]
+    out = select_moments_with_fallback(
+        cands, primary_provider="anthropic", llm_caller=_bad_stub
+    )
+    assert out is not None
+    assert out.headline_moment_id == "newMajor"
+    assert out.supporting_moment_ids == []
+    assert out.headline_reason == ""
+
+
+def test_select_moments_with_fallback_uses_moderate_when_no_major():
+    """If the LLM fails and no major-severity candidates exist, the
+    most-recent moderate is the fallback headline."""
+    cands = [
+        _candidate(
+            moment_id="modA",
+            severity="moderate",
+            session_started_at=datetime(2026, 5, 17, 9, 0, tzinfo=timezone.utc),
+        ),
+        _candidate(
+            moment_id="modB",
+            severity="moderate",
+            session_started_at=datetime(2026, 5, 25, 9, 0, tzinfo=timezone.utc),
+        ),
+    ]
+    out = select_moments_with_fallback(
+        cands, primary_provider="anthropic", llm_caller=_bad_stub
+    )
+    assert out is not None
+    assert out.headline_moment_id == "modB"
+    assert out.supporting_moment_ids == []
+
+
+def test_select_moments_with_fallback_reraises_when_no_major_or_moderate():
+    """If the LLM fails and only minor candidates exist, there is
+    nothing the deterministic fallback can pick -- the original
+    InvalidMomentSelectionError propagates so the digest pipeline
+    knows the headline slot is empty."""
+    cands = [_candidate(moment_id="minA", severity="minor")]
+    with pytest.raises(InvalidMomentSelectionError):
+        select_moments_with_fallback(
+            cands, primary_provider="anthropic", llm_caller=_bad_stub
+        )
+
+
+def test_select_moments_with_fallback_makes_at_most_two_llm_calls():
+    """The fallback wrapper does not retry beyond select_moments'
+    one-retry budget; it must call the LLM exactly twice before
+    giving up and using the deterministic path."""
+    n = 0
+
+    def counting_bad_stub(system: str, user: str, model: str) -> str:
+        nonlocal n
+        n += 1
+        return _bad_stub(system, user, model)
+
+    cands = [_candidate(moment_id="m1", severity="major")]
+    out = select_moments_with_fallback(
+        cands, primary_provider="anthropic", llm_caller=counting_bad_stub
+    )
+    assert out is not None
+    assert out.headline_moment_id == "m1"
+    assert n == 2
+
+
+def test_select_moments_with_fallback_returns_none_for_empty_candidates():
+    """Consistency with select_moments: empty input -> None, with no
+    LLM call attempted and nothing to fall back to."""
+    calls: list[tuple[str, str, str]] = []
+
+    def tracking_stub(system: str, user: str, model: str) -> str:
+        calls.append((system, user, model))
+        return "{}"
+
+    out = select_moments_with_fallback(
+        [], primary_provider="anthropic", llm_caller=tracking_stub
+    )
+    assert out is None
+    assert calls == []
+
+
+def test_select_moments_with_fallback_prefers_major_over_more_recent_moderate():
+    """If a more-recent moderate sits next to an older major, the
+    major still wins. Severity ordering is hard: the fallback is not
+    'most recent moment' -- it's 'most recent of the highest severity
+    that exists'."""
+    older_major = _candidate(
+        moment_id="OLDMAJ",
+        severity="major",
+        session_started_at=datetime(2026, 5, 10, 0, 0, tzinfo=timezone.utc),
+    )
+    newer_moderate = _candidate(
+        moment_id="NEWMOD",
+        severity="moderate",
+        session_started_at=datetime(2026, 5, 25, 0, 0, tzinfo=timezone.utc),
+    )
+    out = select_moments_with_fallback(
+        [older_major, newer_moderate],
+        primary_provider="anthropic",
+        llm_caller=_bad_stub,
+    )
+    assert out is not None
+    assert out.headline_moment_id == "OLDMAJ"

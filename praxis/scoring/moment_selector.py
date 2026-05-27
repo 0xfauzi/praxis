@@ -290,3 +290,54 @@ def select_moments(
             f"{', '.join(retry_invalid)}"
         )
     return retry_selection
+
+
+def _fallback_selection(candidates: list[MomentCandidate]) -> MomentSelection | None:
+    """Pick the most-recent major moment, or the most-recent moderate
+    if no major exists. Returns None when neither severity is present
+    (caller should treat that as an unrecoverable protocol failure).
+
+    Spec section 4.3.1: graceful degradation when the selector LLM
+    fails to return ids in the candidate set after one retry. Recency
+    is measured by session_started_at (when the conversation
+    happened, not when the moment was emitted), matching the user's
+    mental model of "the slip I most recently made". Supporting
+    moment list is empty because the deterministic fallback has no
+    coaching judgment to spend on a second moment.
+    """
+    for severity in ("major", "moderate"):
+        bucket = [c for c in candidates if c.moment.severity == severity]
+        if bucket:
+            chosen = max(bucket, key=lambda c: c.session_started_at)
+            return MomentSelection(
+                headline_moment_id=chosen.moment.moment_id,
+                headline_reason="",
+                supporting_moment_ids=[],
+            )
+    return None
+
+
+def select_moments_with_fallback(
+    candidates: list[MomentCandidate],
+    primary_provider: str = "anthropic",
+    *,
+    llm_caller: LLMCaller | None = None,
+) -> MomentSelection | None:
+    """Wrap select_moments with the spec section 4.3.1 fallback path.
+
+    On InvalidMomentSelectionError (LLM returned bad ids twice in a
+    row), pick the most-recent major-severity moment, or the
+    most-recent moderate if no major exists. supporting_moment_ids is
+    left empty. If neither major nor moderate exists in the candidate
+    set, the original InvalidMomentSelectionError is re-raised so the
+    caller knows the digest is missing a headline.
+    """
+    try:
+        return select_moments(
+            candidates, primary_provider, llm_caller=llm_caller
+        )
+    except InvalidMomentSelectionError:
+        fallback = _fallback_selection(candidates)
+        if fallback is None:
+            raise
+        return fallback
