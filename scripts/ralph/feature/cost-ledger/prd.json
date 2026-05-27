@@ -53,8 +53,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "praxis/scoring/cost_ledger.py: pure dispatcher `compute_moment_dollar_impact_usd(dim_key, model_hint, *, next_two_turn_chars, accepted_response_chars, session_total_input_chars)` applies the spec 10.2 rule for the given dim_key by delegating to the existing per-session helpers. verification + iteration -> estimate_session_cost_usd; fit -> estimate_tier_fit_savings_for_session; planning/context/tools/unknown -> None. The dispatcher itself stays pure (no disk I/O); the underlying helpers handle card resolution. None propagates from no-signal kwargs, no card, or no per-token pricing. Zero chars -> $0 (a legitimate 'no work redone / empty session' signal, mirrors estimate_session_cost_usd's contract). Each dim_key consults exactly one kwarg; cross-wiring is locked out by test_moment_impact_only_relevant_kwarg_consulted."
     },
     {
       "id": "US-051",

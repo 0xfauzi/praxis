@@ -384,6 +384,68 @@ def estimate_tier_fit_savings_for_session(
     return frontier_cost - fast_cost
 
 
+# Dim keys that, by spec section 10.2, do not carry a dollar impact:
+# planning, context, and tools lapses do not map to a wasted-token
+# number we can defensibly invent, so the per-moment estimate is None.
+# Mirrored here rather than imported from `praxis.scoring.rubric` so
+# the cost layer stays independent of the rubric module.
+_MOMENT_DIM_KEYS_WITHOUT_IMPACT = frozenset({"planning", "context", "tools"})
+
+
+def compute_moment_dollar_impact_usd(
+    dim_key: str,
+    model_hint: str | None,
+    *,
+    next_two_turn_chars: int | None = None,
+    accepted_response_chars: int | None = None,
+    session_total_input_chars: int | None = None,
+) -> float | None:
+    """Spec section 10.2 per-dim_key dollar-impact rules.
+
+    For verification, iteration, and fit moments, returns the rough USD
+    estimate the spec asks for. For planning, context, and tools (and
+    any unknown dim_key) returns None: the spec is explicit that we do
+    not invent a number for those dims.
+
+      - 'verification': cost of the next 2 turns after the lapse -- the
+        work the user had to redo because they accepted a bad output.
+        Caller computes the char volume and passes it via
+        `next_two_turn_chars`.
+      - 'iteration': cost of the assistant response the user accepted
+        prematurely. Caller passes the response char volume via
+        `accepted_response_chars`.
+      - 'fit' (over-tier): (frontier_cost - cheaper_tier_cost) for the
+        session, same shape as the tier-fit savings panel
+        (`compute_tier_fit_savings`). Caller passes the session's total
+        input char volume via `session_total_input_chars`.
+      - 'planning' / 'context' / 'tools' / unknown: None.
+
+    Returns None when the relevant chars-input for the dim_key is None
+    (the caller had no signal to attribute), when the model has no
+    card on file, or when the card lacks per-token pricing. All three
+    paths reuse `COST_CHARS_PER_TOKEN` and `COST_OUTPUT_TO_INPUT_RATIO`
+    via the existing helpers, so per-moment estimates and the weekly
+    ledger agree on the same token assumptions.
+    """
+    if dim_key in _MOMENT_DIM_KEYS_WITHOUT_IMPACT:
+        return None
+    if dim_key == "verification":
+        if next_two_turn_chars is None:
+            return None
+        return estimate_session_cost_usd(model_hint, next_two_turn_chars)
+    if dim_key == "iteration":
+        if accepted_response_chars is None:
+            return None
+        return estimate_session_cost_usd(model_hint, accepted_response_chars)
+    if dim_key == "fit":
+        if session_total_input_chars is None:
+            return None
+        return estimate_tier_fit_savings_for_session(
+            model_hint, session_total_input_chars,
+        )
+    return None
+
+
 def compute_tier_fit_savings(
     sessions: list[TierFitInputSession],
     as_of: datetime | None = None,

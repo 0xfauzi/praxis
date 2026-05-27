@@ -1,5 +1,5 @@
 """Tests for the weekly cost ledger (US-047), biggest-line panel (US-048),
-and tier-fit savings estimate (US-049).
+tier-fit savings estimate (US-049), and per-moment dollar impact (US-050).
 
 Acceptance criteria from the PRD:
   - US-047: Total USD spend across all priced models for the week is
@@ -9,6 +9,10 @@ Acceptance criteria from the PRD:
   - US-049: Opus/GPT-5 sessions with user_turn_count <= 3 AND
     avg_prompt_chars <= 200 are counted; savings estimate sums
     (frontier_cost - cheaper_tier_cost) per qualifying session.
+  - US-050: dollar_impact_estimate per moment type per spec 10.2 --
+    verification = next-2-turn cost, fit = frontier-minus-cheaper-tier
+    savings, iteration = accepted-response cost, planning/context/tools
+    = None.
 
 Design contract enforced by these tests:
   - The aggregator (`compute_cost_ledger`) is pure: pre-computed
@@ -27,6 +31,10 @@ Design contract enforced by these tests:
     savings + threshold-signal fields in, total out. The card lookup
     happens in `estimate_tier_fit_savings_for_session`, exercised
     under tmp_home like the other helper.
+  - `compute_moment_dollar_impact_usd` dispatches by dim_key to the
+    existing per-session helpers, returns None for the dims the spec
+    explicitly opts out of (planning/context/tools), and returns None
+    when the caller has no signal to attribute.
 """
 from __future__ import annotations
 
@@ -46,6 +54,7 @@ from praxis.scoring.cost_ledger import (
     TierFitSavings,
     compute_biggest_line,
     compute_cost_ledger,
+    compute_moment_dollar_impact_usd,
     compute_tier_fit_savings,
     estimate_session_cost_usd,
     estimate_tier_fit_savings_for_session,
@@ -740,3 +749,204 @@ def test_estimate_tier_fit_savings_uses_shared_token_constants(tmp_home):
     savings = estimate_tier_fit_savings_for_session("claude-opus-4-7", 4000)
     assert frontier is not None and haiku is not None and savings is not None
     assert abs(savings - (frontier - haiku)) < 1e-9
+
+
+# ---- Per-moment dollar impact tests (US-050) ---------------------------
+# Spec section 10.2: dollar_impact_estimate per moment type. The
+# dispatcher delegates to estimate_session_cost_usd /
+# estimate_tier_fit_savings_for_session, so these tests run under
+# tmp_home for card lookups. They assert each dim_key path, the
+# None-for-no-signal contract, and the planning/context/tools "we do
+# not invent a number" rule.
+
+
+def test_moment_impact_planning_is_none(tmp_home):
+    """Planning moments never carry a dollar impact (spec 10.2)."""
+    assert compute_moment_dollar_impact_usd(
+        "planning", "claude-opus-4-7",
+        next_two_turn_chars=10_000,
+        accepted_response_chars=10_000,
+        session_total_input_chars=10_000,
+    ) is None
+
+
+def test_moment_impact_context_is_none(tmp_home):
+    """Context moments never carry a dollar impact (spec 10.2)."""
+    assert compute_moment_dollar_impact_usd(
+        "context", "claude-opus-4-7",
+        next_two_turn_chars=10_000,
+        accepted_response_chars=10_000,
+        session_total_input_chars=10_000,
+    ) is None
+
+
+def test_moment_impact_tools_is_none(tmp_home):
+    """Tools moments never carry a dollar impact (spec 10.2)."""
+    assert compute_moment_dollar_impact_usd(
+        "tools", "claude-opus-4-7",
+        next_two_turn_chars=10_000,
+        accepted_response_chars=10_000,
+        session_total_input_chars=10_000,
+    ) is None
+
+
+def test_moment_impact_unknown_dim_key_is_none(tmp_home):
+    """Defensive default for any dim_key not named in the spec."""
+    assert compute_moment_dollar_impact_usd(
+        "structured_output", "claude-opus-4-7",
+        next_two_turn_chars=4000,
+    ) is None
+
+
+def test_moment_impact_verification_uses_next_two_turn_chars(tmp_home):
+    """Acceptance: verification = token cost of the next 2 turns after the lapse.
+
+    Mirrors `estimate_session_cost_usd("claude-opus-4-7", 4000)` so the
+    per-moment number and the weekly ledger agree on the same token
+    formula.
+    """
+    expected = estimate_session_cost_usd("claude-opus-4-7", 4000)
+    got = compute_moment_dollar_impact_usd(
+        "verification", "claude-opus-4-7", next_two_turn_chars=4000,
+    )
+    assert expected is not None and got is not None
+    assert abs(got - expected) < 1e-9
+
+
+def test_moment_impact_verification_returns_none_without_signal(tmp_home):
+    """Caller passed no `next_two_turn_chars` -> no impact attributable."""
+    assert compute_moment_dollar_impact_usd(
+        "verification", "claude-opus-4-7",
+    ) is None
+
+
+def test_moment_impact_verification_returns_none_for_unknown_model(tmp_home):
+    """No card on file -> the underlying helper returns None -> we surface that."""
+    assert compute_moment_dollar_impact_usd(
+        "verification", "unknown-model-xyz", next_two_turn_chars=4000,
+    ) is None
+
+
+def test_moment_impact_verification_returns_none_for_no_model_hint(tmp_home):
+    """model_hint=None -> can't price it."""
+    assert compute_moment_dollar_impact_usd(
+        "verification", None, next_two_turn_chars=4000,
+    ) is None
+
+
+def test_moment_impact_verification_returns_none_for_subscription_card(tmp_home):
+    """Copilot has no per-token pricing -> None signals 'unpriced'."""
+    assert compute_moment_dollar_impact_usd(
+        "verification", "copilot", next_two_turn_chars=4000,
+    ) is None
+
+
+def test_moment_impact_iteration_uses_accepted_response_chars(tmp_home):
+    """Acceptance: iteration = token cost of the assistant response the user accepted prematurely.
+
+    Same chars-per-token + output-multiplier as verification + the
+    weekly ledger.
+    """
+    expected = estimate_session_cost_usd("claude-opus-4-7", 800)
+    got = compute_moment_dollar_impact_usd(
+        "iteration", "claude-opus-4-7", accepted_response_chars=800,
+    )
+    assert expected is not None and got is not None
+    assert abs(got - expected) < 1e-9
+
+
+def test_moment_impact_iteration_returns_none_without_signal(tmp_home):
+    """Caller passed no `accepted_response_chars` -> nothing to attribute."""
+    assert compute_moment_dollar_impact_usd(
+        "iteration", "claude-opus-4-7",
+    ) is None
+
+
+def test_moment_impact_iteration_returns_none_for_unknown_model(tmp_home):
+    assert compute_moment_dollar_impact_usd(
+        "iteration", "unknown-model-xyz", accepted_response_chars=800,
+    ) is None
+
+
+def test_moment_impact_fit_uses_session_total_input_chars(tmp_home):
+    """Acceptance: fit (over-tier) = (frontier_cost - cheaper_tier_cost) for the session.
+
+    Equals `estimate_tier_fit_savings_for_session` on the same inputs,
+    so the per-moment fit estimate and the tier-fit panel agree.
+    """
+    expected = estimate_tier_fit_savings_for_session("claude-opus-4-7", 4000)
+    got = compute_moment_dollar_impact_usd(
+        "fit", "claude-opus-4-7", session_total_input_chars=4000,
+    )
+    assert expected is not None and got is not None
+    assert abs(got - expected) < 1e-9
+
+
+def test_moment_impact_fit_returns_none_without_signal(tmp_home):
+    """Caller passed no `session_total_input_chars` -> nothing to attribute."""
+    assert compute_moment_dollar_impact_usd(
+        "fit", "claude-opus-4-7",
+    ) is None
+
+
+def test_moment_impact_fit_returns_none_for_non_frontier(tmp_home):
+    """A fit moment on a fast-tier model has no cheaper sibling to compare against.
+
+    The underlying helper returns None for non-frontier cards;
+    `compute_moment_dollar_impact_usd` surfaces that None.
+    """
+    assert compute_moment_dollar_impact_usd(
+        "fit", "claude-haiku-4-5", session_total_input_chars=4000,
+    ) is None
+
+
+def test_moment_impact_fit_returns_none_for_no_fast_sibling(tmp_home):
+    """Gemini ships frontier-only in the built-in cards -> no savings to claim."""
+    assert compute_moment_dollar_impact_usd(
+        "fit", "gemini-2-5-pro", session_total_input_chars=4000,
+    ) is None
+
+
+def test_moment_impact_only_relevant_kwarg_consulted(tmp_home):
+    """A verification moment ignores the `accepted_response_chars` /
+    `session_total_input_chars` kwargs even when they are populated.
+
+    Guards against future refactors that accidentally cross-wire the
+    dim_key dispatch. Each dim_key has exactly one chars input that
+    matters; the others are noise.
+    """
+    only_verification = compute_moment_dollar_impact_usd(
+        "verification", "claude-opus-4-7",
+        next_two_turn_chars=4000,
+        accepted_response_chars=999_999,
+        session_total_input_chars=999_999,
+    )
+    just_verification = compute_moment_dollar_impact_usd(
+        "verification", "claude-opus-4-7", next_two_turn_chars=4000,
+    )
+    assert only_verification == just_verification
+
+
+def test_moment_impact_verification_zero_chars_is_zero(tmp_home):
+    """A priced model with no chars -> $0, not None.
+
+    Zero is a legitimate signal ('the user redid no work') and matches
+    `estimate_session_cost_usd`'s 0-chars-is-zero contract.
+    """
+    assert compute_moment_dollar_impact_usd(
+        "verification", "claude-opus-4-7", next_two_turn_chars=0,
+    ) == 0.0
+
+
+def test_moment_impact_iteration_zero_chars_is_zero(tmp_home):
+    """Same 0-chars-is-zero contract for iteration moments."""
+    assert compute_moment_dollar_impact_usd(
+        "iteration", "claude-opus-4-7", accepted_response_chars=0,
+    ) == 0.0
+
+
+def test_moment_impact_fit_zero_chars_is_zero(tmp_home):
+    """Frontier session with empty workload qualifies; savings is just $0."""
+    assert compute_moment_dollar_impact_usd(
+        "fit", "claude-opus-4-7", session_total_input_chars=0,
+    ) == 0.0
