@@ -1,8 +1,10 @@
-"""Tests for the weekly cost ledger (US-047).
+"""Tests for the weekly cost ledger (US-047) and biggest-line panel (US-048).
 
 Acceptance criteria from the PRD:
-  - Total USD spend across all priced models for the week is computed.
-  - 90-day rolling weekly mean is computed alongside.
+  - US-047: Total USD spend across all priced models for the week is
+    computed; 90-day rolling weekly mean is computed alongside.
+  - US-048: The (model, task) pair with the largest spend in the
+    week is identified; spend amount and session count are exposed.
 
 Design contract enforced by these tests:
   - The aggregator (`compute_cost_ledger`) is pure: pre-computed
@@ -14,6 +16,9 @@ Design contract enforced by these tests:
     window, counting only ISO weeks with at least one priced session.
     Quiet weeks are not zero-padded; that rule is locked in by
     `test_baseline_excludes_zero_weeks`.
+  - `compute_biggest_line` is pure too: it groups by (model_hint,
+    task_label) within the current ISO week only, skips sessions with
+    a missing identity or unknown cost, and tiebreaks deterministically.
 """
 from __future__ import annotations
 
@@ -23,8 +28,11 @@ from praxis.scoring.cost_ledger import (
     COST_BASELINE_WINDOW_DAYS,
     COST_CHARS_PER_TOKEN,
     COST_OUTPUT_TO_INPUT_RATIO,
+    BiggestLine,
+    BiggestLineInputSession,
     CostLedger,
     CostLedgerInputSession,
+    compute_biggest_line,
     compute_cost_ledger,
     estimate_session_cost_usd,
 )
@@ -235,3 +243,218 @@ def test_estimate_session_cost_constants_match_advisor(tmp_home):
     """Constants stay in lockstep with `models_advisor/advisor.py`."""
     assert COST_CHARS_PER_TOKEN == 4.0
     assert COST_OUTPUT_TO_INPUT_RATIO == 1.5
+
+
+# ---- Biggest (model, task) line tests ----------------------------------
+# Spec section 10.1: the cost panel names the (model, task) pair that
+# drove the week's spend. compute_biggest_line is the same shape as
+# compute_cost_ledger -- pure aggregator over (model_hint, task_label,
+# cost_usd, started_at) inputs. The current ISO week is the window;
+# the baseline weeks are out of scope (CostLedger already reports them).
+
+
+def _biggest_session(
+    days_ago: int,
+    cost_usd: float | None = 1.0,
+    model_hint: str | None = "claude-opus-4-7",
+    task_label: str | None = "auth migration debugging",
+) -> BiggestLineInputSession:
+    return BiggestLineInputSession(
+        started_at=AS_OF - timedelta(days=days_ago),
+        cost_usd=cost_usd,
+        model_hint=model_hint,
+        task_label=task_label,
+    )
+
+
+def test_biggest_line_empty_returns_no_winner():
+    line = compute_biggest_line([], as_of=AS_OF)
+    assert isinstance(line, BiggestLine)
+    assert line.model_hint is None
+    assert line.task_label is None
+    assert line.spend_usd == 0.0
+    assert line.session_count == 0
+
+
+def test_biggest_line_single_session_wins():
+    s = _biggest_session(days_ago=0, cost_usd=2.5, model_hint="opus", task_label="task A")
+    line = compute_biggest_line([s], as_of=AS_OF)
+    assert line.model_hint == "opus"
+    assert line.task_label == "task A"
+    assert line.spend_usd == 2.5
+    assert line.session_count == 1
+
+
+def test_biggest_line_sums_within_pair_then_picks_max():
+    """Acceptance: identify the (model, task) pair with the LARGEST spend.
+
+    Two pairs in-week: (opus, A) has 2 sessions summing to $3, (sonnet, B)
+    has 1 session at $5. Sonnet/B wins on spend even though Opus/A has
+    more sessions -- spend is the primary criterion.
+    """
+    sessions = [
+        _biggest_session(days_ago=0, cost_usd=1.0, model_hint="opus", task_label="A"),
+        _biggest_session(days_ago=1, cost_usd=2.0, model_hint="opus", task_label="A"),
+        _biggest_session(days_ago=2, cost_usd=5.0, model_hint="sonnet", task_label="B"),
+    ]
+    line = compute_biggest_line(sessions, as_of=AS_OF)
+    assert line.model_hint == "sonnet"
+    assert line.task_label == "B"
+    assert line.spend_usd == 5.0
+    assert line.session_count == 1
+
+
+def test_biggest_line_session_count_exposed_for_winner():
+    """Acceptance: spend amount AND session count are exposed to renderer.
+
+    Winning pair has three sessions; session_count must reflect just
+    the winner's sessions, not the total weekly session count.
+    """
+    sessions = [
+        _biggest_session(days_ago=0, cost_usd=1.0, model_hint="opus", task_label="A"),
+        _biggest_session(days_ago=1, cost_usd=1.0, model_hint="opus", task_label="A"),
+        _biggest_session(days_ago=2, cost_usd=1.0, model_hint="opus", task_label="A"),
+        _biggest_session(days_ago=0, cost_usd=2.0, model_hint="sonnet", task_label="B"),
+    ]
+    line = compute_biggest_line(sessions, as_of=AS_OF)
+    assert line.model_hint == "opus"
+    assert line.task_label == "A"
+    assert line.spend_usd == 3.0
+    assert line.session_count == 3
+
+
+def test_biggest_line_skips_sessions_without_model_hint():
+    """A session with model_hint=None cannot be named in the panel -> skipped."""
+    sessions = [
+        _biggest_session(days_ago=0, cost_usd=10.0, model_hint=None, task_label="A"),
+        _biggest_session(days_ago=1, cost_usd=1.0, model_hint="opus", task_label="A"),
+    ]
+    line = compute_biggest_line(sessions, as_of=AS_OF)
+    assert line.model_hint == "opus"
+    assert line.task_label == "A"
+    assert line.spend_usd == 1.0
+    assert line.session_count == 1
+
+
+def test_biggest_line_skips_sessions_without_task_label():
+    """A session with task_label=None cannot be named in the panel -> skipped."""
+    sessions = [
+        _biggest_session(days_ago=0, cost_usd=10.0, model_hint="opus", task_label=None),
+        _biggest_session(days_ago=1, cost_usd=1.0, model_hint="opus", task_label="A"),
+    ]
+    line = compute_biggest_line(sessions, as_of=AS_OF)
+    assert line.model_hint == "opus"
+    assert line.task_label == "A"
+
+
+def test_biggest_line_skips_unpriced_sessions():
+    """`cost_usd=None` sessions are silently ignored (same rule as compute_cost_ledger)."""
+    sessions = [
+        _biggest_session(days_ago=0, cost_usd=None, model_hint="opus", task_label="A"),
+        _biggest_session(days_ago=1, cost_usd=2.0, model_hint="sonnet", task_label="B"),
+    ]
+    line = compute_biggest_line(sessions, as_of=AS_OF)
+    assert line.model_hint == "sonnet"
+    assert line.task_label == "B"
+
+
+def test_biggest_line_ignores_baseline_window_sessions():
+    """Sessions in the 90-day baseline window but before the current ISO week are out of scope.
+
+    Per spec section 10.1 the 'biggest line' is for the current week.
+    The baseline mean covers the historical span; this panel does not.
+    """
+    sessions = [
+        # In current week:
+        _biggest_session(days_ago=0, cost_usd=1.0, model_hint="opus", task_label="A"),
+        # In baseline window only -- must be ignored even though larger:
+        _biggest_session(days_ago=20, cost_usd=99.0, model_hint="sonnet", task_label="B"),
+    ]
+    line = compute_biggest_line(sessions, as_of=AS_OF)
+    assert line.model_hint == "opus"
+    assert line.task_label == "A"
+    assert line.spend_usd == 1.0
+
+
+def test_biggest_line_no_current_week_sessions_returns_empty():
+    """If every priced+identified session is in a prior ISO week, no winner."""
+    sessions = [
+        _biggest_session(days_ago=10, cost_usd=5.0, model_hint="opus", task_label="A"),
+    ]
+    line = compute_biggest_line(sessions, as_of=AS_OF)
+    assert line.model_hint is None
+    assert line.task_label is None
+    assert line.spend_usd == 0.0
+    assert line.session_count == 0
+
+
+def test_biggest_line_current_week_boundary_is_monday_inclusive():
+    """A session at 00:00 on the current ISO week's Monday is in-week."""
+    monday_session = BiggestLineInputSession(
+        started_at=datetime(2026, 5, 25, 0, 0, tzinfo=timezone.utc),  # Mon 00:00
+        cost_usd=4.0,
+        model_hint="opus",
+        task_label="A",
+    )
+    line = compute_biggest_line([monday_session], as_of=AS_OF)
+    assert line.model_hint == "opus"
+    assert line.spend_usd == 4.0
+
+
+def test_biggest_line_tiebreak_by_session_count_then_alphabetical():
+    """When two pairs have equal spend, more sessions wins; then alphabetical.
+
+    The exact tiebreak rule is implementation choice; this test locks it
+    in so renderers + the spec stay deterministic across runs.
+    """
+    sessions = [
+        # Pair (opus, A): one session at $4.
+        _biggest_session(days_ago=0, cost_usd=4.0, model_hint="opus", task_label="A"),
+        # Pair (sonnet, B): two sessions summing to $4 -- same spend, more sessions.
+        _biggest_session(days_ago=1, cost_usd=2.0, model_hint="sonnet", task_label="B"),
+        _biggest_session(days_ago=2, cost_usd=2.0, model_hint="sonnet", task_label="B"),
+    ]
+    line = compute_biggest_line(sessions, as_of=AS_OF)
+    assert line.model_hint == "sonnet"
+    assert line.task_label == "B"
+    assert line.session_count == 2
+
+
+def test_biggest_line_tiebreak_alphabetical_when_spend_and_count_match():
+    """Final tier: pure alphabetical on (model_hint, task_label)."""
+    sessions = [
+        _biggest_session(days_ago=0, cost_usd=3.0, model_hint="opus", task_label="zeta"),
+        _biggest_session(days_ago=1, cost_usd=3.0, model_hint="opus", task_label="alpha"),
+    ]
+    line = compute_biggest_line(sessions, as_of=AS_OF)
+    assert line.model_hint == "opus"
+    assert line.task_label == "alpha"
+
+
+def test_biggest_line_rounds_spend_consistently_with_cost_ledger():
+    """Spend USD rounded to 4 decimals so the panel doesn't show 8.99999..."""
+    sessions = [
+        _biggest_session(days_ago=0, cost_usd=1.0 / 3, model_hint="opus", task_label="A"),
+        _biggest_session(days_ago=1, cost_usd=1.0 / 3, model_hint="opus", task_label="A"),
+        _biggest_session(days_ago=2, cost_usd=1.0 / 3, model_hint="opus", task_label="A"),
+    ]
+    line = compute_biggest_line(sessions, as_of=AS_OF)
+    # Exact rounding parity with CostLedger.weekly_spend_usd.
+    assert line.spend_usd == round(1.0, 4)
+
+
+def test_biggest_line_is_immutable():
+    """Frozen dataclass guards against downstream mutation."""
+    line = compute_biggest_line([], as_of=AS_OF)
+    try:
+        line.spend_usd = 99.0  # type: ignore[misc]
+    except Exception:
+        return
+    raise AssertionError("BiggestLine should be frozen")
+
+
+def test_biggest_line_default_as_of_uses_now():
+    """Smoke test: when as_of is None, the current-week boundary anchors to today."""
+    line = compute_biggest_line([])
+    assert line.model_hint is None
+    assert line.spend_usd == 0.0

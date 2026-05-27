@@ -65,6 +65,43 @@ class CostLedgerInputSession:
 
 
 @dataclass(frozen=True)
+class BiggestLineInputSession:
+    """One session's contribution to the biggest-(model, task) line.
+
+    Adds model + task identity to the per-session cost so the panel
+    can name a specific pair. `model_hint` is the resolved model
+    string (e.g. 'claude-opus-4-7'); `task_label` is the human-readable
+    cluster label produced by `praxis.scoring.clustering` (e.g. 'auth
+    migration debugging'). Sessions with a missing model_hint, missing
+    task_label, or `cost_usd=None` are skipped: the panel exists to
+    point at a concrete (model, task) pair the user can recognize,
+    so an 'unknown / unknown' bucket would be a regression in clarity,
+    not a fallback.
+    """
+
+    started_at: datetime
+    cost_usd: float | None
+    model_hint: str | None
+    task_label: str | None
+
+
+@dataclass(frozen=True)
+class BiggestLine:
+    """The (model, task) pair that drove the largest spend in the current ISO week.
+
+    `model_hint` and `task_label` are None (and `spend_usd`/
+    `session_count` are 0) when no qualifying sessions exist in the
+    current ISO week -- the renderer omits the panel row in that case
+    rather than printing a misleading 'no winner' line.
+    """
+
+    model_hint: str | None
+    task_label: str | None
+    spend_usd: float
+    session_count: int
+
+
+@dataclass(frozen=True)
 class CostLedger:
     """Inputs for the weekly cost panel.
 
@@ -168,4 +205,73 @@ def compute_cost_ledger(
         window_start=window_start,
         window_end=window_end,
         current_week_start=current_week_start,
+    )
+
+
+def _empty_biggest_line() -> BiggestLine:
+    return BiggestLine(
+        model_hint=None,
+        task_label=None,
+        spend_usd=0.0,
+        session_count=0,
+    )
+
+
+def compute_biggest_line(
+    sessions: list[BiggestLineInputSession],
+    as_of: datetime | None = None,
+) -> BiggestLine:
+    """Identify the (model, task) pair with the largest spend in the current ISO week.
+
+    Spec section 10.1: the cost panel names the (model, task) pair
+    that drove the week's spend. Buckets sessions in the current ISO
+    week (`as_of`'s Monday onward) by (model_hint, task_label), sums
+    per-session USD within each bucket, and returns the winning
+    bucket's pair plus its spend and session count.
+
+    A session contributes iff `cost_usd is not None`, `model_hint is
+    not None`, and `task_label is not None`. Unpriced or unidentified
+    sessions are silently skipped (same rule as `compute_cost_ledger`
+    plus the identification requirement). Sessions in the 90-day
+    baseline window but not the current ISO week are ignored: the
+    panel reports on the current week only, since the baseline answer
+    lives in `CostLedger.baseline_weekly_mean_usd`.
+
+    Tiebreak: maximum spend (descending) -> maximum session_count
+    (descending) -> ascending (model_hint, task_label). The last
+    two tiers exist purely so the function is deterministic when
+    two buckets land at the exact same spend; floating-point ties
+    are unlikely in practice but the test suite locks the rule in.
+    """
+    if as_of is None:
+        as_of = datetime.now(timezone.utc)
+    current_week_start = _iso_week_start(as_of.date())
+
+    spend_by_pair: dict[tuple[str, str], float] = defaultdict(float)
+    sessions_by_pair: dict[tuple[str, str], int] = defaultdict(int)
+
+    for s in sessions:
+        if s.cost_usd is None or s.model_hint is None or s.task_label is None:
+            continue
+        if s.started_at.date() < current_week_start:
+            continue
+        key = (s.model_hint, s.task_label)
+        spend_by_pair[key] += s.cost_usd
+        sessions_by_pair[key] += 1
+
+    if not spend_by_pair:
+        return _empty_biggest_line()
+
+    # Tiebreak: -spend, then -session_count, then (model, task) ascending.
+    # Negating spend/count flips the natural sort into descending order
+    # so the lexicographic min over the key tuple is the winner.
+    winner_key = min(
+        spend_by_pair,
+        key=lambda k: (-spend_by_pair[k], -sessions_by_pair[k], k[0], k[1]),
+    )
+    return BiggestLine(
+        model_hint=winner_key[0],
+        task_label=winner_key[1],
+        spend_usd=round(spend_by_pair[winner_key], 4),
+        session_count=sessions_by_pair[winner_key],
     )

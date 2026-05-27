@@ -24,8 +24,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "praxis/scoring/cost_ledger.py: sibling aggregator (compute_biggest_line) over BiggestLineInputSession (started_at, cost_usd, model_hint, task_label). Groups by (model_hint, task_label) within the current ISO week only; baseline window is out of scope (CostLedger already covers it). Skips sessions with None cost_usd / model_hint / task_label -- 'unknown / unknown' would be a regression in panel clarity, not a fallback. Deterministic tiebreak: max spend -> max session_count -> ascending (model_hint, task_label). Empty winner = BiggestLine(None, None, 0.0, 0) so renderers can omit the row."
     },
     {
       "id": "US-049",

@@ -19,3 +19,22 @@
   - US-050 (dollar_impact_estimate per moment) modifies the Moment dataclass / persistence path; cost_ledger.py is upstream of moments rendering, so the two stories don't share much code. Use the same chars-per-token + output-multiplier constants for consistency.
   - US-051 (renderer disclaimer) is a reports-layer change. The cost ledger module already enforces the "rough estimate" framing via the dataclass field naming and docstrings; the actual disclaimer text lives in the renderer that consumes CostLedger.
 ---
+
+## Iteration 2 - US-048: Biggest (model, task) line
+- What I did: Added a sibling aggregator `compute_biggest_line` to praxis/scoring/cost_ledger.py, plus a richer per-session input `BiggestLineInputSession` (started_at, cost_usd, model_hint, task_label) and an output `BiggestLine` (model_hint, task_label, spend_usd, session_count). Groups by (model_hint, task_label) within the current ISO week only and picks the max-spend bucket with a deterministic tiebreak. Added 15 tests in tests/test_cost_ledger.py.
+- Files changed: praxis/scoring/cost_ledger.py, tests/test_cost_ledger.py, scripts/ralph/feature/cost-ledger/prd.json
+- Verification:
+  - python -m pytest tests/test_cost_ledger.py -v -> 34 passed (19 from US-047 + 15 new)
+  - python -m pytest -q -> all 728 passed
+  - pyright praxis/scoring/cost_ledger.py tests/test_cost_ledger.py -> 0 errors
+  - mypy praxis/scoring/cost_ledger.py tests/test_cost_ledger.py -> 0 errors in the two source files (the 23 errors mypy reports are all in pre-existing files: trajectory.py, judge.py, aggregate.py, advisor.py -- same set documented in Iteration 1's handoff)
+- What the next iteration should know:
+  - Two new dataclasses (BiggestLineInputSession, BiggestLine) live alongside CostLedger* in cost_ledger.py. I chose to keep `compute_cost_ledger` minimal (top-line totals + baseline) and add `compute_biggest_line` as a sibling rather than fold the panel data into CostLedger -- the inputs are richer (need model + task identity) and the panel is conceptually a different aggregation. The caller will compute both from the same week of sessions.
+  - Skipping rule: a session is excluded from the biggest-line aggregation iff `cost_usd is None OR model_hint is None OR task_label is None`. The `model_hint`/`task_label`/`cost_usd`-all-required rule is stricter than the parent ledger (which only requires priced cost_usd) because the panel exists to NAME a specific pair -- an 'unknown/unknown' row would be a regression in clarity. If a future story (e.g. US-049 tier-fit) wants to count unidentified-task sessions, it needs a different input.
+  - Tiebreak rule (locked in by tests): max spend -> max session_count -> ascending (model_hint, task_label). The session-count tier exists because two equal-spend pairs read as "the busier one matters more" to a user; the alphabetical tier is purely for determinism. Float ties at exact USD are unlikely in practice but the test suite locks them in so renderers stay stable across runs.
+  - Window: current ISO week ONLY (Monday-inclusive). Baseline-window sessions are silently skipped here -- the baseline answer is exposed via `CostLedger.baseline_weekly_mean_usd`, so duplicating it would be confusing.
+  - Empty-result convention: `BiggestLine(model_hint=None, task_label=None, spend_usd=0.0, session_count=0)`. Renderers should treat `model_hint is None` as the signal to omit the panel row entirely, NOT to print "no biggest line" prose.
+  - US-049 (tier-fit savings): needs `user_turn_count` and `avg_prompt_chars` per session AND the cheaper-tier card lookup. The existing `find_card_for_model_hint` returns one card; the helper `_find_fast_tier_card_in_family` in models_advisor/advisor.py is the cheaper-tier resolver -- still private, still worth extracting to praxis/models_advisor/cards.py if US-049 is the second caller. The output should expose the qualifying-session count AND the savings estimate to the renderer (same renderer-facing shape as BiggestLine, distinct dataclass).
+  - US-050 (per-moment dollar_impact_estimate): downstream of moments persistence; the chars-per-token + output-multiplier constants `COST_CHARS_PER_TOKEN` and `COST_OUTPUT_TO_INPUT_RATIO` should be reused so the per-moment estimates and the weekly ledger agree.
+  - US-051 (renderer disclaimer): purely a reports-layer change. cost_ledger.py is intentionally framing-agnostic; the disclaimer literal lives in the renderer.
+---
