@@ -35,11 +35,19 @@ US-077 acceptance criteria (exit code 3 when no sessions in the window):
   - `praxis scan` is the cron-driven data-mover and does NOT exit 3 on an
     empty window, so scheduled runs do not surface spurious failures
 
+US-078 acceptance criteria (removed commands and flags are gone):
+  - `praxis install-daemon` (the v0.1 daily one) is not a registered
+    subparser and its handler function is no longer exported
+  - The `--no-judge` flag is not accepted by `scan` or `week`
+  - The v0.1 daily orchestrator entry point (`praxis.orchestrator.run`)
+    is not registered as a subcommand's `func` default
+
 Tests go through the argparse entry point (`praxis.cli.__main__.main`) so
 the subparser registration is exercised end-to-end, not just the handler.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -804,3 +812,79 @@ def test_scan_with_no_sessions_does_not_exit_3(
     out = capsys.readouterr().out
     assert code == 0
     assert "Scanned" in out
+
+
+# ---------------------------------------------------------------------------
+# US-078: removed commands and flags are gone
+# ---------------------------------------------------------------------------
+
+
+def test_install_daemon_subcommand_is_absent():
+    """`praxis install-daemon` (the v0.1 daily one) must not be a subcommand.
+
+    Per spec section 11, the daily daemon is removed in v0.2; the weekly
+    replacement (`install-weekly`) lands in a separate story. argparse
+    raises SystemExit on an unknown subcommand, so we assert that here.
+    """
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["install-daemon"])
+
+
+def test_install_daemon_handler_is_not_importable():
+    """The handler function must be deleted, not just unregistered.
+
+    Asserts that `cmd_install_daemon` is no longer exported by the CLI
+    module so dead code can't be revived by an accidental subparser
+    registration in a future change.
+    """
+    import praxis.cli.__main__ as cli_main
+
+    assert not hasattr(cli_main, "cmd_install_daemon")
+
+
+def test_no_judge_flag_is_absent_from_scan():
+    """`praxis scan --no-judge` must fail at the argparse layer (spec 11).
+
+    The judge-free path is no longer a supported mode in v0.2; runs
+    without keys exit 2 (US-076) rather than silently degrading.
+    """
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["scan", "--no-judge"])
+
+
+def test_no_judge_flag_is_absent_from_week():
+    """`praxis week --no-judge` must also fail (spec 11).
+
+    The week verb never accepted --no-judge, but lock it in so a future
+    change can't quietly add it back.
+    """
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["week", "--no-judge"])
+
+
+def test_v01_daily_entry_point_is_not_a_subcommand():
+    """The v0.1 daily orchestrator's `run()` is not exposed as a subcommand.
+
+    v0.1 had a daily flow wired into a `praxis install-daemon` subcommand
+    that registered a cron / launchd / systemd unit. With that removed,
+    no subparser should map directly onto `praxis.orchestrator.run`; only
+    `cmd_scan` may call into it, and even that path is gated by
+    `has_api_key_configured()`. Iterate the registered subparsers and
+    assert none bind to the daily-flow handler.
+    """
+    from praxis import orchestrator
+
+    parser = build_parser()
+    subparsers_action = next(
+        a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
+    )
+    for name, sub_parser in subparsers_action.choices.items():
+        func = sub_parser.get_default("func")
+        # `run` from praxis.orchestrator is the v0.1 daily entry point.
+        # No subcommand should set func=orchestrator.run directly.
+        assert func is not orchestrator.run, (
+            f"subcommand {name!r} binds directly to the v0.1 daily orchestrator entry point"
+        )

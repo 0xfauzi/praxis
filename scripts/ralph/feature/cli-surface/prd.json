@@ -64,8 +64,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Deleted cmd_install_daemon() and its `install-daemon` subparser registration from praxis/cli/__main__.py. Confirmed --no-judge was already absent. Verified the v0.1 daily orchestrator entry point (`praxis.orchestrator.run`) is no longer the func default for any subparser; `cmd_scan` calls into `run()` internally but the `scan` subparser binds `func=cmd_scan`, not `func=run`. README.md updated: removed the `praxis scan --no-judge` example and the entire `## Run it daily` install-daemon section. 5 new US-078 tests in tests/test_cli.py: install-daemon subcommand absent, cmd_install_daemon handler not importable, --no-judge rejected by scan and by week, no subparser binds directly to orchestrator.run."
     }
   ]
 }

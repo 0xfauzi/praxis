@@ -87,14 +87,11 @@ Praxis runs heuristics-only without keys, but the deep insight comes from the LL
 ## Usage
 
 ```bash
-# Run the full pipeline: scan + score + behavior + model advice + consolidate + render
+# Render this week's digest (the v0.2 primary verb)
+praxis week
+
+# Scan + score newly-discovered sessions (no digest)
 praxis scan
-
-# Open the HTML report
-praxis scan --open
-
-# Fast/free mode — no API calls
-praxis scan --no-judge
 
 # Inspect the scoring rubric
 praxis rubric
@@ -108,19 +105,6 @@ praxis models --show claude-opus-4-7
 # Check status
 praxis status
 ```
-
-## Run it daily
-
-```bash
-praxis install-daemon
-```
-
-Prints platform-specific config:
-- **macOS**: LaunchAgent plist
-- **Linux**: systemd user timer
-- **Windows**: Task Scheduler command
-
-Runs once a day, picks up new sessions, regenerates the trajectory and model advice.
 
 ## Model cards: where they come from and how to update them
 

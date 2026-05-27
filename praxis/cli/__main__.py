@@ -403,72 +403,6 @@ def cmd_rubric(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
-def cmd_install_daemon(args: argparse.Namespace) -> int:  # noqa: ARG001
-    import platform
-
-    system = platform.system()
-    home = Path.home()
-    cmd = "praxis scan"
-
-    if system == "Darwin":
-        plist_path = home / "Library" / "LaunchAgents" / "co.praxis.plist"
-        plist = f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>co.praxis</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/sh</string><string>-lc</string><string>{cmd}</string>
-  </array>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key><integer>18</integer>
-    <key>Minute</key><integer>30</integer>
-  </dict>
-  <key>StandardOutPath</key><string>{home}/.praxis/daemon.log</string>
-  <key>StandardErrorPath</key><string>{home}/.praxis/daemon.err.log</string>
-</dict>
-</plist>"""
-        print("macOS — install LaunchAgent (runs daily at 18:30):")
-        print(f"\n  Save the following to: {plist_path}")
-        print("  Then: launchctl load -w " + str(plist_path))
-        print("\n--- plist contents ---")
-        print(plist)
-    elif system == "Linux":
-        print("Linux — install systemd user timer (runs daily at 18:30):")
-        unit_dir = home / ".config" / "systemd" / "user"
-        print(f"\n  mkdir -p {unit_dir}")
-        print(f"  # save the following two files in {unit_dir}/")
-        print("\n--- praxis.service ---")
-        print(f"""[Unit]
-Description=Praxis
-[Service]
-Type=oneshot
-ExecStart=/bin/sh -lc '{cmd}'
-""")
-        print("--- praxis.timer ---")
-        print("""[Unit]
-Description=Daily Praxis run
-[Timer]
-OnCalendar=*-*-* 18:30:00
-Persistent=true
-[Install]
-WantedBy=timers.target
-""")
-        print("Then:")
-        print("  systemctl --user daemon-reload")
-        print("  systemctl --user enable --now praxis.timer")
-    elif system == "Windows":
-        print("Windows — Task Scheduler (daily at 18:30):")
-        print(f"""
-  schtasks /Create /SC DAILY /TN "Praxis" /TR "{cmd}" /ST 18:30
-""")
-    else:
-        print(f"Unknown system {system}. Schedule `{cmd}` daily with your OS tools.")
-    return 0
-
-
 def cmd_config(args: argparse.Namespace) -> int:
     from praxis.config_cli import (
         ConfigCLIError,
@@ -724,10 +658,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show the most recent weekly commitment and its outcome.",
     )
     fup.set_defaults(func=cmd_follow_up)
-
-    daem = sub.add_parser("install-daemon",
-                          help="Print scheduler config for running daily.")
-    daem.set_defaults(func=cmd_install_daemon)
 
     mod = sub.add_parser("models",
                          help="List model cards or show one in detail.")
