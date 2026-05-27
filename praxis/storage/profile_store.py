@@ -315,3 +315,31 @@ class ProfileStore:
             measured_value=row["measured_value"],
             outcome=outcome,
         )
+
+    def prior_follow_up(self, before_week_iso: str) -> FollowUp | None:
+        """Return the most recent follow_up with week_iso strictly before the given one.
+
+        ISO week strings are zero-padded (YYYY-Www), so lexical order matches
+        chronological order; a plain `<` comparison correctly handles the
+        year boundary (e.g. '2025-W52' < '2026-W01').
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT week_iso, dim_key, commitment_text, target_metric, "
+                "       baseline_value, measured_value, outcome "
+                "FROM follow_ups WHERE week_iso < ? "
+                "ORDER BY week_iso DESC LIMIT 1",
+                (before_week_iso,),
+            ).fetchone()
+        if row is None:
+            return None
+        outcome: Outcome = row["outcome"]
+        return FollowUp(
+            week_iso=row["week_iso"],
+            dim_key=row["dim_key"],
+            commitment_text=row["commitment_text"],
+            target_metric=row["target_metric"],
+            baseline_value=row["baseline_value"],
+            measured_value=row["measured_value"],
+            outcome=outcome,
+        )

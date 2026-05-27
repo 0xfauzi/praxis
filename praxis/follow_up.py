@@ -6,9 +6,12 @@ whether the commitment was kept (spec section 6.3, table in section 14).
 
 This module is intentionally narrow: it carries the data shape (`FollowUp`),
 picks the target metric for a given rubric dim, captures the baseline value
-at digest generation, and assembles the row that gets written. The
-"compute outcome from next week's data" step (US-046) and the CLI/render
-surface (US-047) live elsewhere.
+at digest generation, assembles the row that gets written, and -- on the
+following week -- compares the new value against that baseline to decide
+the outcome. The CLI/render surface (US-047) lives elsewhere.
+
+Outcome is computed purely from data (spec sections 2, 6.3, 17.3): the LLM
+may write prose around the outcome but is never asked to decide it.
 
 The `HeadlineMoment` here is the smallest object the engine needs. When
 the broader v0.2 `Moment` dataclass (spec 4.1) lands via the moments-engine
@@ -16,7 +19,7 @@ PRD, it is a superset and satisfies the same call sites.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from praxis.scoring.aggregate import ProfileSnapshot
@@ -120,3 +123,56 @@ def build_follow_up(
         measured_value=None,
         outcome="pending",
     )
+
+
+_OUTCOME_THRESHOLD = 0.5
+
+
+def compute_outcome(
+    target_metric: str,
+    baseline_value: float,
+    measured_value: float,
+) -> Outcome:
+    """Decide the outcome by comparing this week's measurement to the baseline.
+
+    Per spec section 6.3:
+      - "improved" iff measured_value > baseline_value + 0.5
+      - "worse"    iff measured_value < baseline_value - 0.5
+      - otherwise  "unchanged"
+
+    For `delegation_rate` the comparison is inverted because lower is better
+    on that metric (atrophy signal); a drop is improvement, a rise is worse.
+
+    Pure function: only floats and a string in, an Outcome literal out. No
+    I/O, no LLM. This is the structural enforcement of the spec rule that
+    the LLM never decides the outcome.
+    """
+    delta = measured_value - baseline_value
+    if target_metric == "delegation_rate":
+        delta = -delta
+    if delta > _OUTCOME_THRESHOLD:
+        return "improved"
+    if delta < -_OUTCOME_THRESHOLD:
+        return "worse"
+    return "unchanged"
+
+
+def close_follow_up(
+    follow_up: FollowUp,
+    snapshot: ProfileSnapshot,
+    verification_rate: float,
+    delegation_rate: float,
+) -> FollowUp:
+    """Close a pending follow-up against the new week's data.
+
+    Reads the current value of the follow-up's `target_metric` from the new
+    week's snapshot/signals, then decides the outcome via `compute_outcome`.
+    Returns a new FollowUp; does not mutate the input and does not persist.
+    """
+    measured = compute_baseline_value(
+        follow_up.target_metric, snapshot, verification_rate, delegation_rate
+    )
+    outcome = compute_outcome(
+        follow_up.target_metric, follow_up.baseline_value, measured
+    )
+    return replace(follow_up, measured_value=measured, outcome=outcome)

@@ -1,6 +1,6 @@
-"""Tests for the follow-up engine (US-045).
+"""Tests for the follow-up engine (US-045, US-046).
 
-Covers:
+US-045 (already covered):
   - target_metric_for branches (verification_rate / delegation_rate / <dim>_dim_mean)
   - build_follow_up assembles the row correctly from a HeadlineMoment + snapshot
   - baseline_value reflects the right metric per branch
@@ -8,19 +8,30 @@ Covers:
   - ProfileStore.save_follow_up + load_follow_up roundtrip
   - one row per week_iso (re-saving the same week replaces, not duplicates)
   - the outcome CHECK constraint rejects unknown values
+
+US-046 (closing the loop with data, not LLM):
+  - compute_outcome thresholds, edge cases, and delegation_rate inversion
+  - compute_outcome is a pure deterministic function (no LLM in the path)
+  - close_follow_up populates measured_value + outcome without mutating input
+  - ProfileStore.prior_follow_up returns the most recent earlier row
+  - End-to-end: prior week's row is updated in place on the next weekly run
 """
 from __future__ import annotations
 
+import inspect
 import sqlite3
 from dataclasses import replace
 
 import pytest
 
+import praxis.follow_up as follow_up_module
 from praxis.follow_up import (
     FollowUp,
     HeadlineMoment,
     build_follow_up,
+    close_follow_up,
     compute_baseline_value,
+    compute_outcome,
     target_metric_for,
 )
 from praxis.scoring.aggregate import ProfileSnapshot
@@ -302,3 +313,318 @@ def test_build_then_save_writes_one_row_per_week(tmp_home):
     assert loaded.baseline_value == 0.5
     assert loaded.measured_value is None
     assert loaded.outcome == "pending"
+
+
+# =========================================================================
+# US-046: compute outcome from data, never from the LLM
+# =========================================================================
+
+
+# ---- compute_outcome: higher-is-better metrics --------------------------
+
+
+def test_compute_outcome_improved_when_measured_exceeds_baseline_plus_threshold():
+    assert compute_outcome("verification_rate", baseline_value=0.4, measured_value=0.95) == "improved"
+
+
+def test_compute_outcome_worse_when_measured_falls_below_baseline_minus_threshold():
+    assert compute_outcome("verification_rate", baseline_value=0.95, measured_value=0.4) == "worse"
+
+
+def test_compute_outcome_unchanged_inside_band():
+    # Small movements stay inside the +/- 0.5 dead zone.
+    assert compute_outcome("verification_rate", baseline_value=0.5, measured_value=0.6) == "unchanged"
+    assert compute_outcome("verification_rate", baseline_value=0.5, measured_value=0.4) == "unchanged"
+
+
+def test_compute_outcome_threshold_is_strict_above():
+    """A delta of exactly +0.5 is NOT 'improved' (spec uses '>', not '>=')."""
+    assert compute_outcome("verification_rate", baseline_value=0.0, measured_value=0.5) == "unchanged"
+
+
+def test_compute_outcome_threshold_is_strict_below():
+    """A delta of exactly -0.5 is NOT 'worse' (spec uses '<', not '<=')."""
+    assert compute_outcome("verification_rate", baseline_value=0.5, measured_value=0.0) == "unchanged"
+
+
+def test_compute_outcome_dim_mean_uses_same_higher_is_better_rule():
+    assert compute_outcome("planning_dim_mean", baseline_value=6.0, measured_value=7.5) == "improved"
+    assert compute_outcome("planning_dim_mean", baseline_value=7.5, measured_value=6.0) == "worse"
+    assert compute_outcome("planning_dim_mean", baseline_value=6.0, measured_value=6.3) == "unchanged"
+
+
+# ---- compute_outcome: delegation_rate (lower is better, inverted) -------
+
+
+def test_compute_outcome_delegation_rate_dropping_is_improvement():
+    """delegation_rate is an atrophy signal -- lower is better -- so a drop is improvement."""
+    assert compute_outcome("delegation_rate", baseline_value=0.8, measured_value=0.2) == "improved"
+
+
+def test_compute_outcome_delegation_rate_rising_is_worse():
+    assert compute_outcome("delegation_rate", baseline_value=0.2, measured_value=0.8) == "worse"
+
+
+def test_compute_outcome_delegation_rate_inside_band_unchanged():
+    assert compute_outcome("delegation_rate", baseline_value=0.5, measured_value=0.4) == "unchanged"
+    assert compute_outcome("delegation_rate", baseline_value=0.5, measured_value=0.6) == "unchanged"
+
+
+def test_compute_outcome_delegation_rate_inverts_verification_rate_judgment():
+    """Same numeric movement, opposite outcomes by metric direction."""
+    # measured drops by 0.6 in both cases
+    assert compute_outcome("verification_rate", baseline_value=0.8, measured_value=0.2) == "worse"
+    assert compute_outcome("delegation_rate", baseline_value=0.8, measured_value=0.2) == "improved"
+    # measured rises by 0.6 in both cases
+    assert compute_outcome("verification_rate", baseline_value=0.2, measured_value=0.8) == "improved"
+    assert compute_outcome("delegation_rate", baseline_value=0.2, measured_value=0.8) == "worse"
+
+
+# ---- compute_outcome: purity / "no LLM" property ------------------------
+
+
+def test_compute_outcome_is_deterministic():
+    """Same inputs always produce the same outcome -- no randomness, no I/O."""
+    args = ("verification_rate", 0.4, 0.95)
+    assert {compute_outcome(*args) for _ in range(50)} == {"improved"}
+
+
+def test_follow_up_module_does_not_reference_llm_judge():
+    """US-046 AC: the LLM is never asked to decide the outcome.
+
+    Enforced structurally: praxis.follow_up must not import or invoke the
+    LLM judge or any provider SDK. If a future change wires an LLM into the
+    outcome path, this test will fail and force a deliberate spec revisit
+    (see spec sections 2, 6.3, 17.3).
+    """
+    src = inspect.getsource(follow_up_module)
+    forbidden = [
+        "score_session",        # praxis.scoring.judge entry point
+        "praxis.scoring.judge",
+        "praxis.scoring.coach",
+        "anthropic",
+        "Anthropic",
+        "openai",
+        "OpenAI",
+    ]
+    for token in forbidden:
+        assert token not in src, (
+            f"praxis.follow_up should not reference {token!r} "
+            "(US-046 AC: outcome is computed from data, not the LLM)"
+        )
+
+
+# ---- close_follow_up ----------------------------------------------------
+
+
+def test_close_follow_up_populates_measured_and_outcome_for_verification_rate():
+    prior = FollowUp(
+        week_iso="2026-W20",
+        dim_key="verification",
+        commitment_text="ask 'list every table this migration writes'",
+        target_metric="verification_rate",
+        baseline_value=0.4,
+    )
+    closed = close_follow_up(
+        prior,
+        snapshot=_empty_snapshot(),
+        verification_rate=0.95,
+        delegation_rate=0.1,
+    )
+    assert closed.measured_value == 0.95
+    assert closed.outcome == "improved"
+
+
+def test_close_follow_up_populates_measured_and_outcome_for_delegation_rate():
+    prior = FollowUp(
+        week_iso="2026-W20",
+        dim_key="iteration",
+        commitment_text="push back on the first draft",
+        target_metric="delegation_rate",
+        baseline_value=0.8,
+    )
+    # delegation_rate dropping from 0.8 to 0.2 -> "improved" (inverted rule)
+    closed = close_follow_up(
+        prior,
+        snapshot=_empty_snapshot(),
+        verification_rate=0.5,
+        delegation_rate=0.2,
+    )
+    assert closed.measured_value == 0.2
+    assert closed.outcome == "improved"
+
+
+def test_close_follow_up_populates_measured_and_outcome_for_dim_mean():
+    prior = FollowUp(
+        week_iso="2026-W20",
+        dim_key="planning",
+        commitment_text="state goal + constraints before prompting",
+        target_metric="planning_dim_mean",
+        baseline_value=6.0,
+    )
+    snap = _empty_snapshot({"planning": 4.5})
+    closed = close_follow_up(prior, snap, verification_rate=0.5, delegation_rate=0.2)
+    assert closed.measured_value == 4.5
+    assert closed.outcome == "worse"
+
+
+def test_close_follow_up_marks_unchanged_for_small_movements():
+    prior = FollowUp(
+        week_iso="2026-W20",
+        dim_key="planning",
+        commitment_text="state goal + constraints",
+        target_metric="planning_dim_mean",
+        baseline_value=6.0,
+    )
+    snap = _empty_snapshot({"planning": 6.3})
+    closed = close_follow_up(prior, snap, 0.5, 0.2)
+    assert closed.outcome == "unchanged"
+    assert closed.measured_value == 6.3
+
+
+def test_close_follow_up_does_not_mutate_input():
+    prior = FollowUp(
+        week_iso="2026-W20",
+        dim_key="verification",
+        commitment_text="ask for source",
+        target_metric="verification_rate",
+        baseline_value=0.4,
+    )
+    closed = close_follow_up(prior, _empty_snapshot(), 0.95, 0.1)
+    assert prior.measured_value is None
+    assert prior.outcome == "pending"
+    assert closed is not prior
+
+
+def test_close_follow_up_preserves_identity_fields():
+    prior = FollowUp(
+        week_iso="2026-W20",
+        dim_key="verification",
+        commitment_text="ask 'list every table this migration writes'",
+        target_metric="verification_rate",
+        baseline_value=0.4,
+    )
+    closed = close_follow_up(prior, _empty_snapshot(), 0.95, 0.1)
+    assert closed.week_iso == prior.week_iso
+    assert closed.dim_key == prior.dim_key
+    assert closed.commitment_text == prior.commitment_text
+    assert closed.target_metric == prior.target_metric
+    assert closed.baseline_value == prior.baseline_value
+
+
+# ---- ProfileStore.prior_follow_up --------------------------------------
+
+
+def test_prior_follow_up_returns_most_recent_earlier_row(tmp_home):
+    store = ProfileStore()
+    for week_iso in ["2026-W19", "2026-W20", "2026-W21"]:
+        store.save_follow_up(
+            FollowUp(
+                week_iso=week_iso,
+                dim_key="verification",
+                commitment_text=f"commitment for {week_iso}",
+                target_metric="verification_rate",
+                baseline_value=0.4,
+            )
+        )
+    prior = store.prior_follow_up("2026-W21")
+    assert prior is not None
+    assert prior.week_iso == "2026-W20"
+
+
+def test_prior_follow_up_returns_none_when_no_earlier_row(tmp_home):
+    store = ProfileStore()
+    store.save_follow_up(
+        FollowUp(
+            week_iso="2026-W21",
+            dim_key="verification",
+            commitment_text="only week",
+            target_metric="verification_rate",
+            baseline_value=0.4,
+        )
+    )
+    assert store.prior_follow_up("2026-W21") is None
+
+
+def test_prior_follow_up_returns_none_when_store_empty(tmp_home):
+    store = ProfileStore()
+    assert store.prior_follow_up("2026-W21") is None
+
+
+def test_prior_follow_up_handles_year_boundary(tmp_home):
+    """ISO week strings are zero-padded so lexical < matches chronological <."""
+    store = ProfileStore()
+    store.save_follow_up(
+        FollowUp(
+            week_iso="2025-W52",
+            dim_key="verification",
+            commitment_text="end of 2025",
+            target_metric="verification_rate",
+            baseline_value=0.4,
+        )
+    )
+    prior = store.prior_follow_up("2026-W01")
+    assert prior is not None
+    assert prior.week_iso == "2025-W52"
+
+
+def test_prior_follow_up_skips_the_query_week_itself(tmp_home):
+    """`before_week_iso` is strict: a row at the query week must not match."""
+    store = ProfileStore()
+    store.save_follow_up(
+        FollowUp(
+            week_iso="2026-W20",
+            dim_key="verification",
+            commitment_text="prior week",
+            target_metric="verification_rate",
+            baseline_value=0.4,
+        )
+    )
+    store.save_follow_up(
+        FollowUp(
+            week_iso="2026-W21",
+            dim_key="verification",
+            commitment_text="current week",
+            target_metric="verification_rate",
+            baseline_value=0.4,
+        )
+    )
+    prior = store.prior_follow_up("2026-W21")
+    assert prior is not None
+    assert prior.week_iso == "2026-W20"
+
+
+# ---- end-to-end: close prior week and persist --------------------------
+
+
+def test_close_and_persist_updates_existing_row_in_place(tmp_home):
+    """AC: on the next weekly run, the prior week's row is updated (not duplicated)."""
+    store = ProfileStore()
+    # Week N-1: persist a pending commitment.
+    prior = FollowUp(
+        week_iso="2026-W20",
+        dim_key="verification",
+        commitment_text="ask for source",
+        target_metric="verification_rate",
+        baseline_value=0.4,
+    )
+    store.save_follow_up(prior)
+
+    # Week N: find the prior week's row, close it against this week's data, save.
+    found = store.prior_follow_up("2026-W21")
+    assert found is not None
+    closed = close_follow_up(
+        found, _empty_snapshot(), verification_rate=0.95, delegation_rate=0.1
+    )
+    store.save_follow_up(closed)
+
+    reloaded = store.load_follow_up("2026-W20")
+    assert reloaded is not None
+    assert reloaded.measured_value == 0.95
+    assert reloaded.outcome == "improved"
+    # And exactly one row exists for that week (INSERT OR REPLACE -> update).
+    with sqlite3.connect(store.db_path) as conn:
+        rows = list(
+            conn.execute("SELECT * FROM follow_ups WHERE week_iso = ?", ("2026-W20",))
+        )
+    assert len(rows) == 1
