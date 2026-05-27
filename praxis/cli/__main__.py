@@ -26,8 +26,10 @@ from pathlib import Path
 from praxis import __version__
 from praxis.config import ensure_config_file
 from praxis.orchestrator import (
+    NO_API_KEY_MESSAGE,
     InvalidWeekError,
     ReScoreError,
+    has_api_key_configured,
     list_persisted_weeks,
     re_score_session,
     run,
@@ -108,7 +110,19 @@ def cmd_week(args: argparse.Namespace) -> int:
                         <iso>.html``. The terminal render always happens;
                         the HTML file is written only when this flag (or
                         the scheduled --notify run) requests it.
+
+    Exit codes (spec 12.3):
+      0  digest rendered.
+      1  malformed --week ISO string.
+      2  current-week run requested but no API key configured
+         (read-only ``--week`` and ``--dry-run`` paths skip this check
+         since they never invoke the judge).
     """
+    needs_judge = args.week is None and not args.dry_run
+    if needs_judge and not has_api_key_configured():
+        print(NO_API_KEY_MESSAGE, file=sys.stderr)
+        return 2
+
     try:
         summary = run_weekly(
             week_iso=args.week,
@@ -167,7 +181,15 @@ def cmd_scan(args: argparse.Namespace) -> int:
     The output is a compact progress report so the user can confirm the
     scan made progress and, if invoked from a cron job, the log lines
     are still grep-able.
+
+    Exit codes (spec 12.3):
+      0  scan completed.
+      2  no API key configured (scan always calls the judge).
     """
+    if not has_api_key_configured():
+        print(NO_API_KEY_MESSAGE, file=sys.stderr)
+        return 2
+
     summary = run(
         since_days=args.since_days,
         max_new_scored=args.max_new,

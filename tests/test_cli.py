@@ -22,6 +22,12 @@ US-075 acceptance criteria (auxiliary commands):
   - `praxis scan` performs scan + score without rendering a digest
   - `praxis status`, `praxis rubric`, `praxis models` are preserved from v0.1
 
+US-076 acceptance criteria (exit code 2 when no API key):
+  - When neither ANTHROPIC_API_KEY nor OPENAI_API_KEY is set, the CLI exits
+    with code 2 and prints a clear message naming both env vars
+  - Read-only paths (`--week`, `--dry-run`, baseline, history, show, follow-up)
+    do not gate on the API key (they never invoke the judge)
+
 Tests go through the argparse entry point (`praxis.cli.__main__.main`) so
 the subparser registration is exercised end-to-end, not just the handler.
 """
@@ -41,6 +47,20 @@ from praxis.scoring.features import SessionFeatures
 from praxis.scoring.judge import JudgeResult
 from praxis.scoring.rubric import RUBRIC
 from praxis.storage.profile_store import ProfileStore, resolve_home
+
+
+@pytest.fixture
+def fake_api_key(monkeypatch):
+    """Set a placeholder ANTHROPIC_API_KEY so judge-gated commands proceed.
+
+    The v0.2 surface (US-076) gates ``praxis week`` (current week) and
+    ``praxis scan`` on at least one of ANTHROPIC_API_KEY / OPENAI_API_KEY
+    being set; without this fixture every such test would short-circuit
+    to exit 2 because ``tmp_home`` deliberately clears both keys. The key
+    is never used: no real sessions exist in these tests so the judge
+    code path is not reached.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
 
 
 def test_follow_up_exits_3_with_clear_message_when_no_row(tmp_home, capsys):
@@ -203,7 +223,7 @@ def test_week_subcommand_is_registered():
     assert args.write_html is True
 
 
-def test_week_with_no_data_exits_zero(tmp_home, capsys):
+def test_week_with_no_data_exits_zero(tmp_home, capsys, fake_api_key):
     """`praxis week` on an empty machine still renders and exits cleanly."""
     code = main(["week"])
     out = capsys.readouterr().out
@@ -262,7 +282,7 @@ def test_week_dry_run_does_not_create_html(tmp_home, capsys):
     assert not (resolve_home() / "weeks").exists()
 
 
-def test_week_explain_judging_prints_explainer(tmp_home, capsys):
+def test_week_explain_judging_prints_explainer(tmp_home, capsys, fake_api_key):
     """--explain-judging surfaces the pass-1 confidence block (or a clear stub)."""
     code = main(["week", "--explain-judging"])
     out = capsys.readouterr().out
@@ -270,7 +290,7 @@ def test_week_explain_judging_prints_explainer(tmp_home, capsys):
     assert "--explain-judging" in out
 
 
-def test_week_explain_judging_notes_frontier_only(tmp_home, capsys):
+def test_week_explain_judging_notes_frontier_only(tmp_home, capsys, fake_api_key):
     """When both --frontier-only and --explain-judging are set, the explainer
     notes that pass-1 was skipped."""
     code = main(["week", "--frontier-only", "--explain-judging"])
@@ -534,7 +554,7 @@ def test_show_rejects_malformed_week_iso(tmp_home, capsys):
     assert "YYYY-Www" in err
 
 
-def test_scan_does_not_render_digest(tmp_home, capsys):
+def test_scan_does_not_render_digest(tmp_home, capsys, fake_api_key):
     """scan must NOT render the masthead/dimensions; it prints a one-line summary."""
     code = main(["scan"])
     out = capsys.readouterr().out
@@ -569,3 +589,83 @@ def test_models_preserved(tmp_home, capsys):
     out = capsys.readouterr().out
     assert code == 0
     assert "model cards loaded" in out
+
+
+# ---------------------------------------------------------------------------
+# US-076 - exit code 2 when no API key is configured (spec sections 11, 12.3).
+# ---------------------------------------------------------------------------
+
+
+def test_week_without_api_key_exits_2(tmp_home, capsys):
+    """`praxis week` with no API keys exits 2 with a message naming both vars.
+
+    tmp_home clears ANTHROPIC_API_KEY / OPENAI_API_KEY so this exercises
+    the actual gate, not a stubbed version of it.
+    """
+    code = main(["week"])
+    err = capsys.readouterr().err
+    assert code == 2
+    # Spec section 11 says the message must be clear and identify the
+    # missing credential. Naming both env vars lets the user pick whichever
+    # they have at hand.
+    assert "ANTHROPIC_API_KEY" in err
+    assert "OPENAI_API_KEY" in err
+
+
+def test_week_with_only_anthropic_key_proceeds(tmp_home, capsys, monkeypatch):
+    """One key is enough -- the gate is OR, not AND (spec 12.2 fallback)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+    code = main(["week"])
+    assert code == 0
+    capsys.readouterr()
+
+
+def test_week_with_only_openai_key_proceeds(tmp_home, capsys, monkeypatch):
+    """OpenAI alone is also enough -- mirrors the Claude-only case."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-real")
+    code = main(["week"])
+    assert code == 0
+    capsys.readouterr()
+
+
+def test_week_iso_bypasses_api_key_check(tmp_home, capsys):
+    """`praxis week --week <iso>` is read-only; it must run without API keys."""
+    code = main(["week", "--week", "2026-W21"])
+    out = capsys.readouterr().out
+    # No keys set, but the past-week branch never calls the judge.
+    assert code == 0
+    assert "PRAXIS" in out
+
+
+def test_week_dry_run_bypasses_api_key_check(tmp_home, capsys):
+    """`praxis week --dry-run` is read-only; it must run without API keys."""
+    code = main(["week", "--dry-run"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "PRAXIS" in out
+
+
+def test_scan_without_api_key_exits_2(tmp_home, capsys):
+    """`praxis scan` with no API keys exits 2 with a message naming both vars."""
+    code = main(["scan"])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "ANTHROPIC_API_KEY" in err
+    assert "OPENAI_API_KEY" in err
+
+
+def test_baseline_does_not_gate_on_api_key(tmp_home, capsys):
+    """Read-only verbs (baseline) keep exiting 0 even with no API keys."""
+    code = main(["baseline"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "90-DAY BASELINE" in out
+
+
+def test_history_does_not_gate_on_api_key(tmp_home, capsys):
+    """Read-only verbs (history) keep exiting 0 even with no API keys."""
+    code = main(["history"])
+    out = capsys.readouterr().out
+    assert code == 0
+    # Empty history message is fine -- the point is we didn't exit 2.
+    assert "history" in out.lower() or "No history" in out

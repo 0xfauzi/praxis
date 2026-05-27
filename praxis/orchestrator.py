@@ -10,6 +10,7 @@ re-runs are idempotent and cheap.
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 import time
@@ -39,6 +40,26 @@ from praxis.scoring.aggregate import (
 )
 from praxis.scoring.coach import Coaching, generate_coaching
 from praxis.storage.profile_store import ProfileStore
+
+
+NO_API_KEY_MESSAGE = (
+    "No API key configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY "
+    "in your environment and retry."
+)
+
+
+def has_api_key_configured() -> bool:
+    """Return True when at least one judge API key is in the environment.
+
+    Spec section 11 makes API keys a hard requirement in v0.2: heuristic-
+    only mode is gone and the CLI must refuse to run any command that
+    would call the judge when neither ``ANTHROPIC_API_KEY`` nor
+    ``OPENAI_API_KEY`` is set. Read-only verbs (baseline, history, show,
+    follow-up) do not consult this; only commands that actually invoke
+    the judge (``praxis week`` on the current week, ``praxis scan``,
+    ``praxis re-score``) should gate on it before doing work.
+    """
+    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY"))
 
 
 @dataclass

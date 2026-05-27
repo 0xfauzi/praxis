@@ -38,8 +38,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added has_api_key_configured() + NO_API_KEY_MESSAGE in orchestrator.py as the CLI seam. cmd_week gates on it only for the judge-using path (no --week, no --dry-run); cmd_scan always gates. Read-only verbs (baseline/history/show/follow-up) skip the gate. cmd_re_score already returned exit 2 via ReScoreError('no_judge') from US-075, so left untouched. 8 new tests in tests/test_cli.py cover the matrix (week/scan no-key exit 2, week --week / --dry-run / baseline / history bypass, Anthropic-only / OpenAI-only proceed)."
     },
     {
       "id": "US-077",
