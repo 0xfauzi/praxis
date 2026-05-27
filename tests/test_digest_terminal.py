@@ -14,6 +14,7 @@ from praxis.reports.digest_terminal import (
     MAX_LINE_WIDTH,
     MAX_TASKS_RENDERED,
     CostLedgerView,
+    DimRowView,
     FollowUpView,
     HeadlineMomentView,
     TaskRowView,
@@ -23,6 +24,7 @@ from praxis.reports.digest_terminal import (
 )
 from praxis.reports.digest_terminal import (
     _COST_LEDGER_PLACEHOLDER,
+    _DIMENSIONS_PLACEHOLDER,
     _FOLLOW_UP_PLACEHOLDER,
     _HEADLINE_MOMENT_PLACEHOLDER,
     _TASKS_PLACEHOLDER,
@@ -839,3 +841,347 @@ def test_cost_ledger_unknown_dim_key_does_not_crash_via_task():
     # recognize the dim. Future rubric additions would resolve it
     # naturally without touching this test.
     assert "not_a_real_dim" in text
+
+
+# -------------------------------------------- US-069 six-dim panel as footer
+
+
+# The six rubric titles in the exact order the renderer emits them.
+# Tests below assert against this list so a future rubric renaming is
+# one audit point. The 'Model-task fit' entry uses the en-dash that
+# lives in the rubric itself (praxis/scoring/rubric.py); the renderer
+# does not rewrite rubric titles, so this test pins what the user
+# actually sees.
+_RUBRIC_TITLES = (
+    "Planning before prompting",
+    "Context richness",
+    "Iteration & evaluation",
+    "Tool & multi-step use",
+    "Model–task fit",
+    "Verification habits",
+)
+
+
+def _realistic_dimensions() -> list[DimRowView]:
+    """Fixture: a plausible six-dim panel with a mix of deltas.
+
+    The values exercise every branch of the row formatter at least
+    once: a significant positive delta (planning, +0.3 = exactly the
+    threshold), a larger positive (context, +0.4), a significant
+    negative (iteration, -0.4), an insignificant delta (tools, 0.0),
+    a baseline-forming row (fit, baseline=None), and another
+    insignificant delta (verification, +0.3 - wait, this is exactly
+    the threshold). Tweaked so each branch is unambiguous.
+    """
+    return [
+        DimRowView(dim_key="planning", score=5.7, baseline=5.1),
+        DimRowView(dim_key="context", score=6.2, baseline=5.8),
+        DimRowView(dim_key="iteration", score=4.1, baseline=4.5),
+        DimRowView(dim_key="tools", score=5.7, baseline=5.7),
+        DimRowView(dim_key="fit", score=6.0, baseline=None),
+        DimRowView(dim_key="verification", score=5.2, baseline=4.9),
+    ]
+
+
+def _full_digest_with_dimensions() -> WeeklyDigest:
+    digest = _full_digest_with_ledger_and_tasks()
+    digest.dimensions = _realistic_dimensions()
+    return digest
+
+
+def test_six_dim_panel_eyebrow_present():
+    """The 'THE SIX DIMENSIONS' eyebrow renders with and without data.
+
+    Spec section 6.2: the six-dim panel is the footer of the digest.
+    The contract holds whether data is provided or not -- the section
+    always emits its eyebrow so the structural shape of the digest
+    is preserved.
+    """
+    text_with = _strip_ansi(render(_full_digest_with_dimensions()))
+    text_without = _strip_ansi(render(WeeklyDigest()))
+    assert "THE SIX DIMENSIONS" in text_with
+    assert "THE SIX DIMENSIONS" in text_without
+
+
+def test_six_dim_panel_is_the_last_section():
+    """Spec section 6.2: the full six-dim panel SHOULD be a footer.
+
+    The section appears AFTER every other section in the digest so the
+    closing visual is the structural per-dim readout, not coaching
+    copy. This is the editorial decision the spec locks in; a future
+    reorder would silently change the cadence.
+    """
+    text = _strip_ansi(render(_full_digest_with_dimensions()))
+    six_dim_pos = text.find("THE SIX DIMENSIONS")
+    other_eyebrows = [
+        "TRAJECTORY",
+        "HEADLINE MOMENT",
+        "FOLLOW-UP",
+        "COST LEDGER",
+        "WHERE THE WEEK WENT",
+    ]
+    for eyebrow in other_eyebrows:
+        pos = text.find(eyebrow)
+        assert -1 < pos < six_dim_pos, (
+            f"{eyebrow!r} should appear before the six-dim footer; "
+            f"found {eyebrow}@{pos} vs panel@{six_dim_pos}"
+        )
+
+
+def test_six_dim_panel_placeholder_when_input_missing():
+    """When ``dimensions`` is None, the section emits the placeholder copy."""
+    text = _strip_ansi(render(WeeklyDigest()))
+    assert _DIMENSIONS_PLACEHOLDER in text
+
+
+def test_six_dim_panel_placeholder_when_input_empty_list():
+    """An empty dimensions list also triggers the placeholder.
+
+    Parallel to the tasks-empty-list case: the renderer treats
+    ``[]`` the same as ``None`` so a boundary that emits an empty
+    list when no data is ready does not render an empty table.
+    """
+    text = _strip_ansi(render(WeeklyDigest(dimensions=[])))
+    assert _DIMENSIONS_PLACEHOLDER in text
+
+
+def test_six_dim_panel_placeholder_absent_when_data_present():
+    """Real dimensions data does not also leak the placeholder copy."""
+    text = _strip_ansi(render(_full_digest_with_dimensions()))
+    assert _DIMENSIONS_PLACEHOLDER not in text
+
+
+def test_six_dim_panel_renders_all_six_rubric_titles():
+    """With six DimRowView entries, all six rubric titles render."""
+    text = _strip_ansi(render(WeeklyDigest(dimensions=_realistic_dimensions())))
+    for title in _RUBRIC_TITLES:
+        assert title in text, f"expected rubric title {title!r} in:\n{text}"
+
+
+def test_six_dim_panel_renders_score_per_dim():
+    """Spec acceptance: each dim shows its score (formatted X.X/10)."""
+    text = _strip_ansi(render(WeeklyDigest(dimensions=_realistic_dimensions())))
+    # Every realistic dim score (one decimal) appears followed by /10.
+    assert "5.7/10" in text  # planning
+    assert "6.2/10" in text  # context
+    assert "4.1/10" in text  # iteration
+    assert "5.7/10" in text  # tools (also 5.7)
+    assert "6.0/10" in text  # fit
+    assert "5.2/10" in text  # verification
+
+
+def test_six_dim_panel_renders_baseline_per_dim():
+    """Spec acceptance: each dim shows its baseline value.
+
+    Baseline values are formatted to one decimal place (matching the
+    score format) and prefixed by the literal ``baseline `` so the
+    reader can scan the column without parsing position alone.
+    """
+    text = _strip_ansi(render(WeeklyDigest(dimensions=_realistic_dimensions())))
+    assert "baseline 5.1" in text  # planning baseline
+    assert "baseline 5.8" in text  # context baseline
+    assert "baseline 4.5" in text  # iteration baseline
+    assert "baseline 5.7" in text  # tools baseline
+    assert "baseline 4.9" in text  # verification baseline
+
+
+def test_six_dim_panel_significant_positive_delta_renders_up_arrow():
+    """A delta >= +0.3 renders as '↑ +X.X' (spec section 8.3).
+
+    Locks the up-arrow path so a refactor that drops the arrow glyph
+    or the sign-aware formatter trips here.
+    """
+    digest = WeeklyDigest(
+        dimensions=[DimRowView(dim_key="planning", score=5.7, baseline=5.1)]
+    )
+    text = _strip_ansi(render(digest))
+    # ``format_delta`` emits "↑ +0.6" (sign-aware, one decimal).
+    assert "↑ +0.6" in text
+
+
+def test_six_dim_panel_significant_negative_delta_renders_down_arrow():
+    """A delta <= -0.3 renders as '↓ -X.X' (spec section 8.3)."""
+    digest = WeeklyDigest(
+        dimensions=[DimRowView(dim_key="iteration", score=4.1, baseline=4.5)]
+    )
+    text = _strip_ansi(render(digest))
+    assert "↓ -0.4" in text
+
+
+def test_six_dim_panel_insignificant_delta_renders_tilde():
+    """A delta with |delta| < 0.3 renders as ``~`` (spec section 8.3).
+
+    The significance gate is the dividing line between rendering a
+    real movement and rendering noise; a zero-or-near-zero delta must
+    not be dressed up as a movement.
+    """
+    digest = WeeklyDigest(
+        dimensions=[DimRowView(dim_key="tools", score=5.7, baseline=5.7)]
+    )
+    text = _strip_ansi(render(digest))
+    # Single ``~`` on the row; no arrow glyphs.
+    assert "~" in text
+    assert "↑" not in text
+    assert "↓" not in text
+
+
+def test_six_dim_panel_baseline_forming_shows_dashes():
+    """A None baseline renders as the ``--`` placeholder (spec section 8.4).
+
+    The digest must not invent a baseline when the user has less than
+    14 days of data. The literal ``baseline --`` stub makes the
+    forming state visible to the reader.
+    """
+    digest = WeeklyDigest(
+        dimensions=[DimRowView(dim_key="fit", score=6.0, baseline=None)]
+    )
+    text = _strip_ansi(render(digest))
+    assert "baseline --" in text
+
+
+def test_six_dim_panel_baseline_forming_hides_delta():
+    """No delta column when there is no baseline to compare against.
+
+    The 'forming' annotation takes the place of the delta so the row
+    still aligns visually, but no arrow or sign is rendered.
+    """
+    digest = WeeklyDigest(
+        dimensions=[DimRowView(dim_key="fit", score=6.0, baseline=None)]
+    )
+    text = _strip_ansi(render(digest))
+    # The forming branch shows '(forming)' in place of any delta.
+    assert "(forming)" in text
+    # No arrow glyphs or signed numerals from the delta path.
+    assert "↑" not in text
+    assert "↓" not in text
+
+
+def test_six_dim_panel_unknown_dim_key_does_not_crash():
+    """An unknown dim_key in DimRowView falls through to the raw key.
+
+    Mirrors the contract _dim_title established in US-067 and
+    US-068's task row: rubric drift must not crash the digest. The
+    raw key renders instead so the section still emits all its rows.
+    """
+    digest = WeeklyDigest(
+        dimensions=[
+            DimRowView(dim_key="not_a_real_dim", score=5.0, baseline=4.5),
+        ]
+    )
+    text = _strip_ansi(render(digest))
+    assert "not_a_real_dim" in text
+
+
+def test_six_dim_panel_lines_under_80_with_data():
+    """A populated six-dim panel respects the 79-col budget."""
+    digest = WeeklyDigest(dimensions=_realistic_dimensions())
+    for i, line in enumerate(_all_lines(digest)):
+        assert visible_width(line) <= MAX_LINE_WIDTH, (
+            f"line {i} ({visible_width(line)} > {MAX_LINE_WIDTH}): "
+            f"{_strip_ansi(line)!r}"
+        )
+
+
+def test_six_dim_panel_lines_under_80_with_extreme_values():
+    """Extreme score/baseline values (10.0/0.0) still fit the budget.
+
+    The /10 scale caps the formatted score at 4 chars (``10.0``) and
+    the delta path tops out near ``10.0`` magnitude; this test pushes
+    those extremes to ensure no row overflows.
+    """
+    digest = WeeklyDigest(
+        dimensions=[
+            DimRowView(dim_key="planning", score=10.0, baseline=0.0),
+            DimRowView(dim_key="verification", score=0.0, baseline=10.0),
+        ]
+    )
+    for i, line in enumerate(_all_lines(digest)):
+        assert visible_width(line) <= MAX_LINE_WIDTH, (
+            f"line {i} ({visible_width(line)} > {MAX_LINE_WIDTH}): "
+            f"{_strip_ansi(line)!r}"
+        )
+
+
+def test_full_digest_with_dimensions_under_80():
+    """Every section populated (including the footer) stays in budget.
+
+    The most comprehensive width check in the suite once US-069 lands.
+    A future copy or layout change in any section that pushes a line
+    over 79 cols trips here.
+    """
+    lines = _all_lines(_full_digest_with_dimensions())
+    over = [
+        (i, _strip_ansi(line))
+        for i, line in enumerate(lines)
+        if visible_width(line) > MAX_LINE_WIDTH
+    ]
+    assert not over, f"Lines exceed {MAX_LINE_WIDTH} cols: {over}"
+
+
+def test_sections_appear_in_spec_order_with_dimensions_as_footer():
+    """Full spec order: trajectory, moment, follow-up, ledger, tasks, dims.
+
+    Spec section 6.2 places the six-dim panel last (as a footer).
+    Locks the editorial cadence: behavioral read first, then coaching
+    moment, then commitment, then bookkeeping, then the structural
+    six-dim readout to close.
+    """
+    text = _strip_ansi(render(_full_digest_with_dimensions()))
+    positions = [
+        text.find(eyebrow)
+        for eyebrow in (
+            "TRAJECTORY",
+            "HEADLINE MOMENT",
+            "FOLLOW-UP",
+            "COST LEDGER",
+            "WHERE THE WEEK WENT",
+            "THE SIX DIMENSIONS",
+        )
+    ]
+    assert all(p >= 0 for p in positions), f"missing eyebrow(s): {positions}"
+    assert positions == sorted(positions), (
+        f"sections out of order: {positions}"
+    )
+
+
+def test_six_dim_panel_renders_six_body_lines():
+    """The footer panel emits exactly one body line per dim entry.
+
+    Locks the per-row layout: a future change that adds a second row
+    per dim (e.g. an evidence line) would silently double the footer
+    height; this test catches that.
+    """
+    digest = WeeklyDigest(dimensions=_realistic_dimensions())
+    text = render(digest)
+    panel_start = text.find("THE SIX DIMENSIONS")
+    panel_text = text[panel_start:]
+    body_lines = [
+        line for line in panel_text.split("\n")
+        if line.strip()
+        and "THE SIX DIMENSIONS" not in line
+    ]
+    assert len(body_lines) == 6, (
+        f"expected 6 body lines in panel; got {len(body_lines)}:\n"
+        + "\n".join(body_lines)
+    )
+
+
+def test_six_dim_panel_renders_in_caller_provided_order():
+    """The renderer emits rows in the order the caller provided them.
+
+    Upstream constructs the list in rubric order; the renderer trusts
+    that order rather than re-sorting, parallel to the task rows
+    contract. This test reverses the rubric order so any silent
+    re-sort by the renderer would flip the assertion.
+    """
+    reversed_dims = list(reversed(_realistic_dimensions()))
+    text = _strip_ansi(render(WeeklyDigest(dimensions=reversed_dims)))
+    panel_start = text.find("THE SIX DIMENSIONS")
+    panel_text = text[panel_start:]
+    # Verification (last in rubric) should appear first; planning last.
+    verif_pos = panel_text.find("Verification habits")
+    plan_pos = panel_text.find("Planning before prompting")
+    assert -1 < verif_pos < plan_pos, (
+        "renderer must preserve caller's order; "
+        f"verification@{verif_pos} should precede planning@{plan_pos}"
+    )

@@ -12,8 +12,8 @@ for the v0.2 weekly digest pipeline. It is distinct from the v0.1
 for the legacy `praxis scan` output. US-066 established the 80-column
 hard constraint, US-067 wired the three mandatory sections with
 placeholder degradation, US-068 added the compact cost ledger and
-'Where The Week Went' task breakdown, and US-069 will land the
-six-dim footer.
+'Where The Week Went' task breakdown, and US-069 landed the full
+six-dim panel as the digest's footer.
 """
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ import re
 import textwrap
 from dataclasses import dataclass
 
+from praxis.reports.baseline_panel import format_baseline_value
+from praxis.reports.gating import format_delta
 from praxis.scoring.rubric import by_key
 
 
@@ -146,6 +148,25 @@ class TaskRowView:
 
 
 @dataclass
+class DimRowView:
+    """One row of the six-dim footer panel (spec section 6.2).
+
+    ``score`` is this week's mean for the dim on the 0-10 scale.
+    ``baseline`` is the 90-day rolling mean, or ``None`` when the user
+    has less than 14 days of data and the baseline is still forming
+    (spec section 8.4). The renderer derives the delta and runs it
+    through the significance gate (spec section 8.3, threshold 0.3 on
+    the /10 scale), so callers do not pre-compute the delta string.
+    ``dim_key`` is the rubric key; an unknown key renders through
+    ``_dim_title`` as the raw key rather than crashing the digest.
+    """
+
+    dim_key: str
+    score: float
+    baseline: float | None = None
+
+
+@dataclass
 class WeeklyDigest:
     """Inputs the digest renderer reads.
 
@@ -154,10 +175,10 @@ class WeeklyDigest:
     tasks breakdown ("Where The Week Went") MAY render in a compact
     form; in v0.2 we choose to always render them, falling back to a
     placeholder when the upstream pipeline has not produced data yet
-    (spec section 10.1: the cost ledger is "always shown"). Each
-    section's input lives on this dataclass as an Optional field and
-    defaults to ``None`` so the renderer can degrade gracefully. The
-    six-dim footer (US-069) lands as the next optional field.
+    (spec section 10.1: the cost ledger is "always shown"). The full
+    six-dim panel SHOULD render as a footer (US-069). Each section's
+    input lives on this dataclass as an Optional field and defaults
+    to ``None`` so the renderer can degrade gracefully.
     """
 
     week_label: str = ""
@@ -166,6 +187,7 @@ class WeeklyDigest:
     follow_up: FollowUpView | None = None
     cost_ledger: CostLedgerView | None = None
     tasks: list[TaskRowView] | None = None
+    dimensions: list[DimRowView] | None = None
 
 
 # -------------------------------------------------------------------- helpers
@@ -251,6 +273,9 @@ _COST_LEDGER_PLACEHOLDER = (
 )
 _TASKS_PLACEHOLDER = (
     "No task breakdown yet. Clustering surfaces tasks once it runs."
+)
+_DIMENSIONS_PLACEHOLDER = (
+    "Dim panel pending. Run a session to populate per-dim scores."
 )
 
 # Spec section 10.1: spend, baseline, biggest (model, task) line, and
@@ -520,6 +545,72 @@ def _where_the_week_went(tasks: list[TaskRowView] | None) -> list[str]:
     return lines
 
 
+# Spec section 6.2: every dim renders on one body line so the footer
+# stays compact and readable. The title column is padded out to the
+# longest rubric title plus a small breather so the score/baseline/
+# delta columns align across all six rows. 27 chars covers the longest
+# title ("Planning before prompting", 25 chars) with room for one or
+# two future renamings without re-tuning the layout.
+_DIM_TITLE_COL_WIDTH = 27
+
+# The "baseline X.X" / "baseline --" stub renders to one of two widths
+# depending on whether the baseline is forming. The renderer pads the
+# shorter form so the delta column aligns across rows; padding to the
+# longer form ("baseline X.X" = 12 chars) keeps all 6 rows tidy.
+_BASELINE_COL_WIDTH = len("baseline X.X")
+
+
+def _format_dim_row(view: DimRowView, dim_title: str) -> str:
+    """One line: '<title>  X.X/10  baseline Y.Y  <delta>'.
+
+    Both the baseline value and the delta gate on the same boundary:
+    when ``baseline`` is ``None``, the row shows ``baseline --`` and a
+    parenthetical ``(forming)`` in place of the delta (spec section 8.4).
+    When the baseline exists, the delta is the difference between this
+    week's score and the baseline, rendered through ``format_delta``
+    so the significance gate (spec section 8.3) is applied uniformly
+    with the HTML renderer.
+    """
+    title_col = dim_title.ljust(_DIM_TITLE_COL_WIDTH)
+    score_col = f"{view.score:.1f}/10"
+    forming = view.baseline is None
+    baseline_value = view.baseline if view.baseline is not None else 0.0
+    baseline_str = f"baseline {format_baseline_value(baseline_value, forming)}"
+    baseline_col = baseline_str.ljust(_BASELINE_COL_WIDTH)
+    if forming:
+        # No delta when there is no baseline to compare against. The
+        # parenthetical mirrors the cost ledger's "baseline forming"
+        # phrasing so both panels read the same way under the same
+        # precondition.
+        delta_col = "(forming)"
+    else:
+        # ``score`` and ``baseline`` are both /10; the delta lives on
+        # the same scale, which is what ``format_delta`` expects.
+        delta_col = format_delta(view.score - (view.baseline or 0.0))
+    return f"{title_col}  {score_col}  {baseline_col}  {delta_col}"
+
+
+def _six_dim_panel(dimensions: list[DimRowView] | None) -> list[str]:
+    """Render the full six-dim panel as the digest's footer (spec 6.2).
+
+    Spec section 6.2 says the full six-dim panel SHOULD be a footer.
+    The renderer takes the list of ``DimRowView`` entries verbatim and
+    emits one row per entry; the caller is responsible for supplying
+    all six in rubric order, since the renderer treats the panel as a
+    pre-ranked list (consistent with the ``tasks`` section's contract).
+    When the input is ``None`` or empty the section degrades to a DIM
+    placeholder line, mirroring the US-067 / US-068 fallback pattern.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("The six dimensions"))
+    if not dimensions:
+        lines.extend(_placeholder_lines(_DIMENSIONS_PLACEHOLDER))
+        return lines
+    for view in dimensions:
+        lines.append(_body_line(_format_dim_row(view, _dim_title(view.dim_key))))
+    return lines
+
+
 # --------------------------------------------------------------------- render
 
 
@@ -549,6 +640,10 @@ def render(digest: WeeklyDigest) -> str:
     parts.extend(_follow_up(digest.follow_up))
     parts.extend(_cost_ledger(digest.cost_ledger))
     parts.extend(_where_the_week_went(digest.tasks))
+    # Spec section 6.2: the full six-dim panel SHOULD be a footer.
+    # It sits AFTER all coaching and bookkeeping sections so the digest
+    # closes on the structural readout of the week.
+    parts.extend(_six_dim_panel(digest.dimensions))
     # Trailing newline so terminals that print the next prompt without
     # a leading newline don't clash with the last section's content.
     parts.append("")
