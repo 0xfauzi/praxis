@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -892,3 +893,111 @@ def test_v01_daily_entry_point_is_not_a_subcommand():
         assert func is not orchestrator.run, (
             f"subcommand {name!r} binds directly to the v0.1 daily orchestrator entry point"
         )
+
+
+# ---------------------------------------------------------------------------
+# US-081 - macOS notification via osascript on `praxis week --notify`.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_osascript(monkeypatch):
+    """Record every subprocess.run call from praxis.cli.__main__ and succeed.
+
+    The --notify path shells out to ``osascript`` via subprocess.run on
+    Darwin. Tests assert on the recorded command list so they verify
+    the title/body without actually invoking the user's NotificationCenter.
+    """
+    import subprocess as _subprocess
+
+    calls: list[list[str]] = []
+
+    def _run(cmd, *args, **kwargs):  # noqa: ARG001
+        calls.append(list(cmd))
+        return _subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("praxis.cli.__main__.subprocess.run", _run)
+    return calls
+
+
+def test_notify_calls_osascript_after_writing_html(
+    tmp_home, capsys, monkeypatch, fake_api_key, fake_osascript
+):
+    """`praxis week --notify` writes the HTML then posts the notification.
+
+    Asserts both that the HTML file was written (so the "after writing
+    the HTML" half of the AC is satisfied -- nothing can read latest.html
+    if the digest never landed) and that osascript was invoked once.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _seed_score("sess-notify", datetime.now(timezone.utc))
+
+    code = main(["week", "--notify"])
+    capsys.readouterr()
+    assert code == 0
+    # The HTML file is written for the current week before notify fires.
+    iso_weeks = list((resolve_home() / "weeks").glob("*.html"))
+    assert len(iso_weeks) == 1
+    # osascript was invoked exactly once with the `display notification` recipe.
+    assert len(fake_osascript) == 1
+    cmd = fake_osascript[0]
+    assert cmd[0] == "osascript"
+    assert cmd[1] == "-e"
+    assert "display notification" in cmd[2]
+
+
+def test_notify_title_is_fixed_string(
+    tmp_home, capsys, monkeypatch, fake_api_key, fake_osascript
+):
+    """The notification title is exactly 'Praxis weekly read is ready'.
+
+    Per spec section 13.2 / AC US-081, the title is a fixed string. The
+    trajectory label (US-082) lives in the body, not the title.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _seed_score("sess-title", datetime.now(timezone.utc))
+
+    code = main(["week", "--notify"])
+    capsys.readouterr()
+    assert code == 0
+    script = fake_osascript[0][2]
+    assert 'with title "Praxis weekly read is ready"' in script
+
+
+def test_notify_body_mentions_latest_html(
+    tmp_home, capsys, monkeypatch, fake_api_key, fake_osascript
+):
+    """The notification body points the user at ``~/.praxis/latest.html``.
+
+    Per AC US-081, the body must mention opening that path. The HTML
+    digest writer (US-064) maintains ``latest.html`` as a symlink to
+    the most recent week's file, so the user has a single stable
+    location to open regardless of which ISO week was just rendered.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _seed_score("sess-body", datetime.now(timezone.utc))
+
+    code = main(["week", "--notify"])
+    capsys.readouterr()
+    assert code == 0
+    script = fake_osascript[0][2]
+    assert "~/.praxis/latest.html" in script
+
+
+def test_notify_is_noop_on_non_darwin(
+    tmp_home, capsys, monkeypatch, fake_api_key, fake_osascript
+):
+    """On non-macOS, --notify is a silent no-op: osascript is not invoked.
+
+    The spec keeps the same flag portable across platforms (spec 13.2);
+    Linux/Windows simply skip the notification step and still render
+    the digest + HTML normally.
+    """
+    monkeypatch.setattr(sys, "platform", "linux")
+    _seed_score("sess-non-darwin", datetime.now(timezone.utc))
+
+    code = main(["week", "--notify"])
+    capsys.readouterr()
+    assert code == 0
+    # No osascript call should have been recorded.
+    assert fake_osascript == []

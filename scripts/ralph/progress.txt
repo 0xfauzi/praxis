@@ -35,3 +35,22 @@
     * `fake_launchctl` fixture is reusable but accumulates calls across `install_weekly_macos()` + `uninstall_weekly_macos()` in the same test, so slice the list from the install call count before asserting on uninstall's behavior (see test_uninstall_weekly_unloads_and_deletes_plist).
     * `cmd_uninstall_weekly` imports from `praxis.cli.install_weekly` inside the function (not at module top) to match the existing install pattern -- keeps non-macOS imports off the hot path.
 ---
+
+## Iteration 3 - US-081: macOS notification via osascript
+- What I did: Reworked `_post_notify` in praxis/cli/__main__.py so the AppleScript title is the fixed string "Praxis weekly read is ready" and the body is "Open ~/.praxis/latest.html to read." (per spec 13.2 / AC US-081). Dropped the `week_iso` parameter (no longer referenced) and the title-override-by-trajectory branch; the trajectory-label-in-body work is US-082's. Updated the caller in `cmd_week` to call `_post_notify()` with no args, removing the now-dead `traj_label` calculation.
+- Files changed: praxis/cli/__main__.py (refactored `_post_notify`, simplified caller), tests/test_cli.py (added 4 US-081 tests + `fake_osascript` fixture), scripts/ralph/feature/macos-launch-agent/prd.json (passes=true), scripts/ralph/progress.txt (this entry).
+- Verification: `uv run pytest -q` -> 1034 passed (4 new + 1030 existing). `uv run pyright praxis/cli/__main__.py tests/test_cli.py` -> 4 errors, all pre-existing (3 WeeklyRunSummary on __main__.py + 1 "pytest could not be resolved" on test_cli.py). Confirmed unchanged via `git stash` round-trip; my edits introduce 0 new pyright errors.
+- What the next iteration should know:
+  - Patterns established:
+    * `fake_osascript` fixture in tests/test_cli.py monkeypatches `praxis.cli.__main__.subprocess.run` and records every call. Reuse it for US-082's "osascript fails -> run still exits 0" test (just have the stub raise FileNotFoundError or return non-zero).
+    * `_post_notify()` now takes no arguments. US-082 must re-add `trajectory_label: str | None` (it was removed in this iteration since US-081 has no use for it) and the caller in `cmd_week` needs to recompute `summary.trajectory.label.value.title()` before passing it through. The pre-edit code is in the git log at 381704b for reference.
+    * The body text MUST contain the literal substring `~/.praxis/latest.html` -- US-082's expanded body (with trajectory label) must keep that substring intact, otherwise `test_notify_body_mentions_latest_html` will fail.
+    * The title MUST stay literally "Praxis weekly read is ready" -- `test_notify_title_is_fixed_string` asserts `'with title "Praxis weekly read is ready"'` verbatim. US-082 adds the trajectory label to BODY, not title.
+  - Hooks for upcoming stories:
+    * US-082 (trajectory label in body + osascript failure tolerance): Re-add `trajectory_label` parameter to `_post_notify`, then weave the label into the body (spec section 13.2 example: "Praxis: Drifting this week. Open ~/.praxis/latest.html for the detail."). Add an explicit test that monkeypatches subprocess.run to raise `FileNotFoundError("osascript missing")` and asserts the CLI still exits 0 -- today's broad try/except handles it but no test verifies the contract.
+    * US-083 (non-macOS install-weekly): the `fake_osascript` fixture is irrelevant; that story is about `install-weekly` printing a systemd/Task Scheduler snippet to stdout and saving it to `~/.praxis/install-weekly-snippet.txt`. See progress entries for iter 1/2 for the placeholder seam in `cmd_install_weekly`.
+  - Gotchas:
+    * `latest.html` is a SYMLINK created by the HTML digest writer (praxis/reports/digest_html.py, US-064), not by `_post_notify`. Tests don't verify the symlink exists at notification time -- the contract is only that the body MENTIONS the path. If a future change to the notify path tries to validate the symlink before notifying, it would couple notification to the HTML writer's symlink semantics, which is a regression in separation of concerns.
+    * The notification posts AFTER `_weekly_html_path(target_week).write_text(...)` in `cmd_week`. The "after writing the HTML" half of the AC is structural (it's the code order), so the test asserts an HTML file exists at notify time as a smoke check rather than ordering subprocess.run vs write_text directly.
+    * Tests monkeypatch `sys.platform` via `monkeypatch.setattr(sys, "platform", "darwin")`. monkeypatch reverts at teardown, so the patch is fully scoped to one test even though `sys` is a process-wide module.
+---

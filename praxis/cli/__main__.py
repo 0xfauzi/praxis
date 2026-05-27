@@ -59,8 +59,13 @@ def _weekly_html_path(week_iso: str) -> Path:
     return weeks_dir / f"{week_iso}.html"
 
 
-def _post_notify(week_iso: str, trajectory_label: str | None) -> None:
+def _post_notify() -> None:
     """Best-effort macOS notification (spec section 13.2).
+
+    Posts a ``display notification`` AppleScript with the fixed title
+    "Praxis weekly read is ready" and a body that points the user at
+    ``~/.praxis/latest.html`` (the symlink maintained by the HTML
+    digest writer always tracks the most recent week).
 
     Silent no-op on non-macOS so the same flag is portable. ``osascript``
     failures (notifications disabled, sandboxed env) are logged to stderr
@@ -69,9 +74,7 @@ def _post_notify(week_iso: str, trajectory_label: str | None) -> None:
     if sys.platform != "darwin":
         return
     title = "Praxis weekly read is ready"
-    body = f"Open ~/.praxis/weeks/{week_iso}.html to read."
-    if trajectory_label:
-        title = f"Praxis: {trajectory_label} this week"
+    body = "Open ~/.praxis/latest.html to read."
     try:
         subprocess.run(
             [
@@ -167,12 +170,7 @@ def cmd_week(args: argparse.Namespace) -> int:
             )
 
     if args.notify:
-        traj_label = (
-            summary.trajectory.label.value.title()
-            if summary.trajectory is not None
-            else None
-        )
-        _post_notify(target_week, traj_label)
+        _post_notify()
 
     return 0
 
