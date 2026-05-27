@@ -37,3 +37,15 @@
   - The pass-1 row carries the cheap-tier judge_model + scores even when pass 2 later wins. Don't try to "upgrade" the pass-1 row in place; the disagreement is the signal (spec §9.6).
   - mypy baseline unchanged at 34 errors across `behavior/trajectory.py`, `cli/__main__.py`, `models_advisor/advisor.py`, `scoring/aggregate.py`, `scoring/coach.py`, `scoring/judge.py`.
 ---
+
+## Iteration 4 - US-030: Same-task exclusion within a pass-1 batch
+- What I did: Added `build_pass1_batches(sessions, tasks, max_batch_size=5)` plus the `PASS1_BATCH_SIZE = 5` constant in `praxis/scoring/clustering.py`. The helper groups sessions into pass-1 batches that never contain two sessions sharing a task assignment (spec §9.4). When one task has more sessions than there are batches with available room, the extras roll into new batches alone or alongside non-task-mates only. Placement is deterministic (largest-task-first by group size, stable on ties, then input order within each group); the spec's in-batch randomization is left to the caller so the builder stays testable.
+- Files changed: praxis/scoring/clustering.py, tests/test_clustering.py
+- Verification: `uv run pytest -q` (725 passed, up from 715 baseline; +10 new US-030 tests in test_clustering.py). `uv run mypy praxis` (34 errors, same as pre-change baseline; no new errors introduced).
+- What the next iteration should know:
+  - The batching helper is `praxis.scoring.clustering.build_pass1_batches`. Signature: `(sessions: list[Session], tasks: list[Task], max_batch_size: int = PASS1_BATCH_SIZE) -> list[list[Session]]`. It is NOT yet wired into the orchestrator - pass 1 still runs one session per call as set up by US-027. Hooking up clustering + batched LLM calls in the orchestrator is a separate piece of work; US-030's AC only required the constraint to hold within the batches that the helper produces.
+  - Sessions absent from any task in `tasks` are treated as singletons (each gets a unique synthetic negative key) so they never conflict with anyone. This is defensive; spec §5.3 says every session is assigned to exactly one task. If you wire clustering into the orchestrator, validate coverage at that layer rather than expecting this helper to flag unassigned sessions.
+  - The deterministic placement order is: bucket sessions by task; sort buckets by size descending (stable on ties, preserving the order tasks first appeared in `sessions`); for each session in a bucket, drop into the first existing batch that has room and does not already contain its task, else open a new batch. This is what makes oversized-task extras land in their own new batches.
+  - For US-031 (confidence-distribution telemetry), pass 1 is still per-session today, so distribution logging can hang off `score_one_session_pass1` or the orchestrator loop. If you switch to batched pass-1 LLM calls first, the telemetry counter still has access to each session's confidence in the returned per-session result objects.
+  - mypy baseline unchanged at 34 errors across `behavior/trajectory.py`, `cli/__main__.py`, `models_advisor/advisor.py`, `scoring/aggregate.py`, `scoring/coach.py`, `scoring/judge.py`.
+---

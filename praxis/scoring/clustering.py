@@ -82,6 +82,12 @@ ANTI_COLLAPSE_THRESHOLD = 6
 ANTI_SINGLETON_THRESHOLD = 8
 
 
+# Spec §9.1 / §9.4: pass 1 sends 5 sessions per LLM call. The batching
+# helper below uses this as the default cap; callers can override for ad-hoc
+# experiments without changing the constant.
+PASS1_BATCH_SIZE = 5
+
+
 @dataclass
 class Task:
     """One task cluster returned by the LLM (or built by singleton fallback)."""
@@ -490,6 +496,89 @@ def cluster_sessions(
     return None
 
 
+def build_pass1_batches(
+    sessions: list[Session],
+    tasks: list[Task],
+    max_batch_size: int = PASS1_BATCH_SIZE,
+) -> list[list[Session]]:
+    """Group sessions into pass-1 batches with same-task exclusion (spec §9.4).
+
+    No batch contains two sessions that share a task assignment - this prevents
+    the cheap-tier judge from anchoring its read of one session on a sibling
+    in the same batch. When a single task has more sessions than there are
+    batches with available room, the extras roll into new batches alone or
+    alongside non-task-mates only (US-030 AC #2).
+
+    Sessions whose stable_id is not present in any task in ``tasks`` are
+    treated as their own singleton task - they never conflict with any other
+    session and fill batches normally. This is defensive: spec 5.3 requires
+    every session to appear in exactly one task, but the helper does not
+    re-validate that contract.
+
+    Placement is deterministic: tasks are processed largest-first (stable on
+    ties, preserving the input order of ``tasks``), and within each task
+    sessions are placed in the order they appear in ``sessions``. The spec
+    calls for randomized within-batch ordering (§9.4); that shuffle is a
+    separate concern handled by the caller so this helper stays testable.
+    """
+    if not sessions:
+        return []
+    if max_batch_size < 1:
+        raise ValueError("max_batch_size must be at least 1")
+
+    # Map session stable_id -> a per-task identifier (the task's index in
+    # ``tasks``). Unassigned sessions get a unique synthetic id each so they
+    # never collide with another session under the same-task check.
+    sid_to_task_key: dict[str, int] = {}
+    for i, t in enumerate(tasks):
+        for sid in t.session_ids:
+            sid_to_task_key[sid] = i
+
+    # Bucket sessions by task while preserving input order within each bucket.
+    # Unassigned sessions go into singleton buckets keyed by negative ints so
+    # they sort/iterate distinctly from real task keys.
+    buckets: dict[int, list[Session]] = {}
+    bucket_order: list[int] = []  # task-key encounter order, for stable sort
+    next_singleton_key = -1
+    for s in sessions:
+        key = sid_to_task_key.get(s.stable_id)
+        if key is None:
+            key = next_singleton_key
+            next_singleton_key -= 1
+        if key not in buckets:
+            buckets[key] = []
+            bucket_order.append(key)
+        buckets[key].append(s)
+
+    # Sort buckets by size descending so the largest task is spread across
+    # batches first; stable on size ties so the caller's task order leaks
+    # through deterministically.
+    ordered_keys = sorted(
+        bucket_order, key=lambda k: -len(buckets[k])
+    )
+
+    batches: list[list[Session]] = []
+    batch_keys: list[set[int]] = []
+
+    for key in ordered_keys:
+        for session in buckets[key]:
+            placed = False
+            for i, batch in enumerate(batches):
+                if len(batch) >= max_batch_size:
+                    continue
+                if key in batch_keys[i]:
+                    continue
+                batch.append(session)
+                batch_keys[i].add(key)
+                placed = True
+                break
+            if not placed:
+                batches.append([session])
+                batch_keys.append({key})
+
+    return batches
+
+
 __all__ = [
     "ALLOWED_TASK_TYPES",
     "ANTHROPIC_CHEAP_MODEL",
@@ -501,8 +590,10 @@ __all__ = [
     "LABEL_SOURCE_FALLBACK",
     "LABEL_SOURCE_LLM",
     "OPENAI_CHEAP_MODEL",
+    "PASS1_BATCH_SIZE",
     "SINGLETON_FALLBACK_LABEL_WORDS",
     "Task",
+    "build_pass1_batches",
     "build_prompt",
     "build_session_blocks",
     "cluster_sessions",

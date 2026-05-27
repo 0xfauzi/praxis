@@ -51,8 +51,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added build_pass1_batches(sessions, tasks, max_batch_size=5) helper in praxis/scoring/clustering.py plus PASS1_BATCH_SIZE=5 constant. The helper groups sessions into pass-1 batches such that no batch contains two sessions sharing a task assignment (spec §9.4); when one task has more sessions than there are batches with room, the extras roll into new batches alone or alongside non-task-mates. Placement is deterministic (largest-task-first, then input order); in-batch shuffling per spec is left to the caller so the builder stays testable. 10 new unit tests in tests/test_clustering.py cover the constraint, oversized-task overflow, non-task-mate pairing, max-batch-size cap, unassigned-session fallback, zero/negative size rejection, determinism, and the default batch size value. The orchestrator is not yet wired to call this - pass 1 still runs one session per call (US-027) - because clustering integration into the orchestrator is a separate concern not covered by this story's AC."
     },
     {
       "id": "US-031",
