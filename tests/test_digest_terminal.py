@@ -1986,3 +1986,176 @@ def test_us041_panels_respect_80_column_budget():
         assert visible_width(line) <= MAX_LINE_WIDTH, (
             f"line exceeds {MAX_LINE_WIDTH} cols: {line!r}"
         )
+
+
+# =========================================================================
+# US-042: tool/agent ladder + refined cost-effectiveness panels (terminal)
+# =========================================================================
+
+
+from praxis.reports.digest_terminal import (  # noqa: E402
+    _COST_EFFECTIVENESS_NO_COST_DATA,
+    _TOOL_AGENT_LADDER_NO_ACTIVITY,
+)
+from praxis.reports.panel_inputs import (  # noqa: E402
+    LadderRungRow,
+    RefinedCostEffectivenessPanel,
+    ToolAgentLadderPanel,
+)
+
+
+def _ladder_populated() -> ToolAgentLadderPanel:
+    return ToolAgentLadderPanel(
+        rows=(
+            LadderRungRow(kind="prompt_only", label="Prompt-only", session_count=2),
+            LadderRungRow(kind="tools_on", label="Tools-on", session_count=3),
+            LadderRungRow(kind="skills", label="Skills", session_count=1),
+            LadderRungRow(kind="hooks", label="Hooks", session_count=0),
+            LadderRungRow(kind="subagents", label="Subagents", session_count=0),
+        ),
+        max_rung_kind="skills",
+        max_rung_label="Skills",
+    )
+
+
+def _cost_effectiveness_populated() -> RefinedCostEffectivenessPanel:
+    return RefinedCostEffectivenessPanel(
+        higher_tier_display="Claude Opus 4.7",
+        lower_tier_display="Claude Haiku 4.5",
+        spent_on_higher_tier_usd=12.34,
+        overspend_usd=10.50,
+        qualifying_session_count=2,
+        has_cost_data=True,
+    )
+
+
+def _us042_panel_inputs(
+    *,
+    ladder: ToolAgentLadderPanel | None = None,
+    cost_effectiveness: RefinedCostEffectivenessPanel | None = None,
+) -> PanelInputs:
+    return PanelInputs(
+        tool_agent_ladder=ladder,
+        refined_cost_effectiveness=cost_effectiveness,
+    )
+
+
+def test_tool_agent_ladder_eyebrow_always_renders():
+    """The eyebrow renders regardless of data state."""
+    text_empty = _strip_ansi(render(WeeklyDigest()))
+    text_full = _strip_ansi(
+        render(
+            WeeklyDigest(
+                panel_inputs=_us042_panel_inputs(ladder=_ladder_populated())
+            )
+        )
+    )
+    assert "TOOL/AGENT LADDER" in text_empty
+    assert "TOOL/AGENT LADDER" in text_full
+
+
+def test_tool_agent_ladder_empty_state_renders_placeholder():
+    """When no sessions were observed the panel emits the explicit
+    empty-state copy verbatim."""
+    text = _strip_ansi(render(WeeklyDigest()))
+    assert _TOOL_AGENT_LADDER_NO_ACTIVITY in text
+
+
+def test_tool_agent_ladder_renders_max_rung_headline():
+    """A populated panel surfaces the max-rung headline ('Max rung: Skills')."""
+    digest = WeeklyDigest(
+        panel_inputs=_us042_panel_inputs(ladder=_ladder_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "Max rung: Skills" in text
+
+
+def test_tool_agent_ladder_renders_per_rung_counts():
+    """A populated panel lists per-rung counts in rung order."""
+    digest = WeeklyDigest(
+        panel_inputs=_us042_panel_inputs(ladder=_ladder_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "Prompt-only: 2 sessions" in text
+    assert "Tools-on: 3 sessions" in text
+    assert "Skills: 1 session" in text
+    assert "Hooks: 0 sessions" in text
+
+
+def test_tool_agent_ladder_renders_citation():
+    """The Anthropic Skills/hooks/subagents + OpenAI harness-engineering
+    citation renders inline."""
+    digest = WeeklyDigest(
+        panel_inputs=_us042_panel_inputs(ladder=_ladder_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "Anthropic" in text
+    assert "OpenAI" in text
+
+
+def test_cost_effectiveness_eyebrow_always_renders():
+    """The eyebrow renders regardless of data state."""
+    text_empty = _strip_ansi(render(WeeklyDigest()))
+    text_full = _strip_ansi(
+        render(
+            WeeklyDigest(
+                panel_inputs=_us042_panel_inputs(
+                    cost_effectiveness=_cost_effectiveness_populated()
+                )
+            )
+        )
+    )
+    assert "COST-EFFECTIVENESS" in text_empty
+    assert "COST-EFFECTIVENESS" in text_full
+
+
+def test_cost_effectiveness_renders_no_cost_data_empty_state():
+    """US-042 AC: when the cost ledger has no entries this week the
+    panel renders 'No cost data this week.' verbatim rather than $0
+    overspend (which would falsely imply optimality)."""
+    text = _strip_ansi(render(WeeklyDigest()))
+    assert _COST_EFFECTIVENESS_NO_COST_DATA in text
+    # And the $0 overspend literal must NOT appear in the empty path,
+    # since that would falsely read as "optimized".
+    assert "$0.00 overspend" not in text
+
+
+def test_cost_effectiveness_renders_canonical_sentence():
+    """US-042 AC: the panel renders 'You spent $X on <higher> for tasks
+    <lower> could have done = $Y overspend' verbatim when overspend > 0."""
+    digest = WeeklyDigest(
+        panel_inputs=_us042_panel_inputs(
+            cost_effectiveness=_cost_effectiveness_populated()
+        )
+    )
+    text = _strip_ansi(render(digest))
+    assert "You spent $12.34 on Claude Opus 4.7" in text
+    assert "Claude Haiku 4.5" in text
+    assert "$10.50 overspend" in text
+
+
+def test_cost_effectiveness_renders_clean_signal_when_no_overspend():
+    """When cost data is present but no qualifying overspend exists,
+    the panel renders a positive-signal sentence (not the empty-state
+    placeholder, which would conflate 'no data' with 'no waste')."""
+    panel = RefinedCostEffectivenessPanel(has_cost_data=True)
+    digest = WeeklyDigest(
+        panel_inputs=_us042_panel_inputs(cost_effectiveness=panel)
+    )
+    text = _strip_ansi(render(digest))
+    assert "No tier-mismatch overspend" in text
+    assert _COST_EFFECTIVENESS_NO_COST_DATA not in text
+
+
+def test_us042_panels_respect_80_column_budget():
+    """US-066: the two new panels respect the 79-column hard cap."""
+    digest = WeeklyDigest(
+        panel_inputs=_us042_panel_inputs(
+            ladder=_ladder_populated(),
+            cost_effectiveness=_cost_effectiveness_populated(),
+        )
+    )
+    for line in render(digest).split("\n"):
+        assert visible_width(line) <= MAX_LINE_WIDTH, (
+            f"line exceeds {MAX_LINE_WIDTH} cols: {line!r}"
+        )

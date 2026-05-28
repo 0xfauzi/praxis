@@ -32,8 +32,10 @@ from praxis.reports.panel_inputs import (
     ContextEngineeringDepthPanel,
     KnowledgeGapDistributionPanel,
     PanelInputs,
+    RefinedCostEffectivenessPanel,
     RepeatTaskRadarPanel,
     SpecificationAdoptionPanel,
+    ToolAgentLadderPanel,
     VerificationCalibrationPanel,
 )
 from praxis.scoring.rubric import by_key
@@ -338,6 +340,16 @@ _CONTEXT_ENGINEERING_NO_ARTIFACTS = (
     "No scaffolding artifacts referenced this week."
 )
 _KNOWLEDGE_GAP_EMPTY = "No knowledge gaps detected this week."
+
+# US-042: empty-state copy for the tool/agent ladder (when the week has
+# no sessions to place on the ladder) and for the refined cost-
+# effectiveness panel (when the cost ledger has no priced entries this
+# week; per AC the panel must NOT render "$0 overspend" which would
+# falsely imply optimality).
+_TOOL_AGENT_LADDER_NO_ACTIVITY = (
+    "No tool/agent usage observed this week."
+)
+_COST_EFFECTIVENESS_NO_COST_DATA = "No cost data this week."
 
 
 def _dim_title(dim_key: str) -> str:
@@ -936,6 +948,94 @@ def _knowledge_gap_distribution(
     return lines
 
 
+def _tool_agent_ladder(panel: ToolAgentLadderPanel | None) -> list[str]:
+    """Render the tool/agent ladder panel (US-042).
+
+    Two states:
+      1. ``panel is None`` or no sessions observed: emit the explicit
+         "No tool/agent usage observed this week." copy. The empty-state
+         covers a freshly-installed user as well as a week with no
+         session activity.
+      2. At least one session: emit the max rung as the headline
+         ("Max rung: <Label>") followed by per-rung counts in ladder
+         order (lowest to highest) so the reader sees the distribution
+         beneath the ceiling. The Anthropic Skills/hooks/subagents +
+         OpenAI harness-engineering citation closes the section.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Tool/agent ladder"))
+    if panel is None or not panel.has_activity:
+        lines.extend(_placeholder_lines(_TOOL_AGENT_LADDER_NO_ACTIVITY))
+        return lines
+    lines.append(_body_line(f"Max rung: {panel.max_rung_label}"))
+    for row in panel.rows:
+        session_word = "session" if row.session_count == 1 else "sessions"
+        lines.append(_body_line(
+            f"{row.label}: {row.session_count} {session_word}"
+        ))
+    for wrapped in _wrap(
+        f"Source: {panel.citation}", width=_BODY_WIDTH
+    ):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    return lines
+
+
+def _refined_cost_effectiveness(
+    panel: RefinedCostEffectivenessPanel | None,
+) -> list[str]:
+    """Render the refined cost-effectiveness panel (US-042).
+
+    Three states:
+      1. ``panel is None`` or ``has_cost_data`` is False: emit the
+         "No cost data this week." copy verbatim per US-042 AC. The
+         absence of priced sessions is structurally different from
+         "$0 overspend" (which would falsely imply optimality).
+      2. Cost data present but no overspend: emit a positive-signal
+         line ("No tier-mismatch overspend detected this week.") so the
+         reader sees the absence of waste as a win without misreading
+         the empty-state copy.
+      3. Cost data present AND overspend > 0: emit the canonical
+         sentence per AC ("You spent $X on <higher-tier> for tasks
+         <lower-tier> could have done = $Y overspend").
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Cost-effectiveness"))
+    if panel is None or not panel.has_cost_data:
+        lines.extend(_placeholder_lines(_COST_EFFECTIVENESS_NO_COST_DATA))
+        return lines
+    if not panel.has_overspend:
+        for wrapped in _wrap(
+            "No tier-mismatch overspend detected this week.",
+            width=_BODY_WIDTH,
+        ):
+            lines.append(_body_line(wrapped))
+        for wrapped in _wrap(
+            f"Source: {panel.citation}", width=_BODY_WIDTH
+        ):
+            lines.append(_body_line(wrapped, ansi=DIM))
+        return lines
+    sentence = (
+        f"You spent ${panel.spent_on_higher_tier_usd:.2f} on "
+        f"{panel.higher_tier_display} for tasks "
+        f"{panel.lower_tier_display} could have done = "
+        f"${panel.overspend_usd:.2f} overspend"
+    )
+    for wrapped in _wrap(sentence, width=_BODY_WIDTH):
+        lines.append(_body_line(wrapped))
+    session_word = (
+        "session" if panel.qualifying_session_count == 1 else "sessions"
+    )
+    lines.append(_body_line(
+        f"Across {panel.qualifying_session_count} qualifying {session_word}.",
+        ansi=DIM,
+    ))
+    for wrapped in _wrap(
+        f"Source: {panel.citation}", width=_BODY_WIDTH
+    ):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    return lines
+
+
 def _six_dim_panel(dimensions: list[DimRowView] | None) -> list[str]:
     """Render the full six-dim panel as the digest's footer (spec 6.2).
 
@@ -1060,6 +1160,25 @@ def render(digest: WeeklyDigest) -> str:
         else None
     )
     parts.extend(_knowledge_gap_distribution(knowledge_gap_panel))
+    # US-042: tool/agent ladder + refined cost-effectiveness panel.
+    # The ladder reports the max scaffolding rung observed this week
+    # (prompt-only -> tools-on -> skills -> hooks -> subagents); the
+    # cost-effectiveness panel applies the deterministic counterfactual
+    # rule from praxis/models_advisor/advisor.py. Both sit at the END
+    # of the document because they close the editorial arc: scaffolding
+    # readiness then dollar consequences of the week's choices.
+    ladder_panel = (
+        digest.panel_inputs.tool_agent_ladder
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_tool_agent_ladder(ladder_panel))
+    cost_effectiveness_panel = (
+        digest.panel_inputs.refined_cost_effectiveness
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_refined_cost_effectiveness(cost_effectiveness_panel))
     # Trailing newline so terminals that print the next prompt without
     # a leading newline don't clash with the last section's content.
     parts.append("")

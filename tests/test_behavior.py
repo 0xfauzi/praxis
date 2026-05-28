@@ -540,3 +540,127 @@ def test_llm_trajectory_returns_none_without_keys(tmp_home):
     assert assess_trajectory_with_llm(pairs) is None
     # Top-level assess should still produce a result via the heuristic fallback.
     assert assess(pairs).label != TrajectoryLabel.INSUFFICIENT_DATA
+
+
+# =========================================================================
+# US-042: tool/agent ladder signal detection
+# =========================================================================
+
+
+from praxis.behavior.signals import (  # noqa: E402
+    LADDER_KINDS_IN_PANEL_ORDER,
+    categorize_session_ladder_rung,
+    detect_session_ladder_rungs,
+)
+
+
+def _ladder_session(turns: list[Turn]) -> "Session":
+    """Build a session for ladder tests, mirroring _make_session."""
+    return _make_session(turns, datetime.now(timezone.utc))
+
+
+def test_detect_session_ladder_rungs_skills_marker():
+    """A user turn that names a .skill artifact fires the skills kind."""
+    turns = [
+        Turn(role=Role.USER, content="please run my code-review.skill again"),
+    ]
+    session = _ladder_session(turns)
+    kinds = detect_session_ladder_rungs(session)
+    assert "skills" in kinds
+
+
+def test_detect_session_ladder_rungs_hooks_marker():
+    """A reference to a hooks/<name> file fires the hooks kind."""
+    turns = [
+        Turn(role=Role.USER, content="add hooks/pre-commit to lint before push"),
+    ]
+    session = _ladder_session(turns)
+    kinds = detect_session_ladder_rungs(session)
+    assert "hooks" in kinds
+
+
+def test_detect_session_ladder_rungs_subagents_marker():
+    """A 'subagent' mention fires the subagents kind."""
+    turns = [
+        Turn(role=Role.USER, content="spawn a subagent to handle the migration"),
+    ]
+    session = _ladder_session(turns)
+    kinds = detect_session_ladder_rungs(session)
+    assert "subagents" in kinds
+
+
+def test_detect_session_ladder_rungs_tool_calls_on_assistant_turn():
+    """An assistant turn carrying tool_calls fires the tools_on kind."""
+    turns = [
+        Turn(role=Role.USER, content="check the logs"),
+        Turn(
+            role=Role.ASSISTANT,
+            content="Reading logs...",
+            tool_calls=[{"name": "bash", "args": {"cmd": "tail logs"}}],
+        ),
+    ]
+    session = _ladder_session(turns)
+    kinds = detect_session_ladder_rungs(session)
+    assert "tools_on" in kinds
+
+
+def test_detect_session_ladder_rungs_prompt_only_returns_empty_set():
+    """A session of pure-text prompts (no tools, no scaffolding) returns
+    an empty set; prompt_only is the SESSION-level default, never a
+    per-turn kind."""
+    turns = [
+        Turn(role=Role.USER, content="explain how a ring buffer works"),
+        Turn(role=Role.ASSISTANT, content="A ring buffer uses..."),
+    ]
+    session = _ladder_session(turns)
+    assert detect_session_ladder_rungs(session) == set()
+
+
+def test_categorize_session_ladder_rung_prompt_only_default():
+    """A session with no signals lands in prompt_only."""
+    turns = [
+        Turn(role=Role.USER, content="explain X"),
+    ]
+    session = _ladder_session(turns)
+    assert categorize_session_ladder_rung(session) == "prompt_only"
+
+
+def test_categorize_session_ladder_rung_subagents_beats_skills():
+    """When multiple rungs fire, the highest-rung wins (subagents >
+    skills > hooks > tools_on > prompt_only)."""
+    turns = [
+        Turn(
+            role=Role.USER,
+            content="run my code-review.skill and spawn a subagent for tests",
+        ),
+    ]
+    session = _ladder_session(turns)
+    assert categorize_session_ladder_rung(session) == "subagents"
+
+
+def test_categorize_session_ladder_rung_hooks_beats_tools_on():
+    """Hooks rank higher than tools_on, so a session that exercises
+    both lands in hooks."""
+    turns = [
+        Turn(role=Role.USER, content="wire hooks/pre-tool-use to log"),
+        Turn(
+            role=Role.ASSISTANT,
+            content="Wiring...",
+            tool_calls=[{"name": "edit", "args": {}}],
+        ),
+    ]
+    session = _ladder_session(turns)
+    assert categorize_session_ladder_rung(session) == "hooks"
+
+
+def test_categorize_session_ladder_rung_returns_member_of_panel_order():
+    """The returned kind is always a member of LADDER_KINDS_IN_PANEL_ORDER."""
+    turns = [Turn(role=Role.USER, content="nothing special here")]
+    session = _ladder_session(turns)
+    assert categorize_session_ladder_rung(session) in LADDER_KINDS_IN_PANEL_ORDER
+
+
+def test_categorize_session_ladder_rung_empty_session():
+    """A session with zero turns is prompt_only (the default)."""
+    session = _ladder_session([])
+    assert categorize_session_ladder_rung(session) == "prompt_only"

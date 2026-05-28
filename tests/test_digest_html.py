@@ -1717,3 +1717,198 @@ def test_us041_panels_render_after_verification_calibration():
     ce_pos = out.find('id="context-engineering-depth"')
     kg_pos = out.find('id="knowledge-gap-distribution"')
     assert 0 <= vc_pos < sa_pos < ce_pos < kg_pos
+
+
+# =========================================================================
+# US-042: tool/agent ladder + refined cost-effectiveness panels (HTML)
+# =========================================================================
+
+
+def _ladder_html_panel():
+    from praxis.reports.panel_inputs import (
+        LadderRungRow,
+        ToolAgentLadderPanel,
+    )
+    return ToolAgentLadderPanel(
+        rows=(
+            LadderRungRow(kind="prompt_only", label="Prompt-only", session_count=2),
+            LadderRungRow(kind="tools_on", label="Tools-on", session_count=3),
+            LadderRungRow(kind="skills", label="Skills", session_count=1),
+            LadderRungRow(kind="hooks", label="Hooks", session_count=0),
+            LadderRungRow(kind="subagents", label="Subagents", session_count=0),
+        ),
+        max_rung_kind="skills",
+        max_rung_label="Skills",
+    )
+
+
+def _cost_effectiveness_html_panel():
+    from praxis.reports.panel_inputs import RefinedCostEffectivenessPanel
+    return RefinedCostEffectivenessPanel(
+        higher_tier_display="Claude Opus 4.7",
+        lower_tier_display="Claude Haiku 4.5",
+        spent_on_higher_tier_usd=12.34,
+        overspend_usd=10.50,
+        qualifying_session_count=2,
+        has_cost_data=True,
+    )
+
+
+def _us042_digest(
+    *,
+    ladder=None,
+    cost_effectiveness=None,
+):
+    from praxis.reports.panel_inputs import PanelInputs
+    return WeeklyDigest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        panel_inputs=PanelInputs(
+            tool_agent_ladder=ladder,
+            refined_cost_effectiveness=cost_effectiveness,
+        ),
+    )
+
+
+def test_tool_agent_ladder_section_always_present():
+    """The section anchor renders regardless of data state."""
+    out_empty = render(_digest())
+    assert 'id="tool-agent-ladder"' in out_empty
+    out_full = render(_us042_digest(ladder=_ladder_html_panel()))
+    assert 'id="tool-agent-ladder"' in out_full
+
+
+def test_tool_agent_ladder_renders_empty_state_placeholder():
+    """Empty panel surfaces the verbatim no-activity placeholder."""
+    out = render(_digest())
+    assert "No tool/agent usage observed this week." in out
+
+
+def test_tool_agent_ladder_renders_max_rung_headline():
+    """A populated panel surfaces 'Max rung this week: <Label>'."""
+    out = render(_us042_digest(ladder=_ladder_html_panel()))
+    start = out.find('id="tool-agent-ladder"')
+    end = out.find("</section>", start)
+    section = out[start:end]
+    assert "Max rung this week" in section
+    assert "Skills" in section
+
+
+def test_tool_agent_ladder_renders_per_rung_rows():
+    """All five rungs render with their counts (including zeros)."""
+    out = render(_us042_digest(ladder=_ladder_html_panel()))
+    start = out.find('id="tool-agent-ladder"')
+    end = out.find("</section>", start)
+    section = out[start:end]
+    assert "Prompt-only" in section
+    assert "Tools-on" in section
+    assert "Hooks" in section
+    assert "Subagents" in section
+    assert "2 sessions" in section
+    assert "3 sessions" in section
+    assert "1 session" in section
+    assert "0 sessions" in section
+
+
+def test_tool_agent_ladder_renders_citation():
+    """The Anthropic Skills/hooks/subagents + OpenAI harness citation
+    renders inline."""
+    out = render(_us042_digest(ladder=_ladder_html_panel()))
+    start = out.find('id="tool-agent-ladder"')
+    end = out.find("</section>", start)
+    section = out[start:end]
+    assert "Anthropic" in section
+    assert "OpenAI" in section
+
+
+def test_cost_effectiveness_section_always_present():
+    """The section anchor renders regardless of data state."""
+    out_empty = render(_digest())
+    assert 'id="refined-cost-effectiveness"' in out_empty
+    out_full = render(
+        _us042_digest(cost_effectiveness=_cost_effectiveness_html_panel())
+    )
+    assert 'id="refined-cost-effectiveness"' in out_full
+
+
+def test_cost_effectiveness_renders_no_cost_data_placeholder():
+    """US-042 AC: empty panel renders 'No cost data this week.' rather
+    than a misleading $0 overspend (which would falsely imply
+    optimality)."""
+    out = render(_digest())
+    start = out.find('id="refined-cost-effectiveness"')
+    end = out.find("</section>", start)
+    section = out[start:end]
+    assert "No cost data this week." in section
+    # The $0 overspend literal must NOT appear in the empty-state path.
+    assert "$0.00 overspend" not in section
+
+
+def test_cost_effectiveness_renders_canonical_sentence():
+    """US-042 AC: when overspend is positive the panel renders the
+    canonical sentence 'You spent $X on <higher> for tasks <lower>
+    could have done = $Y overspend'."""
+    out = render(
+        _us042_digest(cost_effectiveness=_cost_effectiveness_html_panel())
+    )
+    start = out.find('id="refined-cost-effectiveness"')
+    end = out.find("</section>", start)
+    section = out[start:end]
+    assert "$12.34" in section
+    assert "Claude Opus 4.7" in section
+    assert "Claude Haiku 4.5" in section
+    assert "$10.50 overspend" in section
+
+
+def test_cost_effectiveness_renders_clean_signal_when_no_overspend():
+    """When cost data is present but no qualifying overspend, the
+    panel surfaces a positive-signal sentence ('No tier-mismatch
+    overspend detected...') instead of the empty-state copy."""
+    from praxis.reports.panel_inputs import RefinedCostEffectivenessPanel
+    panel = RefinedCostEffectivenessPanel(has_cost_data=True)
+    out = render(_us042_digest(cost_effectiveness=panel))
+    start = out.find('id="refined-cost-effectiveness"')
+    end = out.find("</section>", start)
+    section = out[start:end]
+    assert "No tier-mismatch overspend" in section
+    assert "No cost data this week." not in section
+
+
+def test_us042_panels_self_containment_holds():
+    """US-061: the new panels must not introduce external links,
+    scripts, or images."""
+    out = render(
+        _us042_digest(
+            ladder=_ladder_html_panel(),
+            cost_effectiveness=_cost_effectiveness_html_panel(),
+        )
+    )
+    lower = out.lower()
+    assert "<link" not in lower
+    assert "<script" not in lower
+    assert "<img" not in lower
+    assert "http://" not in out
+    assert "https://" not in out
+    assert "@import" not in out
+    assert "url(" not in out
+
+
+def test_us042_panels_render_after_knowledge_gap():
+    """The two US-042 panels sit AFTER knowledge-gap distribution so
+    the document reads habit -> verify -> craft -> scaffolding ->
+    cost."""
+    from praxis.reports.panel_inputs import PanelInputs
+    digest = WeeklyDigest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        panel_inputs=PanelInputs(
+            knowledge_gap_distribution=_knowledge_gap_html_panel(),
+            tool_agent_ladder=_ladder_html_panel(),
+            refined_cost_effectiveness=_cost_effectiveness_html_panel(),
+        ),
+    )
+    out = render(digest)
+    kg_pos = out.find('id="knowledge-gap-distribution"')
+    tal_pos = out.find('id="tool-agent-ladder"')
+    rce_pos = out.find('id="refined-cost-effectiveness"')
+    assert 0 <= kg_pos < tal_pos < rce_pos

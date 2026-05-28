@@ -21,14 +21,18 @@ from praxis.behavior.repeat_task import (
 from praxis.behavior.signals import (
     KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER,
     KNOWLEDGE_GAP_LABELS,
+    LADDER_KINDS_IN_PANEL_ORDER,
+    LADDER_LABELS,
     SCAFFOLDING_KINDS_IN_PANEL_ORDER,
     SIGNAL_KINDS_IN_PANEL_ORDER,
+    categorize_session_ladder_rung,
     categorize_session_verification,
     count_session_knowledge_gaps,
     detect_scaffolding_kinds,
     detect_signal_kinds,
     detect_spec_block,
 )
+from praxis.models_advisor.advisor import compute_counterfactual_overspend
 from praxis.reports import digest_html as dh
 from praxis.reports import digest_terminal as dt
 from praxis.reports.panel_inputs import (
@@ -47,10 +51,13 @@ from praxis.reports.panel_inputs import (
     ContextEngineeringRow,
     KnowledgeGapDistributionPanel,
     KnowledgeGapRow,
+    LadderRungRow,
     PanelInputs,
+    RefinedCostEffectivenessPanel,
     RepeatTaskRadarPanel,
     RepeatTaskRow,
     SpecificationAdoptionPanel,
+    ToolAgentLadderPanel,
     VerificationCalibrationPanel,
     clip_excerpt,
 )
@@ -1031,6 +1038,88 @@ def _knowledge_gap_distribution_panel(
     return KnowledgeGapDistributionPanel(rows=rows)
 
 
+def _tool_agent_ladder_panel(summary) -> ToolAgentLadderPanel:
+    """Aggregate per-session ladder rungs across the week (US-042).
+
+    Walks each session, asks ``categorize_session_ladder_rung`` for the
+    highest rung the session reached (prompt-only -> tools-on -> skills
+    -> hooks -> subagents), accumulates per-rung session counts, and
+    tracks the highest rung any session reached this week. The renderer
+    surfaces the max rung as the headline plus a per-rung breakdown.
+
+    When the week has zero sessions, ``max_rung_kind`` stays ``None``
+    and the panel's ``has_activity`` flag flips False so the renderer
+    surfaces an empty-state placeholder instead of misleading zero rows.
+    """
+    counts: dict[str, int] = {k: 0 for k in LADDER_KINDS_IN_PANEL_ORDER}
+    max_rung_idx = -1
+    max_rung_kind: str | None = None
+    for s in getattr(summary, "sessions", None) or []:
+        try:
+            rung = categorize_session_ladder_rung(s)
+        except (AttributeError, TypeError):
+            # Defensive: a session with no turns attribute must not crash
+            # the panel build.
+            continue
+        if rung in counts:
+            counts[rung] += 1
+        else:
+            counts["prompt_only"] += 1
+            rung = "prompt_only"
+        idx = LADDER_KINDS_IN_PANEL_ORDER.index(rung)
+        if idx > max_rung_idx:
+            max_rung_idx = idx
+            max_rung_kind = rung
+    rows = tuple(
+        LadderRungRow(
+            kind=kind,
+            label=LADDER_LABELS[kind],
+            session_count=counts[kind],
+        )
+        for kind in LADDER_KINDS_IN_PANEL_ORDER
+    )
+    max_rung_label = (
+        LADDER_LABELS.get(max_rung_kind, "") if max_rung_kind else ""
+    )
+    return ToolAgentLadderPanel(
+        rows=rows,
+        max_rung_kind=max_rung_kind,
+        max_rung_label=max_rung_label,
+    )
+
+
+def _refined_cost_effectiveness_panel(
+    summary,
+) -> RefinedCostEffectivenessPanel:
+    """Apply the deterministic counterfactual rule to the week (US-042).
+
+    Delegates to ``compute_counterfactual_overspend`` (documented in
+    praxis/models_advisor/advisor.py) which:
+
+      - resolves each session's model_hint to a card,
+      - filters frontier-tier sessions with small workloads (<=3 user
+        turns AND <=200 avg prompt chars),
+      - computes (frontier_cost - fast_cost) per qualifying session,
+      - sums per (higher, lower) tier pair and returns the dominant
+        pair plus the totals.
+
+    The panel's ``has_cost_data`` mirrors the counterfactual rule's
+    ``had_any_priced_session`` so the renderer can distinguish "zero
+    overspend because nothing qualified" from "no priced sessions at
+    all this week" (US-042 AC).
+    """
+    sessions = list(getattr(summary, "sessions", None) or [])
+    result = compute_counterfactual_overspend(sessions)
+    return RefinedCostEffectivenessPanel(
+        higher_tier_display=result.higher_tier_display,
+        lower_tier_display=result.lower_tier_display,
+        spent_on_higher_tier_usd=result.spent_on_higher_tier_usd,
+        overspend_usd=result.overspend_usd,
+        qualifying_session_count=result.qualifying_session_count,
+        has_cost_data=result.had_any_priced_session,
+    )
+
+
 def build_panel_inputs(summary) -> PanelInputs:
     """Build the v0.3 expansion-panel inputs from a WeeklyRunSummary.
 
@@ -1040,8 +1129,8 @@ def build_panel_inputs(summary) -> PanelInputs:
     balance and the cadence panel; US-040 wires the repeat-task radar
     and the verification-calibration panel; US-041 wires the
     specification-adoption, context-engineering-depth, and
-    knowledge-gap distribution panels; subsequent stories extend the
-    returned ``PanelInputs`` with additional panels.
+    knowledge-gap distribution panels; US-042 wires the tool/agent
+    ladder and the refined cost-effectiveness panels.
     """
     return PanelInputs(
         behavioral_signals=_behavioral_patterns_panel(summary),
@@ -1052,6 +1141,8 @@ def build_panel_inputs(summary) -> PanelInputs:
         specification_adoption=_specification_adoption_panel(summary),
         context_engineering=_context_engineering_panel(summary),
         knowledge_gap_distribution=_knowledge_gap_distribution_panel(summary),
+        tool_agent_ladder=_tool_agent_ladder_panel(summary),
+        refined_cost_effectiveness=_refined_cost_effectiveness_panel(summary),
     )
 
 

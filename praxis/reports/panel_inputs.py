@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from praxis.behavior.signals import (
     KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER,
     KNOWLEDGE_GAP_LABELS,
+    LADDER_KINDS_IN_PANEL_ORDER,
+    LADDER_LABELS,
     SCAFFOLDING_KINDS_IN_PANEL_ORDER,
     SIGNAL_KINDS_IN_PANEL_ORDER,
 )
@@ -515,6 +517,107 @@ class KnowledgeGapDistributionPanel:
         return sum(row.count for row in self.rows)
 
 
+# US-042 anchors: tool/agent ladder and refined cost-effectiveness.
+# The ladder panel surfaces the user's max ladder rung (prompt-only ->
+# tools-on -> skills -> hooks -> subagents) across the week; the
+# cost-effectiveness panel applies the deterministic counterfactual
+# rule documented in praxis/models_advisor/advisor.py.
+TOOL_AGENT_LADDER_CITATION = (
+    "Anthropic Skills/hooks/subagents + OpenAI harness engineering"
+)
+
+COST_EFFECTIVENESS_CITATION = (
+    "Anthropic + OpenAI model card pricing"
+)
+
+
+@dataclass(frozen=True)
+class LadderRungRow:
+    """One row of the tool/agent ladder panel (US-042).
+
+    Carries the count of sessions that topped out at this rung during
+    the week. The renderer iterates ``LADDER_KINDS_IN_PANEL_ORDER`` so
+    the rows are always present in stable order, even when a particular
+    rung's count is zero.
+    """
+
+    kind: str
+    label: str
+    session_count: int
+
+
+@dataclass(frozen=True)
+class ToolAgentLadderPanel:
+    """Tool/agent ladder panel input (US-042).
+
+    ``rows`` is the list of rung counts in panel-display order;
+    ``max_rung_kind`` is the highest rung any session reached this
+    week (the renderer's headline value). When no sessions were
+    observed, ``max_rung_kind`` is ``None`` and ``has_activity`` is
+    False so the renderer surfaces an empty-state placeholder rather
+    than misleading zero counts.
+    """
+
+    rows: tuple[LadderRungRow, ...] = ()
+    max_rung_kind: str | None = None
+    max_rung_label: str = ""
+    citation: str = TOOL_AGENT_LADDER_CITATION
+
+    @property
+    def has_activity(self) -> bool:
+        """True when at least one session was observed this week."""
+        return self.max_rung_kind is not None
+
+    @property
+    def total_sessions(self) -> int:
+        """Sum of session counts across every rung this week."""
+        return sum(row.session_count for row in self.rows)
+
+
+@dataclass(frozen=True)
+class RefinedCostEffectivenessPanel:
+    """Refined cost-effectiveness panel input (US-042).
+
+    Carries the four fields the renderer reads to surface the
+    counterfactual: the dominant higher-tier model name, the
+    corresponding fast-tier sibling, the dollars spent on the higher
+    tier across qualifying sessions, and the deterministic overspend
+    figure.
+
+    ``has_cost_data`` is the gate the renderer uses to decide between
+    "$Y overspend" copy and the explicit "No cost data this week."
+    empty-state. Per US-042 AC, a $0 overspend WITH cost data is a real
+    "you optimized well" signal that the panel should surface; the
+    empty-state copy fires only when no priced session was observed
+    at all this week.
+    """
+
+    higher_tier_display: str = ""
+    lower_tier_display: str = ""
+    spent_on_higher_tier_usd: float = 0.0
+    overspend_usd: float = 0.0
+    qualifying_session_count: int = 0
+    has_cost_data: bool = False
+    citation: str = COST_EFFECTIVENESS_CITATION
+
+    @property
+    def has_overspend(self) -> bool:
+        """True when the panel can surface a non-trivial overspend.
+
+        Requires both a positive overspend dollar figure AND at least
+        one qualifying session. A $0 overspend with cost data is still
+        a positive signal (the user optimized well) and the renderer
+        surfaces a different sentence for that case; this property
+        gates the "you spent $X for tasks $Y could have done" copy
+        specifically.
+        """
+        return (
+            self.has_cost_data
+            and self.overspend_usd > 0.0
+            and self.qualifying_session_count > 0
+        )
+
+
 @dataclass(frozen=True)
 class PanelInputs:
     """Container for the v0.3 expansion-panel inputs (US-038..042).
@@ -534,6 +637,8 @@ class PanelInputs:
     specification_adoption: SpecificationAdoptionPanel | None = None
     context_engineering: ContextEngineeringDepthPanel | None = None
     knowledge_gap_distribution: KnowledgeGapDistributionPanel | None = None
+    tool_agent_ladder: ToolAgentLadderPanel | None = None
+    refined_cost_effectiveness: RefinedCostEffectivenessPanel | None = None
 
 
 __all__ = [
@@ -561,6 +666,10 @@ __all__ = [
     "SCAFFOLDING_LABELS",
     "KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER",
     "KNOWLEDGE_GAP_LABELS",
+    "LADDER_KINDS_IN_PANEL_ORDER",
+    "LADDER_LABELS",
+    "TOOL_AGENT_LADDER_CITATION",
+    "COST_EFFECTIVENESS_CITATION",
     "BehavioralPatternRow",
     "BehavioralPatternsPanel",
     "AugAutoBalancePanel",
@@ -573,6 +682,9 @@ __all__ = [
     "ContextEngineeringDepthPanel",
     "KnowledgeGapRow",
     "KnowledgeGapDistributionPanel",
+    "LadderRungRow",
+    "ToolAgentLadderPanel",
+    "RefinedCostEffectivenessPanel",
     "PanelInputs",
     "clip_excerpt",
 ]

@@ -66,8 +66,10 @@ from praxis.reports.panel_inputs import (
     ContextEngineeringDepthPanel,
     KnowledgeGapDistributionPanel,
     PanelInputs,
+    RefinedCostEffectivenessPanel,
     RepeatTaskRadarPanel,
     SpecificationAdoptionPanel,
+    ToolAgentLadderPanel,
     VerificationCalibrationPanel,
 )
 from praxis.storage.profile_store import resolve_home
@@ -1486,6 +1488,89 @@ def _knowledge_gap_distribution_section(
   </section>"""
 
 
+# US-042: empty-state copy for the tool/agent ladder + refined cost-
+# effectiveness panel. Tests assert verbatim so a copy change is one
+# audit point per renderer.
+_TOOL_AGENT_LADDER_NO_ACTIVITY = "No tool/agent usage observed this week."
+_COST_EFFECTIVENESS_NO_COST_DATA = "No cost data this week."
+
+
+def _tool_agent_ladder_section(panel: ToolAgentLadderPanel | None) -> str:
+    """Render the tool/agent ladder panel (US-042).
+
+    The eyebrow always renders so the document shape stays stable. The
+    body falls through two states: no activity -> placeholder copy;
+    activity -> max-rung headline plus per-rung counts plus citation.
+    """
+    if panel is None or not panel.has_activity:
+        return f"""
+  <section class="tal-section" id="tool-agent-ladder">
+    <div class="s-eyebrow">Tool / Agent Ladder</div>
+    <p class="placeholder">{_safe(_TOOL_AGENT_LADDER_NO_ACTIVITY)}</p>
+  </section>"""
+    rows: list[str] = []
+    for row in panel.rows:
+        session_word = "session" if row.session_count == 1 else "sessions"
+        rows.append(
+            f'<div class="tal-row">'
+            f'<span class="tal-label">{_safe(row.label)}</span>'
+            f'<span class="tal-value">{row.session_count} {session_word}</span>'
+            f'</div>'
+        )
+    return f"""
+  <section class="tal-section" id="tool-agent-ladder">
+    <div class="s-eyebrow">Tool / Agent Ladder</div>
+    <p class="tal-max">Max rung this week: <strong>{_safe(panel.max_rung_label)}</strong></p>
+    <div class="tal-list">{"".join(rows)}</div>
+    <p class="tal-citation">Source: {_safe(panel.citation)}</p>
+  </section>"""
+
+
+def _refined_cost_effectiveness_section(
+    panel: RefinedCostEffectivenessPanel | None,
+) -> str:
+    """Render the refined cost-effectiveness panel (US-042).
+
+    Three states:
+      1. ``panel`` is None or ``has_cost_data`` is False: emit the
+         "No cost data this week." copy. Per AC, $0 overspend must not
+         render in the absence of cost data because that would falsely
+         imply optimality.
+      2. Cost data present but no overspend: emit a positive-signal
+         sentence so the absence of waste is itself visible.
+      3. Cost data present AND overspend > 0: emit the canonical AC
+         sentence ("You spent $X on <higher-tier> for tasks
+         <lower-tier> could have done = $Y overspend").
+    """
+    if panel is None or not panel.has_cost_data:
+        return f"""
+  <section class="rce-section" id="refined-cost-effectiveness">
+    <div class="s-eyebrow">Cost-Effectiveness</div>
+    <p class="placeholder">{_safe(_COST_EFFECTIVENESS_NO_COST_DATA)}</p>
+  </section>"""
+    if not panel.has_overspend:
+        return f"""
+  <section class="rce-section" id="refined-cost-effectiveness">
+    <div class="s-eyebrow">Cost-Effectiveness</div>
+    <p class="rce-clean">No tier-mismatch overspend detected this week.</p>
+    <p class="rce-citation">Source: {_safe(panel.citation)}</p>
+  </section>"""
+    higher = _safe(panel.higher_tier_display)
+    lower = _safe(panel.lower_tier_display)
+    spent = f"${panel.spent_on_higher_tier_usd:.2f}"
+    overspend = f"${panel.overspend_usd:.2f}"
+    session_word = (
+        "session" if panel.qualifying_session_count == 1 else "sessions"
+    )
+    return f"""
+  <section class="rce-section" id="refined-cost-effectiveness">
+    <div class="s-eyebrow">Cost-Effectiveness</div>
+    <p class="rce-headline">You spent <strong>{spent}</strong> on {higher} for tasks {lower} could have done = <strong>{overspend} overspend</strong>.</p>
+    <p class="rce-meta">Across {panel.qualifying_session_count} qualifying {session_word}.</p>
+    <p class="rce-citation">Source: {_safe(panel.citation)}</p>
+  </section>"""
+
+
 def _verification_calibration_section(
     panel: VerificationCalibrationPanel | None,
 ) -> str:
@@ -1600,6 +1685,16 @@ def render(digest: WeeklyDigest) -> str:
         if digest.panel_inputs is not None
         else None
     )
+    ladder_panel = (
+        digest.panel_inputs.tool_agent_ladder
+        if digest.panel_inputs is not None
+        else None
+    )
+    cost_effectiveness_panel = (
+        digest.panel_inputs.refined_cost_effectiveness
+        if digest.panel_inputs is not None
+        else None
+    )
     data_block = (
         '<div class="data-block">'
         '<div class="data-block__rule"></div>'
@@ -1615,6 +1710,8 @@ def render(digest: WeeklyDigest) -> str:
         f'{_specification_adoption_section(specification_panel)}'
         f'{_context_engineering_section(context_engineering_panel)}'
         f'{_knowledge_gap_distribution_section(knowledge_gap_panel)}'
+        f'{_tool_agent_ladder_section(ladder_panel)}'
+        f'{_refined_cost_effectiveness_section(cost_effectiveness_panel)}'
         f'{_weekly_trajectory_section(digest.weekly_trajectory)}'
         '</div>'
     )
@@ -2850,6 +2947,92 @@ html, body {{
   letter-spacing: -0.01em;
 }}
 .kg-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-5);
+}}
+
+/* --- US-042 tool/agent ladder --------------------------------------- */
+.tal-section {{
+  margin-bottom: 96px;
+}}
+.tal-max {{
+  font-family: var(--serif);
+  font-size: 17px;
+  color: var(--ink);
+  margin-bottom: var(--space-5);
+}}
+.tal-max strong {{
+  color: var(--accent);
+  font-weight: 500;
+}}
+.tal-list {{
+  margin-bottom: var(--space-5);
+}}
+.tal-row {{
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: var(--space-4) 0;
+  border-top: 1px solid var(--rule);
+}}
+.tal-row:last-of-type {{
+  border-bottom: 1px solid var(--rule);
+}}
+.tal-label {{
+  font-family: var(--serif);
+  font-size: 15.5px;
+  color: var(--ink);
+}}
+.tal-value {{
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--ink-muted);
+  font-feature-settings: 'lnum';
+}}
+.tal-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-5);
+}}
+
+/* --- US-042 refined cost-effectiveness ------------------------------ */
+.rce-section {{
+  margin-bottom: 96px;
+}}
+.rce-headline {{
+  font-family: var(--serif);
+  font-size: 18px;
+  line-height: 1.55;
+  color: var(--ink);
+  margin-bottom: var(--space-4);
+  max-width: 560px;
+}}
+.rce-headline strong {{
+  color: var(--accent);
+  font-weight: 500;
+}}
+.rce-clean {{
+  font-family: var(--serif);
+  font-size: 17px;
+  color: var(--ink);
+  font-style: italic;
+  margin-bottom: var(--space-4);
+}}
+.rce-meta {{
+  font-family: var(--sans);
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  color: var(--ink-muted);
+  margin-bottom: var(--space-5);
+}}
+.rce-citation {{
   font-family: var(--sans);
   font-size: 10.5px;
   letter-spacing: 0.06em;

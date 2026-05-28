@@ -589,3 +589,134 @@ def count_session_knowledge_gaps(session: Session) -> dict[str, int]:
         for kind in detect_knowledge_gap_kinds(turn):
             counts[kind] += 1
     return counts
+
+
+# --------------------------------------------------------------------
+# US-042 tool/agent ladder signal.
+#
+# The ladder anchors against Anthropic's Skills/hooks/subagents harness
+# stack and OpenAI's harness-engineering writeups: as users move up the
+# ladder from prompt-only -> tools-on -> skills -> hooks -> subagents
+# they exercise progressively richer scaffolding. The panel surfaces the
+# MAX rung observed across the week's sessions so the reader sees the
+# ceiling of their current habit. Each session is bucketed by the
+# highest-rung kind any of its turns reached.
+#
+# Rung-order is intentional and lowest-to-highest. ``categorize_session_
+# ladder_rung`` walks user-turn content for the scaffolding markers
+# (skills / hooks / subagents) and assistant-turn ``tool_calls`` for the
+# tools-on signal, then returns the highest rung any turn reached. A
+# session whose only signal is the user typing prompts (no tool calls,
+# no scaffolding mention) lands in ``prompt_only``.
+
+LADDER_KINDS_IN_PANEL_ORDER: tuple[str, ...] = (
+    "prompt_only",
+    "tools_on",
+    "skills",
+    "hooks",
+    "subagents",
+)
+
+
+LADDER_LABELS: dict[str, str] = {
+    "prompt_only": "Prompt-only",
+    "tools_on": "Tools-on",
+    "skills": "Skills",
+    "hooks": "Hooks",
+    "subagents": "Subagents",
+}
+
+
+# Per-rung markers. Each pattern is anchored on text that names the
+# concept by its canonical artifact form: ``.skill`` files / ``skills/<name>``
+# paths for Skills, ``hooks/<name>`` paths or ``.hook`` for hooks,
+# ``subagent`` / ``sub-agent`` spellings for subagents. The patterns are
+# distinct from ``_SCAFFOLDING_PATTERNS["skills"]`` (which conflates the
+# three rungs into one bucket) because the ladder panel needs each rung
+# separate to compute the user's ceiling.
+_LADDER_SKILLS_MARKERS = re.compile(
+    r"(?:\.skill\b|"
+    r"\bagent skill\b|"
+    r"\bskills?/[A-Za-z0-9_\-]+|"
+    r"\banthropic skills?\b)",
+    re.IGNORECASE,
+)
+
+
+_LADDER_HOOKS_MARKERS = re.compile(
+    r"(?:\bhooks?/[A-Za-z0-9_\-]+|"
+    r"\.hook\b|"
+    r"\bpre[- ]?(?:tool[- ]?use|commit)\s+hook|"
+    r"\bpost[- ]?(?:tool[- ]?use|commit)\s+hook)",
+    re.IGNORECASE,
+)
+
+
+_LADDER_SUBAGENTS_MARKERS = re.compile(
+    r"\b(sub[- ]?agents?|subagent[- ]?type|spawn(?:ed)?\s+a?\s*subagent)\b",
+    re.IGNORECASE,
+)
+
+
+def _turn_has_tool_calls(turn: Turn) -> bool:
+    """True when an assistant turn carries one or more tool_calls.
+
+    Defensive: a turn whose ``tool_calls`` list is None or missing is
+    treated as no calls. Tool calls only ever attach to assistant turns
+    in the normalized model, so a user turn with tool_calls would be a
+    bug upstream; the function does not filter on role to keep the
+    detector cheap.
+    """
+    calls = getattr(turn, "tool_calls", None) or []
+    return bool(calls)
+
+
+def detect_session_ladder_rungs(session: Session) -> set[str]:
+    """Return the set of ladder-rung kinds observed in this session.
+
+    Walks every turn:
+      - Any assistant turn with ``tool_calls`` contributes ``tools_on``.
+      - Any user-turn content matching skills / hooks / subagents
+        markers contributes that respective kind.
+
+    ``prompt_only`` is the implicit default (returned by
+    ``categorize_session_ladder_rung`` when no other kind fires) and is
+    never returned here, mirroring the verification-calibration
+    detector's shape: an absence-marker cannot be observed per-turn.
+    """
+    kinds: set[str] = set()
+    for turn in session.turns:
+        if _turn_has_tool_calls(turn):
+            kinds.add("tools_on")
+        content = getattr(turn, "content", "") or ""
+        if not content:
+            continue
+        if _LADDER_SKILLS_MARKERS.search(content):
+            kinds.add("skills")
+        if _LADDER_HOOKS_MARKERS.search(content):
+            kinds.add("hooks")
+        if _LADDER_SUBAGENTS_MARKERS.search(content):
+            kinds.add("subagents")
+    return kinds
+
+
+def categorize_session_ladder_rung(session: Session) -> str:
+    """Return the highest-rung kind reached by this session.
+
+    Rung order (lowest to highest): prompt_only < tools_on < skills <
+    hooks < subagents. ``categorize_session_ladder_rung`` walks the
+    session once via ``detect_session_ladder_rungs`` and promotes the
+    session to the highest kind any turn reached. A session with no
+    detected signal lands in ``prompt_only`` (the user typed prompts;
+    the assistant produced text; no tools, no scaffolding).
+
+    Returns a member of ``LADDER_KINDS_IN_PANEL_ORDER``.
+    """
+    rungs = detect_session_ladder_rungs(session)
+    # Walk panel order from highest to lowest so the first match wins.
+    for kind in reversed(LADDER_KINDS_IN_PANEL_ORDER):
+        if kind == "prompt_only":
+            continue
+        if kind in rungs:
+            return kind
+    return "prompt_only"

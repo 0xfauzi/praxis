@@ -1043,3 +1043,244 @@ def test_build_panel_inputs_includes_us041_panels():
     assert pi.specification_adoption is not None
     assert pi.context_engineering is not None
     assert pi.knowledge_gap_distribution is not None
+
+
+# =========================================================================
+# US-042: tool/agent ladder + refined cost-effectiveness panels
+# =========================================================================
+
+
+from praxis.behavior.signals import (  # noqa: E402
+    LADDER_KINDS_IN_PANEL_ORDER,
+)
+from praxis.reports.adapter import (  # noqa: E402
+    _refined_cost_effectiveness_panel,
+    _tool_agent_ladder_panel,
+)
+from praxis.reports.panel_inputs import (  # noqa: E402
+    COST_EFFECTIVENESS_CITATION,
+    LADDER_LABELS,
+    TOOL_AGENT_LADDER_CITATION,
+    RefinedCostEffectivenessPanel,
+    ToolAgentLadderPanel,
+)
+
+
+def _ladder_session(
+    turns: list[Turn],
+    *,
+    session_id: str = "ladder-s",
+    model_hint: str | None = None,
+) -> Session:
+    """Real Session for the ladder + cost-effectiveness tests."""
+    return Session(
+        provider=Provider.CLAUDE,
+        session_id=session_id,
+        started_at=datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc),
+        turns=turns,
+        source_path="/tmp/test-ladder",
+        model_hint=model_hint,
+    )
+
+
+# --------- _tool_agent_ladder_panel: empty + populated ----------------
+
+
+def test_tool_agent_ladder_no_sessions_is_inactive():
+    """Zero sessions => has_activity is False; max_rung_kind is None
+    so the renderer falls through to the empty-state placeholder."""
+    panel = _tool_agent_ladder_panel(_FakeSummary())
+    assert isinstance(panel, ToolAgentLadderPanel)
+    assert panel.has_activity is False
+    assert panel.max_rung_kind is None
+    assert panel.max_rung_label == ""
+    assert panel.total_sessions == 0
+
+
+def test_tool_agent_ladder_rows_in_panel_order():
+    """The rows always appear in LADDER_KINDS_IN_PANEL_ORDER so the
+    renderer iterates a stable rung sequence."""
+    panel = _tool_agent_ladder_panel(_FakeSummary())
+    kinds = tuple(row.kind for row in panel.rows)
+    assert kinds == LADDER_KINDS_IN_PANEL_ORDER
+
+
+def test_tool_agent_ladder_max_rung_is_highest_observed():
+    """Across sessions, the panel surfaces the HIGHEST rung any session
+    reached - skills (high) > tools_on (medium) > prompt_only (low)."""
+    sessions = [
+        _ladder_session(
+            [Turn(role=Role.USER, content="explain caches")],
+            session_id="po",
+        ),
+        _ladder_session(
+            [
+                Turn(role=Role.USER, content="run a tool"),
+                Turn(
+                    role=Role.ASSISTANT,
+                    content="...",
+                    tool_calls=[{"name": "bash"}],
+                ),
+            ],
+            session_id="tools",
+        ),
+        _ladder_session(
+            [Turn(role=Role.USER, content="invoke my code-review.skill")],
+            session_id="skill",
+        ),
+    ]
+    panel = _tool_agent_ladder_panel(SimpleNamespace(sessions=sessions))
+    assert panel.max_rung_kind == "skills"
+    assert panel.max_rung_label == LADDER_LABELS["skills"]
+
+
+def test_tool_agent_ladder_counts_per_rung():
+    """A mixed week populates per-rung session counts."""
+    sessions = [
+        _ladder_session(
+            [Turn(role=Role.USER, content="explain X")],
+            session_id="po1",
+        ),
+        _ladder_session(
+            [Turn(role=Role.USER, content="explain Y")],
+            session_id="po2",
+        ),
+        _ladder_session(
+            [Turn(role=Role.USER, content="spawn a subagent for migration")],
+            session_id="sub",
+        ),
+    ]
+    panel = _tool_agent_ladder_panel(SimpleNamespace(sessions=sessions))
+    counts = {row.kind: row.session_count for row in panel.rows}
+    assert counts["prompt_only"] == 2
+    assert counts["subagents"] == 1
+
+
+def test_tool_agent_ladder_carries_citation():
+    """The panel surfaces the Anthropic Skills/hooks/subagents +
+    OpenAI harness-engineering citation."""
+    panel = _tool_agent_ladder_panel(_FakeSummary())
+    assert panel.citation == TOOL_AGENT_LADDER_CITATION
+    assert "Anthropic" in panel.citation
+    assert "OpenAI" in panel.citation
+
+
+def test_tool_agent_ladder_total_sessions_matches_input():
+    """total_sessions sums counts across every rung."""
+    sessions = [
+        _ladder_session(
+            [Turn(role=Role.USER, content="explain")],
+            session_id=f"s{i}",
+        )
+        for i in range(4)
+    ]
+    panel = _tool_agent_ladder_panel(SimpleNamespace(sessions=sessions))
+    assert panel.total_sessions == 4
+
+
+def test_tool_agent_ladder_panel_is_frozen():
+    """Immutability matches the other panel dataclasses."""
+    import dataclasses
+
+    panel = ToolAgentLadderPanel()
+    try:
+        panel.rows = ()  # type: ignore[misc]
+    except dataclasses.FrozenInstanceError:
+        return
+    raise AssertionError("ToolAgentLadderPanel must be frozen")
+
+
+# --------- _refined_cost_effectiveness_panel: empty + populated -------
+
+
+def test_refined_cost_effectiveness_no_sessions_has_no_cost_data():
+    """Zero sessions => has_cost_data is False so the renderer surfaces
+    the 'No cost data this week.' empty-state."""
+    panel = _refined_cost_effectiveness_panel(_FakeSummary())
+    assert isinstance(panel, RefinedCostEffectivenessPanel)
+    assert panel.has_cost_data is False
+    assert panel.has_overspend is False
+    assert panel.qualifying_session_count == 0
+    assert panel.overspend_usd == 0.0
+    assert panel.higher_tier_display == ""
+    assert panel.lower_tier_display == ""
+
+
+def test_refined_cost_effectiveness_priced_session_with_overspend(tmp_home):
+    """A short-prompt frontier session produces both has_cost_data and
+    has_overspend True; the higher/lower displays match the resolved
+    cards."""
+    sessions = [
+        _ladder_session(
+            [Turn(role=Role.USER, content="quick lookup")],
+            session_id="opus-short",
+            model_hint="claude-opus-4-7",
+        ),
+    ]
+    panel = _refined_cost_effectiveness_panel(SimpleNamespace(sessions=sessions))
+    assert panel.has_cost_data is True
+    assert panel.has_overspend is True
+    assert panel.qualifying_session_count == 1
+    assert panel.higher_tier_display == "Claude Opus 4.7"
+    assert panel.lower_tier_display == "Claude Haiku 4.5"
+
+
+def test_refined_cost_effectiveness_unknown_model_has_no_cost_data():
+    """A session whose model resolves to no card has no cost data."""
+    sessions = [
+        _ladder_session(
+            [Turn(role=Role.USER, content="hello")],
+            session_id="unk",
+            model_hint="totally-made-up-model",
+        ),
+    ]
+    panel = _refined_cost_effectiveness_panel(SimpleNamespace(sessions=sessions))
+    assert panel.has_cost_data is False
+    assert panel.has_overspend is False
+
+
+def test_refined_cost_effectiveness_long_prompt_no_overspend(tmp_home):
+    """A long-prompt Opus session has cost data but does NOT qualify
+    for overspend (large prompts are plausibly the right use of the
+    frontier tier)."""
+    long = "x" * 5000
+    sessions = [
+        _ladder_session(
+            [Turn(role=Role.USER, content=long)],
+            session_id="opus-long",
+            model_hint="claude-opus-4-7",
+        ),
+    ]
+    panel = _refined_cost_effectiveness_panel(SimpleNamespace(sessions=sessions))
+    assert panel.has_cost_data is True
+    assert panel.has_overspend is False
+    assert panel.qualifying_session_count == 0
+
+
+def test_refined_cost_effectiveness_carries_citation():
+    """The panel surfaces the model card pricing citation."""
+    panel = _refined_cost_effectiveness_panel(_FakeSummary())
+    assert panel.citation == COST_EFFECTIVENESS_CITATION
+
+
+def test_refined_cost_effectiveness_panel_is_frozen():
+    """Immutability matches the other panel dataclasses."""
+    import dataclasses
+
+    panel = RefinedCostEffectivenessPanel()
+    try:
+        panel.overspend_usd = 99.0  # type: ignore[misc]
+    except dataclasses.FrozenInstanceError:
+        return
+    raise AssertionError("RefinedCostEffectivenessPanel must be frozen")
+
+
+# ---------- build_panel_inputs wires every US-042 panel ----------------
+
+
+def test_build_panel_inputs_includes_us042_panels():
+    """The top-level adapter exposes the US-042 panels so a single
+    call produces every expansion-panel input."""
+    pi = build_panel_inputs(_FakeSummary(sessions=[]))
+    assert pi.tool_agent_ladder is not None
+    assert pi.refined_cost_effectiveness is not None
