@@ -207,9 +207,12 @@ def test_weekly_digests_table_columns_and_fk(tmp_home):
 
 
 def test_follow_ups_table_columns(tmp_home):
-    # Post-US-002 the table is rebuilt with `id INTEGER PRIMARY KEY
-    # AUTOINCREMENT` (so multiple commitments per week can coexist) and
-    # week_iso becomes a plain NOT NULL column.
+    """US-002 / US-022: follow_ups uses `id INTEGER PRIMARY KEY
+    AUTOINCREMENT` so multiple commitments per week can coexist;
+    week_iso is a plain NOT NULL TEXT column, with the partial-unique
+    index ``idx_follow_ups_one_active_per_week`` enforcing one active
+    pending commitment per week. The PK shift unblocks the replace-flow.
+    """
     ProfileStore(home=resolve_home())
     with _open_db() as conn:
         cols = _table_columns(conn, "follow_ups")
@@ -225,6 +228,10 @@ def test_follow_ups_table_columns(tmp_home):
     assert cols["measured_value"]["type"] == "REAL"
     assert cols["measured_value"]["notnull"] == 0
     assert cols["outcome"]["notnull"] == 1
+    assert cols["user_chosen"]["notnull"] == 1
+    assert cols["user_chosen"]["dflt_value"] == "0"
+    assert cols["display_text"]["notnull"] == 0
+    assert cols["superseded_by"]["notnull"] == 0
 
 
 def test_follow_ups_outcome_check_rejects_unknown_value(tmp_home):

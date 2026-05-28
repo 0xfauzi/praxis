@@ -17,7 +17,7 @@ CREATE TABLE follow_ups_v2 (
     target_metric TEXT NOT NULL,
     baseline_value REAL NOT NULL,
     measured_value REAL,
-    outcome TEXT NOT NULL CHECK (outcome IN ('improved','unchanged','worse','pending')),
+    outcome TEXT NOT NULL CHECK (outcome IN ('improved','unchanged','worse','pending','superseded')),
     user_chosen INTEGER NOT NULL DEFAULT 0,
     display_text TEXT,
     superseded_by INTEGER REFERENCES follow_ups(id)

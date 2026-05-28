@@ -782,6 +782,156 @@ def cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+def cmd_commit(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Render the commit prompt, read the user's selection, persist it.
+
+    Resolves the suggestion list from the latest persisted state:
+      - The current ISO week's headline_moment.suggested_alternative
+        (if a digest has run this week and it has a headline moment).
+      - The first canned drill from each of the two weakest dimensions
+        (sourced from praxis.scoring.coach.FALLBACK_DRILLS via the
+        latest weekly_digests snapshot).
+      - 'Keep last week's commitment', when a still-open prior
+        commitment exists (latest follow-up with ``outcome='pending'``).
+      - 'Write your own', always.
+
+    Mid-week replace (US-023): when an active pending commitment already
+    exists for the current ISO week, the handler short-circuits to the
+    [r]eplace / [k]eep / [c]ancel preamble before printing the suggestion
+    list. ``[k]eep`` and ``[c]ancel`` exit 0 without writing; ``[r]eplace``
+    falls through to the suggestion prompt and the eventual persist call
+    becomes :meth:`ProfileStore.supersede_and_insert_follow_up`, which
+    flips the prior row's ``outcome='superseded'`` + ``superseded_by`` to
+    the new row's id in a single transaction.
+
+    When stdin is a TTY (interactive shell), the handler additionally
+    reads the user's choice. ``'w'`` opens a validated single-line read
+    via :func:`prompt_free_text`; ``'1'``..``'N'`` / ``'k'`` pick a
+    pre-built suggestion. On any successful selection the handler writes
+    one ``follow_ups`` row via :meth:`ProfileStore.insert_follow_up` with
+    ``user_chosen=1``, ``outcome='pending'``, and the verbatim user-facing
+    string in ``display_text``.
+
+    Non-TTY invocations (pytest, piped scripts, cron) print the prompt
+    and exit 0 without attempting to read. Ctrl-C / Ctrl-D during the
+    interactive read also exit 0 cleanly without writing.
+
+    Exit codes:
+      0  prompt rendered (and selection handled when interactive).
+    """
+    import sqlite3
+
+    from praxis.cli.commit import (
+        build_commit_suggestions,
+        build_user_chosen_follow_up,
+        format_commit_prompt,
+        format_replace_keep_cancel_preamble,
+        load_commit_context,
+        prompt_free_text,
+        resolve_choice,
+        resolve_replace_choice,
+    )
+
+    week_iso = current_iso_week()
+    store = ProfileStore()
+
+    # Mid-week replace gate (US-023). Runs BEFORE the suggestion prompt so
+    # the user is never surprised by an IntegrityError from a stale active
+    # row. Falls through to the normal selection flow on [r]eplace.
+    active = store.active_follow_up_for_week(week_iso)
+    replace_prior_id: int | None = None
+    if active is not None:
+        existing_text = active.display_text or active.commitment_text
+        print(format_replace_keep_cancel_preamble(existing_text), end="")
+        if not sys.stdin.isatty():
+            # Non-interactive: print the preamble and exit 0. The user is
+            # explicitly informed there is an active commitment, but we
+            # don't try to read a choice from a non-TTY stdin.
+            return 0
+        try:
+            raw_replace_choice = input()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        decision = resolve_replace_choice(raw_replace_choice)
+        if decision in (None, "keep", "cancel"):
+            # Unknown input is treated as "do nothing" -- consistent with
+            # the suggestion-prompt's behavior for invalid choices.
+            return 0
+        # decision == "replace": find the prior row id so the transactional
+        # supersede has something to update, then fall through.
+        with sqlite3.connect(store.db_path) as conn:
+            row = conn.execute(
+                "SELECT id FROM follow_ups "
+                "WHERE week_iso = ? AND outcome = 'pending' "
+                "  AND superseded_by IS NULL "
+                "LIMIT 1",
+                (week_iso,),
+            ).fetchone()
+        if row is None:
+            # Active row vanished between the two reads (e.g. concurrent
+            # CLI run). Fall back to the plain insert path.
+            replace_prior_id = None
+        else:
+            replace_prior_id = int(row[0])
+
+    ctx = load_commit_context(store, week_iso=week_iso)
+    suggestions = build_commit_suggestions(ctx)
+    print(format_commit_prompt(suggestions), end="")
+
+    if not sys.stdin.isatty():
+        return 0
+
+    try:
+        raw_choice = input()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 0
+
+    chosen = resolve_choice(raw_choice, suggestions)
+    if chosen is None:
+        return 0
+
+    if chosen.kind == "free_text":
+        print("Write your own commitment for this week.")
+        try:
+            display_text = prompt_free_text()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+    else:
+        display_text = chosen.text
+
+    prior = store.latest_follow_up()
+    follow_up = build_user_chosen_follow_up(
+        week_iso=week_iso,
+        suggestion=chosen,
+        display_text=display_text,
+        prior=prior,
+    )
+    try:
+        if replace_prior_id is not None:
+            store.supersede_and_insert_follow_up(
+                prior_id=replace_prior_id, new_follow_up=follow_up
+            )
+        else:
+            store.insert_follow_up(follow_up)
+    except sqlite3.IntegrityError:
+        # Defensive: the partial-unique index fired despite the replace
+        # gate above (e.g. a concurrent write between our checks). Surface
+        # a friendly hint instead of a traceback.
+        print()
+        print(
+            f"You already have an active commitment for {week_iso}. "
+            "Re-run `praxis commit` to retry."
+        )
+        return 0
+
+    print(f'Your commitment for {week_iso}:')
+    print(f'  "{display_text}"')
+    return 0
+
+
 def cmd_follow_up(args: argparse.Namespace) -> int:  # noqa: ARG001
     """Print the most recent weekly commitment status.
 
@@ -1411,6 +1561,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     nudge.set_defaults(func=cmd_nudge)
+
+    cmt = sub.add_parser(
+        "commit",
+        help="Pick a coaching commitment for this ISO week.",
+        description=(
+            "Print the numbered commitment-suggestion prompt for the "
+            "current ISO week. Sources: this week's headline moment, "
+            "drills for the two weakest dimensions, an optional "
+            "'Keep last week' option when a still-open commitment "
+            "exists, and the 'Write your own' fallback."
+        ),
+    )
+    cmt.set_defaults(func=cmd_commit)
 
     mod = sub.add_parser("models",
                          help="List model cards or show one in detail.")
