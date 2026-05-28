@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from praxis import __version__
-from praxis.config import ensure_config_file
+from praxis.config import ReflectConfig, ensure_config_file, load_config
 from praxis.orchestrator import (
     NO_API_KEY_MESSAGE,
     InvalidWeekError,
@@ -839,6 +839,14 @@ _HOOK_TIMEOUT_SECONDS = 0.1
 _HOOK_PAYLOAD_MISSING_NOTE = "hook payload missing or unparseable"
 _HOOK_PAYLOAD_NO_SESSION_NOTE = "hook payload missing session_id"
 
+# US-026 (threshold gating). When the AI tool's Stop hook fires we
+# only escalate to an interactive prompt if the session was long enough
+# to be worth reflecting on; shorter sessions write a 'skip' row with
+# the corresponding note so opt-outs / nuisance sessions are still
+# counted in the digest panel.
+_TRANSCRIPT_MISSING_NOTE = "transcript missing"
+_SESSION_TOO_SHORT_NOTE = "session too short"
+
 _SELF_REPORT_BY_CHOICE: dict[str, SelfReport] = {
     "y": "yes",
     "yes": "yes",
@@ -958,6 +966,110 @@ def _extract_session_id(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _extract_transcript_path(payload: dict[str, Any]) -> Path | None:
+    """Return the transcript_path from a hook payload as a Path.
+
+    Claude Code's Stop hook posts ``transcript_path`` pointing at a
+    JSONL file on disk; Codex's Stop hook omits this field entirely.
+    Returns None when the field is absent, blank, or not a string so
+    callers can distinguish "no transcript was sent" (Codex shape) from
+    "transcript was sent but unreadable" (Claude shape, file missing).
+    """
+    raw = payload.get("transcript_path")
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    return Path(text)
+
+
+def _read_transcript_stats(transcript_path: Path) -> tuple[int, float] | None:
+    """Return ``(user_turns, elapsed_seconds)`` for a Claude Code transcript.
+
+    The transcript is the JSONL file Claude Code posts as
+    ``transcript_path`` in its Stop hook. Each line is one event; we
+    only care about two facts:
+
+      * how many ``type == "user"`` entries had non-empty content (the
+        "user turns" the AC counts), and
+      * the elapsed time between the earliest and latest ``timestamp``
+        on the file (any entry contributes its timestamp, not just user
+        turns -- the user can sit idle while the assistant works).
+
+    Returns ``None`` if the file can't be opened (the caller treats
+    this the same as 'transcript missing'). Malformed JSON lines are
+    skipped silently so a partially-written transcript doesn't blow up
+    the read; elapsed time falls back to 0.0 when there are no
+    timestamps. The parser is intentionally tolerant: this code path
+    runs under the Stop hook and we must never crash the AI tool.
+    """
+    user_turns = 0
+    first_ts: datetime | None = None
+    last_ts: datetime | None = None
+
+    try:
+        with transcript_path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    entry = json.loads(stripped)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+
+                if entry.get("type") == "user":
+                    message = entry.get("message") or {}
+                    content = message.get("content") if isinstance(message, dict) else None
+                    if _has_user_text(content):
+                        user_turns += 1
+
+                ts_raw = entry.get("timestamp")
+                if isinstance(ts_raw, str):
+                    try:
+                        ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                    except (TypeError, ValueError):
+                        ts = None
+                    if ts is not None:
+                        if first_ts is None or ts < first_ts:
+                            first_ts = ts
+                        if last_ts is None or ts > last_ts:
+                            last_ts = ts
+    except OSError:
+        return None
+
+    if first_ts is not None and last_ts is not None:
+        elapsed = (last_ts - first_ts).total_seconds()
+    else:
+        elapsed = 0.0
+    return (user_turns, elapsed)
+
+
+def _has_user_text(content: object) -> bool:
+    """Best-effort check that a Claude Code ``message.content`` has text.
+
+    Claude Code's content is either a plain string or a list of typed
+    blocks ({type: "text", text: ...} et al.). We count the turn as a
+    real user turn only if at least one text block has non-whitespace
+    characters -- empty 'system' frames (tool_use_result with no text)
+    shouldn't bump the user-turn count.
+    """
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str) and text.strip():
+                    return True
+    return False
+
+
 def cmd_reflect(args: argparse.Namespace) -> int:
     """Reflect on this week's active commitment.
 
@@ -1002,11 +1114,17 @@ def _cmd_reflect_session_end(stdin: Any) -> int:
     Never blocks the AI tool: every code path exits 0. When the payload
     is missing, malformed, or has no session_id, a skip row is still
     written with a descriptive note so opt-outs / hook failures are
-    counted in the digest panel. The happy path (valid payload with
-    session_id) writes a placeholder skip row attributed to the real
-    session id; US-026 will swap the note to 'session too short' when
-    the transcript falls below the configured turn/elapsed thresholds,
-    and US-027 will replace this branch with a detached child that
+    counted in the digest panel. When the payload includes a
+    ``transcript_path`` (Claude Code shape), US-026 threshold gating
+    checks the transcript before falling through to the placeholder
+    happy path:
+
+      * file missing on disk -> skip + 'transcript missing'.
+      * user_turns < turns_min OR elapsed_seconds < elapsed_seconds_min
+        -> skip + 'session too short'.
+
+    Codex-shape payloads (no transcript_path) bypass the threshold
+    gate; US-027 will replace this branch with a detached child that
     opens /dev/tty for the interactive prompt.
     """
     store = ProfileStore()
@@ -1044,9 +1162,23 @@ def _cmd_reflect_session_end(stdin: Any) -> int:
         )
         return 0
 
-    # Happy path: valid payload with a session_id. Write a placeholder
-    # skip row so the invocation is observable; US-026 / US-027 will
-    # rebuild this branch once threshold gating and TTY detection land.
+    transcript_path = _extract_transcript_path(payload)
+    if transcript_path is not None:
+        reflect_cfg = _load_reflect_config()
+        gate_note = _check_transcript_threshold(transcript_path, reflect_cfg)
+        if gate_note is not None:
+            store.insert_session_reflection(
+                session_stable_id=session_id,
+                follow_up_id=active.follow_up_id,
+                self_report="skip",
+                note=gate_note,
+            )
+            return 0
+
+    # Happy path: valid payload with a session_id (and, for Claude shape,
+    # a transcript that met the configured thresholds). Write a
+    # placeholder skip row so the invocation is observable; US-027 will
+    # rebuild this branch as a detached interactive child.
     store.insert_session_reflection(
         session_stable_id=session_id,
         follow_up_id=active.follow_up_id,
@@ -1054,6 +1186,45 @@ def _cmd_reflect_session_end(stdin: Any) -> int:
         note=None,
     )
     return 0
+
+
+def _load_reflect_config() -> ReflectConfig:
+    """Load the [reflect] section, falling back to defaults on errors.
+
+    A malformed ``~/.praxis/config.toml`` (invalid TOML, negative
+    threshold, etc.) MUST NOT crash the Stop hook -- the AI tool sees a
+    non-zero exit as a block signal. We swallow any load error and use
+    the documented defaults so the gate still applies sensibly.
+    """
+    try:
+        return load_config().reflect
+    except (OSError, ValueError, TypeError):
+        return ReflectConfig()
+
+
+def _check_transcript_threshold(
+    transcript_path: Path,
+    cfg: ReflectConfig,
+) -> str | None:
+    """Return the skip-note for a sub-threshold transcript, else None.
+
+    The two branches encode the AC for US-026:
+      * file missing on disk -> 'transcript missing'
+      * stats below either threshold -> 'session too short'
+      * meets both thresholds -> None (caller falls through to the
+        happy path)
+    """
+    if not transcript_path.is_file():
+        return _TRANSCRIPT_MISSING_NOTE
+    stats = _read_transcript_stats(transcript_path)
+    if stats is None:
+        # Unreadable transcript: treat as 'missing' so the user-facing
+        # note matches the AC's wording.
+        return _TRANSCRIPT_MISSING_NOTE
+    user_turns, elapsed_seconds = stats
+    if user_turns < cfg.turns_min or elapsed_seconds < cfg.elapsed_seconds_min:
+        return _SESSION_TOO_SHORT_NOTE
+    return None
 
 
 def _run_interactive_reflect(

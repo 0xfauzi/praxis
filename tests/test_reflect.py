@@ -18,6 +18,16 @@ US-025 acceptance criteria covered here:
     (we never silently drop a hook invocation when an active
     commitment exists).
 
+US-026 acceptance criteria covered here:
+  - `[reflect] turns_min` / `elapsed_seconds_min` come from
+    `~/.praxis/config.toml`, default to 2 / 60, and reject negative
+    integers at config-load time.
+  - A transcript that exists but falls below either threshold writes a
+    skip row with note='session too short' and exits 0.
+  - A transcript_path that does not exist on disk writes a skip row
+    with note='transcript missing' and exits 0 (no crash, no retry
+    loop).
+
 The tests drive the CLI through the argparse entry point
 (``praxis.cli.__main__.main``) so subparser registration is exercised
 end-to-end. Stdin is piped via ``monkeypatch.setattr(sys, "stdin",
@@ -31,6 +41,8 @@ from __future__ import annotations
 import io
 import json
 import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -38,15 +50,21 @@ from praxis.cli.__main__ import (
     _HOOK_PAYLOAD_MISSING_NOTE,
     _HOOK_PAYLOAD_NO_SESSION_NOTE,
     _REFLECT_NO_COMMITMENT_MSG,
+    _SESSION_TOO_SHORT_NOTE,
+    _TRANSCRIPT_MISSING_NOTE,
+    _check_transcript_threshold,
     _cmd_reflect_session_end,
     _extract_session_id,
+    _extract_transcript_path,
     _parse_hook_payload,
     _read_hook_payload,
     _read_optional_note,
     _read_self_report_choice,
+    _read_transcript_stats,
     _run_interactive_reflect,
     main,
 )
+from praxis.config import ReflectConfig, load_config
 from praxis.follow_up import FollowUp
 from praxis.storage.profile_store import (
     ActiveCommitment,
@@ -373,6 +391,57 @@ def _codex_payload(
     )
 
 
+def _write_claude_transcript(
+    path: Path,
+    *,
+    user_turns: int = 2,
+    elapsed_seconds: float = 60.0,
+    start: datetime | None = None,
+) -> Path:
+    """Write a Claude Code-shape transcript JSONL that meets given thresholds.
+
+    Generates ``user_turns`` ``type='user'`` entries plus one
+    ``type='assistant'`` entry whose timestamp is at ``start +
+    elapsed_seconds``, so the parsed (turns, elapsed) tuple equals the
+    requested pair. Mirrors the on-disk format Claude Code's Stop hook
+    posts via ``transcript_path``.
+    """
+    if start is None:
+        start = datetime(2026, 5, 28, 12, 0, 0, tzinfo=timezone.utc)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    for i in range(max(user_turns, 0)):
+        lines.append(
+            json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": start.isoformat().replace("+00:00", "Z"),
+                    "message": {
+                        "role": "user",
+                        "content": f"prompt {i + 1}",
+                    },
+                }
+            )
+        )
+    # Land a final assistant entry at start+elapsed_seconds so the
+    # max-min timestamp spread matches the requested elapsed.
+    end_ts = start + timedelta(seconds=elapsed_seconds)
+    lines.append(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": end_ts.isoformat().replace("+00:00", "Z"),
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "reply"}],
+                },
+            }
+        )
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
 # ---- _read_hook_payload / _parse_hook_payload / _extract_session_id ---
 
 
@@ -454,7 +523,19 @@ def test_session_end_claude_code_shape_inserts_row_with_session_id(tmp_home):
     store = ProfileStore()
     active = _seed_active(store, "2026-W22")
 
-    stdin = io.StringIO(_claude_code_payload(session_id="claude-abc-1"))
+    # US-026 threshold gate fires only when transcript_path points at a
+    # file. Write a transcript that comfortably meets both default
+    # thresholds (2 user turns + 60s elapsed) so the happy-path
+    # placeholder (note=None) is preserved for US-025 backward compat.
+    transcript = _write_claude_transcript(
+        tmp_home / "claude" / "transcript-abc.jsonl"
+    )
+    stdin = io.StringIO(
+        _claude_code_payload(
+            session_id="claude-abc-1",
+            transcript_path=str(transcript),
+        )
+    )
     code = _cmd_reflect_session_end(stdin)
 
     assert code == 0
@@ -574,8 +655,18 @@ def test_cli_reflect_session_end_dispatches_to_session_end_branch(
     monkeypatch.setattr(cli_main, "current_iso_week", lambda: "2026-W22")
     _seed_active(store, "2026-W22")
 
+    transcript = _write_claude_transcript(
+        tmp_home / "claude" / "transcript-hook-id-9.jsonl"
+    )
     monkeypatch.setattr(
-        sys, "stdin", io.StringIO(_claude_code_payload(session_id="hook-id-9"))
+        sys,
+        "stdin",
+        io.StringIO(
+            _claude_code_payload(
+                session_id="hook-id-9",
+                transcript_path=str(transcript),
+            )
+        ),
     )
     code = main(["reflect", "--session-end"])
 
@@ -613,3 +704,430 @@ def test_cli_reflect_session_end_exit_0_when_no_active_commitment(
     # hook payload from Claude Code expects silent success on the
     # parent process.
     assert _REFLECT_NO_COMMITMENT_MSG not in captured.out
+
+
+# ---- US-026: ReflectConfig validation ---------------------------------
+
+
+def test_reflect_config_defaults_match_spec():
+    """Defaults must match the documented AC: 2 turns, 60 elapsed."""
+    cfg = ReflectConfig()
+    assert cfg.turns_min == 2
+    assert cfg.elapsed_seconds_min == 60
+
+
+def test_reflect_config_accepts_zero():
+    """Zero is allowed (it disables the corresponding gate)."""
+    cfg = ReflectConfig(turns_min=0, elapsed_seconds_min=0)
+    assert cfg.turns_min == 0
+    assert cfg.elapsed_seconds_min == 0
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"turns_min": -1},
+        {"elapsed_seconds_min": -1},
+        {"turns_min": -2, "elapsed_seconds_min": -7},
+    ],
+)
+def test_reflect_config_rejects_negative_values(kwargs):
+    """AC: 'reject negative values at config-load time'."""
+    with pytest.raises(ValueError):
+        ReflectConfig(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"turns_min": 1.5},
+        {"elapsed_seconds_min": "60"},
+        {"turns_min": True},  # bool subclass of int must be rejected
+    ],
+)
+def test_reflect_config_rejects_non_integer_values(kwargs):
+    """AC: 'both have integer types'."""
+    with pytest.raises(ValueError):
+        ReflectConfig(**kwargs)
+
+
+def test_load_config_includes_reflect_section(tmp_home):
+    """The DEFAULT_CONFIG_TOML round-trips into a populated Config.reflect."""
+    cfg = load_config()
+    assert cfg.reflect.turns_min == 2
+    assert cfg.reflect.elapsed_seconds_min == 60
+
+
+def test_load_config_reads_user_overrides(tmp_home):
+    """A hand-edited [reflect] section is reflected in load_config."""
+    cfg_path = tmp_home / ".praxis" / "config.toml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(
+        "[reflect]\nturns_min = 5\nelapsed_seconds_min = 120\n",
+        encoding="utf-8",
+    )
+    cfg = load_config()
+    assert cfg.reflect.turns_min == 5
+    assert cfg.reflect.elapsed_seconds_min == 120
+
+
+def test_load_config_raises_on_negative_user_override(tmp_home):
+    """The 'reject at load time' guarantee must surface for hand-edits."""
+    cfg_path = tmp_home / ".praxis" / "config.toml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(
+        "[reflect]\nturns_min = -1\nelapsed_seconds_min = 60\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        load_config()
+
+
+# ---- US-026: transcript stats parsing ---------------------------------
+
+
+def test_read_transcript_stats_counts_user_turns_and_elapsed(tmp_home):
+    transcript = _write_claude_transcript(
+        tmp_home / "claude" / "stats.jsonl",
+        user_turns=3,
+        elapsed_seconds=180.0,
+    )
+    stats = _read_transcript_stats(transcript)
+    assert stats is not None
+    user_turns, elapsed = stats
+    assert user_turns == 3
+    assert elapsed == pytest.approx(180.0)
+
+
+def test_read_transcript_stats_returns_none_when_file_missing(tmp_home):
+    missing = tmp_home / "no-such-transcript.jsonl"
+    assert _read_transcript_stats(missing) is None
+
+
+def test_read_transcript_stats_skips_malformed_lines(tmp_home):
+    """Malformed JSON lines must not crash the parser."""
+    path = tmp_home / "claude" / "garbled.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    start = datetime(2026, 5, 28, 12, 0, 0, tzinfo=timezone.utc)
+    end = start + timedelta(seconds=90)
+    path.write_text(
+        "\n".join(
+            [
+                "{not json",
+                json.dumps(
+                    {
+                        "type": "user",
+                        "timestamp": start.isoformat().replace("+00:00", "Z"),
+                        "message": {"role": "user", "content": "hi"},
+                    }
+                ),
+                "",  # blank
+                json.dumps(
+                    {
+                        "type": "user",
+                        "timestamp": end.isoformat().replace("+00:00", "Z"),
+                        "message": {"role": "user", "content": "more"},
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stats = _read_transcript_stats(path)
+    assert stats is not None
+    user_turns, elapsed = stats
+    assert user_turns == 2
+    assert elapsed == pytest.approx(90.0)
+
+
+def test_read_transcript_stats_ignores_empty_user_content(tmp_home):
+    """A 'user' frame with empty content (e.g., tool_result wrapper)
+    must NOT count toward turns_min."""
+    path = tmp_home / "claude" / "empty.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime(2026, 5, 28, 12, 0, 0, tzinfo=timezone.utc)
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "user",
+                        "timestamp": ts.isoformat().replace("+00:00", "Z"),
+                        "message": {"role": "user", "content": ""},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "timestamp": ts.isoformat().replace("+00:00", "Z"),
+                        "message": {
+                            "role": "user",
+                            "content": [{"type": "tool_result", "content": "ok"}],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stats = _read_transcript_stats(path)
+    assert stats == (0, 0.0)
+
+
+# ---- US-026: _extract_transcript_path ---------------------------------
+
+
+def test_extract_transcript_path_returns_path_when_present():
+    payload = {"transcript_path": "/var/tmp/foo.jsonl"}
+    assert _extract_transcript_path(payload) == Path("/var/tmp/foo.jsonl")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"transcript_path": ""},
+        {"transcript_path": "   "},
+        {"transcript_path": None},
+        {"transcript_path": 42},
+        {"cwd": "/tmp"},  # Codex-shape minus transcript_path
+    ],
+)
+def test_extract_transcript_path_returns_none_when_absent_or_bad(payload):
+    assert _extract_transcript_path(payload) is None
+
+
+# ---- US-026: _check_transcript_threshold ------------------------------
+
+
+def test_check_threshold_returns_missing_when_file_absent(tmp_home):
+    note = _check_transcript_threshold(
+        tmp_home / "ghost.jsonl", ReflectConfig()
+    )
+    assert note == _TRANSCRIPT_MISSING_NOTE
+
+
+def test_check_threshold_returns_too_short_when_turns_below(tmp_home):
+    transcript = _write_claude_transcript(
+        tmp_home / "claude" / "short-turns.jsonl",
+        user_turns=1,        # below default 2
+        elapsed_seconds=600,
+    )
+    note = _check_transcript_threshold(transcript, ReflectConfig())
+    assert note == _SESSION_TOO_SHORT_NOTE
+
+
+def test_check_threshold_returns_too_short_when_elapsed_below(tmp_home):
+    transcript = _write_claude_transcript(
+        tmp_home / "claude" / "short-elapsed.jsonl",
+        user_turns=5,
+        elapsed_seconds=10,  # below default 60
+    )
+    note = _check_transcript_threshold(transcript, ReflectConfig())
+    assert note == _SESSION_TOO_SHORT_NOTE
+
+
+def test_check_threshold_returns_none_when_meets_both(tmp_home):
+    transcript = _write_claude_transcript(
+        tmp_home / "claude" / "ok.jsonl",
+        user_turns=2,
+        elapsed_seconds=60,
+    )
+    assert _check_transcript_threshold(transcript, ReflectConfig()) is None
+
+
+def test_check_threshold_zero_disables_gate(tmp_home):
+    """turns_min=0, elapsed_seconds_min=0 -> any non-empty transcript passes."""
+    transcript = _write_claude_transcript(
+        tmp_home / "claude" / "trivial.jsonl",
+        user_turns=0,
+        elapsed_seconds=0,
+    )
+    cfg = ReflectConfig(turns_min=0, elapsed_seconds_min=0)
+    assert _check_transcript_threshold(transcript, cfg) is None
+
+
+# ---- US-026: --session-end end-to-end via _cmd_reflect_session_end ---
+
+
+def test_session_end_transcript_missing_writes_transcript_missing_note(tmp_home):
+    """AC: transcript_path absent on disk -> 'transcript missing' skip."""
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+
+    stdin = io.StringIO(
+        _claude_code_payload(
+            session_id="claude-missing-tx",
+            transcript_path=str(tmp_home / "no-such-transcript.jsonl"),
+        )
+    )
+    code = _cmd_reflect_session_end(stdin)
+
+    assert code == 0
+    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
+    assert len(rows) == 1
+    assert rows[0]["self_report"] == "skip"
+    assert rows[0]["note"] == _TRANSCRIPT_MISSING_NOTE
+    # The session_id is still attributed even when the transcript was
+    # missing; the row is observable in the digest panel.
+    assert rows[0]["session_stable_id"] == "claude-missing-tx"
+
+
+def test_session_end_short_session_under_turns_writes_too_short(tmp_home):
+    """AC: < turns_min user turns -> 'session too short' skip."""
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+    transcript = _write_claude_transcript(
+        tmp_home / "claude" / "too-few-turns.jsonl",
+        user_turns=1,        # below default 2
+        elapsed_seconds=600,
+    )
+
+    stdin = io.StringIO(
+        _claude_code_payload(
+            session_id="claude-short-turns",
+            transcript_path=str(transcript),
+        )
+    )
+    code = _cmd_reflect_session_end(stdin)
+
+    assert code == 0
+    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
+    assert len(rows) == 1
+    assert rows[0]["self_report"] == "skip"
+    assert rows[0]["note"] == _SESSION_TOO_SHORT_NOTE
+    assert rows[0]["session_stable_id"] == "claude-short-turns"
+
+
+def test_session_end_short_session_under_elapsed_writes_too_short(tmp_home):
+    """AC: < elapsed_seconds_min -> 'session too short' skip."""
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+    transcript = _write_claude_transcript(
+        tmp_home / "claude" / "too-fast.jsonl",
+        user_turns=5,
+        elapsed_seconds=10,  # below default 60
+    )
+
+    stdin = io.StringIO(
+        _claude_code_payload(
+            session_id="claude-short-elapsed",
+            transcript_path=str(transcript),
+        )
+    )
+    code = _cmd_reflect_session_end(stdin)
+
+    assert code == 0
+    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
+    assert len(rows) == 1
+    assert rows[0]["self_report"] == "skip"
+    assert rows[0]["note"] == _SESSION_TOO_SHORT_NOTE
+
+
+def test_session_end_long_session_falls_through_to_happy_path(tmp_home):
+    """A transcript that meets both thresholds writes the placeholder
+    happy-path skip row (note=None) -- US-027 will replace this with
+    a detached child."""
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+    transcript = _write_claude_transcript(
+        tmp_home / "claude" / "ample.jsonl",
+        user_turns=4,
+        elapsed_seconds=300,
+    )
+
+    stdin = io.StringIO(
+        _claude_code_payload(
+            session_id="claude-ample",
+            transcript_path=str(transcript),
+        )
+    )
+    code = _cmd_reflect_session_end(stdin)
+
+    assert code == 0
+    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
+    assert len(rows) == 1
+    assert rows[0]["self_report"] == "skip"
+    assert rows[0]["note"] is None
+
+
+def test_session_end_threshold_respects_user_overrides(tmp_home):
+    """A user-tuned ``[reflect]`` section gates differently than defaults."""
+    cfg_path = tmp_home / ".praxis" / "config.toml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(
+        "[reflect]\nturns_min = 0\nelapsed_seconds_min = 5\n",
+        encoding="utf-8",
+    )
+
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+    # This transcript would FAIL default thresholds (1 turn, 30s
+    # elapsed -> under 2 turns) but PASSES the user's 0/5 override.
+    transcript = _write_claude_transcript(
+        tmp_home / "claude" / "user-override.jsonl",
+        user_turns=1,
+        elapsed_seconds=30,
+    )
+
+    stdin = io.StringIO(
+        _claude_code_payload(
+            session_id="claude-user-override",
+            transcript_path=str(transcript),
+        )
+    )
+    code = _cmd_reflect_session_end(stdin)
+
+    assert code == 0
+    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
+    assert len(rows) == 1
+    assert rows[0]["note"] is None
+
+
+def test_session_end_codex_shape_skips_threshold_gate(tmp_home):
+    """Codex payloads omit transcript_path, so threshold gating must
+    not apply -- otherwise every Codex session would be 'transcript
+    missing'."""
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+
+    stdin = io.StringIO(_codex_payload(session_id="codex-no-gate"))
+    code = _cmd_reflect_session_end(stdin)
+
+    assert code == 0
+    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
+    assert len(rows) == 1
+    assert rows[0]["self_report"] == "skip"
+    assert rows[0]["note"] is None
+    assert rows[0]["session_stable_id"] == "codex-no-gate"
+
+
+def test_session_end_threshold_never_crashes_on_malformed_config(tmp_home):
+    """Defense in depth: a corrupt config.toml must NOT break the Stop
+    hook. The loader falls back to defaults so the gate still applies."""
+    cfg_path = tmp_home / ".praxis" / "config.toml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text("[reflect\nturns_min = ???", encoding="utf-8")
+
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+    transcript = _write_claude_transcript(
+        tmp_home / "claude" / "resilient.jsonl",
+        user_turns=2,
+        elapsed_seconds=60,
+    )
+
+    stdin = io.StringIO(
+        _claude_code_payload(
+            session_id="claude-resilient",
+            transcript_path=str(transcript),
+        )
+    )
+    code = _cmd_reflect_session_end(stdin)
+
+    assert code == 0
+    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
+    assert len(rows) == 1
+    assert rows[0]["note"] is None

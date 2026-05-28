@@ -107,6 +107,7 @@ def test_default_config_string_parses_as_valid_toml():
         "judge",
         "notification",
         "privacy",
+        "reflect",
     }
 
 

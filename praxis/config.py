@@ -58,6 +58,15 @@ style = "banner"
 
 [privacy]
 redact_secrets = true    # MUST default true (Section 4.4)
+
+[reflect]
+# Threshold gates for `praxis reflect --session-end` (US-026). When the
+# AI tool's Stop hook fires, we only prompt the user if the session had
+# at least `turns_min` user turns AND lasted at least
+# `elapsed_seconds_min`; shorter sessions write a 'skip' reflection row
+# so opt-outs / nuisance sessions are still counted in the digest panel.
+turns_min = 2
+elapsed_seconds_min = 60
 """
 
 
@@ -124,12 +133,52 @@ class PrivacyConfig:
 
 
 @dataclass(frozen=True)
+class ReflectConfig:
+    """Threshold gates for ``praxis reflect --session-end`` (US-026).
+
+    Both values are integers in seconds / turn count and must be
+    non-negative. The loader rejects negative values at load time so a
+    typo in ``config.toml`` surfaces immediately rather than silently
+    producing surprising threshold behavior. Zero is allowed (it
+    effectively disables the corresponding gate).
+    """
+
+    turns_min: int = 2
+    elapsed_seconds_min: int = 60
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.turns_min, int) or isinstance(self.turns_min, bool):
+            raise ValueError(
+                "[reflect] turns_min must be a non-negative integer; "
+                f"got {self.turns_min!r}"
+            )
+        if not isinstance(self.elapsed_seconds_min, int) or isinstance(
+            self.elapsed_seconds_min, bool
+        ):
+            raise ValueError(
+                "[reflect] elapsed_seconds_min must be a non-negative integer; "
+                f"got {self.elapsed_seconds_min!r}"
+            )
+        if self.turns_min < 0:
+            raise ValueError(
+                "[reflect] turns_min must be >= 0; "
+                f"got {self.turns_min}"
+            )
+        if self.elapsed_seconds_min < 0:
+            raise ValueError(
+                "[reflect] elapsed_seconds_min must be >= 0; "
+                f"got {self.elapsed_seconds_min}"
+            )
+
+
+@dataclass(frozen=True)
 class Config:
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     scan: ScanConfig = field(default_factory=ScanConfig)
     judge: JudgeConfig = field(default_factory=JudgeConfig)
     notification: NotificationConfig = field(default_factory=NotificationConfig)
     privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
+    reflect: ReflectConfig = field(default_factory=ReflectConfig)
 
 
 def _section(cls: type, data: Any) -> Any:
@@ -163,4 +212,5 @@ def load_config(home: Path | None = None) -> Config:
         judge=_section(JudgeConfig, raw.get("judge")),
         notification=_section(NotificationConfig, raw.get("notification")),
         privacy=_section(PrivacyConfig, raw.get("privacy")),
+        reflect=_section(ReflectConfig, raw.get("reflect")),
     )
