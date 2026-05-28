@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Goal: refactor the storage layer to use SQLite WAL mode.\n\nConstraints: keep the existing API."},
+  {"role": "assistant", "content": "Plan: enable WAL via pragma..."}
+]

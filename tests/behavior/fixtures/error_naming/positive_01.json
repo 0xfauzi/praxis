@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "I'm getting a TypeError: 'NoneType' object is not subscriptable on line 42 of parser.py. Here is the traceback (most recent call last). Any idea what is missing?"},
+  {"role": "assistant", "content": "Likely a missing None check..."}
+]

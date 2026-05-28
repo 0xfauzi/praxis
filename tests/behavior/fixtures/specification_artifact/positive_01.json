@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Goal: migrate the auth service to JWT.\n\nConstraints:\n- Keep /login and /logout signatures.\n- All existing tests must still pass.\n\nAcceptance criteria:\n- 401 on expired tokens\n- /login returns a valid JWT\n\nWalk me through the plan before changing any code."},
+  {"role": "assistant", "content": "Here is the plan..."}
+]

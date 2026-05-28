@@ -1,0 +1,5 @@
+[
+  {"role": "user", "content": "explain how list comprehensions work in python"},
+  {"role": "assistant", "content": "They are a concise way to build lists from iterables..."},
+  {"role": "user", "content": "got it, thanks"}
+]

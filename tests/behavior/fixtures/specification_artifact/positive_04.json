@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "The CLI must exit with code 2 and print a clear message when no API key is configured. It should not crash with a traceback in that case. Please add a test that covers the OPENAI_API_KEY=unset path."},
+  {"role": "assistant", "content": "On it."}
+]

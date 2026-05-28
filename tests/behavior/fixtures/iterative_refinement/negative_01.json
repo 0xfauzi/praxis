@@ -1,0 +1,5 @@
+[
+  {"role": "user", "content": "Write me a python function to parse json."},
+  {"role": "assistant", "content": "Here it is..."},
+  {"role": "user", "content": "Thanks."}
+]

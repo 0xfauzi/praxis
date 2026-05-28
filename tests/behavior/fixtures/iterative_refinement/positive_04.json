@@ -1,0 +1,5 @@
+[
+  {"role": "user", "content": "Add a /healthz endpoint."},
+  {"role": "assistant", "content": "Added."},
+  {"role": "user", "content": "Can you also gate it behind a feature flag and refine the response to include the build SHA?"}
+]

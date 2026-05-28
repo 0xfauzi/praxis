@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "The test is failing with KeyError: 'session_id' coming from orchestrator.py:128. The error message says the dict was loaded from disk but the key is missing."},
+  {"role": "assistant", "content": "Sounds like a schema drift..."}
+]

@@ -1,0 +1,5 @@
+[
+  {"role": "user", "content": "Why does this approach work? Explain the security trade-off."},
+  {"role": "assistant", "content": "RS256 is asymmetric..."},
+  {"role": "user", "content": "So basically a shared secret would also work for a single service?"}
+]
