@@ -378,6 +378,128 @@ def test_distinct_outcomes_for_same_week_do_not_conflict(tmp_home):
     assert count == 2
 
 
+def test_cold_open_of_v0_2_db_with_legacy_follow_ups_upgrades_cleanly(tmp_home):
+    """A user with a real v0.2 profile.db -- follow_ups keyed by week_iso
+    with no user_chosen / display_text / superseded_by, plus session_scores
+    / moments / weekly_digests / run_log / tasks already on the v3 marker --
+    must upgrade to the v4 shape on the FIRST ProfileStore construction
+    without hitting "no such column: superseded_by" from the partial-unique
+    index. Regression for the PR #2 review's blocker: SCHEMA's index inline
+    referenced superseded_by, which didn't exist on the legacy table yet
+    because CREATE TABLE IF NOT EXISTS is a no-op on the existing one.
+    """
+    home = tmp_home / ".praxis"
+    home.mkdir(parents=True, exist_ok=True)
+    db_path = home / "profile.db"
+
+    conn = sqlite3.connect(db_path)
+    try:
+        # v3 marker: present on every v0.2 DB
+        conn.executescript(
+            """
+            CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+            INSERT INTO schema_version VALUES (3);
+
+            CREATE TABLE session_scores (
+              stable_id TEXT NOT NULL, provider TEXT NOT NULL,
+              started_at TEXT NOT NULL, scored_at TEXT NOT NULL,
+              overall REAL NOT NULL,
+              dimension_scores_json TEXT NOT NULL, judge_result_json TEXT,
+              features_json TEXT NOT NULL, source_path TEXT NOT NULL,
+              judge_model TEXT,
+              judge_pass INTEGER NOT NULL DEFAULT 1,
+              PRIMARY KEY (stable_id, judge_pass)
+            );
+
+            CREATE TABLE moments (
+              moment_id TEXT PRIMARY KEY, session_stable_id TEXT NOT NULL,
+              dim_key TEXT NOT NULL, turn_index INTEGER NOT NULL,
+              quoted_excerpt TEXT NOT NULL, why_it_lost_score TEXT NOT NULL,
+              suggested_alternative TEXT NOT NULL,
+              dollar_impact_estimate REAL, minutes_impact_estimate INTEGER,
+              severity TEXT NOT NULL CHECK (severity IN ('minor','moderate','major')),
+              created_at TEXT NOT NULL, redacted INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE tasks (
+              task_id TEXT PRIMARY KEY, label TEXT NOT NULL, task_type TEXT NOT NULL,
+              project_hint TEXT, started_at TEXT NOT NULL, ended_at TEXT NOT NULL,
+              session_count INTEGER NOT NULL, total_cost_estimate_usd REAL,
+              label_source TEXT NOT NULL CHECK (label_source IN ('llm','fallback'))
+            );
+
+            CREATE TABLE task_members (
+              task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+              session_stable_id TEXT NOT NULL,
+              PRIMARY KEY (task_id, session_stable_id)
+            );
+
+            CREATE TABLE weekly_digests (
+              week_iso TEXT PRIMARY KEY, generated_at TEXT NOT NULL,
+              trajectory_label TEXT NOT NULL, trajectory_headline TEXT NOT NULL,
+              headline_moment_id TEXT REFERENCES moments(moment_id),
+              cost_total_usd REAL, cost_baseline_usd REAL, snapshot_json TEXT NOT NULL,
+              html_path TEXT
+            );
+
+            -- v0.2 follow_ups: PK on week_iso, no v4 columns.
+            CREATE TABLE follow_ups (
+              week_iso TEXT PRIMARY KEY, dim_key TEXT NOT NULL,
+              commitment_text TEXT NOT NULL, target_metric TEXT NOT NULL,
+              baseline_value REAL NOT NULL, measured_value REAL,
+              outcome TEXT NOT NULL
+                CHECK (outcome IN ('improved','unchanged','worse','pending'))
+            );
+
+            CREATE TABLE run_log (
+              run_id INTEGER PRIMARY KEY AUTOINCREMENT, run_at TEXT NOT NULL,
+              kind TEXT NOT NULL, sessions_seen INTEGER NOT NULL,
+              sessions_new INTEGER NOT NULL, notes TEXT
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO follow_ups VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("2026-W20", "verification", "old commitment",
+             "verification_rate", 0.42, None, "pending"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # First open must NOT raise; tables and partial index must end up at v4.
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        cols = {r["name"] for r in conn.execute(
+            "PRAGMA table_info(follow_ups)"
+        ).fetchall()}
+        indexes = {r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='index' AND tbl_name='follow_ups'"
+        ).fetchall()}
+        seeded = conn.execute(
+            "SELECT week_iso, dim_key, commitment_text, target_metric, "
+            "baseline_value, measured_value, outcome, "
+            "user_chosen, display_text, superseded_by "
+            "FROM follow_ups WHERE week_iso = ?",
+            ("2026-W20",),
+        ).fetchone()
+
+    # v4 columns added by _ensure_follow_ups_v4 / migration 001
+    assert {"id", "week_iso", "user_chosen", "display_text",
+            "superseded_by"} <= cols, f"missing v4 cols, got {cols}"
+    # Partial-unique index must exist (this is what the SCHEMA inline
+    # version crashed on against the legacy table).
+    assert "idx_follow_ups_one_active_per_week" in indexes
+    # Legacy row preserved with new columns defaulted.
+    assert seeded is not None
+    assert seeded["dim_key"] == "verification"
+    assert seeded["commitment_text"] == "old commitment"
+    assert seeded["user_chosen"] == 0
+    assert seeded["display_text"] is None
+    assert seeded["superseded_by"] is None
+
+
 def test_existing_follow_ups_rows_preserved_through_migration(tmp_home):
     """A v0.2 follow_ups row written before US-002 should survive the rebuild
     with its values intact and the three new columns defaulted."""

@@ -181,9 +181,13 @@ CREATE TABLE IF NOT EXISTS follow_ups (
     superseded_by INTEGER REFERENCES follow_ups(id)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_follow_ups_one_active_per_week
-    ON follow_ups(week_iso)
-    WHERE outcome = 'pending' AND superseded_by IS NULL;
+-- The partial-unique index idx_follow_ups_one_active_per_week is created
+-- by _ensure_follow_ups_v4(), not here, because a user upgrading from
+-- v0.2 (where follow_ups exists with the legacy `week_iso PRIMARY KEY`
+-- shape and no superseded_by column) needs the column added before the
+-- index references it. CREATE TABLE IF NOT EXISTS above is a no-op on
+-- existing tables, so referencing superseded_by inline would crash with
+-- "no such column" and bounce the user to a restore-from-backup.
 
 CREATE TABLE IF NOT EXISTS session_reflections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -264,6 +268,16 @@ class ProfileStore:
         cur = conn.execute("PRAGMA table_info(follow_ups)")
         existing_cols = {row[1] for row in cur.fetchall()}
         if "user_chosen" in existing_cols:
+            # Already at v4. Make sure the partial-unique index exists too --
+            # SCHEMA cannot create it inline because that would break the
+            # v0.2 -> v3 upgrade path (the index references superseded_by,
+            # which only exists after this method runs the first time).
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "idx_follow_ups_one_active_per_week "
+                "ON follow_ups(week_iso) "
+                "WHERE outcome = 'pending' AND superseded_by IS NULL"
+            )
             return
         conn.executescript(
             """
