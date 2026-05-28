@@ -1936,7 +1936,6 @@ def test_uninstall_copilot_user_level_removes_settings_entry(
     install_copilot_user_level()
     user_dir = _darwin_user_dir(tmp_home)
     settings_path = user_dir / "settings.json"
-    prompts_dir = user_dir / "prompts"
 
     uninstall_copilot_user_level()
 
