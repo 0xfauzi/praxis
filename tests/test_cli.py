@@ -246,6 +246,25 @@ def test_review_subcommand_is_registered():
     assert args.write_html is True
 
 
+def test_review_max_new_flag_is_registered():
+    """Issue #5: ``--max-new`` exists on the review parser with default 50.
+
+    Mirrors the same cap that ``praxis scan`` has had since v0.2; without
+    it, ``praxis review`` could silently kick off N x LLM calls on a
+    busy week.
+    """
+    parser = build_parser()
+    args = parser.parse_args(["review"])
+    assert args.max_new == 50
+
+    args = parser.parse_args(["review", "--max-new", "10"])
+    assert args.max_new == 10
+
+    # 0 is the documented opt-out for the cap.
+    args = parser.parse_args(["review", "--max-new", "0"])
+    assert args.max_new == 0
+
+
 def test_week_subcommand_is_removed():
     """`praxis week` must no longer be a registered subparser (US-033).
 

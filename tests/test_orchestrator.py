@@ -164,11 +164,11 @@ def test_run_weekly_step_inputs_match_documented_upstream(tmp_home, step_recorde
     assert len(by_name["cluster"]["args"]) == 1
     assert by_name["cluster"]["kwargs"] == {}
 
-    # pass1: sessions (scan), tasks (cluster). The only kwarg is the
-    # CLI-level frontier_only switch (spec §9.6), which is a static
-    # mode flag, not data flowing back from a later step.
+    # pass1: sessions (scan), tasks (cluster). The kwargs are CLI-level
+    # mode flags (frontier_only per spec 9.6, max_new per issue #5),
+    # not data flowing back from a later step.
     assert len(by_name["pass1"]["args"]) == 2
-    assert set(by_name["pass1"]["kwargs"].keys()) <= {"frontier_only"}
+    assert set(by_name["pass1"]["kwargs"].keys()) <= {"frontier_only", "max_new"}
 
     # pass2: sessions (scan), pass1 output. Spec 9.1 forbids passing
     # pass1's scores to pass2; the contract is the IDs travel via the
@@ -1015,3 +1015,178 @@ def test_get_session_aug_auto_missing_session_returns_none(tmp_home):
     """No row in session_scores -> get_session_aug_auto returns (None, None)."""
     store = ProfileStore(home=resolve_home())
     assert store.get_session_aug_auto("never-saved") == (None, None)
+
+
+# --- Issue #5: bound review's internal scan -----------------------------
+
+
+def _make_dummy_sessions(n: int, when_base: datetime | None = None) -> list:
+    """Build N distinct in-memory Sessions with unique stable_ids."""
+    from praxis.models import Provider, Role, Session, Turn
+    when_base = when_base or datetime.now(timezone.utc)
+    sessions = []
+    for i in range(n):
+        sessions.append(
+            Session(
+                provider=Provider.CLAUDE,
+                session_id=f"fake-{i}-{uuid.uuid4().hex[:6]}",
+                started_at=when_base + timedelta(seconds=i),
+                turns=[
+                    Turn(role=Role.USER, content=f"question {i}"),
+                    Turn(role=Role.ASSISTANT, content=f"answer {i}"),
+                ],
+                source_path=f"/tmp/fake-{i}.jsonl",
+            )
+        )
+    return sessions
+
+
+def test_step_pass1_skips_already_scored_sessions(
+    tmp_home, stub_pass1_judge, monkeypatch
+):
+    """Issue #5 part 2: stable_ids already in session_scores must not
+    trigger the judge LLM call.
+
+    Pre-seed 5 of 10 sessions as already-scored. ``_step_pass1`` should
+    only call ``score_one_session_pass1`` for the 5 unjudged ones.
+    """
+    # Stub the aug_auto classifier so it never errors and never blocks.
+    monkeypatch.setattr(
+        orch, "classify_session",
+        lambda _t: AugAutoResult(classification="augmentation", confidence=0.8, rationale="ok"),
+    )
+
+    sessions = _make_dummy_sessions(10)
+    store = ProfileStore(home=resolve_home())
+    for s in sessions[:5]:
+        store.save_session_score(_build_session_score_for(s))
+
+    judge_calls: list[str] = []
+    real_stub = orch.score_one_session_pass1
+
+    def _spy(session, *, sharpen_calibration=False, stricter_low=False):
+        judge_calls.append(session.stable_id)
+        return real_stub(session, sharpen_calibration=sharpen_calibration,
+                         stricter_low=stricter_low)
+
+    monkeypatch.setattr(orch, "score_one_session_pass1", _spy)
+
+    pass1 = orch._step_pass1(sessions, tasks=[])
+
+    # Only the 5 unseeded sessions are judged.
+    assert len(judge_calls) == 5
+    judged_ids = set(judge_calls)
+    expected_ids = {s.stable_id for s in sessions[5:]}
+    assert judged_ids == expected_ids
+    assert set(pass1.results.keys()) == expected_ids
+
+
+def test_step_pass1_respects_max_new(tmp_home, stub_pass1_judge, monkeypatch):
+    """Issue #5 part 1: with max_new=3, the judge runs 3 times even though
+    10 sessions are eligible (none already scored)."""
+    monkeypatch.setattr(
+        orch, "classify_session",
+        lambda _t: AugAutoResult(classification="augmentation", confidence=0.8, rationale="ok"),
+    )
+    sessions = _make_dummy_sessions(10)
+
+    judge_calls: list[str] = []
+    real_stub = orch.score_one_session_pass1
+
+    def _spy(session, *, sharpen_calibration=False, stricter_low=False):
+        judge_calls.append(session.stable_id)
+        return real_stub(session, sharpen_calibration=sharpen_calibration,
+                         stricter_low=stricter_low)
+
+    monkeypatch.setattr(orch, "score_one_session_pass1", _spy)
+
+    orch._step_pass1(sessions, tasks=[], max_new=3)
+
+    assert len(judge_calls) == 3
+    # Newest-first ordering: the cap should select the latest 3 sessions.
+    expected_ids = {s.stable_id for s in sessions[-3:]}
+    assert set(judge_calls) == expected_ids
+
+
+def test_step_pass1_max_new_zero_is_unbounded(
+    tmp_home, stub_pass1_judge, monkeypatch
+):
+    """max_new of 0 (or negative) means 'no cap' so every unseeded
+    session is judged. This mirrors the CLI normalisation that converts
+    --max-new 0 to ``None`` before invoking run_weekly."""
+    monkeypatch.setattr(
+        orch, "classify_session",
+        lambda _t: AugAutoResult(classification="augmentation", confidence=0.8, rationale="ok"),
+    )
+    sessions = _make_dummy_sessions(4)
+
+    judge_calls: list[str] = []
+    real_stub = orch.score_one_session_pass1
+
+    def _spy(session, *, sharpen_calibration=False, stricter_low=False):
+        judge_calls.append(session.stable_id)
+        return real_stub(session, sharpen_calibration=sharpen_calibration,
+                         stricter_low=stricter_low)
+
+    monkeypatch.setattr(orch, "score_one_session_pass1", _spy)
+
+    orch._step_pass1(sessions, tasks=[], max_new=0)
+    assert len(judge_calls) == 4
+
+
+def test_step_pass1_frontier_only_skips_already_scored(
+    tmp_home, monkeypatch
+):
+    """In --frontier-only mode, pass-1 is a no-op that flags low-confidence
+    IDs for pass-2. Already-scored sessions must not be re-flagged so the
+    frontier judge does not re-judge them either (issue #5)."""
+    sessions = _make_dummy_sessions(5)
+    store = ProfileStore(home=resolve_home())
+    for s in sessions[:3]:
+        store.save_session_score(_build_session_score_for(s))
+
+    pass1 = orch._step_pass1(sessions, tasks=[], frontier_only=True)
+    # Only the 2 unseeded ids land in low_confidence_session_ids.
+    assert set(pass1.low_confidence_session_ids) == {s.stable_id for s in sessions[3:]}
+
+
+def test_run_weekly_max_new_default_caps_pass1(
+    tmp_home, monkeypatch
+):
+    """End-to-end: run_weekly defaults max_new=50, so a synthetic burst
+    of 100 freshly-scanned sessions only gets the first 50 judged."""
+    monkeypatch.setattr(
+        orch, "classify_session",
+        lambda _t: AugAutoResult(classification="augmentation", confidence=0.8, rationale="ok"),
+    )
+    sessions = _make_dummy_sessions(100)
+    monkeypatch.setattr(orch, "_step_scan", lambda _s: sessions)
+    monkeypatch.setattr(orch, "_step_cluster", lambda _s: [])
+
+    def _fake_pass1_judge(session, *, sharpen_calibration=False, stricter_low=False):  # noqa: ARG001
+        return _build_session_score_for(session)
+    monkeypatch.setattr(orch, "score_one_session_pass1", _fake_pass1_judge)
+
+    summary = run_weekly()
+    assert len(summary.judge_results) == 50
+
+
+def test_run_weekly_max_new_none_is_unbounded(tmp_home, monkeypatch):
+    """``run_weekly(max_new=None)`` opts out of the cap and judges everything
+    that isn't already scored. Cron / scripted runs that want the full
+    historical behaviour pass ``--max-new 0`` (the CLI normalises that to
+    ``None``)."""
+    monkeypatch.setattr(
+        orch, "classify_session",
+        lambda _t: AugAutoResult(classification="augmentation", confidence=0.8, rationale="ok"),
+    )
+    sessions = _make_dummy_sessions(15)
+    monkeypatch.setattr(orch, "_step_scan", lambda _s: sessions)
+    monkeypatch.setattr(orch, "_step_cluster", lambda _s: [])
+
+    def _fake_pass1_judge(session, *, sharpen_calibration=False, stricter_low=False):  # noqa: ARG001
+        return _build_session_score_for(session)
+    monkeypatch.setattr(orch, "score_one_session_pass1", _fake_pass1_judge)
+
+    summary = run_weekly(max_new=None)
+    assert len(summary.judge_results) == 15

@@ -567,12 +567,17 @@ def _cmd_review_impl(args: argparse.Namespace) -> int:
         print(NO_API_KEY_MESSAGE, file=sys.stderr)
         return 2
 
+    # Issue #5: --max-new accepts 0 (or any non-positive) as "unbounded";
+    # run_weekly distinguishes None / 0 from a positive cap internally.
+    raw_max_new = getattr(args, "max_new", 50)
+    max_new_arg: int | None = raw_max_new if raw_max_new and raw_max_new > 0 else None
     try:
         summary = run_weekly(
             week_iso=args.week,
             dry_run=args.dry_run,
             frontier_only=args.frontier_only,
             explain_judging=args.explain_judging,
+            max_new=max_new_arg,
         )
     except InvalidWeekError as exc:
         print(str(exc), file=sys.stderr)
@@ -2474,6 +2479,20 @@ def build_parser() -> argparse.ArgumentParser:
             "terminal masthead (spec section 2). Always implied by the "
             "scheduled --notify path; pass this flag for scripted runs "
             "that should never block on stdin."
+        ),
+    )
+    review.add_argument(
+        "--max-new",
+        type=int,
+        default=50,
+        metavar="N",
+        help=(
+            "Cap on newly-discovered sessions to deep-score this run "
+            "(default: 50). Already-scored stable_ids are skipped before "
+            "the cap is applied. Use 0 (or a negative value) to disable "
+            "the cap; defaults to the same number as `praxis scan` so a "
+            "stray `praxis review` cannot silently kick off N x LLM "
+            "calls on a busy week (issue #5)."
         ),
     )
     review.set_defaults(func=cmd_review)

@@ -549,6 +549,7 @@ def _step_pass1(
     tasks: list[Task],
     *,
     frontier_only: bool = False,
+    max_new: int | None = None,
 ) -> Pass1Output:
     """Step 3: batched cheap-tier judge with same-task exclusion (spec 9.4).
 
@@ -556,6 +557,18 @@ def _step_pass1(
     wires the ordering but reuses the per-session judge path (US-073 will
     add the batching mechanic). `tasks` is accepted here so the batching
     constraint can be enforced when the batched path lands.
+
+    Issue #5: sessions whose stable_id is already in ``session_scores``
+    are skipped before the judge call. ``save_session_score`` was already
+    idempotent at the DB layer, but the judge call was still being made
+    (and billed). With the early skip, re-running ``praxis review`` over
+    the same week is effectively free.
+
+    ``max_new`` caps how many NEW (not-yet-scored) sessions get the
+    judge treatment. ``None`` or ``0`` means unbounded (the weekly run's
+    historical default). When set, the cap is applied AFTER the
+    already-scored filter and AFTER sorting newest-first, so the most
+    recent unjudged sessions win.
 
     US-010: the augmentation-vs-automation classifier runs alongside the
     rubric judge here, once per session. Its failure modes (no API key /
@@ -579,27 +592,45 @@ def _step_pass1(
     if frontier_only:
         # --frontier-only (spec §9.6): skip pass-1 entirely and force the
         # frontier judge on every session. Flag every session id as
-        # 'low confidence' so _step_pass2 picks them up.
+        # 'low confidence' so _step_pass2 picks them up. The already-
+        # scored filter applies here too: the frontier judge in
+        # _step_pass2 also doesn't need to re-judge stable_ids that
+        # already have a score row.
         return Pass1Output(
             results={},
-            low_confidence_session_ids=[s.stable_id for s in sessions],
+            low_confidence_session_ids=[
+                s.stable_id for s in sessions if not store.has_session(s.stable_id)
+            ],
         )
+
+    # Issue #5: filter sessions already in the store BEFORE any LLM call.
+    # ``score_one_session_pass1`` is the expensive step (cheap-tier judge +
+    # aug/auto classifier); the DB-side idempotency in save_session_score
+    # only kicks in AFTER both have run. Doing the filter here makes a
+    # re-run effectively free in tokens.
+    to_score = [s for s in sessions if not store.has_session(s.stable_id)]
+    if max_new is not None and max_new > 0 and len(to_score) > max_new:
+        # Newest-first ordering matches the `praxis scan` cap (spec 9.1)
+        # so a budget-bounded run favours the user's most recent work.
+        to_score = sorted(to_score, key=lambda s: s.started_at, reverse=True)[:max_new]
+    if not to_score:
+        return Pass1Output(results=results, low_confidence_session_ids=low_confidence)
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
     # 5 workers matches PASS1_BATCH_SIZE = 5 from the spec. Each thread
     # holds one in-flight OpenAI/Anthropic HTTP request; the SDK's own
     # connection pool handles concurrency safely.
-    max_workers = min(5, len(sessions))
+    max_workers = min(5, len(to_score))
     futures = {}
     # Pre-compute behavioral signals so persistence carries them for the
     # weekly-bucketed trajectory model (spec §7).
-    signals_by_id = {s.stable_id: extract_signals(s) for s in sessions}
+    signals_by_id = {s.stable_id: extract_signals(s) for s in to_score}
     from dataclasses import asdict as _dc_asdict
     # Mutable one-element list so the per-session classifier helper can
     # flip the "already logged?" gate without needing a nonlocal.
     aug_auto_unavailable_logged: list[bool] = [False]
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for s in sessions:
+        for s in to_score:
             futures[pool.submit(score_one_session_pass1, s)] = s
         for fut in as_completed(futures):
             session = futures[fut]
@@ -1042,6 +1073,7 @@ def run_weekly(
     week_iso: str | None = None,
     frontier_only: bool = False,
     explain_judging: bool = False,
+    max_new: int | None = 50,
 ) -> WeeklyRunSummary:
     """Run the weekly pipeline in spec Section 9.4 order.
 
@@ -1074,6 +1106,15 @@ def run_weekly(
     through to the returned summary so callers can surface them; they
     do not yet alter the judge pipeline behavior (US-031 lands a later
     iteration).
+
+    Issue #5: ``max_new`` caps how many already-unjudged sessions are
+    sent to the cheap-tier judge in this run. The default of ``50``
+    matches the ``praxis scan --max-new`` default so a stray
+    ``praxis review`` cannot silently kick off N x LLM calls on a
+    busy week. ``None`` or ``0`` means unbounded (preserves the v0.2
+    behaviour for callers that opt in). The cap only applies to NEW
+    sessions; already-scored stable_ids are skipped before the LLM
+    layer regardless of the cap.
     """
     started = time.time()
     steps: list[str] = []
@@ -1222,7 +1263,9 @@ def run_weekly(
     tasks = _step_cluster(sessions)
     steps.append("cluster")
 
-    pass1 = _step_pass1(sessions, tasks, frontier_only=frontier_only)
+    pass1 = _step_pass1(
+        sessions, tasks, frontier_only=frontier_only, max_new=max_new
+    )
     steps.append("pass1")
 
     pass2_results = _step_pass2(sessions, pass1)
