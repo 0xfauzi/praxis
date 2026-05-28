@@ -564,6 +564,16 @@ def _step_pass1(
     (and billed). With the early skip, re-running ``praxis review`` over
     the same week is effectively free.
 
+    Known limitation of the early skip: ``store.has_session`` returns
+    True if EITHER a pass-1 OR a pass-2 row exists. A session whose
+    pass-1 succeeded but whose pass-2 call errored transiently (no row
+    saved) will NOT auto-retry pass-2 on the next weekly run -- the
+    pass-1 row alone keeps it filtered out here, so pass-2 never gets
+    re-flagged. Users hit by this can force a fresh frontier judge via
+    ``praxis re-score <stable_id>``. A future fix could restrict the
+    skip to sessions whose pass-1 confidence was not ``low``, or
+    re-flag sessions that are missing their expected pass-2 row.
+
     ``max_new`` caps how many NEW (not-yet-scored) sessions get the
     judge treatment. ``None`` or ``0`` means unbounded (the weekly run's
     historical default). When set, the cap is applied AFTER the
