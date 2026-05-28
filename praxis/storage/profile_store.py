@@ -64,6 +64,8 @@ CREATE TABLE IF NOT EXISTS session_scores (
     judge_model TEXT,
     judge_pass INTEGER NOT NULL DEFAULT 1,
     signals_json TEXT,
+    aug_auto_classification TEXT,
+    aug_auto_confidence REAL,
     PRIMARY KEY (stable_id, judge_pass)
 );
 
@@ -183,16 +185,30 @@ class ProfileStore:
     def _ensure_session_scores_columns(conn: sqlite3.Connection) -> None:
         """Add additive columns introduced after the v3 marker landed.
 
-        Currently only `signals_json` (spec section 7 - persists per-session
-        BehavioralSignals so the weekly-bucketed trajectory can replay 90
-        days of history without re-parsing source files). Idempotent: a
-        DB that already has the column is left alone.
+        Tracks:
+          - ``signals_json`` (spec section 7 - persists per-session
+            BehavioralSignals so the weekly-bucketed trajectory can replay 90
+            days of history without re-parsing source files).
+          - ``aug_auto_classification`` / ``aug_auto_confidence`` (US-010 -
+            persists the augmentation-vs-automation classifier's per-session
+            output so per-week aggregation can read it back without re-calling
+            the LLM).
+
+        Idempotent: a DB that already has the columns is left alone.
         """
         cur = conn.execute("PRAGMA table_info(session_scores)")
         existing_cols = {row[1] for row in cur.fetchall()}
         if "signals_json" not in existing_cols:
             conn.execute(
                 "ALTER TABLE session_scores ADD COLUMN signals_json TEXT"
+            )
+        if "aug_auto_classification" not in existing_cols:
+            conn.execute(
+                "ALTER TABLE session_scores ADD COLUMN aug_auto_classification TEXT"
+            )
+        if "aug_auto_confidence" not in existing_cols:
+            conn.execute(
+                "ALTER TABLE session_scores ADD COLUMN aug_auto_confidence REAL"
             )
 
     def _apply_v2_schema(self, conn: sqlite3.Connection) -> None:
@@ -203,6 +219,12 @@ class ProfileStore:
         # prior state (fresh, v0.1, v0.2) is brought to v0.3 in one shot.
         conn.executescript(SCHEMA)
         self._migrate_session_scores_to_v3(conn)
+        # The v3 table-rebuild path in _migrate_session_scores_to_v3 does
+        # not include columns added after the v3 marker landed (aug_auto_*),
+        # so run the additive-column step here too. Idempotent: fresh DBs
+        # already have the columns from SCHEMA above and the ALTER lines
+        # short-circuit.
+        self._ensure_session_scores_columns(conn)
 
     def _migrate_session_scores_to_v3(self, conn: sqlite3.Connection) -> None:
         """Spec §9.6 (US-029): add ``judge_pass`` to session_scores and make
@@ -450,6 +472,55 @@ class ProfileStore:
             json.loads(out["judge_result_json"]) if out["judge_result_json"] else None
         )
         return out
+
+    # ---- aug_auto classifier (US-010) -----------------------------------
+
+    def save_session_aug_auto(
+        self,
+        session_stable_id: str,
+        classification: str,
+        confidence: float,
+    ) -> None:
+        """Persist the augmentation-vs-automation classifier output for one session.
+
+        Writes both ``aug_auto_classification`` and ``aug_auto_confidence``
+        on every persisted row for the session (pass-1 and pass-2 share the
+        same classifier read; the classifier is not re-run on pass-2). When
+        no row yet exists for the stable_id the update is a no-op: the
+        classifier always runs alongside ``save_session_score`` in the
+        orchestrator's pass-1, so the row is created first.
+        """
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE session_scores "
+                "SET aug_auto_classification = ?, aug_auto_confidence = ? "
+                "WHERE stable_id = ?",
+                (classification, confidence, session_stable_id),
+            )
+
+    def get_session_aug_auto(
+        self, session_stable_id: str
+    ) -> dict[str, Any] | None:
+        """Read back the classifier output for one session.
+
+        Returns ``{"classification": str|None, "confidence": float|None}``
+        for the highest-pass row of the session, or None when no row
+        exists. Both fields are nullable so callers can distinguish
+        "classifier didn't run / errored" (NULL) from a valid result.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT aug_auto_classification, aug_auto_confidence "
+                "FROM session_scores WHERE stable_id = ? "
+                "ORDER BY judge_pass DESC LIMIT 1",
+                (session_stable_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "classification": row["aug_auto_classification"],
+            "confidence": row["aug_auto_confidence"],
+        }
 
     # ---- moments --------------------------------------------------------
 

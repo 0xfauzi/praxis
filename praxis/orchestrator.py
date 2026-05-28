@@ -34,6 +34,13 @@ from praxis.behavior import (
     extract as extract_signals,
     iso_week_tag,
 )
+from praxis.behavior.aug_auto import (
+    AugAutoError,
+    AugAutoParseError,
+    AugAutoResult,
+    AugAutoUnavailableError,
+    classify_session,
+)
 from pathlib import Path
 
 from praxis.models import Moment as JudgeMoment, Session
@@ -464,6 +471,67 @@ def _step_cluster(sessions: list[Session]) -> list[Task]:
     return tasks or []
 
 
+def _session_transcript_for_classifier(session: Session) -> str:
+    """Render a session's turns as plain text for the aug_auto classifier.
+
+    The classifier wants raw transcript content - it has its own length
+    cap inside classify_session, so this helper only stitches role-tagged
+    blocks together without further trimming.
+    """
+    blocks: list[str] = []
+    for turn in session.turns:
+        role = turn.role.value
+        blocks.append(f"<{role}> {turn.content} </{role}>")
+    return "\n".join(blocks)
+
+
+def _classify_and_persist(
+    session: Session,
+    store: ProfileStore,
+    unavailable_logged: list[bool],
+) -> None:
+    """Run the aug_auto classifier for one session and write the result.
+
+    Per US-010 acceptance criteria:
+      - When no API key is set, log once per run and leave the aug_auto
+        columns NULL.
+      - On AugAutoParseError, log the rationale (the exception message)
+        and leave the columns NULL.
+      - On success, persist classification + confidence.
+
+    Failures here must never abort the rest of the pipeline.
+    """
+    transcript = _session_transcript_for_classifier(session)
+    try:
+        result: AugAutoResult = classify_session(transcript)
+    except AugAutoUnavailableError:
+        if not unavailable_logged[0]:
+            print(
+                "[orchestrator] aug_auto classifier unavailable "
+                "(no API key); aug_auto columns will be NULL for this run.",
+                file=sys.stderr,
+            )
+            unavailable_logged[0] = True
+        return
+    except AugAutoParseError as exc:
+        print(
+            f"[orchestrator] aug_auto classifier parse error "
+            f"for {session.stable_id}: {exc}",
+            file=sys.stderr,
+        )
+        return
+    except AugAutoError as exc:
+        print(
+            f"[orchestrator] aug_auto classifier error "
+            f"for {session.stable_id}: {exc!r}",
+            file=sys.stderr,
+        )
+        return
+    store.save_session_aug_auto(
+        session.stable_id, result.classification, result.confidence
+    )
+
+
 def _step_pass1(
     sessions: list[Session],
     tasks: list[Task],
@@ -476,6 +544,11 @@ def _step_pass1(
     wires the ordering but reuses the per-session judge path (US-073 will
     add the batching mechanic). `tasks` is accepted here so the batching
     constraint can be enforced when the batched path lands.
+
+    US-010: the augmentation-vs-automation classifier runs alongside the
+    rubric judge here, once per session. Its failure modes (no API key /
+    parse error) are absorbed by `_classify_and_persist` so the rest of
+    the pipeline continues; the aug_auto columns stay NULL on failure.
 
     Output feeds: pass2 (low-confidence subset only), validate.
     """
@@ -510,6 +583,9 @@ def _step_pass1(
     # weekly-bucketed trajectory model (spec §7).
     signals_by_id = {s.stable_id: extract_signals(s) for s in sessions}
     from dataclasses import asdict as _dc_asdict
+    # Mutable one-element list so the per-session classifier helper can
+    # flip the "already logged?" gate without needing a nonlocal.
+    aug_auto_unavailable_logged: list[bool] = [False]
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         for s in sessions:
             futures[pool.submit(score_one_session_pass1, s)] = s
@@ -530,6 +606,11 @@ def _step_pass1(
             results[session.stable_id] = score.judge_result
             if score.judge_result.confidence == "low":
                 low_confidence.append(session.stable_id)
+            # Spec US-010: classify each scored session for the aug_auto
+            # side-channel. The classifier is a side-channel data collector;
+            # its failure must not stop the rest of the run, hence the
+            # broad-but-typed handling in _classify_and_persist.
+            _classify_and_persist(session, store, aug_auto_unavailable_logged)
     return Pass1Output(results=results, low_confidence_session_ids=low_confidence)
 
 

@@ -745,3 +745,282 @@ def test_run_weekly_dry_run_does_not_compute_baseline(tmp_home, step_recorder):
     # carries cost_baseline_usd=None because the read was skipped.
     assert summary.digest_persisted is False
     assert summary.cost_baseline_usd is None
+
+
+# --- US-010: aug_auto classifier integration in pass-1 -------------------
+
+from praxis.behavior.aug_auto import (
+    AugAutoParseError,
+    AugAutoResult,
+    AugAutoUnavailableError,
+)
+from praxis.scoring.features import SessionFeatures
+
+
+def _build_session_score_for(session, *, dim_value: float = 6.0) -> orch.SessionScore:
+    """Construct a minimal SessionScore for the per-session pass-1 stub.
+
+    The orchestrator only reads ``judge_result.confidence`` and persists
+    the score; dimension values do not affect aug_auto-specific assertions.
+    """
+    judge = JudgeResult(
+        dimension_scores={d.key: dim_value for d in RUBRIC},
+        rationale={d.key: "stub" for d in RUBRIC},
+        standout_moments=["stub"],
+        failure_modes=["stub"],
+        overall_note="stub",
+        judge_model="stub-model",
+    )
+    return orch.SessionScore(
+        session_stable_id=session.stable_id,
+        provider=session.provider.value,
+        started_at=session.started_at,
+        dimension_scores={d.key: dim_value for d in RUBRIC},
+        overall=dim_value,
+        judge_result=judge,
+        features=SessionFeatures(turn_count=len(session.turns), avg_prompt_chars=50.0),
+        source_path=session.source_path,
+        judge_pass=1,
+    )
+
+
+@pytest.fixture
+def stub_pass1_judge(monkeypatch):
+    """Replace ``score_one_session_pass1`` with a fixed-shape SessionScore.
+
+    The aug_auto integration tests want the orchestrator to reach the
+    "score saved, now classify" branch deterministically without hitting
+    the real judge LLM or routing through API-key gating.
+    """
+
+    def _fake(session, *, sharpen_calibration=False, stricter_low=False):  # noqa: ARG001
+        return _build_session_score_for(session)
+
+    monkeypatch.setattr(orch, "score_one_session_pass1", _fake)
+    return _fake
+
+
+def test_step_pass1_invokes_classifier_per_session(
+    tmp_home, synthetic_session_object, stub_pass1_judge, monkeypatch
+):
+    """The classifier is called once per session that pass-1 successfully scores."""
+    calls: list[str] = []
+
+    def _fake_classify(transcript_text: str) -> AugAutoResult:
+        calls.append(transcript_text)
+        return AugAutoResult(
+            classification="augmentation", confidence=0.8, rationale="stub"
+        )
+
+    monkeypatch.setattr(orch, "classify_session", _fake_classify)
+    sessions = [synthetic_session_object]
+    pass1 = orch._step_pass1(sessions, tasks=[])
+    assert len(calls) == 1
+    # The transcript text is non-empty and contains a user turn marker.
+    assert "<user>" in calls[0]
+    # The judge ran too: pass1.results carries the session's stub JudgeResult.
+    assert synthetic_session_object.stable_id in pass1.results
+
+
+def test_step_pass1_persists_classification_to_session_scores(
+    tmp_home, synthetic_session_object, stub_pass1_judge, monkeypatch
+):
+    """On a successful classify, the aug_auto columns hold the result."""
+
+    def _fake_classify(transcript_text: str) -> AugAutoResult:  # noqa: ARG001
+        return AugAutoResult(
+            classification="mixed", confidence=0.55, rationale="stub"
+        )
+
+    monkeypatch.setattr(orch, "classify_session", _fake_classify)
+    orch._step_pass1([synthetic_session_object], tasks=[])
+    store = ProfileStore(home=resolve_home())
+    row = store.get_session_aug_auto(synthetic_session_object.stable_id)
+    assert row is not None
+    assert row["classification"] == "mixed"
+    assert row["confidence"] == pytest.approx(0.55)
+
+
+def test_step_pass1_no_api_key_leaves_aug_auto_null_and_logs_once(
+    tmp_home, synthetic_claude_session, synthetic_codex_session,
+    stub_pass1_judge, monkeypatch, capsys
+):
+    """No API key for classifier: NULL columns, one info-level log per run.
+
+    The orchestrator's other LLM calls (judge, selector) gate on the key
+    separately; this test pins the AC for the classifier side-channel:
+    the run does not abort and the classifier columns stay NULL while
+    only a single message is emitted.
+    """
+    # Stub classifier to behave as if no API key was set.
+    def _fake_classify(transcript_text: str) -> AugAutoResult:  # noqa: ARG001
+        raise AugAutoUnavailableError(
+            "no API key configured for aug_auto classifier"
+        )
+
+    monkeypatch.setattr(orch, "classify_session", _fake_classify)
+    # Use two sessions so we can assert "logged once," not once per session.
+    from praxis.scanners import ALL_SCANNERS
+    sessions = []
+    for scanner_cls in ALL_SCANNERS:
+        for s in scanner_cls().scan(since=None):
+            sessions.append(s)
+    sessions = [s for s in sessions if s.user_turns]
+    assert len(sessions) >= 2, "fixtures should produce >=2 sessions"
+
+    orch._step_pass1(sessions, tasks=[])
+
+    captured = capsys.readouterr()
+    log_line_count = captured.err.count("aug_auto classifier unavailable")
+    assert log_line_count == 1, (
+        f"expected one unavailability log line per run, got {log_line_count}"
+    )
+
+    store = ProfileStore(home=resolve_home())
+    for s in sessions:
+        row = store.get_session_aug_auto(s.stable_id)
+        assert row is not None, f"session {s.stable_id} should have a row from pass-1"
+        assert row["classification"] is None
+        assert row["confidence"] is None
+
+
+def test_step_pass1_parse_error_leaves_aug_auto_null_and_logs(
+    tmp_home, synthetic_session_object, stub_pass1_judge, monkeypatch, capsys
+):
+    """AugAutoParseError: NULL columns, error message logged, run continues."""
+
+    def _fake_classify(transcript_text: str) -> AugAutoResult:  # noqa: ARG001
+        raise AugAutoParseError(
+            "classifier response is not valid JSON: synthetic test failure"
+        )
+
+    monkeypatch.setattr(orch, "classify_session", _fake_classify)
+    pass1 = orch._step_pass1([synthetic_session_object], tasks=[])
+
+    # The pass-1 judge result still landed - the parse failure must not
+    # abort the rest of the per-session processing.
+    assert synthetic_session_object.stable_id in pass1.results
+
+    captured = capsys.readouterr()
+    assert "aug_auto classifier parse error" in captured.err
+    assert "synthetic test failure" in captured.err, (
+        "the rationale (exception message) must be logged so the user "
+        "can diagnose without re-running"
+    )
+
+    store = ProfileStore(home=resolve_home())
+    row = store.get_session_aug_auto(synthetic_session_object.stable_id)
+    assert row is not None
+    assert row["classification"] is None
+    assert row["confidence"] is None
+
+
+def test_step_pass1_classifier_failure_does_not_abort_other_sessions(
+    tmp_home, synthetic_claude_session, synthetic_codex_session,
+    stub_pass1_judge, monkeypatch
+):
+    """One session's parse error must not stop the other session's classify."""
+    from praxis.scanners import ALL_SCANNERS
+    sessions = []
+    for scanner_cls in ALL_SCANNERS:
+        for s in scanner_cls().scan(since=None):
+            sessions.append(s)
+    sessions = [s for s in sessions if s.user_turns]
+    assert len(sessions) >= 2
+
+    # First session through the door raises, all others succeed. Use a
+    # mutable counter rather than a per-id branch so the stub is simple.
+    state = {"calls": 0}
+
+    def _fake_classify(transcript_text: str) -> AugAutoResult:  # noqa: ARG001
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise AugAutoParseError("first session intentionally broken")
+        return AugAutoResult(
+            classification="automation", confidence=0.7, rationale="ok"
+        )
+
+    monkeypatch.setattr(orch, "classify_session", _fake_classify)
+    orch._step_pass1(sessions, tasks=[])
+
+    store = ProfileStore(home=resolve_home())
+    classified = 0
+    for s in sessions:
+        row = store.get_session_aug_auto(s.stable_id)
+        assert row is not None
+        if row["classification"] is not None:
+            classified += 1
+    # At least one session classified successfully (every session except the
+    # first as_completed result); the broken session leaves NULL behind.
+    assert classified >= 1
+
+
+def test_step_pass1_frontier_only_skips_classifier(
+    tmp_home, synthetic_session_object, monkeypatch
+):
+    """In --frontier-only mode pass-1 (and therefore the classifier) is bypassed.
+
+    The AC ties the classifier to pass-1 specifically; when pass-1 is
+    skipped, the classifier is skipped too, leaving aug_auto NULL.
+    """
+    called = {"hit": False}
+
+    def _fake_classify(transcript_text: str) -> AugAutoResult:  # noqa: ARG001
+        called["hit"] = True
+        return AugAutoResult(
+            classification="augmentation", confidence=0.9, rationale="x"
+        )
+
+    monkeypatch.setattr(orch, "classify_session", _fake_classify)
+    orch._step_pass1([synthetic_session_object], tasks=[], frontier_only=True)
+    assert called["hit"] is False
+
+
+def test_save_and_get_session_aug_auto_round_trip(tmp_home):
+    """ProfileStore helpers round-trip the classifier output.
+
+    save_session_aug_auto updates an existing session_scores row; the
+    test seeds one via save_session_score first, then reads back.
+    """
+    store = ProfileStore(home=resolve_home())
+    # Build a row by seeding session_scores directly via the SessionScore
+    # path. We don't have a real session here; just use a minimal score.
+    judge = JudgeResult(
+        dimension_scores={d.key: 5.0 for d in RUBRIC},
+        rationale={d.key: "x" for d in RUBRIC},
+        standout_moments=[],
+        failure_modes=[],
+        overall_note="x",
+        judge_model="x",
+    )
+    from datetime import datetime as _dt, timezone as _tz
+    score = orch.SessionScore(
+        session_stable_id="abc123",
+        provider="claude",
+        started_at=_dt.now(_tz.utc),
+        dimension_scores={d.key: 5.0 for d in RUBRIC},
+        overall=5.0,
+        judge_result=judge,
+        features=SessionFeatures(turn_count=2, avg_prompt_chars=40.0),
+        source_path="/tmp/abc.jsonl",
+        judge_pass=1,
+    )
+    store.save_session_score(score)
+
+    # Before saving aug_auto, both columns are NULL.
+    pre = store.get_session_aug_auto("abc123")
+    assert pre is not None
+    assert pre["classification"] is None
+    assert pre["confidence"] is None
+
+    store.save_session_aug_auto("abc123", "augmentation", 0.83)
+    post = store.get_session_aug_auto("abc123")
+    assert post is not None
+    assert post["classification"] == "augmentation"
+    assert post["confidence"] == pytest.approx(0.83)
+
+
+def test_get_session_aug_auto_missing_session_returns_none(tmp_home):
+    """No row in session_scores -> get_session_aug_auto returns None."""
+    store = ProfileStore(home=resolve_home())
+    assert store.get_session_aug_auto("never-saved") is None
