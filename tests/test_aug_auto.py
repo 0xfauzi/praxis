@@ -4,22 +4,34 @@ These tests cover praxis.behavior.aug_auto.classify_session - parser
 robustness, the augmentation/automation/mixed literal contract, and the
 call-time provider selection. They do NOT hit a live model; the
 Anthropic/OpenAI client codepaths are stubbed via monkeypatch.
+
+The aggregate_for_week tests (US-011) seed real session_scores rows via
+ProfileStore (no LLM call) and exercise the per-week roll-up directly.
 """
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from praxis.behavior.aug_auto import (
+    AUG_AUTO_BUCKETS,
     CLAUDE_CLASSIFIER_MODEL,
     OPENAI_CLASSIFIER_MODEL,
     AugAutoParseError,
     AugAutoResult,
     AugAutoUnavailableError,
+    AugAutoWeekSummary,
     _parse_response,
+    aggregate_for_week,
     classify_session,
 )
+from praxis.scoring.aggregate import SessionScore
+from praxis.scoring.features import SessionFeatures
+from praxis.scoring.judge import JudgeResult
+from praxis.scoring.rubric import RUBRIC
+from praxis.storage.profile_store import ProfileStore, resolve_home
 
 
 def _good_payload(
@@ -249,3 +261,276 @@ def test_model_constants_match_spec() -> None:
     """Pin the model strings the PRD calls out."""
     assert CLAUDE_CLASSIFIER_MODEL == "claude-haiku-4-5"
     assert OPENAI_CLASSIFIER_MODEL == "gpt-5-mini"
+
+
+# ---------------------------------------------------------------------------
+# aggregate_for_week (US-011): per-week roll-up of classifier output.
+# ---------------------------------------------------------------------------
+
+
+def _seed_session_score(
+    store: ProfileStore,
+    *,
+    stable_id: str,
+    started_at: datetime,
+    classification: str | None = None,
+    confidence: float | None = None,
+) -> None:
+    """Seed one session_scores row (and optional aug_auto columns) for tests."""
+    judge = JudgeResult(
+        dimension_scores={d.key: 5.0 for d in RUBRIC},
+        rationale={d.key: "x" for d in RUBRIC},
+        standout_moments=[],
+        failure_modes=[],
+        overall_note="x",
+        judge_model="x",
+    )
+    score = SessionScore(
+        session_stable_id=stable_id,
+        provider="claude",
+        started_at=started_at,
+        dimension_scores={d.key: 5.0 for d in RUBRIC},
+        overall=5.0,
+        judge_result=judge,
+        features=SessionFeatures(turn_count=2, avg_prompt_chars=40.0),
+        source_path=f"/tmp/{stable_id}.jsonl",
+        judge_pass=1,
+    )
+    store.save_session_score(score)
+    if classification is not None and confidence is not None:
+        store.save_session_aug_auto(stable_id, classification, confidence)
+
+
+def _wed_in_week(week_iso: str) -> datetime:
+    """Return a UTC datetime at noon Wednesday of the given ISO week tag."""
+    year_str, week_str = week_iso.split("-W")
+    monday = datetime.fromisocalendar(int(year_str), int(week_str), 1)
+    return datetime(
+        monday.year,
+        monday.month,
+        monday.day,
+        12,
+        0,
+        0,
+        tzinfo=timezone.utc,
+    ) + timedelta(days=2)
+
+
+def test_aggregate_for_week_empty_store_returns_zero_summary(tmp_home) -> None:
+    """No session_scores in the store -> all-zero counts, classifier_unavailable=False.
+
+    AC: 'Calling aggregate_for_week with a week_iso that has zero
+    session_scores returns a summary with all zeros and
+    classifier_unavailable=False (not True).'
+    """
+    store = ProfileStore(home=resolve_home())
+    summary = aggregate_for_week(store, "2026-W22")
+    assert isinstance(summary, AugAutoWeekSummary)
+    assert summary.week_iso == "2026-W22"
+    assert summary.total == 0
+    assert summary.counts == {b: 0 for b in AUG_AUTO_BUCKETS}
+    assert summary.shares == {b: 0.0 for b in AUG_AUTO_BUCKETS}
+    assert summary.classifier_unavailable is False
+
+
+def test_aggregate_for_week_target_week_has_no_rows(tmp_home) -> None:
+    """Store has rows in other weeks but none in the target week.
+
+    Same expectation as the truly-empty store: classifier_unavailable=False
+    because there is no classifier work to do.
+    """
+    store = ProfileStore(home=resolve_home())
+    _seed_session_score(
+        store,
+        stable_id="other-week",
+        started_at=_wed_in_week("2026-W20"),
+        classification="augmentation",
+        confidence=0.7,
+    )
+    summary = aggregate_for_week(store, "2026-W22")
+    assert summary.total == 0
+    assert summary.classifier_unavailable is False
+
+
+def test_aggregate_for_week_all_null_sets_classifier_unavailable(tmp_home) -> None:
+    """Every row in the week is NULL -> classifier_unavailable=True.
+
+    AC: '"classifier_unavailable" flag when every row in the week is NULL.'
+    """
+    store = ProfileStore(home=resolve_home())
+    for i in range(3):
+        _seed_session_score(
+            store,
+            stable_id=f"null-{i}",
+            started_at=_wed_in_week("2026-W22"),
+        )
+    summary = aggregate_for_week(store, "2026-W22")
+    assert summary.total == 3
+    assert summary.counts["unclassified"] == 3
+    assert summary.counts["augmentation"] == 0
+    assert summary.counts["automation"] == 0
+    assert summary.counts["mixed"] == 0
+    assert summary.classifier_unavailable is True
+    assert summary.shares["unclassified"] == pytest.approx(1.0)
+
+
+def test_aggregate_for_week_null_rows_go_to_unclassified_bucket(tmp_home) -> None:
+    """NULL rows are counted under 'unclassified', not dropped.
+
+    AC: 'aggregate_for_week treats NULL rows as unclassified (separate
+    bucket) rather than dropping them, so totals always equal the count
+    of session_scores in the week.'
+    """
+    store = ProfileStore(home=resolve_home())
+    _seed_session_score(
+        store,
+        stable_id="aug-1",
+        started_at=_wed_in_week("2026-W22"),
+        classification="augmentation",
+        confidence=0.9,
+    )
+    _seed_session_score(
+        store,
+        stable_id="null-1",
+        started_at=_wed_in_week("2026-W22"),
+    )
+    _seed_session_score(
+        store,
+        stable_id="null-2",
+        started_at=_wed_in_week("2026-W22"),
+    )
+    summary = aggregate_for_week(store, "2026-W22")
+    assert summary.total == 3
+    assert summary.counts["augmentation"] == 1
+    assert summary.counts["unclassified"] == 2
+    assert summary.classifier_unavailable is False
+
+
+def test_aggregate_for_week_mixed_classifications_count_and_share(tmp_home) -> None:
+    """Counts and shares are computed per bucket; shares sum to 1.0."""
+    store = ProfileStore(home=resolve_home())
+    seeds = [
+        ("a1", "augmentation"),
+        ("a2", "augmentation"),
+        ("b1", "automation"),
+        ("m1", "mixed"),
+    ]
+    for stable_id, classification in seeds:
+        _seed_session_score(
+            store,
+            stable_id=stable_id,
+            started_at=_wed_in_week("2026-W22"),
+            classification=classification,
+            confidence=0.6,
+        )
+    summary = aggregate_for_week(store, "2026-W22")
+    assert summary.total == 4
+    assert summary.counts == {
+        "augmentation": 2,
+        "automation": 1,
+        "mixed": 1,
+        "unclassified": 0,
+    }
+    assert summary.shares["augmentation"] == pytest.approx(0.5)
+    assert summary.shares["automation"] == pytest.approx(0.25)
+    assert summary.shares["mixed"] == pytest.approx(0.25)
+    assert summary.shares["unclassified"] == pytest.approx(0.0)
+    assert sum(summary.shares.values()) == pytest.approx(1.0)
+    assert summary.classifier_unavailable is False
+
+
+def test_aggregate_for_week_excludes_rows_from_other_weeks(tmp_home) -> None:
+    """Rows from weeks other than the target must not be counted."""
+    store = ProfileStore(home=resolve_home())
+    _seed_session_score(
+        store,
+        stable_id="prev-week",
+        started_at=_wed_in_week("2026-W21"),
+        classification="augmentation",
+        confidence=0.9,
+    )
+    _seed_session_score(
+        store,
+        stable_id="next-week",
+        started_at=_wed_in_week("2026-W23"),
+        classification="automation",
+        confidence=0.8,
+    )
+    _seed_session_score(
+        store,
+        stable_id="this-week",
+        started_at=_wed_in_week("2026-W22"),
+        classification="mixed",
+        confidence=0.7,
+    )
+    summary = aggregate_for_week(store, "2026-W22")
+    assert summary.total == 1
+    assert summary.counts["mixed"] == 1
+    assert summary.counts["augmentation"] == 0
+    assert summary.counts["automation"] == 0
+
+
+def test_aggregate_for_week_total_equals_row_count_for_week(tmp_home) -> None:
+    """Sanity check the invariant: total == sum of session_scores rows for the week.
+
+    This is the testable form of the AC 'totals always equal the count of
+    session_scores in the week.'
+    """
+    store = ProfileStore(home=resolve_home())
+    classifications: list[str | None] = [
+        "augmentation",
+        "augmentation",
+        "automation",
+        "mixed",
+        None,
+        None,
+    ]
+    for i, classification in enumerate(classifications):
+        _seed_session_score(
+            store,
+            stable_id=f"row-{i}",
+            started_at=_wed_in_week("2026-W22"),
+            classification=classification,
+            confidence=0.55 if classification else None,
+        )
+    summary = aggregate_for_week(store, "2026-W22")
+    assert summary.total == len(classifications)
+    assert sum(summary.counts.values()) == len(classifications)
+
+
+def test_aggregate_for_week_classifier_unavailable_false_when_any_row_classified(
+    tmp_home,
+) -> None:
+    """classifier_unavailable is False as soon as ONE row in the week is classified."""
+    store = ProfileStore(home=resolve_home())
+    _seed_session_score(
+        store,
+        stable_id="classified",
+        started_at=_wed_in_week("2026-W22"),
+        classification="augmentation",
+        confidence=0.9,
+    )
+    for i in range(4):
+        _seed_session_score(
+            store,
+            stable_id=f"unclassified-{i}",
+            started_at=_wed_in_week("2026-W22"),
+        )
+    summary = aggregate_for_week(store, "2026-W22")
+    assert summary.total == 5
+    assert summary.counts["unclassified"] == 4
+    assert summary.counts["augmentation"] == 1
+    assert summary.classifier_unavailable is False
+
+
+def test_aggregate_for_week_buckets_are_exactly_four(tmp_home) -> None:
+    """The four-bucket shape (aug, auto, mixed, unclassified) is contract.
+
+    Pinned to guard against silent expansion of AUG_AUTO_BUCKETS, which
+    would also require widening callers / display code.
+    """
+    assert AUG_AUTO_BUCKETS == ("augmentation", "automation", "mixed", "unclassified")
+    store = ProfileStore(home=resolve_home())
+    summary = aggregate_for_week(store, "2026-W22")
+    assert set(summary.counts.keys()) == set(AUG_AUTO_BUCKETS)
+    assert set(summary.shares.keys()) == set(AUG_AUTO_BUCKETS)

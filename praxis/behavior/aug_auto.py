@@ -21,12 +21,26 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Literal, cast
+from datetime import datetime
+from typing import TYPE_CHECKING, Literal, cast
+
+if TYPE_CHECKING:
+    from praxis.storage.profile_store import ProfileStore
 
 AugAutoClassification = Literal["augmentation", "automation", "mixed"]
 
 _VALID_CLASSIFICATIONS: frozenset[str] = frozenset(
     {"augmentation", "automation", "mixed"}
+)
+
+# Bucket keys for AugAutoWeekSummary.counts and .shares. NULL aug_auto_classification
+# rows go into 'unclassified' (a separate bucket from the three valid literals)
+# so per-week totals always equal the row count for the week.
+AUG_AUTO_BUCKETS: tuple[str, ...] = (
+    "augmentation",
+    "automation",
+    "mixed",
+    "unclassified",
 )
 
 CLAUDE_CLASSIFIER_MODEL = "claude-haiku-4-5"
@@ -69,6 +83,27 @@ class AugAutoResult:
     classification: AugAutoClassification
     confidence: float
     rationale: str
+
+
+@dataclass(frozen=True)
+class AugAutoWeekSummary:
+    """Per-week roll-up of augmentation-vs-automation classifications.
+
+    counts and shares carry one entry per bucket in AUG_AUTO_BUCKETS
+    ('augmentation', 'automation', 'mixed', 'unclassified'). NULL classifier
+    rows land in 'unclassified' rather than being dropped, so ``total``
+    equals the count of session_scores rows for the week.
+
+    classifier_unavailable is True only when total >= 1 AND every row in the
+    week is NULL. An empty week (total == 0) returns classifier_unavailable
+    = False because there is no classifier work to do, not a missing key.
+    """
+
+    week_iso: str
+    counts: dict[str, int]
+    shares: dict[str, float]
+    total: int
+    classifier_unavailable: bool
 
 
 _SYSTEM_PROMPT = """You read one chat session between a person and an AI coding assistant, and decide whether the person was AUGMENTING their own work or AUTOMATING it.
@@ -268,13 +303,80 @@ def classify_session(transcript_text: str) -> AugAutoResult:
     return _parse_response(raw)
 
 
+def _row_week_iso(started_at_raw: object) -> str | None:
+    """Return the ISO-week tag for a session_scores row's ``started_at``, or None.
+
+    None is returned when the value is missing or not a parseable ISO
+    timestamp; the caller treats that as "exclude this row from the week".
+    """
+    if not isinstance(started_at_raw, str):
+        return None
+    try:
+        started = datetime.fromisoformat(started_at_raw)
+    except ValueError:
+        return None
+    year, week, _ = started.date().isocalendar()
+    return f"{year:04d}-W{week:02d}"
+
+
+def aggregate_for_week(
+    profile_store: ProfileStore, week_iso: str
+) -> AugAutoWeekSummary:
+    """Aggregate aug_auto classifications for one ISO week.
+
+    Reads every session_scores row whose ``started_at`` falls in the given
+    ISO week, buckets each row by ``aug_auto_classification`` (NULL -> the
+    'unclassified' bucket), and returns counts, share-of-total, total, and
+    the ``classifier_unavailable`` flag.
+
+    A week with zero session_scores returns an all-zero summary with
+    classifier_unavailable=False. A week with rows where every row is NULL
+    returns classifier_unavailable=True.
+    """
+    rows = profile_store.load_session_scores()
+    counts: dict[str, int] = {bucket: 0 for bucket in AUG_AUTO_BUCKETS}
+    for row in rows:
+        if _row_week_iso(row.get("started_at")) != week_iso:
+            continue
+        classification = row.get("aug_auto_classification")
+        if classification in _VALID_CLASSIFICATIONS:
+            counts[cast(str, classification)] += 1
+        else:
+            # NULL, or any unknown literal that somehow slipped past the
+            # classifier's validator, goes to the unclassified bucket so
+            # the row is still counted in the week total.
+            counts["unclassified"] += 1
+    total = sum(counts.values())
+    if total == 0:
+        shares = {bucket: 0.0 for bucket in AUG_AUTO_BUCKETS}
+        return AugAutoWeekSummary(
+            week_iso=week_iso,
+            counts=counts,
+            shares=shares,
+            total=0,
+            classifier_unavailable=False,
+        )
+    shares = {bucket: counts[bucket] / total for bucket in AUG_AUTO_BUCKETS}
+    classifier_unavailable = counts["unclassified"] == total
+    return AugAutoWeekSummary(
+        week_iso=week_iso,
+        counts=counts,
+        shares=shares,
+        total=total,
+        classifier_unavailable=classifier_unavailable,
+    )
+
+
 __all__ = [
+    "AUG_AUTO_BUCKETS",
     "AugAutoClassification",
     "AugAutoError",
     "AugAutoParseError",
     "AugAutoResult",
     "AugAutoUnavailableError",
+    "AugAutoWeekSummary",
     "CLAUDE_CLASSIFIER_MODEL",
     "OPENAI_CLASSIFIER_MODEL",
+    "aggregate_for_week",
     "classify_session",
 ]
