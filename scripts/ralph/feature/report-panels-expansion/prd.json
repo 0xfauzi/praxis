@@ -75,6 +75,7 @@
   "allowedPaths": [
     "praxis/reports/",
     "praxis/behavior/",
+    "praxis/models_advisor/",
     "tests/",
     "scripts/ralph/feature/report-panels-expansion/",
     "scripts/ralph/progress.txt"
