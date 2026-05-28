@@ -1601,3 +1601,135 @@ def test_masthead_commitment_block_resilient_to_missing_target_dim_key():
     text = _strip_ansi(render(digest))
     assert "Data says:" in text
     assert "0.0" in text
+
+
+# --------------------------------------- US-037 gap-judge prose at renderer
+
+
+def test_masthead_gap_line_uses_judge_prose_when_attached():
+    """When a disagree rollup carries gap_prose, the renderer uses it.
+
+    US-037 attaches constrained-judge prose to the rollup upstream; the
+    renderer's job is to surface it under the "Gap:" field instead of
+    the static fallback line.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 5, "no": 0, "partial": 0},
+        dim_before={"verification": 6.5},
+        dim_after={"verification": 4.8},
+    )
+    rollup = CommitmentRollup(
+        display_text=rollup.display_text,
+        target_dim_key=rollup.target_dim_key,
+        sessions_this_week=rollup.sessions_this_week,
+        sessions_prior_week=rollup.sessions_prior_week,
+        self_report_tally=rollup.self_report_tally,
+        dim_before=rollup.dim_before,
+        dim_after=rollup.dim_after,
+        gap_prose="The numbers and your reflections diverged this week.",
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "The numbers and your reflections diverged this week." in text
+    # The static disagree fallback is NOT used when prose is attached.
+    assert _GAP_DISAGREE_LINE not in text
+
+
+def test_masthead_gap_line_truncates_prose_over_two_sentences():
+    """Spec acceptance: prose > 2 sentences renders with the ellipsis cap.
+
+    The renderer applies the documented truncation rather than emitting
+    an unbounded blob; the third sentence onward is replaced with "..."
+    so the reader sees the cut explicitly.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 5, "no": 0, "partial": 0},
+        dim_before={"verification": 6.5},
+        dim_after={"verification": 4.8},
+    )
+    rollup = CommitmentRollup(
+        display_text=rollup.display_text,
+        target_dim_key=rollup.target_dim_key,
+        sessions_this_week=rollup.sessions_this_week,
+        sessions_prior_week=rollup.sessions_prior_week,
+        self_report_tally=rollup.self_report_tally,
+        dim_before=rollup.dim_before,
+        dim_after=rollup.dim_after,
+        gap_prose=(
+            "First short observation. Second short note. Third extra. Fourth."
+        ),
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "First short observation. Second short note..." in text
+    # The third+ sentences must NOT survive truncation.
+    assert "Third extra" not in text
+    assert "Fourth" not in text
+
+
+def test_masthead_gap_line_falls_back_to_static_when_prose_is_none():
+    """No prose on the rollup => the static disagree line still renders.
+
+    The renderer never leaves the Gap field blank: when the judge wasn't
+    called (or returned None) the documented neutral phrasing fires.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 5, "no": 0, "partial": 0},
+        dim_before={"verification": 6.5},
+        dim_after={"verification": 4.8},
+        # gap_prose stays None by default
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "Self-report and data differ this week." in text
+
+
+def test_masthead_gap_line_falls_back_to_static_when_prose_is_empty():
+    """An empty-string prose collapses to the static fallback.
+
+    An empty Gap field would be worse than a documented neutral line;
+    the renderer treats an empty prose the same way it treats a None
+    prose.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 5, "no": 0, "partial": 0},
+        dim_before={"verification": 6.5},
+        dim_after={"verification": 4.8},
+    )
+    rollup = CommitmentRollup(
+        display_text=rollup.display_text,
+        target_dim_key=rollup.target_dim_key,
+        sessions_this_week=rollup.sessions_this_week,
+        sessions_prior_week=rollup.sessions_prior_week,
+        self_report_tally=rollup.self_report_tally,
+        dim_before=rollup.dim_before,
+        dim_after=rollup.dim_after,
+        gap_prose="   ",
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "Self-report and data differ this week." in text
+
+
+def test_masthead_gap_line_ignores_prose_on_agreement():
+    """Prose attached but no disagreement => the agree line still wins.
+
+    The judge would never be called in this case in production
+    (`apply_gap_prose` short-circuits on agreement), but if a future
+    caller attaches prose anyway the renderer must still emit the
+    agree line so the masthead does not accuse the user falsely.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 5, "no": 0, "partial": 0},
+        dim_before={"verification": 4.5},
+        dim_after={"verification": 6.5},
+    )
+    rollup = CommitmentRollup(
+        display_text=rollup.display_text,
+        target_dim_key=rollup.target_dim_key,
+        sessions_this_week=rollup.sessions_this_week,
+        sessions_prior_week=rollup.sessions_prior_week,
+        self_report_tally=rollup.self_report_tally,
+        dim_before=rollup.dim_before,
+        dim_after=rollup.dim_after,
+        gap_prose="A spurious judge prose that should be ignored.",
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert _GAP_AGREE_LINE in text
+    assert "spurious judge prose" not in text

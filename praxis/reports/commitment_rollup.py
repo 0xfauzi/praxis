@@ -49,6 +49,12 @@ class CommitmentRollup:
     the current week's mean per rubric dim (from session_scores within
     the week), `dim_before` is the prior week's mean (empty when no
     prior data is on file).
+
+    `gap_prose` (US-037) carries the constrained cheap-judge sentence(s)
+    that the masthead renders under the "Gap:" field when self-report
+    and dim data disagree. It stays None when no judge call was made or
+    the call returned nothing; renderers fall back to the documented
+    static neutral phrasing in that case.
     """
 
     display_text: str
@@ -58,6 +64,7 @@ class CommitmentRollup:
     self_report_tally: dict[str, int] = field(default_factory=_zero_tally)
     dim_before: dict[str, float] = field(default_factory=dict)
     dim_after: dict[str, float] = field(default_factory=dict)
+    gap_prose: str | None = None
 
 
 def fetch_self_report_tally(

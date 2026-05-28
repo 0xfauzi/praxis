@@ -911,6 +911,7 @@ def _rollup(
     self_report_tally: dict[str, int] | None = None,
     dim_before: dict[str, float] | None = None,
     dim_after: dict[str, float] | None = None,
+    gap_prose: str | None = None,
 ) -> CommitmentRollup:
     return CommitmentRollup(
         display_text=display_text,
@@ -920,6 +921,7 @@ def _rollup(
         self_report_tally=self_report_tally or {"yes": 3, "partial": 1, "no": 0, "skip": 0},
         dim_before=dim_before or {"verification": 4.8},
         dim_after=dim_after or {"verification": 6.2},
+        gap_prose=gap_prose,
     )
 
 
@@ -1084,3 +1086,114 @@ def test_html_masthead_escapes_user_provided_display_text():
     # The literal <table> must not appear as a tag - it must be escaped.
     assert "<table>" not in out
     assert "&lt;table&gt;" in out
+
+
+# ---------------------------------------------------------------------------
+# US-037: gap-judge prose surfaces under the Gap field in the HTML masthead
+# ---------------------------------------------------------------------------
+
+
+def test_html_masthead_uses_judge_prose_when_disagreement_attached():
+    """Disagree rollup carrying gap_prose => the HTML renders the prose.
+
+    Mirrors the terminal renderer's contract: when upstream attaches
+    constrained-judge prose, the masthead surfaces it in the Gap field
+    rather than the static fallback line.
+    """
+    digest = dataclasses.replace(
+        _digest(),
+        commitment_rollup=_rollup(
+            self_report_tally={"yes": 5, "no": 0, "partial": 0, "skip": 0},
+            dim_before={"verification": 6.5},
+            dim_after={"verification": 4.5},
+            gap_prose="The check-ins and the numbers tell different stories.",
+        ),
+    )
+    out = render(digest)
+    assert "different stories" in out
+    assert "Self-report and data differ this week." not in out
+
+
+def test_html_masthead_truncates_judge_prose_over_two_sentences():
+    """Spec acceptance: > 2 sentences are truncated with ellipsis-and-period.
+
+    The HTML renderer pulls the same truncation helper the terminal
+    renderer uses, so a runaway prose response is bounded on both
+    surfaces simultaneously.
+    """
+    long_prose = "A. B. C. D. E."
+    digest = dataclasses.replace(
+        _digest(),
+        commitment_rollup=_rollup(
+            self_report_tally={"yes": 5, "no": 0, "partial": 0, "skip": 0},
+            dim_before={"verification": 6.5},
+            dim_after={"verification": 4.5},
+            gap_prose=long_prose,
+        ),
+    )
+    out = render(digest)
+    # First two sentences survive; later ones do not.
+    assert "A. B..." in out
+    assert "C." not in out or "C. D" not in out
+
+
+def test_html_masthead_falls_back_to_static_when_prose_is_none():
+    """No prose on a disagree rollup => static fallback fires in HTML too."""
+    digest = dataclasses.replace(
+        _digest(),
+        commitment_rollup=_rollup(
+            self_report_tally={"yes": 5, "no": 0, "partial": 0, "skip": 0},
+            dim_before={"verification": 6.5},
+            dim_after={"verification": 4.5},
+            # gap_prose defaults to None
+        ),
+    )
+    out = render(digest)
+    assert "Self-report and data differ this week." in out
+
+
+def test_html_masthead_gap_disagree_modifier_applies_to_judge_prose():
+    """Judge prose gets the same CSS accent class as the static fallback.
+
+    The accent treatment is what visually marks a noticed gap; the
+    class flips on agree vs anything-else, so the prose surface inherits
+    the disagree styling automatically. The assertion targets the
+    element attribute (``class="cb-gap--disagree"``) rather than the
+    bare class name, since both class selectors live in the inline CSS
+    block regardless of which one fires.
+    """
+    digest = dataclasses.replace(
+        _digest(),
+        commitment_rollup=_rollup(
+            self_report_tally={"yes": 5, "no": 0, "partial": 0, "skip": 0},
+            dim_before={"verification": 6.5},
+            dim_after={"verification": 4.5},
+            gap_prose="A short single sentence.",
+        ),
+    )
+    out = render(digest)
+    assert 'class="cb-gap--disagree"' in out
+    assert 'class="cb-gap--agree"' not in out
+
+
+def test_html_masthead_gap_agree_class_when_signals_align_despite_prose():
+    """Prose ignored when there is no disagreement => agree class wins.
+
+    Defensive: if upstream ever attaches prose on an agreement (the
+    orchestrator's apply_gap_prose short-circuits, but a future
+    caller might not), the renderer still emits the agree line and
+    the agree class.
+    """
+    digest = dataclasses.replace(
+        _digest(),
+        commitment_rollup=_rollup(
+            self_report_tally={"yes": 5, "no": 0, "partial": 0, "skip": 0},
+            dim_before={"verification": 4.5},
+            dim_after={"verification": 6.5},  # both signals positive
+            gap_prose="A spurious prose that must not surface.",
+        ),
+    )
+    out = render(digest)
+    assert 'class="cb-gap--agree"' in out
+    assert 'class="cb-gap--disagree"' not in out
+    assert "spurious prose" not in out

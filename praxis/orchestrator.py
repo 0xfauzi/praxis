@@ -39,6 +39,7 @@ from praxis.reports.commitment_rollup import (
     build_commitment_rollup,
     fetch_self_report_tally,
 )
+from praxis.reports.gap_judge import apply_gap_prose
 from pathlib import Path
 
 from praxis.models import Moment as JudgeMoment, Session
@@ -1095,6 +1096,11 @@ def run_weekly(
             sessions_prior_week=past_prior_sessions,
             self_report_tally=fetch_self_report_tally(store, week_iso),
         )
+        # US-037: attach constrained-judge prose when the self-report
+        # and dim data disagree. The helper is a no-op on agreement
+        # and silently returns the input rollup when no API key is
+        # configured or the judge call fails.
+        past_rollup = apply_gap_prose(past_rollup)
 
         rendered_html, rendered_terminal = _step_render(
             [], past_tasks, past_selection, past_follow_up, snapshot,
@@ -1351,6 +1357,11 @@ def run_weekly(
         sessions_prior_week=sessions_prior_week,
         self_report_tally=self_report_tally,
     )
+    # US-037: attach constrained-judge prose when self-report and
+    # dim data disagree. No-op when there's nothing to compare or
+    # when no API key / judge failure means the renderer should fall
+    # back to the static phrasing.
+    commitment_rollup = apply_gap_prose(commitment_rollup)
 
     # Render last - now that trajectory, cost, and persistence are settled.
     rendered_html, rendered_terminal = _step_render(

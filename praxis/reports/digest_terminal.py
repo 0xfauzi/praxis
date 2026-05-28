@@ -303,16 +303,24 @@ def _gap_summary_line(
     self_report_tally: dict[str, int],
     dim_before: float | None,
     dim_after: float,
+    *,
+    gap_prose: str | None = None,
 ) -> str:
     """Pick the gap-summary line for the masthead's "Gap:" field.
 
     Agreement when the self-report and the dim movement point the same
     way, OR when either signal is None (no evidence of contradiction --
-    we don't accuse the user of mismatch when the data is silent).
-    Disagreement renders the static neutral phrasing under US-035;
-    US-037 swaps in the constrained-judge prose when the disagreement
-    path fires AND an API key is available, with this same string as
-    its documented offline fallback.
+    we don't accuse the user of mismatch when the data is silent). The
+    agree path always returns the static neutral phrasing.
+
+    Disagreement uses ``gap_prose`` when one was attached upstream by
+    the constrained cheap-judge call (US-037). The prose is run through
+    ``truncate_to_two_sentences`` here so a runaway response is bounded
+    at the renderer boundary rather than relying solely on the prompt's
+    "<= 2 sentences" rule. When ``gap_prose`` is None or empty (no API
+    key, the judge call failed, or no upstream wiring) the renderer
+    falls back to the static disagree line so the field never goes
+    blank.
     """
     self_signal = _self_report_signals_progress(self_report_tally)
     data_signal = _dim_movement_signal(dim_before, dim_after)
@@ -320,6 +328,15 @@ def _gap_summary_line(
         return _GAP_AGREE_LINE
     if self_signal == data_signal:
         return _GAP_AGREE_LINE
+    if gap_prose:
+        # Late import keeps the renderer free of the optional Anthropic /
+        # OpenAI SDKs that ``gap_judge`` is allowed to touch. Only the
+        # pure truncation helper is reached from here.
+        from praxis.reports.gap_judge import truncate_to_two_sentences
+
+        truncated = truncate_to_two_sentences(gap_prose)
+        if truncated:
+            return truncated
     return _GAP_DISAGREE_LINE
 
 
@@ -452,7 +469,10 @@ def _commitment_block(rollup: "CommitmentRollup | None") -> list[str]:
     for cont in wrapped_data[1:]:
         lines.append(_body_line(cont_indent + cont))
     gap_text = _gap_summary_line(
-        rollup.self_report_tally, dim_before, dim_after
+        rollup.self_report_tally,
+        dim_before,
+        dim_after,
+        gap_prose=rollup.gap_prose,
     )
     gap_line = _field_line("Gap:", gap_text)
     wrapped_gap = _wrap(gap_line, width=_BODY_WIDTH)

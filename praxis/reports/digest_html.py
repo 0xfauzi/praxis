@@ -313,7 +313,7 @@ def _ordinal(n: int) -> str:
 # without duplicating the noise-band threshold or the rubric lookup.
 
 from praxis.reports.digest_terminal import (  # noqa: E402
-    _GAP_DISAGREE_LINE as _MASTHEAD_GAP_DISAGREE,
+    _GAP_AGREE_LINE as _MASTHEAD_GAP_AGREE,
     _NO_SESSIONS_LOGGED as _MASTHEAD_NO_SESSIONS,
     _format_data_says_line as _masthead_data_says,
     _format_self_report_tally as _masthead_self_report,
@@ -361,17 +361,23 @@ def _commitment_section(rollup: "CommitmentRollup | None") -> str:
         )
         data_says_value = _masthead_data_says(target_key, dim_before, dim_after)
         gap_value = _masthead_gap_summary(
-            rollup.self_report_tally, dim_before, dim_after
+            rollup.self_report_tally,
+            dim_before,
+            dim_after,
+            gap_prose=rollup.gap_prose,
         )
         # The four-field status block: ordering matches the terminal
         # renderer's _commitment_block exactly (Sessions, You said, Data
         # says, Gap). The gap value's class flips on agree/disagree so
         # the disagree line picks up the same warning accent the rest of
-        # the digest reserves for noticed-and-named gaps.
+        # the digest reserves for noticed-and-named gaps. Any text other
+        # than the agree line (the static disagree fallback OR judge
+        # prose under US-037) counts as a disagree surface and gets the
+        # accent treatment.
         gap_modifier = (
-            "cb-gap--disagree"
-            if gap_value == _MASTHEAD_GAP_DISAGREE
-            else "cb-gap--agree"
+            "cb-gap--agree"
+            if gap_value == _MASTHEAD_GAP_AGREE
+            else "cb-gap--disagree"
         )
         status_block = (
             '<div class="cb-status">'
