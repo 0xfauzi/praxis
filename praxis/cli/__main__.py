@@ -780,7 +780,7 @@ def cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
 
 
 def cmd_commit(args: argparse.Namespace) -> int:  # noqa: ARG001
-    """Render the commit prompt and read the user's selection.
+    """Render the commit prompt, read the user's selection, persist it.
 
     Resolves the suggestion list from the latest persisted state:
       - The current ISO week's headline_moment.suggested_alternative
@@ -793,10 +793,15 @@ def cmd_commit(args: argparse.Namespace) -> int:  # noqa: ARG001
       - 'Write your own', always.
 
     When stdin is a TTY (interactive shell), the handler additionally
-    reads the user's choice. The free-text 'w' branch (US-021) opens a
-    validated single-line read via :func:`prompt_free_text` and echoes
-    the accepted text back. Persistence and mid-week replace land in
-    US-022 / US-023 and will reuse the same selection seam.
+    reads the user's choice. ``'w'`` opens a validated single-line read
+    via :func:`prompt_free_text`; ``'1'``..``'N'`` / ``'k'`` pick a
+    pre-built suggestion. On any successful selection the handler writes
+    one ``follow_ups`` row via :meth:`ProfileStore.insert_follow_up` with
+    ``user_chosen=1``, ``outcome='pending'``, and the verbatim user-facing
+    string in ``display_text``. A second pending row for the same week
+    raises :class:`sqlite3.IntegrityError`; the handler catches it and
+    surfaces a replace-flow hint (the actual replace prompt lands in
+    US-023).
 
     Non-TTY invocations (pytest, piped scripts, cron) print the prompt
     and exit 0 without attempting to read. Ctrl-C / Ctrl-D during the
@@ -805,11 +810,15 @@ def cmd_commit(args: argparse.Namespace) -> int:  # noqa: ARG001
     Exit codes:
       0  prompt rendered (and selection handled when interactive).
     """
+    import sqlite3
+
     from praxis.cli.commit import (
         build_commit_suggestions,
+        build_user_chosen_follow_up,
         format_commit_prompt,
         load_commit_context,
         prompt_free_text,
+        resolve_choice,
     )
 
     week_iso = current_iso_week()
@@ -822,21 +831,49 @@ def cmd_commit(args: argparse.Namespace) -> int:  # noqa: ARG001
         return 0
 
     try:
-        choice = input().strip().lower()
+        raw_choice = input()
     except (EOFError, KeyboardInterrupt):
         print()
         return 0
 
-    if choice == "w":
+    chosen = resolve_choice(raw_choice, suggestions)
+    if chosen is None:
+        return 0
+
+    if chosen.kind == "free_text":
         print("Write your own commitment for this week.")
         try:
-            text = prompt_free_text()
+            display_text = prompt_free_text()
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
-        print(f'Your commitment for {week_iso}:')
-        print(f'  "{text}"')
+    else:
+        display_text = chosen.text
 
+    prior = store.latest_follow_up()
+    follow_up = build_user_chosen_follow_up(
+        week_iso=week_iso,
+        suggestion=chosen,
+        display_text=display_text,
+        prior=prior,
+    )
+    try:
+        store.insert_follow_up(follow_up)
+    except sqlite3.IntegrityError:
+        # The partial-unique index ``idx_follow_ups_one_active_per_week``
+        # fired: another active pending commitment already exists for this
+        # week. The mid-week replace/keep/cancel prompt is US-023; for
+        # US-022 we surface a friendly hint and exit cleanly so the user
+        # is never left with a traceback.
+        print()
+        print(
+            f"You already have an active commitment for {week_iso}. "
+            "Re-run `praxis commit` once the replace flow lands (US-023)."
+        )
+        return 0
+
+    print(f'Your commitment for {week_iso}:')
+    print(f'  "{display_text}"')
     return 0
 
 

@@ -26,7 +26,7 @@ from praxis.scoring.aggregate import ProfileSnapshot
 from praxis.scoring.rubric import RUBRIC
 
 
-Outcome = Literal["improved", "unchanged", "worse", "pending"]
+Outcome = Literal["improved", "unchanged", "worse", "pending", "superseded"]
 
 
 _RUBRIC_KEYS: frozenset[str] = frozenset(d.key for d in RUBRIC)
@@ -46,7 +46,14 @@ class HeadlineMoment:
 
 @dataclass
 class FollowUp:
-    """One row of the `follow_ups` table (spec section 6.3 / section 14)."""
+    """One row of the `follow_ups` table (spec section 6.3 / section 14).
+
+    ``user_chosen`` flags rows the user explicitly committed to via
+    ``praxis commit`` (1) versus rows the orchestrator synthesised from the
+    weekly headline moment (0). ``display_text`` is the verbatim user-facing
+    string the CLI printed and the user picked; for system-generated rows
+    it stays None and the renderer falls back to ``commitment_text``.
+    """
 
     week_iso: str
     dim_key: str
@@ -55,6 +62,8 @@ class FollowUp:
     baseline_value: float
     measured_value: float | None = None
     outcome: Outcome = "pending"
+    user_chosen: int = 0
+    display_text: str | None = None
 
 
 def target_metric_for(dim_key: str) -> str:
@@ -104,11 +113,19 @@ def build_follow_up(
     snapshot: ProfileSnapshot,
     verification_rate: float,
     delegation_rate: float,
+    *,
+    user_chosen: int = 0,
+    display_text: str | None = None,
 ) -> FollowUp:
     """Assemble the FollowUp row for the current weekly digest.
 
     The result has `outcome='pending'` and `measured_value=None`; next week's
     run fills those in (US-046).
+
+    ``user_chosen`` defaults to 0 (the orchestrator's synthesised row);
+    ``praxis commit`` passes ``user_chosen=1`` with ``display_text`` set to
+    the verbatim user-facing string the user picked, so the next renderer /
+    write can reproduce it without paraphrasing.
     """
     metric = target_metric_for(headline_moment.dim_key)
     baseline = compute_baseline_value(
@@ -122,6 +139,8 @@ def build_follow_up(
         baseline_value=baseline,
         measured_value=None,
         outcome="pending",
+        user_chosen=user_chosen,
+        display_text=display_text,
     )
 
 

@@ -206,10 +206,18 @@ def test_weekly_digests_table_columns_and_fk(tmp_home):
 
 
 def test_follow_ups_table_columns(tmp_home):
+    """US-022 / schema-migrations US-002: follow_ups uses an id PK so a
+    week can hold an active row plus any number of superseded rows kept
+    for audit; week_iso is a non-unique TEXT column, with the partial-unique
+    index ``idx_follow_ups_one_active_per_week`` enforcing one active
+    pending commitment per week. The PK shift unblocks the replace-flow.
+    """
     ProfileStore(home=resolve_home())
     with _open_db() as conn:
         cols = _table_columns(conn, "follow_ups")
-    assert cols["week_iso"]["pk"] == 1
+    assert cols["id"]["pk"] == 1
+    assert cols["week_iso"]["pk"] == 0
+    assert cols["week_iso"]["notnull"] == 1
     assert cols["dim_key"]["notnull"] == 1
     assert cols["commitment_text"]["notnull"] == 1
     assert cols["target_metric"]["notnull"] == 1
@@ -218,6 +226,10 @@ def test_follow_ups_table_columns(tmp_home):
     assert cols["measured_value"]["type"] == "REAL"
     assert cols["measured_value"]["notnull"] == 0
     assert cols["outcome"]["notnull"] == 1
+    assert cols["user_chosen"]["notnull"] == 1
+    assert cols["user_chosen"]["dflt_value"] == "0"
+    assert cols["display_text"]["notnull"] == 0
+    assert cols["superseded_by"]["notnull"] == 0
 
 
 def test_follow_ups_outcome_check_rejects_unknown_value(tmp_home):

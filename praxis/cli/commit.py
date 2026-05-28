@@ -35,8 +35,14 @@ import sys
 from dataclasses import dataclass
 from typing import Callable, Literal
 
+from praxis.follow_up import FollowUp, target_metric_for
 from praxis.scoring.coach import drills_for_dim
+from praxis.scoring.rubric import RUBRIC
 from praxis.storage.profile_store import ProfileStore
+
+
+_RUBRIC_KEYS: frozenset[str] = frozenset(d.key for d in RUBRIC)
+_FREE_TEXT_SENTINEL = "free_text"
 
 
 MAX_COMMITMENT_CHARS = 280
@@ -232,6 +238,102 @@ def format_commit_prompt(suggestions: list[CommitSuggestion]) -> str:
     lines.append("")
     lines.append(f"Your choice [{', '.join(choice_keys)}]:")
     return "\n".join(lines) + "\n"
+
+
+def resolve_choice(
+    raw: str, suggestions: list[CommitSuggestion]
+) -> CommitSuggestion | None:
+    """Map the user's typed choice to a :class:`CommitSuggestion`.
+
+    Accepts (case-insensitive, whitespace-trimmed):
+      - ``'1'``..``'9'`` -> the Nth headline/drill in priority order.
+      - ``'k'`` -> the keep-last entry, if present.
+      - ``'w'`` -> the free-text placeholder; the caller is responsible for
+        opening :func:`prompt_free_text` to capture the actual text.
+
+    Returns ``None`` for any unrecognized or out-of-range input so the
+    caller can decide whether to re-prompt or exit silently.
+    """
+    normalised = raw.strip().lower()
+    if normalised == "w":
+        return next((s for s in suggestions if s.kind == "free_text"), None)
+    if normalised == "k":
+        return next((s for s in suggestions if s.kind == "keep_last"), None)
+    if normalised.isdigit():
+        idx = int(normalised)
+        numbered = [s for s in suggestions if s.kind in ("headline", "drill")]
+        if 1 <= idx <= len(numbered):
+            return numbered[idx - 1]
+    return None
+
+
+def build_user_chosen_follow_up(
+    *,
+    week_iso: str,
+    suggestion: CommitSuggestion,
+    display_text: str,
+    prior: FollowUp | None,
+) -> FollowUp:
+    """Construct the :class:`FollowUp` to persist for a user-chosen commitment.
+
+    Always sets ``user_chosen=1``, ``outcome='pending'``, ``measured_value=None``,
+    and ``display_text`` to the verbatim user-facing string. The remaining
+    fields depend on the suggestion's kind:
+
+      - ``headline`` / ``drill``: ``dim_key`` is the suggestion's rubric dim;
+        ``target_metric`` is derived via :func:`target_metric_for`. Baseline
+        defaults to ``0.0`` because :func:`compute_baseline_value` needs a
+        snapshot + signals that ``cmd_commit`` does not load. The next-week
+        close path can either refuse to score ``user_chosen`` rows or use
+        the live signal value as both baseline and measured.
+      - ``keep_last``: reuses the prior follow-up's ``dim_key`` /
+        ``target_metric`` / ``baseline_value`` so the original baseline is
+        preserved across the keep-replace pivot.
+      - ``free_text`` (or any unknown dim): a ``free_text`` sentinel is
+        written into ``dim_key`` / ``target_metric``. The columns are
+        ``NOT NULL`` so we need a non-empty placeholder; the next-week close
+        path inspects ``target_metric`` and skips sentinel rows.
+    """
+    if suggestion.kind == "keep_last" and prior is not None:
+        return FollowUp(
+            week_iso=week_iso,
+            dim_key=prior.dim_key,
+            commitment_text=display_text,
+            target_metric=prior.target_metric,
+            baseline_value=prior.baseline_value,
+            measured_value=None,
+            outcome="pending",
+            user_chosen=1,
+            display_text=display_text,
+        )
+    dim_key = suggestion.dim_key
+    if (
+        suggestion.kind in ("headline", "drill")
+        and dim_key is not None
+        and dim_key in _RUBRIC_KEYS
+    ):
+        return FollowUp(
+            week_iso=week_iso,
+            dim_key=dim_key,
+            commitment_text=display_text,
+            target_metric=target_metric_for(dim_key),
+            baseline_value=0.0,
+            measured_value=None,
+            outcome="pending",
+            user_chosen=1,
+            display_text=display_text,
+        )
+    return FollowUp(
+        week_iso=week_iso,
+        dim_key=_FREE_TEXT_SENTINEL,
+        commitment_text=display_text,
+        target_metric=_FREE_TEXT_SENTINEL,
+        baseline_value=0.0,
+        measured_value=None,
+        outcome="pending",
+        user_chosen=1,
+        display_text=display_text,
+    )
 
 
 def prompt_free_text(

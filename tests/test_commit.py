@@ -754,7 +754,7 @@ def test_cmd_commit_w_choice_keyboard_interrupt_exits_zero(
 def test_cmd_commit_non_w_choice_does_not_open_free_text(
     monkeypatch, tmp_home, capsys
 ):
-    """Selecting '1' or 'k' does not trigger the free-text reader (US-022 will wire those)."""
+    """Selecting '1' or 'k' does not trigger the free-text reader."""
     _force_tty(monkeypatch)
     inputs = iter(["1"])
     monkeypatch.setattr(builtins, "input", lambda *_a, **_kw: next(inputs))
@@ -764,3 +764,400 @@ def test_cmd_commit_non_w_choice_does_not_open_free_text(
     assert code == 0
     # No free-text branch was entered.
     assert "Write your own commitment for this week." not in out
+
+
+# ---- resolve_choice (US-022) ------------------------------------------------
+
+
+def test_resolve_choice_returns_numbered_suggestion():
+    """Digit input picks the Nth headline/drill in order."""
+    from praxis.cli.commit import resolve_choice
+
+    suggestions = [
+        CommitSuggestion(kind="headline", text="alpha", dim_key="planning"),
+        CommitSuggestion(kind="drill", text="beta", dim_key="context"),
+        CommitSuggestion(kind="free_text", text="Write your own"),
+    ]
+    result = resolve_choice("2", suggestions)
+    assert result is not None
+    assert result.kind == "drill"
+    assert result.text == "beta"
+
+
+def test_resolve_choice_returns_keep_last_for_k():
+    """The 'k' shortcut picks the keep-last entry."""
+    from praxis.cli.commit import resolve_choice
+
+    suggestions = [
+        CommitSuggestion(kind="drill", text="alpha", dim_key="planning"),
+        CommitSuggestion(kind="keep_last", text="last week's commitment"),
+        CommitSuggestion(kind="free_text", text="Write your own"),
+    ]
+    result = resolve_choice("k", suggestions)
+    assert result is not None
+    assert result.kind == "keep_last"
+    assert result.text == "last week's commitment"
+
+
+def test_resolve_choice_returns_free_text_for_w():
+    """The 'w' shortcut returns the free-text placeholder."""
+    from praxis.cli.commit import resolve_choice
+
+    suggestions = [CommitSuggestion(kind="free_text", text="Write your own")]
+    result = resolve_choice("w", suggestions)
+    assert result is not None
+    assert result.kind == "free_text"
+
+
+def test_resolve_choice_case_insensitive_and_trims_whitespace():
+    """Surrounding whitespace and uppercase letters still resolve."""
+    from praxis.cli.commit import resolve_choice
+
+    suggestions = [
+        CommitSuggestion(kind="keep_last", text="prior"),
+        CommitSuggestion(kind="free_text", text="Write your own"),
+    ]
+    assert resolve_choice("  K ", suggestions) is not None
+    assert resolve_choice("W\n", suggestions) is not None
+
+
+def test_resolve_choice_invalid_returns_none():
+    """Unknown letters, out-of-range digits, and empty input all return None."""
+    from praxis.cli.commit import resolve_choice
+
+    suggestions = [
+        CommitSuggestion(kind="drill", text="alpha", dim_key="planning"),
+        CommitSuggestion(kind="free_text", text="Write your own"),
+    ]
+    assert resolve_choice("9", suggestions) is None  # only 1 numbered slot
+    assert resolve_choice("x", suggestions) is None
+    assert resolve_choice("", suggestions) is None
+    assert resolve_choice("k", suggestions) is None  # no keep_last in list
+
+
+# ---- build_user_chosen_follow_up (US-022) -----------------------------------
+
+
+def test_build_user_chosen_follow_up_drill_uses_dim_target_metric():
+    """A drill commitment carries its dim_key + derived target_metric."""
+    from praxis.cli.commit import build_user_chosen_follow_up
+
+    suggestion = CommitSuggestion(
+        kind="drill",
+        text="State the goal in one line before prompting.",
+        dim_key="planning",
+    )
+    fu = build_user_chosen_follow_up(
+        week_iso="2026-W21",
+        suggestion=suggestion,
+        display_text=suggestion.text,
+        prior=None,
+    )
+    assert fu.week_iso == "2026-W21"
+    assert fu.dim_key == "planning"
+    assert fu.target_metric == "planning_dim_mean"
+    assert fu.commitment_text == suggestion.text
+    assert fu.display_text == suggestion.text
+    assert fu.user_chosen == 1
+    assert fu.outcome == "pending"
+    assert fu.measured_value is None
+
+
+def test_build_user_chosen_follow_up_free_text_uses_sentinel():
+    """A free-text commitment writes a sentinel dim_key / target_metric.
+
+    The columns are NOT NULL so we cannot leave them blank; the sentinel
+    lets the next-week close path recognize a user-chosen-with-no-dim row
+    and skip the data-driven scoring.
+    """
+    from praxis.cli.commit import build_user_chosen_follow_up
+
+    suggestion = CommitSuggestion(kind="free_text", text="Write your own")
+    fu = build_user_chosen_follow_up(
+        week_iso="2026-W21",
+        suggestion=suggestion,
+        display_text="Ask 'list every table this writes' before each migration.",
+        prior=None,
+    )
+    assert fu.dim_key == "free_text"
+    assert fu.target_metric == "free_text"
+    assert fu.user_chosen == 1
+    assert fu.outcome == "pending"
+    assert fu.display_text == (
+        "Ask 'list every table this writes' before each migration."
+    )
+    assert fu.commitment_text == fu.display_text
+
+
+def test_build_user_chosen_follow_up_keep_last_reuses_prior_baseline():
+    """Keep-last must preserve the original baseline_value so close still works."""
+    from praxis.cli.commit import build_user_chosen_follow_up
+
+    prior = FollowUp(
+        week_iso="2026-W20",
+        dim_key="verification",
+        commitment_text="ask for source",
+        target_metric="verification_rate",
+        baseline_value=0.42,
+        outcome="pending",
+    )
+    suggestion = CommitSuggestion(kind="keep_last", text=prior.commitment_text)
+    fu = build_user_chosen_follow_up(
+        week_iso="2026-W21",
+        suggestion=suggestion,
+        display_text=prior.commitment_text,
+        prior=prior,
+    )
+    assert fu.week_iso == "2026-W21"
+    assert fu.dim_key == "verification"
+    assert fu.target_metric == "verification_rate"
+    assert fu.baseline_value == 0.42
+    assert fu.user_chosen == 1
+    assert fu.display_text == prior.commitment_text
+
+
+# ---- ProfileStore.insert_follow_up + partial-unique index (US-022) ----------
+
+
+def test_insert_follow_up_persists_user_chosen_and_display_text(tmp_home):
+    """insert_follow_up writes the new columns; load_follow_up surfaces them."""
+    from praxis.storage.profile_store import ProfileStore as _PS
+
+    store = _PS()
+    fu = FollowUp(
+        week_iso="2026-W21",
+        dim_key="planning",
+        commitment_text="state the goal in one line before prompting",
+        target_metric="planning_dim_mean",
+        baseline_value=0.0,
+        outcome="pending",
+        user_chosen=1,
+        display_text="state the goal in one line before prompting",
+    )
+    row_id = store.insert_follow_up(fu)
+    assert isinstance(row_id, int) and row_id > 0
+    loaded = store.load_follow_up("2026-W21")
+    assert loaded is not None
+    assert loaded.user_chosen == 1
+    assert loaded.display_text == "state the goal in one line before prompting"
+    assert loaded.outcome == "pending"
+
+
+def test_insert_follow_up_second_pending_row_raises_integrity_error(tmp_home):
+    """The partial-unique index blocks two active pending rows per week."""
+    import sqlite3
+
+    from praxis.storage.profile_store import ProfileStore as _PS
+
+    store = _PS()
+    fu = FollowUp(
+        week_iso="2026-W21",
+        dim_key="planning",
+        commitment_text="first commitment",
+        target_metric="planning_dim_mean",
+        baseline_value=0.0,
+        outcome="pending",
+        user_chosen=1,
+        display_text="first commitment",
+    )
+    store.insert_follow_up(fu)
+    with pytest.raises(sqlite3.IntegrityError):
+        store.insert_follow_up(fu)
+
+
+def test_insert_follow_up_allows_second_row_after_first_is_superseded(tmp_home):
+    """Once the active row has superseded_by set, a new active row may insert.
+
+    Manually flips ``superseded_by`` on the first row to simulate what the
+    US-023 replace flow will do in one transaction. The partial-unique
+    index only enforces against rows where ``superseded_by IS NULL``.
+    """
+    import sqlite3
+
+    from praxis.storage.profile_store import ProfileStore as _PS
+
+    store = _PS()
+    first = FollowUp(
+        week_iso="2026-W21",
+        dim_key="planning",
+        commitment_text="first",
+        target_metric="planning_dim_mean",
+        baseline_value=0.0,
+        outcome="pending",
+        user_chosen=1,
+        display_text="first",
+    )
+    first_id = store.insert_follow_up(first)
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            "UPDATE follow_ups SET superseded_by = ?, outcome = 'superseded' "
+            "WHERE id = ?",
+            (first_id + 1, first_id),
+        )
+        conn.commit()
+    second = FollowUp(
+        week_iso="2026-W21",
+        dim_key="planning",
+        commitment_text="second",
+        target_metric="planning_dim_mean",
+        baseline_value=0.0,
+        outcome="pending",
+        user_chosen=1,
+        display_text="second",
+    )
+    second_id = store.insert_follow_up(second)
+    assert second_id != first_id
+
+
+def test_outcome_check_constraint_accepts_superseded(tmp_home):
+    """The CHECK constraint must allow the new 'superseded' value."""
+    import sqlite3
+
+    from praxis.storage.profile_store import ProfileStore as _PS
+
+    store = _PS()
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            "INSERT INTO follow_ups (week_iso, dim_key, commitment_text, "
+            "target_metric, baseline_value, outcome) VALUES (?, ?, ?, ?, ?, ?)",
+            ("2026-W21", "planning", "x", "planning_dim_mean", 0.0, "superseded"),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT outcome FROM follow_ups WHERE week_iso = ?", ("2026-W21",)
+        ).fetchone()
+    assert row[0] == "superseded"
+
+
+# ---- cmd_commit + persistence integration (US-022) --------------------------
+
+
+def test_cmd_commit_free_text_persists_row_with_user_chosen_and_display_text(
+    monkeypatch, tmp_home, capsys
+):
+    """End-to-end: 'w' + valid text writes one row with user_chosen=1."""
+    _force_tty(monkeypatch)
+    text = "Ask 'list every table this writes' before each migration."
+    inputs = iter(["w", text])
+    monkeypatch.setattr(builtins, "input", lambda *_a, **_kw: next(inputs))
+
+    code = main(["commit"])
+    capsys.readouterr()
+    assert code == 0
+
+    store = ProfileStore()
+    loaded = store.load_follow_up(current_iso_week())
+    assert loaded is not None
+    assert loaded.user_chosen == 1
+    assert loaded.display_text == text
+    assert loaded.outcome == "pending"
+
+
+def test_cmd_commit_numbered_choice_persists_drill_with_dim_key(
+    monkeypatch, tmp_home, capsys
+):
+    """Selecting '1' on a drill suggestion writes a row with that dim_key."""
+    _force_tty(monkeypatch)
+    store = ProfileStore()
+    store.save_weekly_digest(
+        week_iso=current_iso_week(),
+        trajectory_label="learning",
+        trajectory_headline="learning week",
+        snapshot=_snapshot_with_means({"planning": 2.0, "context": 3.0}),
+    )
+    inputs = iter(["1"])
+    monkeypatch.setattr(builtins, "input", lambda *_a, **_kw: next(inputs))
+
+    code = main(["commit"])
+    capsys.readouterr()
+    assert code == 0
+
+    loaded = store.load_follow_up(current_iso_week())
+    assert loaded is not None
+    assert loaded.user_chosen == 1
+    assert loaded.dim_key == "planning"
+    assert loaded.target_metric == "planning_dim_mean"
+    assert loaded.display_text == FALLBACK_DRILLS["planning"][0]
+    assert loaded.outcome == "pending"
+
+
+def test_cmd_commit_keep_last_persists_using_prior_baseline(
+    monkeypatch, tmp_home, capsys
+):
+    """Selecting 'k' writes a new row that reuses the prior baseline."""
+    _force_tty(monkeypatch)
+    store = ProfileStore()
+    store.save_follow_up(
+        FollowUp(
+            week_iso="2026-W20",
+            dim_key="verification",
+            commitment_text="ask for source",
+            target_metric="verification_rate",
+            baseline_value=0.42,
+            outcome="pending",
+        )
+    )
+
+    from praxis.cli import __main__ as cli_main
+    monkeypatch.setattr(cli_main, "current_iso_week", lambda: "2026-W21")
+    inputs = iter(["k"])
+    monkeypatch.setattr(builtins, "input", lambda *_a, **_kw: next(inputs))
+
+    code = main(["commit"])
+    capsys.readouterr()
+    assert code == 0
+
+    loaded = store.load_follow_up("2026-W21")
+    assert loaded is not None
+    assert loaded.user_chosen == 1
+    assert loaded.dim_key == "verification"
+    assert loaded.target_metric == "verification_rate"
+    assert loaded.baseline_value == 0.42
+    assert loaded.display_text == "ask for source"
+
+
+def test_cmd_commit_second_insert_with_active_pending_catches_integrity_error(
+    monkeypatch, tmp_home, capsys
+):
+    """A second 'w' run, with the first commitment still active, exits 0 cleanly.
+
+    AC #3: the partial-unique index fires; the CLI catches the error and
+    surfaces a replace-flow hint instead of crashing.
+    """
+    _force_tty(monkeypatch)
+
+    # First run: persist a free-text commitment.
+    inputs_first = iter(["w", "first commitment for this week"])
+    monkeypatch.setattr(builtins, "input", lambda *_a, **_kw: next(inputs_first))
+    assert main(["commit"]) == 0
+    capsys.readouterr()
+
+    # Second run: same week, second commitment attempt.
+    inputs_second = iter(["w", "second commitment for this week"])
+    monkeypatch.setattr(builtins, "input", lambda *_a, **_kw: next(inputs_second))
+    code = main(["commit"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "already have an active commitment" in captured.out
+
+    store = ProfileStore()
+    loaded = store.load_follow_up(current_iso_week())
+    assert loaded is not None
+    # The first commitment is still the active one (no overwrite).
+    assert loaded.display_text == "first commitment for this week"
+
+
+def test_cmd_commit_invalid_choice_does_not_persist(
+    monkeypatch, tmp_home, capsys
+):
+    """Unknown input (e.g. ``'q'``) leaves the DB untouched."""
+    _force_tty(monkeypatch)
+    inputs = iter(["q"])
+    monkeypatch.setattr(builtins, "input", lambda *_a, **_kw: next(inputs))
+
+    code = main(["commit"])
+    capsys.readouterr()
+    assert code == 0
+
+    store = ProfileStore()
+    assert store.load_follow_up(current_iso_week()) is None
