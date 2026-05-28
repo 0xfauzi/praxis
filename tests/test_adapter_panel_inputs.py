@@ -292,6 +292,75 @@ def _session_with_aug_auto(label: str | None, weekday: int = 0):
 # ---------------- _aug_auto_balance_panel: empty + unavailable paths -----
 
 
+def test_aug_auto_balance_reads_persisted_label_from_store(tmp_home):
+    """Regression: real Session objects do not carry aug_auto_classification
+    as an attribute -- the classifier writes the label to session_scores
+    via ProfileStore.set_session_aug_auto. The adapter must look it up
+    from the store, not via getattr on the Session.
+
+    Reproduction (pre-fix): all rendered weeks showed "Classifier
+    unavailable" even when OpenAI was reachable and rows in the DB had
+    non-null aug_auto_classification. Caused by the adapter reading a
+    non-existent attribute, always getting None, then declaring the
+    classifier unavailable.
+    """
+    from praxis.models import Provider, Session
+    from praxis.scoring.aggregate import SessionScore
+    from praxis.scoring.features import SessionFeatures
+    from praxis.scoring.judge import JudgeResult
+    from praxis.scoring.rubric import RUBRIC
+    from praxis.storage.profile_store import ProfileStore, resolve_home
+
+    store = ProfileStore(home=resolve_home())
+    # Seed two judged sessions and tag them with classifier labels.
+    sessions: list[Session] = []
+    for idx, label in enumerate(("augmentation", "automation")):
+        sess = Session(
+            provider=Provider.CLAUDE,
+            session_id=f"sess-aug-auto-{idx}",
+            started_at=datetime(2026, 5, 25, 12, idx, tzinfo=timezone.utc),
+            turns=[
+                Turn(role=Role.USER, content="please help"),
+                Turn(role=Role.ASSISTANT, content="ok"),
+            ],
+            source_path=f"/tmp/sess-{idx}.jsonl",
+        )
+        sessions.append(sess)
+        judge = JudgeResult(
+            dimension_scores={d.key: 6.0 for d in RUBRIC},
+            rationale={d.key: "fixture" for d in RUBRIC},
+            standout_moments=[],
+            failure_modes=[],
+            overall_note="fixture",
+            judge_model="fixture",
+        )
+        score = SessionScore(
+            session_stable_id=sess.stable_id,
+            provider=sess.provider.value,
+            started_at=sess.started_at,
+            dimension_scores=judge.dimension_scores,
+            overall=6.0,
+            judge_result=judge,
+            features=SessionFeatures(turn_count=2, avg_prompt_chars=12.0),
+            source_path=sess.source_path,
+            judge_pass=1,
+        )
+        store.save_session_score(score)
+        store.set_session_aug_auto(sess.stable_id, label, 0.85)
+
+    panel = _aug_auto_balance_panel(SimpleNamespace(sessions=sessions))
+    # If the bug returns the panel will say classifier_unavailable=True
+    # and every session will be in unclassified_count.
+    assert panel.classifier_unavailable is False, (
+        "Classifier appears unavailable even though rows are tagged in the DB. "
+        "Adapter is probably reading getattr(session, 'aug_auto_classification') "
+        "again instead of falling back to ProfileStore.get_session_aug_auto."
+    )
+    assert panel.augmentation_count == 1
+    assert panel.automation_count == 1
+    assert panel.unclassified_count == 0
+
+
 def test_aug_auto_balance_no_sessions_is_not_unavailable():
     """Zero sessions in the week is structurally different from "API key
     missing"; classifier_unavailable is False so the renderer can show a
