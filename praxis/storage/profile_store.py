@@ -25,6 +25,11 @@ def _utcnow() -> datetime:
     """Tz-aware UTC now. Wraps datetime.now(timezone.utc) for terseness."""
     return datetime.now(timezone.utc)
 
+
+def _sqlite_literal(s: str) -> str:
+    """Escape ``s`` for use inside a SQLite single-quoted string literal."""
+    return s.replace("'", "''")
+
 from praxis.follow_up import FollowUp, Outcome
 from praxis.models import Moment, compute_moment_id
 from praxis.redactor import redact_secrets
@@ -162,6 +167,7 @@ class ProfileStore:
                     # in-place so older v3 DBs gain new optional columns
                     # (signals_json) without a full table rebuild.
                     self._ensure_session_scores_columns(conn)
+                    self._run_sql_migrations()
                     return
 
         # Migration needed (fresh DB, v0.1, or v0.2 DB without the v3 marker).
@@ -178,6 +184,7 @@ class ProfileStore:
             raise MigrationError(
                 self._migration_failure_message(backup_path, exc)
             ) from exc
+        self._run_sql_migrations()
 
     @staticmethod
     def _ensure_session_scores_columns(conn: sqlite3.Connection) -> None:
@@ -309,6 +316,84 @@ class ProfileStore:
             "VALUES (?, ?, ?, ?, ?)",
             (_utcnow().isoformat(), "schema_version", 0, 0, "3"),
         )
+
+    # ---- sql-file migration runner (US-001) -----------------------------
+
+    @classmethod
+    def _migrations_dir(cls) -> Path:
+        """Directory holding numbered ``*.sql`` migration files.
+
+        Overridable in tests via ``monkeypatch.setattr(ProfileStore,
+        "_migrations_dir", classmethod(lambda cls: tmp_path))``.
+        """
+        return Path(__file__).parent / "migrations"
+
+    def _run_sql_migrations(self) -> None:
+        """Apply any pending ``*.sql`` migrations in lexical order.
+
+        ``schema_migrations(version, applied_at)`` is created on first run.
+        Each pending migration runs wrapped in a ``BEGIN; ... COMMIT;``
+        transaction together with the row that records the version, so on
+        ``sqlite3.OperationalError`` we rollback and re-raise. ``version``
+        stays absent from ``schema_migrations`` for failed migrations, so
+        the next invocation re-attempts the same file.
+        """
+        self._ensure_schema_migrations_table()
+        migrations_dir = self._migrations_dir()
+        if not migrations_dir.is_dir():
+            return
+        applied = self._applied_migration_versions()
+        for sql_path in sorted(migrations_dir.glob("*.sql")):
+            if sql_path.name in applied:
+                continue
+            self._apply_sql_migration(sql_path.name, sql_path.read_text())
+
+    def _ensure_schema_migrations_table(self) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS schema_migrations ("
+                "  version TEXT PRIMARY KEY,"
+                "  applied_at TEXT NOT NULL"
+                ")"
+            )
+
+    def _applied_migration_versions(self) -> set[str]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT version FROM schema_migrations"
+            ).fetchall()
+        return {row["version"] for row in rows}
+
+    def _apply_sql_migration(self, version: str, body_sql: str) -> None:
+        """Run one migration's SQL + the marker insert in one transaction.
+
+        Uses ``executescript`` with the ``BEGIN; ... COMMIT;`` boundaries
+        inside the script string so a partial failure rolls back the body
+        and leaves no marker row behind. Outside that script, ``conn`` runs
+        with default sqlite3 transaction handling.
+        """
+        applied_at = _utcnow().isoformat()
+        script = (
+            "BEGIN;\n"
+            + body_sql.rstrip(" \t\r\n;") + ";\n"
+            + "INSERT INTO schema_migrations (version, applied_at) VALUES ("
+            + f"'{_sqlite_literal(version)}', '{_sqlite_literal(applied_at)}'"
+            + ");\n"
+            + "COMMIT;\n"
+        )
+        conn = sqlite3.connect(self.db_path)
+        try:
+            try:
+                conn.executescript(script)
+            except sqlite3.OperationalError:
+                if conn.in_transaction:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass
+                raise
+        finally:
+            conn.close()
 
     @contextmanager
     def _conn(self):
@@ -450,6 +535,58 @@ class ProfileStore:
             json.loads(out["judge_result_json"]) if out["judge_result_json"] else None
         )
         return out
+
+    # ---- aug/auto classification (US-004) -------------------------------
+
+    _AUG_AUTO_VALID = ("augmentation", "automation", "mixed")
+
+    def set_session_aug_auto(
+        self,
+        stable_id: str,
+        classification: str,
+        confidence: float,
+    ) -> None:
+        """Persist the augmentation/automation classifier output for a session.
+
+        ``classification`` must be one of ``augmentation``, ``automation``,
+        ``mixed``; anything else raises ``ValueError`` before any SQL is
+        issued. The update touches every persisted row for ``stable_id``
+        (both pass-1 and pass-2 when present) so a subsequent read finds
+        the value regardless of which row it looks at.
+        """
+        if classification not in self._AUG_AUTO_VALID:
+            raise ValueError(
+                f"aug_auto_classification must be one of "
+                f"{self._AUG_AUTO_VALID}, got {classification!r}"
+            )
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE session_scores "
+                "SET aug_auto_classification = ?, aug_auto_confidence = ? "
+                "WHERE stable_id = ?",
+                (classification, confidence, stable_id),
+            )
+
+    def get_session_aug_auto(
+        self, stable_id: str
+    ) -> tuple[str | None, float | None]:
+        """Return ``(classification, confidence)`` for a session.
+
+        Returns ``(None, None)`` when the session row is missing or when
+        the columns are NULL (rows written before this migration ran, or
+        sessions the classifier has not yet labelled). Reads from the
+        highest-pass row for the session, matching ``load_one_session_score``.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT aug_auto_classification, aug_auto_confidence "
+                "FROM session_scores WHERE stable_id = ? "
+                "ORDER BY judge_pass DESC LIMIT 1",
+                (stable_id,),
+            ).fetchone()
+        if row is None:
+            return (None, None)
+        return (row["aug_auto_classification"], row["aug_auto_confidence"])
 
     # ---- moments --------------------------------------------------------
 
@@ -690,11 +827,43 @@ class ProfileStore:
     # ---- follow-ups -----------------------------------------------------
 
     def save_follow_up(self, follow_up: FollowUp) -> None:
-        """Persist (or replace) one row of follow_ups keyed by week_iso."""
+        """Persist (or update) the follow-up row for this week.
+
+        Post-US-002, ``week_iso`` is no longer the primary key on
+        ``follow_ups`` so a future user-picks-from-alternatives flow can
+        store multiple rows per week. To keep this single-row API stable
+        we UPDATE the most-recent row for ``week_iso`` when one exists
+        (preserves ``id`` for any FK references) and INSERT only when
+        the week has no row yet.
+        """
         with self._conn() as conn:
+            existing = conn.execute(
+                "SELECT id FROM follow_ups WHERE week_iso = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (follow_up.week_iso,),
+            ).fetchone()
+            if existing is not None:
+                conn.execute(
+                    """
+                    UPDATE follow_ups
+                    SET dim_key = ?, commitment_text = ?, target_metric = ?,
+                        baseline_value = ?, measured_value = ?, outcome = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        follow_up.dim_key,
+                        follow_up.commitment_text,
+                        follow_up.target_metric,
+                        follow_up.baseline_value,
+                        follow_up.measured_value,
+                        follow_up.outcome,
+                        existing["id"],
+                    ),
+                )
+                return
             conn.execute(
                 """
-                INSERT OR REPLACE INTO follow_ups
+                INSERT INTO follow_ups
                 (week_iso, dim_key, commitment_text, target_metric,
                  baseline_value, measured_value, outcome)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -715,7 +884,8 @@ class ProfileStore:
             row = conn.execute(
                 "SELECT week_iso, dim_key, commitment_text, target_metric, "
                 "       baseline_value, measured_value, outcome "
-                "FROM follow_ups WHERE week_iso = ?",
+                "FROM follow_ups WHERE week_iso = ? "
+                "ORDER BY id DESC LIMIT 1",
                 (week_iso,),
             ).fetchone()
         if row is None:
@@ -839,7 +1009,7 @@ class ProfileStore:
                 "SELECT week_iso, dim_key, commitment_text, target_metric, "
                 "       baseline_value, measured_value, outcome "
                 "FROM follow_ups WHERE week_iso < ? "
-                "ORDER BY week_iso DESC LIMIT 1",
+                "ORDER BY week_iso DESC, id DESC LIMIT 1",
                 (before_week_iso,),
             ).fetchone()
         if row is None:
@@ -864,7 +1034,7 @@ class ProfileStore:
             row = conn.execute(
                 "SELECT week_iso, dim_key, commitment_text, target_metric, "
                 "       baseline_value, measured_value, outcome "
-                "FROM follow_ups ORDER BY week_iso DESC LIMIT 1"
+                "FROM follow_ups ORDER BY week_iso DESC, id DESC LIMIT 1"
             ).fetchone()
         if row is None:
             return None
@@ -878,3 +1048,32 @@ class ProfileStore:
             measured_value=row["measured_value"],
             outcome=outcome,
         )
+
+    # ---- session reflections (US-003) -----------------------------------
+
+    def insert_session_reflection(
+        self,
+        *,
+        session_stable_id: str,
+        follow_up_id: int,
+        self_report: str,
+        note: str | None = None,
+    ) -> int:
+        """Persist one ``session_reflections`` row and return its id.
+
+        ``self_report`` must be one of ``yes``/``no``/``partial``/``skip``;
+        any other value is rejected by the column CHECK constraint as
+        ``sqlite3.IntegrityError``. ``created_at`` is the ISO-8601 UTC
+        timestamp for the moment the row was written.
+        """
+        created_at = _utcnow().isoformat()
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO session_reflections "
+                "(session_stable_id, follow_up_id, self_report, note, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (session_stable_id, follow_up_id, self_report, note, created_at),
+            )
+            row_id = cur.lastrowid
+        assert row_id is not None
+        return row_id

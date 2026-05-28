@@ -9,7 +9,6 @@ Spec 5.6 acceptance criteria:
 """
 from __future__ import annotations
 
-from praxis.models import Role
 from praxis.scanners import (
     ClaudeScanner,
     CodexScanner,

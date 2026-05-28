@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -206,10 +207,16 @@ def test_weekly_digests_table_columns_and_fk(tmp_home):
 
 
 def test_follow_ups_table_columns(tmp_home):
+    # Post-US-002 the table is rebuilt with `id INTEGER PRIMARY KEY
+    # AUTOINCREMENT` (so multiple commitments per week can coexist) and
+    # week_iso becomes a plain NOT NULL column.
     ProfileStore(home=resolve_home())
     with _open_db() as conn:
         cols = _table_columns(conn, "follow_ups")
-    assert cols["week_iso"]["pk"] == 1
+    assert cols["id"]["pk"] == 1
+    assert cols["id"]["type"] == "INTEGER"
+    assert cols["week_iso"]["pk"] == 0
+    assert cols["week_iso"]["notnull"] == 1
     assert cols["dim_key"]["notnull"] == 1
     assert cols["commitment_text"]["notnull"] == 1
     assert cols["target_metric"]["notnull"] == 1
@@ -250,6 +257,180 @@ def test_follow_ups_outcome_check_accepts_all_four_values(tmp_home):
         conn.commit()
         count = conn.execute("SELECT COUNT(*) AS c FROM follow_ups").fetchone()["c"]
         assert count == 4
+
+
+# ---- US-002: new columns + partial-unique active-commitment index ----------
+
+
+def _insert_active_pending(conn, week_iso: str, commitment: str = "ask first") -> int:
+    """Insert one row with outcome='pending' and superseded_by NULL, return its id."""
+    cur = conn.execute(
+        "INSERT INTO follow_ups (week_iso, dim_key, commitment_text, target_metric, "
+        "baseline_value, outcome) VALUES (?, ?, ?, ?, ?, ?)",
+        (week_iso, "verification", commitment, "verification_rate", 0.4, "pending"),
+    )
+    return cur.lastrowid
+
+
+def test_follow_ups_has_user_chosen_column(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        cols = _table_columns(conn, "follow_ups")
+    assert cols["user_chosen"]["type"] == "INTEGER"
+    assert cols["user_chosen"]["notnull"] == 1
+    assert cols["user_chosen"]["dflt_value"] == "0"
+
+
+def test_follow_ups_has_display_text_column(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        cols = _table_columns(conn, "follow_ups")
+    assert cols["display_text"]["type"] == "TEXT"
+    assert cols["display_text"]["notnull"] == 0
+
+
+def test_follow_ups_has_superseded_by_column_with_self_fk(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        cols = _table_columns(conn, "follow_ups")
+        fks = conn.execute("PRAGMA foreign_key_list(follow_ups)").fetchall()
+    assert cols["superseded_by"]["type"] == "INTEGER"
+    assert cols["superseded_by"]["notnull"] == 0
+    matching = [
+        f for f in fks
+        if f["table"] == "follow_ups"
+        and f["from"] == "superseded_by"
+        and f["to"] == "id"
+    ]
+    assert len(matching) == 1, "superseded_by must FK-reference follow_ups(id)"
+
+
+def test_active_commitment_partial_unique_index_exists(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        row = conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'index' "
+            "AND name = 'idx_follow_ups_one_active_per_week'"
+        ).fetchone()
+    assert row is not None, "partial-unique index must exist"
+    sql = row["sql"].lower()
+    assert "unique" in sql
+    assert "where" in sql
+    assert "outcome" in sql and "pending" in sql
+    assert "superseded_by" in sql
+
+
+def test_second_active_pending_row_for_same_week_raises_integrity_error(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        _insert_active_pending(conn, "2026-W21")
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_active_pending(conn, "2026-W21", commitment="second active try")
+
+
+def test_second_active_row_succeeds_after_first_is_superseded(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        first_id = _insert_active_pending(conn, "2026-W21")
+        conn.commit()
+        # Mark the first row as superseded so the partial index predicate
+        # no longer matches it; a second active row can now coexist.
+        conn.execute(
+            "UPDATE follow_ups SET superseded_by = ? WHERE id = ?",
+            (first_id + 99, first_id),
+        )
+        conn.commit()
+        new_id = _insert_active_pending(conn, "2026-W21", commitment="replacement")
+        conn.commit()
+        rows = conn.execute(
+            "SELECT id, outcome, superseded_by FROM follow_ups "
+            "WHERE week_iso = ? ORDER BY id ASC",
+            ("2026-W21",),
+        ).fetchall()
+    assert [r["id"] for r in rows] == [first_id, new_id]
+    assert rows[0]["superseded_by"] == first_id + 99
+    assert rows[1]["superseded_by"] is None
+
+
+def test_distinct_outcomes_for_same_week_do_not_conflict(tmp_home):
+    # The partial index only restricts pending+unsuperseded rows. Once a row
+    # is closed (outcome != 'pending') the next week's pending row coexists.
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        conn.execute(
+            "INSERT INTO follow_ups (week_iso, dim_key, commitment_text, target_metric, "
+            "baseline_value, outcome) VALUES (?, ?, ?, ?, ?, ?)",
+            ("2026-W21", "verification", "ask first", "verification_rate", 0.4, "improved"),
+        )
+        _insert_active_pending(conn, "2026-W21", commitment="next attempt")
+        conn.commit()
+        count = conn.execute(
+            "SELECT COUNT(*) AS c FROM follow_ups WHERE week_iso = ?", ("2026-W21",)
+        ).fetchone()["c"]
+    assert count == 2
+
+
+def test_existing_follow_ups_rows_preserved_through_migration(tmp_home):
+    """A v0.2 follow_ups row written before US-002 should survive the rebuild
+    with its values intact and the three new columns defaulted."""
+    # Seed a v0.1-shaped DB so the v0.2 migration runs to create follow_ups
+    # via SCHEMA, then we seed one row, then the US-002 migration recreates
+    # the table. We can't go through ProfileStore for the seed (it would
+    # already have applied US-002), so we open the DB by hand to insert,
+    # then reopen via ProfileStore to trigger the runner.
+    home = tmp_home / ".praxis"
+    home.mkdir(parents=True, exist_ok=True)
+    db_path = home / "profile.db"
+    # First open: applies v0.2 SCHEMA + US-002 migration.
+    ProfileStore(home=resolve_home())
+    # Roll the table back to v0.2 shape so we can simulate a row that pre-
+    # dates US-002, then re-trigger the runner.
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DROP INDEX IF EXISTS idx_follow_ups_one_active_per_week")
+        conn.execute("DROP TABLE follow_ups")
+        conn.execute(
+            "CREATE TABLE follow_ups ("
+            "week_iso TEXT PRIMARY KEY, dim_key TEXT NOT NULL, "
+            "commitment_text TEXT NOT NULL, target_metric TEXT NOT NULL, "
+            "baseline_value REAL NOT NULL, measured_value REAL, "
+            "outcome TEXT NOT NULL CHECK (outcome IN ('improved','unchanged','worse','pending')))"
+        )
+        conn.execute(
+            "INSERT INTO follow_ups VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("2026-W14", "verification", "old commitment", "verification_rate",
+             0.4, 0.7, "improved"),
+        )
+        # Remove the schema_migrations row so the runner re-applies US-002.
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE version = ?",
+            ("001_follow_ups_active_commitment.sql",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    # Reopen: US-002 migration re-runs against the seeded v0.2 row.
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        row = conn.execute(
+            "SELECT week_iso, dim_key, commitment_text, target_metric, "
+            "baseline_value, measured_value, outcome, "
+            "user_chosen, display_text, superseded_by "
+            "FROM follow_ups WHERE week_iso = ?",
+            ("2026-W14",),
+        ).fetchone()
+    assert row is not None
+    assert row["dim_key"] == "verification"
+    assert row["commitment_text"] == "old commitment"
+    assert row["target_metric"] == "verification_rate"
+    assert row["baseline_value"] == 0.4
+    assert row["measured_value"] == 0.7
+    assert row["outcome"] == "improved"
+    # New columns get default values.
+    assert row["user_chosen"] == 0
+    assert row["display_text"] is None
+    assert row["superseded_by"] is None
 
 
 # ---- US-002: drop daily_consolidations, preserve session_scores and run_log -
@@ -386,8 +567,10 @@ def test_session_scores_schema_unchanged_across_v0_2_migration(tmp_home):
     """v0.3 (US-029): session_scores gains a ``judge_pass`` column and a
     composite (stable_id, judge_pass) primary key so pass-1 and pass-2 rows
     coexist. v0.3.1 adds ``signals_json`` for the weekly-bucketed trajectory
-    (spec section 7). The v0.1 ``heuristic_scores_json`` column is also
-    dropped as part of the table recreation."""
+    (spec section 7). US-004 adds ``aug_auto_classification`` and
+    ``aug_auto_confidence`` for the augmentation/automation classifier output.
+    The v0.1 ``heuristic_scores_json`` column is also dropped as part of the
+    table recreation."""
     _seed_v0_1_db(tmp_home)
     ProfileStore(home=resolve_home())
     with _open_db() as conn:
@@ -397,6 +580,7 @@ def test_session_scores_schema_unchanged_across_v0_2_migration(tmp_home):
         "dimension_scores_json", "judge_result_json",
         "features_json", "source_path", "judge_model", "judge_pass",
         "signals_json",
+        "aug_auto_classification", "aug_auto_confidence",
     }
     # Composite PK on (stable_id, judge_pass): pk indices reflect column order.
     assert cols["stable_id"]["pk"] == 1
@@ -765,3 +949,359 @@ def test_profile_store_module_exports_migration_error():
     # Bind through the imported module to keep linters happy and to verify
     # the symbol is reachable via praxis.storage.profile_store.
     assert profile_store_mod.MigrationError is MigrationError
+
+
+# ---- US-003: session_reflections table -------------------------------------
+
+
+def _seed_follow_up_id(conn: sqlite3.Connection, week_iso: str = "2026-W21") -> int:
+    """Insert one follow_ups row and return its id, for use as FK target."""
+    cur = conn.execute(
+        "INSERT INTO follow_ups (week_iso, dim_key, commitment_text, target_metric, "
+        "baseline_value, outcome) VALUES (?, ?, ?, ?, ?, ?)",
+        (week_iso, "verification", "ask first", "verification_rate", 0.4, "pending"),
+    )
+    assert cur.lastrowid is not None
+    return cur.lastrowid
+
+
+def test_session_reflections_table_columns(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        cols = _table_columns(conn, "session_reflections")
+    assert cols["id"]["pk"] == 1
+    assert cols["id"]["type"] == "INTEGER"
+    assert cols["session_stable_id"]["notnull"] == 1
+    assert cols["session_stable_id"]["type"] == "TEXT"
+    assert cols["follow_up_id"]["notnull"] == 1
+    assert cols["follow_up_id"]["type"] == "INTEGER"
+    assert cols["self_report"]["notnull"] == 1
+    assert cols["self_report"]["type"] == "TEXT"
+    assert cols["note"]["type"] == "TEXT"
+    assert cols["note"]["notnull"] == 0
+    assert cols["created_at"]["notnull"] == 1
+    assert cols["created_at"]["type"] == "TEXT"
+
+
+def test_session_reflections_has_fk_to_follow_ups(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        fks = conn.execute(
+            "PRAGMA foreign_key_list(session_reflections)"
+        ).fetchall()
+    matching = [
+        f for f in fks
+        if f["table"] == "follow_ups"
+        and f["from"] == "follow_up_id"
+        and f["to"] == "id"
+    ]
+    assert len(matching) == 1, "session_reflections must FK-reference follow_ups(id)"
+
+
+def test_session_reflections_index_exists(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        row = conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'index' "
+            "AND name = 'idx_reflections_follow_up'"
+        ).fetchone()
+    assert row is not None, "idx_reflections_follow_up must exist"
+    assert "follow_up_id" in row["sql"]
+
+
+def test_session_reflections_self_report_check_rejects_unknown_value(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        fid = _seed_follow_up_id(conn)
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO session_reflections "
+                "(session_stable_id, follow_up_id, self_report, note, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("s1", fid, "maybe", None, "2026-05-26T10:00:00+00:00"),
+            )
+
+
+def test_session_reflections_self_report_check_accepts_all_four_values(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        fid = _seed_follow_up_id(conn)
+        conn.commit()
+        for i, val in enumerate(("yes", "no", "partial", "skip")):
+            conn.execute(
+                "INSERT INTO session_reflections "
+                "(session_stable_id, follow_up_id, self_report, note, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (f"s{i}", fid, val, None, "2026-05-26T10:00:00+00:00"),
+            )
+        conn.commit()
+        count = conn.execute(
+            "SELECT COUNT(*) AS c FROM session_reflections"
+        ).fetchone()["c"]
+    assert count == 4
+
+
+def test_session_reflections_note_can_be_null(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        fid = _seed_follow_up_id(conn)
+        conn.commit()
+        conn.execute(
+            "INSERT INTO session_reflections "
+            "(session_stable_id, follow_up_id, self_report, note, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("s-null-note", fid, "yes", None, "2026-05-26T10:00:00+00:00"),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT note FROM session_reflections WHERE session_stable_id = ?",
+            ("s-null-note",),
+        ).fetchone()
+    assert row is not None
+    assert row["note"] is None
+
+
+def test_insert_session_reflection_helper_exists_on_profile_store():
+    # The acceptance criterion requires "exposed on profile_store.py" so the
+    # caller can write reflections without hand-rolling SQL.
+    assert hasattr(ProfileStore, "insert_session_reflection")
+    assert callable(ProfileStore.insert_session_reflection)
+
+
+def test_insert_session_reflection_writes_row_and_returns_id(tmp_home):
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        fid = _seed_follow_up_id(conn)
+        conn.commit()
+    row_id = store.insert_session_reflection(
+        session_stable_id="claude:abc:1",
+        follow_up_id=fid,
+        self_report="yes",
+        note="felt focused",
+    )
+    assert isinstance(row_id, int) and row_id > 0
+    with _open_db() as conn:
+        row = conn.execute(
+            "SELECT session_stable_id, follow_up_id, self_report, note "
+            "FROM session_reflections WHERE id = ?",
+            (row_id,),
+        ).fetchone()
+    assert row["session_stable_id"] == "claude:abc:1"
+    assert row["follow_up_id"] == fid
+    assert row["self_report"] == "yes"
+    assert row["note"] == "felt focused"
+
+
+def test_insert_session_reflection_writes_iso_8601_utc_timestamp(tmp_home):
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        fid = _seed_follow_up_id(conn)
+        conn.commit()
+    row_id = store.insert_session_reflection(
+        session_stable_id="claude:abc:1",
+        follow_up_id=fid,
+        self_report="partial",
+    )
+    with _open_db() as conn:
+        created_at = conn.execute(
+            "SELECT created_at FROM session_reflections WHERE id = ?",
+            (row_id,),
+        ).fetchone()["created_at"]
+    # ISO-8601 with a UTC offset marker (Python's datetime.isoformat() default
+    # for a tz-aware UTC datetime produces a "+00:00" suffix).
+    assert "T" in created_at
+    assert created_at.endswith("+00:00")
+    # Round-trip parses to a tz-aware UTC datetime.
+    parsed = datetime.fromisoformat(created_at)
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timedelta(0)
+
+
+def test_insert_session_reflection_note_defaults_to_none(tmp_home):
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        fid = _seed_follow_up_id(conn)
+        conn.commit()
+    row_id = store.insert_session_reflection(
+        session_stable_id="claude:abc:1",
+        follow_up_id=fid,
+        self_report="skip",
+    )
+    with _open_db() as conn:
+        row = conn.execute(
+            "SELECT note FROM session_reflections WHERE id = ?",
+            (row_id,),
+        ).fetchone()
+    assert row["note"] is None
+
+
+def test_insert_session_reflection_rejects_invalid_self_report(tmp_home):
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        fid = _seed_follow_up_id(conn)
+        conn.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        store.insert_session_reflection(
+            session_stable_id="claude:abc:1",
+            follow_up_id=fid,
+            self_report="maybe",
+        )
+
+
+# ---- US-004: session_scores aug_auto columns -------------------------------
+
+
+def _seed_session_score_row(
+    conn: sqlite3.Connection,
+    stable_id: str = "claude:aug:1",
+    judge_pass: int = 1,
+) -> None:
+    """Insert one minimal session_scores row with NULL aug_auto columns."""
+    conn.execute(
+        "INSERT INTO session_scores "
+        "(stable_id, provider, started_at, scored_at, overall, "
+        " dimension_scores_json, features_json, source_path, judge_pass) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            stable_id,
+            "claude",
+            "2026-05-26T10:00:00+00:00",
+            "2026-05-26T10:05:00+00:00",
+            7.0,
+            "{}",
+            "{}",
+            "/tmp/seed.jsonl",
+            judge_pass,
+        ),
+    )
+
+
+def test_session_scores_has_aug_auto_classification_column(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        cols = _table_columns(conn, "session_scores")
+    assert cols["aug_auto_classification"]["type"] == "TEXT"
+    assert cols["aug_auto_classification"]["notnull"] == 0
+
+
+def test_session_scores_has_aug_auto_confidence_column(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        cols = _table_columns(conn, "session_scores")
+    assert cols["aug_auto_confidence"]["type"] == "REAL"
+    assert cols["aug_auto_confidence"]["notnull"] == 0
+
+
+def test_get_session_aug_auto_returns_none_none_for_pre_migration_row(tmp_home):
+    """Rows written before this migration get NULL in both columns; the
+    read helper reports that as (None, None)."""
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        _seed_session_score_row(conn, stable_id="claude:pre:1")
+        conn.commit()
+    assert store.get_session_aug_auto("claude:pre:1") == (None, None)
+
+
+def test_get_session_aug_auto_returns_none_none_for_missing_session(tmp_home):
+    store = ProfileStore(home=resolve_home())
+    assert store.get_session_aug_auto("does-not-exist") == (None, None)
+
+
+def test_set_and_get_session_aug_auto_round_trip(tmp_home):
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        _seed_session_score_row(conn, stable_id="claude:rt:1")
+        conn.commit()
+    store.set_session_aug_auto("claude:rt:1", "augmentation", 0.82)
+    assert store.get_session_aug_auto("claude:rt:1") == ("augmentation", 0.82)
+
+
+@pytest.mark.parametrize("classification", ["augmentation", "automation", "mixed"])
+def test_set_session_aug_auto_accepts_all_three_valid_values(tmp_home, classification):
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        _seed_session_score_row(conn, stable_id=f"claude:v:{classification}")
+        conn.commit()
+    store.set_session_aug_auto(f"claude:v:{classification}", classification, 0.5)
+    assert store.get_session_aug_auto(f"claude:v:{classification}") == (
+        classification,
+        0.5,
+    )
+
+
+@pytest.mark.parametrize("invalid", ["AUTOMATION", "augment", "manual", "", "unknown"])
+def test_set_session_aug_auto_rejects_invalid_classification(tmp_home, invalid):
+    """The Python helper raises ValueError BEFORE any SQL is issued."""
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        _seed_session_score_row(conn, stable_id="claude:bad:1")
+        conn.commit()
+    with pytest.raises(ValueError):
+        store.set_session_aug_auto("claude:bad:1", invalid, 0.5)
+    # And the underlying row's aug_auto fields stay NULL: no partial write.
+    with _open_db() as conn:
+        row = conn.execute(
+            "SELECT aug_auto_classification, aug_auto_confidence "
+            "FROM session_scores WHERE stable_id = ?",
+            ("claude:bad:1",),
+        ).fetchone()
+    assert row["aug_auto_classification"] is None
+    assert row["aug_auto_confidence"] is None
+
+
+def test_set_session_aug_auto_validates_before_opening_connection(tmp_home, monkeypatch):
+    """A SQL-issuing path is never reached for invalid input. We confirm by
+    patching `_conn` to fail loudly if it gets called."""
+    store = ProfileStore(home=resolve_home())
+
+    def boom(self):
+        raise AssertionError("_conn() must not be invoked for invalid input")
+
+    monkeypatch.setattr(ProfileStore, "_conn", boom)
+    with pytest.raises(ValueError):
+        store.set_session_aug_auto("claude:any:1", "not-a-class", 0.5)
+
+
+def test_set_session_aug_auto_updates_all_judge_passes(tmp_home):
+    """If a session has both a pass-1 and a pass-2 row, the helper updates
+    both so a later read finds the value regardless of which row it reads."""
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        _seed_session_score_row(conn, stable_id="claude:multi:1", judge_pass=1)
+        _seed_session_score_row(conn, stable_id="claude:multi:1", judge_pass=2)
+        conn.commit()
+    store.set_session_aug_auto("claude:multi:1", "mixed", 0.91)
+    with _open_db() as conn:
+        rows = conn.execute(
+            "SELECT judge_pass, aug_auto_classification, aug_auto_confidence "
+            "FROM session_scores WHERE stable_id = ? ORDER BY judge_pass",
+            ("claude:multi:1",),
+        ).fetchall()
+    assert len(rows) == 2
+    assert rows[0]["aug_auto_classification"] == "mixed"
+    assert rows[0]["aug_auto_confidence"] == 0.91
+    assert rows[1]["aug_auto_classification"] == "mixed"
+    assert rows[1]["aug_auto_confidence"] == 0.91
+
+
+def test_get_session_aug_auto_reads_from_highest_judge_pass(tmp_home):
+    """When the two passes disagree (e.g. an old pass-1 row predates a
+    pass-2 re-run that updated only the pass-2 row), the read helper
+    surfaces the pass-2 value to match ``load_one_session_score`` semantics."""
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        _seed_session_score_row(conn, stable_id="claude:hp:1", judge_pass=1)
+        _seed_session_score_row(conn, stable_id="claude:hp:1", judge_pass=2)
+        conn.execute(
+            "UPDATE session_scores SET aug_auto_classification = ?, "
+            "aug_auto_confidence = ? WHERE stable_id = ? AND judge_pass = ?",
+            ("augmentation", 0.30, "claude:hp:1", 1),
+        )
+        conn.execute(
+            "UPDATE session_scores SET aug_auto_classification = ?, "
+            "aug_auto_confidence = ? WHERE stable_id = ? AND judge_pass = ?",
+            ("automation", 0.85, "claude:hp:1", 2),
+        )
+        conn.commit()
+    assert store.get_session_aug_auto("claude:hp:1") == ("automation", 0.85)
