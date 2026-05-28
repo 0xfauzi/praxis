@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -945,3 +946,201 @@ def test_profile_store_module_exports_migration_error():
     # Bind through the imported module to keep linters happy and to verify
     # the symbol is reachable via praxis.storage.profile_store.
     assert profile_store_mod.MigrationError is MigrationError
+
+
+# ---- US-003: session_reflections table -------------------------------------
+
+
+def _seed_follow_up_id(conn: sqlite3.Connection, week_iso: str = "2026-W21") -> int:
+    """Insert one follow_ups row and return its id, for use as FK target."""
+    cur = conn.execute(
+        "INSERT INTO follow_ups (week_iso, dim_key, commitment_text, target_metric, "
+        "baseline_value, outcome) VALUES (?, ?, ?, ?, ?, ?)",
+        (week_iso, "verification", "ask first", "verification_rate", 0.4, "pending"),
+    )
+    assert cur.lastrowid is not None
+    return cur.lastrowid
+
+
+def test_session_reflections_table_columns(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        cols = _table_columns(conn, "session_reflections")
+    assert cols["id"]["pk"] == 1
+    assert cols["id"]["type"] == "INTEGER"
+    assert cols["session_stable_id"]["notnull"] == 1
+    assert cols["session_stable_id"]["type"] == "TEXT"
+    assert cols["follow_up_id"]["notnull"] == 1
+    assert cols["follow_up_id"]["type"] == "INTEGER"
+    assert cols["self_report"]["notnull"] == 1
+    assert cols["self_report"]["type"] == "TEXT"
+    assert cols["note"]["type"] == "TEXT"
+    assert cols["note"]["notnull"] == 0
+    assert cols["created_at"]["notnull"] == 1
+    assert cols["created_at"]["type"] == "TEXT"
+
+
+def test_session_reflections_has_fk_to_follow_ups(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        fks = conn.execute(
+            "PRAGMA foreign_key_list(session_reflections)"
+        ).fetchall()
+    matching = [
+        f for f in fks
+        if f["table"] == "follow_ups"
+        and f["from"] == "follow_up_id"
+        and f["to"] == "id"
+    ]
+    assert len(matching) == 1, "session_reflections must FK-reference follow_ups(id)"
+
+
+def test_session_reflections_index_exists(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        row = conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'index' "
+            "AND name = 'idx_reflections_follow_up'"
+        ).fetchone()
+    assert row is not None, "idx_reflections_follow_up must exist"
+    assert "follow_up_id" in row["sql"]
+
+
+def test_session_reflections_self_report_check_rejects_unknown_value(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        fid = _seed_follow_up_id(conn)
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO session_reflections "
+                "(session_stable_id, follow_up_id, self_report, note, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("s1", fid, "maybe", None, "2026-05-26T10:00:00+00:00"),
+            )
+
+
+def test_session_reflections_self_report_check_accepts_all_four_values(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        fid = _seed_follow_up_id(conn)
+        conn.commit()
+        for i, val in enumerate(("yes", "no", "partial", "skip")):
+            conn.execute(
+                "INSERT INTO session_reflections "
+                "(session_stable_id, follow_up_id, self_report, note, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (f"s{i}", fid, val, None, "2026-05-26T10:00:00+00:00"),
+            )
+        conn.commit()
+        count = conn.execute(
+            "SELECT COUNT(*) AS c FROM session_reflections"
+        ).fetchone()["c"]
+    assert count == 4
+
+
+def test_session_reflections_note_can_be_null(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        fid = _seed_follow_up_id(conn)
+        conn.commit()
+        conn.execute(
+            "INSERT INTO session_reflections "
+            "(session_stable_id, follow_up_id, self_report, note, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("s-null-note", fid, "yes", None, "2026-05-26T10:00:00+00:00"),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT note FROM session_reflections WHERE session_stable_id = ?",
+            ("s-null-note",),
+        ).fetchone()
+    assert row is not None
+    assert row["note"] is None
+
+
+def test_insert_session_reflection_helper_exists_on_profile_store():
+    # The acceptance criterion requires "exposed on profile_store.py" so the
+    # caller can write reflections without hand-rolling SQL.
+    assert hasattr(ProfileStore, "insert_session_reflection")
+    assert callable(ProfileStore.insert_session_reflection)
+
+
+def test_insert_session_reflection_writes_row_and_returns_id(tmp_home):
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        fid = _seed_follow_up_id(conn)
+        conn.commit()
+    row_id = store.insert_session_reflection(
+        session_stable_id="claude:abc:1",
+        follow_up_id=fid,
+        self_report="yes",
+        note="felt focused",
+    )
+    assert isinstance(row_id, int) and row_id > 0
+    with _open_db() as conn:
+        row = conn.execute(
+            "SELECT session_stable_id, follow_up_id, self_report, note "
+            "FROM session_reflections WHERE id = ?",
+            (row_id,),
+        ).fetchone()
+    assert row["session_stable_id"] == "claude:abc:1"
+    assert row["follow_up_id"] == fid
+    assert row["self_report"] == "yes"
+    assert row["note"] == "felt focused"
+
+
+def test_insert_session_reflection_writes_iso_8601_utc_timestamp(tmp_home):
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        fid = _seed_follow_up_id(conn)
+        conn.commit()
+    row_id = store.insert_session_reflection(
+        session_stable_id="claude:abc:1",
+        follow_up_id=fid,
+        self_report="partial",
+    )
+    with _open_db() as conn:
+        created_at = conn.execute(
+            "SELECT created_at FROM session_reflections WHERE id = ?",
+            (row_id,),
+        ).fetchone()["created_at"]
+    # ISO-8601 with a UTC offset marker (Python's datetime.isoformat() default
+    # for a tz-aware UTC datetime produces a "+00:00" suffix).
+    assert "T" in created_at
+    assert created_at.endswith("+00:00")
+    # Round-trip parses to a tz-aware UTC datetime.
+    parsed = datetime.fromisoformat(created_at)
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timedelta(0)
+
+
+def test_insert_session_reflection_note_defaults_to_none(tmp_home):
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        fid = _seed_follow_up_id(conn)
+        conn.commit()
+    row_id = store.insert_session_reflection(
+        session_stable_id="claude:abc:1",
+        follow_up_id=fid,
+        self_report="skip",
+    )
+    with _open_db() as conn:
+        row = conn.execute(
+            "SELECT note FROM session_reflections WHERE id = ?",
+            (row_id,),
+        ).fetchone()
+    assert row["note"] is None
+
+
+def test_insert_session_reflection_rejects_invalid_self_report(tmp_home):
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        fid = _seed_follow_up_id(conn)
+        conn.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        store.insert_session_reflection(
+            session_stable_id="claude:abc:1",
+            follow_up_id=fid,
+            self_report="maybe",
+        )

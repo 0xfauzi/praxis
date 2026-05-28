@@ -996,3 +996,32 @@ class ProfileStore:
             measured_value=row["measured_value"],
             outcome=outcome,
         )
+
+    # ---- session reflections (US-003) -----------------------------------
+
+    def insert_session_reflection(
+        self,
+        *,
+        session_stable_id: str,
+        follow_up_id: int,
+        self_report: str,
+        note: str | None = None,
+    ) -> int:
+        """Persist one ``session_reflections`` row and return its id.
+
+        ``self_report`` must be one of ``yes``/``no``/``partial``/``skip``;
+        any other value is rejected by the column CHECK constraint as
+        ``sqlite3.IntegrityError``. ``created_at`` is the ISO-8601 UTC
+        timestamp for the moment the row was written.
+        """
+        created_at = _utcnow().isoformat()
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO session_reflections "
+                "(session_stable_id, follow_up_id, self_report, note, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (session_stable_id, follow_up_id, self_report, note, created_at),
+            )
+            row_id = cur.lastrowid
+        assert row_id is not None
+        return row_id
