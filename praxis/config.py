@@ -56,6 +56,13 @@ sound = "default"
 #                        if the binary is not on PATH.
 style = "banner"
 
+[nudge]
+# Minutes before the same surface re-fires in the same project. Shared
+# across SessionStart hooks (Claude Code, Codex) and the shell-startup
+# nudge via ~/.praxis/.last_nudge so a single shell that opens right
+# after a SessionStart fires hears the cue once.
+throttle_minutes = 30
+
 [privacy]
 redact_secrets = true    # MUST default true (Section 4.4)
 """
@@ -119,6 +126,15 @@ class NotificationConfig:
 
 
 @dataclass(frozen=True)
+class NudgeConfig:
+    # Minutes before the same surface re-fires for the same project.
+    # ~/.praxis/.last_nudge is keyed by (surface, sha1(cwd)); a second
+    # call from the same surface in the same project within this window
+    # returns empty without touching the DB.
+    throttle_minutes: int = 30
+
+
+@dataclass(frozen=True)
 class PrivacyConfig:
     redact_secrets: bool = True
 
@@ -129,6 +145,7 @@ class Config:
     scan: ScanConfig = field(default_factory=ScanConfig)
     judge: JudgeConfig = field(default_factory=JudgeConfig)
     notification: NotificationConfig = field(default_factory=NotificationConfig)
+    nudge: NudgeConfig = field(default_factory=NudgeConfig)
     privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
 
 
@@ -162,5 +179,6 @@ def load_config(home: Path | None = None) -> Config:
         scan=_section(ScanConfig, raw.get("scan")),
         judge=_section(JudgeConfig, raw.get("judge")),
         notification=_section(NotificationConfig, raw.get("notification")),
+        nudge=_section(NudgeConfig, raw.get("nudge")),
         privacy=_section(PrivacyConfig, raw.get("privacy")),
     )

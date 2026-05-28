@@ -40,8 +40,8 @@
         "Tests pass: uv run pytest"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added praxis/cli/nudge_throttle.py with is_throttled / record_fire keyed by f'{surface}:{sha1(cwd)}'. Added NudgeConfig dataclass + [nudge] section to praxis/config.py (throttle_minutes default 30) and wove it into DEFAULT_CONFIG_TOML. cmd_nudge now runs the throttle check BEFORE _resolve_active_commitment so a throttled call never opens profile.db; record_fire is only invoked on the path that actually printed a commitment (silent no-op runs do NOT touch the file, otherwise a fresh user with no commitment would block themselves for 30 min after their first commit). Malformed JSON / non-object payloads are quarantined to .last_nudge.corrupt via _quarantine_corrupt_file and the current call proceeds with empty state."
     },
     {
       "id": "US-019",

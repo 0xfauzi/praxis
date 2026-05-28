@@ -1500,3 +1500,231 @@ def test_nudge_format_parses_into_args_namespace():
 
     args_default = parser.parse_args(["nudge"])
     assert args_default.format == "text"
+
+
+# ---------------------------------------------------------------------------
+# US-018 - ~/.praxis/.last_nudge throttles per (surface, cwd).
+# ---------------------------------------------------------------------------
+
+
+def _read_throttle_state(tmp_home: Path) -> dict:
+    """Return the parsed contents of ~/.praxis/.last_nudge for assertions."""
+    path = tmp_home / ".praxis" / ".last_nudge"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_nudge_surface_argument_parses_with_default_cli(tmp_home, monkeypatch):
+    """`--surface` exposes the throttle dedup key (default 'cli').
+
+    Both SessionStart hooks and the shell-startup snippet rely on the
+    default so a single human action only surfaces one cue per cycle
+    (US-019 builds on this contract). Tests below override the surface
+    explicitly to exercise the per-surface throttle keying.
+    """
+    parser = build_parser()
+    args = parser.parse_args(["nudge"])
+    assert args.surface == "cli"
+
+    args_override = parser.parse_args(["nudge", "--surface", "claude-code"])
+    assert args_override.surface == "claude-code"
+
+
+def test_nudge_records_fire_timestamp_after_successful_surface(
+    tmp_home, capsys, monkeypatch
+):
+    """A successful nudge writes an ISO-8601 timestamp into ~/.praxis/.last_nudge.
+
+    The JSON object is keyed by ``f"{surface}:{sha1(cwd)}"`` (US-018 AC #1).
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    monkeypatch.chdir(tmp_home)
+    _seed_follow_up("2026-W21", commitment_text="stay literal")
+    code = main(["nudge"])
+    assert code == 0
+    captured = capsys.readouterr()
+    assert "[Praxis] This week: stay literal" in captured.out
+
+    state = _read_throttle_state(tmp_home)
+    assert len(state) == 1
+    key = next(iter(state))
+    # Key format: surface ':' followed by a 40-char sha1 hex digest.
+    assert key.startswith("cli:")
+    assert len(key) == len("cli:") + 40
+    # Value is parseable as an ISO-8601 timestamp; we don't pin a
+    # specific instant since the helper uses datetime.now(timezone.utc).
+    ts = datetime.fromisoformat(state[key])
+    assert ts.tzinfo is not None
+
+
+def test_nudge_throttled_within_window_returns_empty_without_db_touch(
+    tmp_home, capsys, monkeypatch
+):
+    """A second invocation within throttle_minutes is silent and skips the DB.
+
+    Verifies AC #2: the throttle short-circuits before any commitment
+    resolution so the second call never opens profile.db.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    monkeypatch.chdir(tmp_home)
+    _seed_follow_up("2026-W21", commitment_text="first fire only")
+
+    first = main(["nudge"])
+    assert first == 0
+    first_out = capsys.readouterr()
+    assert "first fire only" in first_out.out
+
+    # Booby-trap the DB resolver: if the second call reaches it, the
+    # test fails loudly. The throttle must short-circuit beforehand.
+    def _explode(_week_iso: str) -> None:
+        raise AssertionError(
+            "throttled call must not reach the active-commitment resolver"
+        )
+
+    monkeypatch.setattr(
+        "praxis.cli.__main__._resolve_active_commitment", _explode
+    )
+    second = main(["nudge"])
+    second_out = capsys.readouterr()
+    assert second == 0
+    assert second_out.out == ""
+    assert second_out.err == ""
+
+
+def test_nudge_throttle_releases_after_window_elapses(
+    tmp_home, capsys, monkeypatch
+):
+    """After throttle_minutes have passed, the surface fires again."""
+    from praxis.cli import nudge_throttle
+
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    monkeypatch.chdir(tmp_home)
+    _seed_follow_up("2026-W21", commitment_text="time-travel cue")
+
+    # Prime the throttle file with a fire 31 minutes ago (default window is 30).
+    past = datetime.now(timezone.utc) - timedelta(minutes=31)
+    nudge_throttle.record_fire("cli", now=past)
+
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "time-travel cue" in captured.out
+
+
+def test_nudge_throttle_minutes_honors_config_override(
+    tmp_home, capsys, monkeypatch
+):
+    """User-set [nudge] throttle_minutes overrides the default 30."""
+    from praxis.cli import nudge_throttle
+
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    monkeypatch.chdir(tmp_home)
+    _seed_follow_up("2026-W21", commitment_text="user-config cue")
+
+    # Set throttle_minutes = 60; prime a fire 45 minutes ago. Under the
+    # default (30) this would have released; under the user override
+    # (60) it must still be throttled.
+    config = tmp_home / ".praxis" / "config.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("[nudge]\nthrottle_minutes = 60\n", encoding="utf-8")
+    past = datetime.now(timezone.utc) - timedelta(minutes=45)
+    nudge_throttle.record_fire("cli", now=past)
+
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == ""
+
+
+def test_nudge_throttle_keyed_by_surface_so_different_surfaces_fire_independently(
+    tmp_home, capsys, monkeypatch
+):
+    """Different `--surface` values get separate throttle entries.
+
+    Per US-018 AC #1 the key is (surface, sha1(cwd)); two distinct
+    surfaces in the same cwd therefore have independent throttle state.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    monkeypatch.chdir(tmp_home)
+    _seed_follow_up("2026-W21", commitment_text="per-surface cue")
+
+    code_a = main(["nudge", "--surface", "claude-code"])
+    capsys.readouterr()  # discard first
+    code_b = main(["nudge", "--surface", "codex"])
+    out_b = capsys.readouterr().out
+    assert code_a == 0
+    assert code_b == 0
+    # Codex's surface has not yet fired -> the second call fires.
+    assert "per-surface cue" in out_b
+
+    state = _read_throttle_state(tmp_home)
+    surfaces = {key.split(":", 1)[0] for key in state}
+    assert surfaces == {"claude-code", "codex"}
+
+
+def test_nudge_throttle_corrupt_json_renames_to_corrupt_and_proceeds(
+    tmp_home, capsys, monkeypatch
+):
+    """Malformed JSON quarantines to ``.last_nudge.corrupt`` and proceeds (AC #3)."""
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    monkeypatch.chdir(tmp_home)
+    _seed_follow_up("2026-W21", commitment_text="recovered cue")
+
+    praxis_home = tmp_home / ".praxis"
+    praxis_home.mkdir(parents=True, exist_ok=True)
+    last_nudge = praxis_home / ".last_nudge"
+    corrupt = praxis_home / ".last_nudge.corrupt"
+    last_nudge.write_text("{not json", encoding="utf-8")
+
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    # The call must surface the commitment instead of crashing on the
+    # bad file: AC #3's "the user-facing call never crashes on the bad
+    # file" plus "the current call proceeds as if no prior fire."
+    assert code == 0
+    assert "recovered cue" in captured.out
+
+    # Quarantine path exists and the original file has been replaced
+    # with valid JSON containing the fresh fire (the throttle entry
+    # written by this call).
+    assert corrupt.exists()
+    assert corrupt.read_text(encoding="utf-8") == "{not json"
+    new_state = _read_throttle_state(tmp_home)
+    assert any(k.startswith("cli:") for k in new_state)
+
+
+def test_nudge_no_active_commitment_does_not_record_fire(
+    tmp_home, capsys, monkeypatch
+):
+    """Silent runs (no commitment) must NOT touch the throttle file.
+
+    Recording a fire when nothing was surfaced would block the next
+    legitimate cue (after the user finally commits) for 30 minutes.
+    The throttle file should remain unchanged across no-op calls.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    monkeypatch.chdir(tmp_home)
+    # No `_seed_follow_up` -- the resolver returns None.
+
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == ""
+
+    throttle_file = tmp_home / ".praxis" / ".last_nudge"
+    assert not throttle_file.exists()

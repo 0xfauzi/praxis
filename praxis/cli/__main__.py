@@ -28,7 +28,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from praxis import __version__
-from praxis.config import ensure_config_file
+from praxis.cli.nudge_throttle import is_throttled, record_fire
+from praxis.config import ensure_config_file, load_config
 from praxis.follow_up import FollowUp
 from praxis.orchestrator import (
     NO_API_KEY_MESSAGE,
@@ -842,10 +843,27 @@ def cmd_nudge(args: argparse.Namespace) -> int:
       codex        Same JSON shape as claude-code (Codex SessionStart hooks
                    share the additionalContext envelope per spec section 5).
 
+    Throttling (US-018): the first action is a check against
+    ``~/.praxis/.last_nudge`` -- if the same (surface, cwd) fired within
+    ``[nudge].throttle_minutes`` (default 30) the command exits 0 with empty
+    stdout and never opens the DB. A successful surfacing writes a fresh
+    timestamp into that file, keyed by ``f"{surface}:{sha1(cwd)}"``.
+
     Exit codes:
-      0  active commitment printed, or no active commitment (silent).
+      0  active commitment printed, or no active commitment (silent),
+         or throttled (silent).
       4  invariant violated: more than one active row for the current week.
     """
+    fmt = getattr(args, "format", "text")
+    surface = getattr(args, "surface", "cli")
+
+    # Throttle check runs BEFORE any DB access so a throttled call stays
+    # cheap (one stat + one read of the small JSON file) and never opens
+    # profile.db. The malformed-JSON recovery happens inside is_throttled.
+    cfg = load_config()
+    if is_throttled(surface, throttle_minutes=cfg.nudge.throttle_minutes):
+        return 0
+
     week_iso = current_iso_week()
     try:
         active = _resolve_active_commitment(week_iso)
@@ -853,9 +871,11 @@ def cmd_nudge(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 4
     if active is None:
+        # No commitment to surface: don't record a fire, otherwise the
+        # next legitimate cue (once the user commits) would be throttled
+        # away. Silent-no-op surfaces remain free to retry on every hook.
         return 0
     display_text = active.commitment_text
-    fmt = getattr(args, "format", "text")
     if fmt == "text":
         print(f"[Praxis] This week: {display_text}")
     else:
@@ -865,6 +885,7 @@ def cmd_nudge(args: argparse.Namespace) -> int:
             },
         }
         print(json.dumps(payload, separators=(",", ":")))
+    record_fire(surface)
     return 0
 
 
@@ -1376,6 +1397,17 @@ def build_parser() -> argparse.ArgumentParser:
             "'claude-code' and 'codex' emit a single-line JSON envelope "
             "({\"hookSpecificOutput\":{\"additionalContext\":...}}) for "
             "SessionStart hooks per spec section 5."
+        ),
+    )
+    nudge.add_argument(
+        "--surface",
+        type=str,
+        default="cli",
+        help=(
+            "Surface identifier used for throttling. The throttle file "
+            "(~/.praxis/.last_nudge) is keyed by (surface, sha1(cwd)); "
+            "callers using the default share a single throttle entry so "
+            "a shell startup right after a SessionStart hook stays silent."
         ),
     )
     nudge.set_defaults(func=cmd_nudge)
