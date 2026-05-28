@@ -1,9 +1,9 @@
-"""Tests for ``praxis install-coach`` (US-028, US-029, US-030).
+"""Tests for ``praxis install-coach`` (US-028, US-029, US-030, US-031).
 
 Covers tool detection + per-tool prompt/flag routing (US-028), the
-Claude Code settings.json merger (US-029), and the Codex hooks.json
-installer (US-030). US-031 adds its own tests when the Copilot branch
-replaces the matching placeholder in ``install_for_tool``.
+Claude Code settings.json merger (US-029), the Codex hooks.json
+installer (US-030), and the Copilot markdown-block injector + optional
+user-level prompt-file/settings.json patcher (US-031).
 """
 from __future__ import annotations
 
@@ -17,6 +17,10 @@ from praxis.cli.install_coach import (
     ALL_TOOLS,
     CLAUDE_HOOK_COMMANDS,
     CODEX_HOOK_COMMANDS,
+    COPILOT_INSTRUCTION_FILENAME,
+    COPILOT_MARKER_BEGIN,
+    COPILOT_MARKER_END,
+    COPILOT_SETTINGS_KEY,
     SENTINEL,
     TOOL_CLAUDE_CODE,
     TOOL_CODEX,
@@ -24,6 +28,7 @@ from praxis.cli.install_coach import (
     InstallCoachError,
     claude_settings_path,
     codex_hooks_path,
+    copilot_workspace_path,
     detect_all,
     detect_claude_code,
     detect_codex,
@@ -31,7 +36,10 @@ from praxis.cli.install_coach import (
     display_name,
     install_claude_code,
     install_codex,
+    install_copilot_user_level,
+    install_copilot_workspace,
     run_install_coach,
+    vscode_user_dir,
 )
 
 
@@ -163,7 +171,7 @@ def stub_install(monkeypatch):
     """Record every install_for_tool dispatch instead of doing real work."""
     installed: list[str] = []
 
-    def _record(tool: str) -> None:
+    def _record(tool: str, **_kwargs) -> None:
         installed.append(tool)
 
     monkeypatch.setattr(
@@ -921,3 +929,577 @@ def test_cli_install_coach_default_path_writes_when_codex_detected(
     capsys.readouterr()
     assert code == 0
     assert (tmp_home / ".codex" / "hooks.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# US-031: Copilot file injection (workspace markdown + optional user-level
+# prompt-file and settings.json patch).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def tmp_cwd(monkeypatch, tmp_path):
+    """Redirect Path.cwd() so the dispatch layer writes inside tmp_path."""
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def test_copilot_workspace_path_uses_cwd(tmp_path, monkeypatch):
+    """copilot_workspace_path() falls back to Path.cwd() when cwd= is None."""
+    monkeypatch.chdir(tmp_path)
+    assert copilot_workspace_path() == tmp_path / ".github" / "copilot-instructions.md"
+
+
+def test_copilot_workspace_path_respects_explicit_cwd(tmp_path):
+    other = tmp_path / "alt"
+    other.mkdir()
+    assert (
+        copilot_workspace_path(cwd=other)
+        == other / ".github" / "copilot-instructions.md"
+    )
+
+
+def test_install_copilot_workspace_creates_file_on_clean_cwd(tmp_path):
+    """No file -> writes the marker-bounded Praxis block."""
+    assert not (tmp_path / ".github" / "copilot-instructions.md").exists()
+
+    path = install_copilot_workspace(cwd=tmp_path)
+
+    assert path == tmp_path / ".github" / "copilot-instructions.md"
+    content = path.read_text(encoding="utf-8")
+    assert COPILOT_MARKER_BEGIN in content
+    assert COPILOT_MARKER_END in content
+    assert "praxis commit" in content
+
+
+def test_install_copilot_workspace_creates_github_dir(tmp_path):
+    """A missing .github/ is created by the installer."""
+    assert not (tmp_path / ".github").exists()
+    install_copilot_workspace(cwd=tmp_path)
+    assert (tmp_path / ".github").is_dir()
+
+
+def test_install_copilot_workspace_block_content_is_idempotent(tmp_path):
+    """Re-running the installer twice produces the same bytes."""
+    install_copilot_workspace(cwd=tmp_path)
+    first = (tmp_path / ".github" / "copilot-instructions.md").read_bytes()
+    install_copilot_workspace(cwd=tmp_path)
+    second = (tmp_path / ".github" / "copilot-instructions.md").read_bytes()
+    assert first == second
+
+
+def test_install_copilot_workspace_replaces_existing_managed_block(tmp_path):
+    """An existing praxisManaged block is replaced, not duplicated."""
+    target_dir = tmp_path / ".github"
+    target_dir.mkdir()
+    target = target_dir / "copilot-instructions.md"
+    target.write_text(
+        f"{COPILOT_MARKER_BEGIN}\nOLD STALE CONTENT\n{COPILOT_MARKER_END}\n",
+        encoding="utf-8",
+    )
+
+    install_copilot_workspace(cwd=tmp_path)
+
+    content = target.read_text(encoding="utf-8")
+    assert "OLD STALE CONTENT" not in content
+    # Exactly one begin/end marker pair
+    assert content.count(COPILOT_MARKER_BEGIN) == 1
+    assert content.count(COPILOT_MARKER_END) == 1
+
+
+def test_install_copilot_workspace_preserves_surrounding_content_byte_level(
+    tmp_path,
+):
+    """Content outside the markers is preserved byte-for-byte (fixture test).
+
+    The AC explicitly calls for a byte-level preservation assertion; this
+    is that fixture. The leading and trailing slices of the file must be
+    bit-identical after the install, only the bytes between (and
+    including) the markers change.
+    """
+    target_dir = tmp_path / ".github"
+    target_dir.mkdir()
+    target = target_dir / "copilot-instructions.md"
+    leading = (
+        "# Project Instructions\n"
+        "\n"
+        "Be concise. Use type hints.\n"
+        "Prefer composition over inheritance.\n"
+        "\n"
+    )
+    trailing = (
+        "\n"
+        "## Style Guide\n"
+        "- 80-char line limit\n"
+        "- Two newlines between functions\n"
+    )
+    block = f"{COPILOT_MARKER_BEGIN}\nOLD STALE CONTENT\n{COPILOT_MARKER_END}"
+    original_bytes = (leading + block + trailing).encode("utf-8")
+    target.write_bytes(original_bytes)
+
+    install_copilot_workspace(cwd=tmp_path)
+
+    final_bytes = target.read_bytes()
+    final = final_bytes.decode("utf-8")
+    # Byte-level: leading slice unchanged.
+    assert final.startswith(leading), "leading content was modified"
+    # Byte-level: trailing slice unchanged.
+    assert final.endswith(trailing), "trailing content was modified"
+    # Block content was replaced (no stale content remains).
+    assert "OLD STALE CONTENT" not in final
+    # New praxis block is present and well-formed.
+    assert "<!-- praxisManaged:begin -->" in final
+    assert "<!-- praxisManaged:end -->" in final
+    assert "praxis commit" in final
+
+
+def test_install_copilot_workspace_appends_when_no_block(tmp_path):
+    """Existing file without a praxisManaged block -> append with a blank line."""
+    target_dir = tmp_path / ".github"
+    target_dir.mkdir()
+    target = target_dir / "copilot-instructions.md"
+    user_content = "# User Instructions\n\nUse semantic commit messages.\n"
+    target.write_text(user_content, encoding="utf-8")
+
+    install_copilot_workspace(cwd=tmp_path)
+
+    final = target.read_text(encoding="utf-8")
+    # User content preserved at the top.
+    assert final.startswith(user_content)
+    # Praxis block appended.
+    assert COPILOT_MARKER_BEGIN in final
+    assert COPILOT_MARKER_END in final
+    # There's a blank-line separator between user content and the block.
+    assert "\n\n<!-- praxisManaged:begin -->" in final
+
+
+def test_install_copilot_workspace_appends_to_file_without_trailing_newline(
+    tmp_path,
+):
+    """A file without a trailing newline gets one inserted before the block."""
+    target_dir = tmp_path / ".github"
+    target_dir.mkdir()
+    target = target_dir / "copilot-instructions.md"
+    target.write_text("No trailing newline.", encoding="utf-8")
+
+    install_copilot_workspace(cwd=tmp_path)
+
+    final = target.read_text(encoding="utf-8")
+    assert final.startswith("No trailing newline.")
+    # Block is separated from user content by at least one blank line.
+    assert "\n\n<!-- praxisManaged:begin -->" in final
+
+
+def test_install_copilot_workspace_atomic_write_leaves_no_tmp_file(tmp_path):
+    """On success, no leftover .tmp files in <cwd>/.github/."""
+    install_copilot_workspace(cwd=tmp_path)
+    install_copilot_workspace(cwd=tmp_path)
+    github_dir = tmp_path / ".github"
+    leftovers = [
+        p.name for p in github_dir.iterdir() if p.name != "copilot-instructions.md"
+    ]
+    assert leftovers == []
+
+
+# ---------------------------------------------------------------------------
+# vscode_user_dir() per-platform resolution.
+# ---------------------------------------------------------------------------
+
+
+def test_vscode_user_dir_darwin(tmp_path, monkeypatch):
+    """macOS path is ~/Library/Application Support/Code/User."""
+    monkeypatch.setattr(
+        "praxis.cli.install_coach.platform.system", lambda: "Darwin"
+    )
+    path = vscode_user_dir(home=tmp_path)
+    assert path == tmp_path / "Library" / "Application Support" / "Code" / "User"
+
+
+def test_vscode_user_dir_linux(tmp_path, monkeypatch):
+    """Linux path is ~/.config/Code/User."""
+    monkeypatch.setattr(
+        "praxis.cli.install_coach.platform.system", lambda: "Linux"
+    )
+    path = vscode_user_dir(home=tmp_path)
+    assert path == tmp_path / ".config" / "Code" / "User"
+
+
+def test_vscode_user_dir_windows_uses_appdata(tmp_path, monkeypatch):
+    """Windows path honors APPDATA env var."""
+    monkeypatch.setattr(
+        "praxis.cli.install_coach.platform.system", lambda: "Windows"
+    )
+    fake_appdata = tmp_path / "fake_appdata"
+    fake_appdata.mkdir()
+    monkeypatch.setenv("APPDATA", str(fake_appdata))
+    path = vscode_user_dir(home=tmp_path)
+    assert path == fake_appdata / "Code" / "User"
+
+
+def test_vscode_user_dir_windows_falls_back_when_appdata_unset(
+    tmp_path, monkeypatch
+):
+    """Windows without APPDATA falls back to ~/AppData/Roaming/Code/User."""
+    monkeypatch.setattr(
+        "praxis.cli.install_coach.platform.system", lambda: "Windows"
+    )
+    monkeypatch.delenv("APPDATA", raising=False)
+    path = vscode_user_dir(home=tmp_path)
+    assert path == tmp_path / "AppData" / "Roaming" / "Code" / "User"
+
+
+# ---------------------------------------------------------------------------
+# install_copilot_user_level: prompt file + settings.json patcher.
+# ---------------------------------------------------------------------------
+
+
+def _darwin_user_dir(home: Path) -> Path:
+    return home / "Library" / "Application Support" / "Code" / "User"
+
+
+@pytest.fixture
+def force_darwin(monkeypatch):
+    """Pin platform.system() to 'Darwin' so user-level paths are deterministic."""
+    monkeypatch.setattr(
+        "praxis.cli.install_coach.platform.system", lambda: "Darwin"
+    )
+
+
+def test_install_copilot_user_level_writes_prompt_file_and_patches_settings(
+    tmp_home, force_darwin
+):
+    prompt_path, settings_path = install_copilot_user_level()
+
+    user_dir = _darwin_user_dir(tmp_home)
+    expected_prompt = user_dir / "prompts" / COPILOT_INSTRUCTION_FILENAME
+    expected_settings = user_dir / "settings.json"
+    assert prompt_path == expected_prompt
+    assert settings_path == expected_settings
+    assert prompt_path.exists()
+    # The prompt file content includes the praxis-managed block.
+    prompt_content = prompt_path.read_text(encoding="utf-8")
+    assert COPILOT_MARKER_BEGIN in prompt_content
+    assert COPILOT_MARKER_END in prompt_content
+    # Settings file enables the prompts directory.
+    data = json.loads(settings_path.read_text(encoding="utf-8"))
+    locations = data[COPILOT_SETTINGS_KEY]
+    assert isinstance(locations, dict)
+    assert locations[str(user_dir / "prompts")] is True
+
+
+def test_install_copilot_user_level_creates_parent_dirs(tmp_home, force_darwin):
+    """vscode user dir + prompts subdir are created if absent."""
+    user_dir = _darwin_user_dir(tmp_home)
+    assert not user_dir.exists()
+    install_copilot_user_level()
+    assert (user_dir / "prompts").is_dir()
+    assert (user_dir / "settings.json").exists()
+
+
+def test_install_copilot_user_level_preserves_existing_settings(
+    tmp_home, force_darwin
+):
+    """Unrelated top-level keys + existing chat.instructionsFilesLocations entries survive."""
+    user_dir = _darwin_user_dir(tmp_home)
+    user_dir.mkdir(parents=True)
+    existing = {
+        "editor.fontSize": 14,
+        "files.autoSave": "onFocusChange",
+        COPILOT_SETTINGS_KEY: {
+            "/Users/other/prompts": True,
+        },
+    }
+    (user_dir / "settings.json").write_text(
+        json.dumps(existing), encoding="utf-8"
+    )
+
+    install_copilot_user_level()
+
+    data = json.loads(
+        (user_dir / "settings.json").read_text(encoding="utf-8")
+    )
+    assert data["editor.fontSize"] == 14
+    assert data["files.autoSave"] == "onFocusChange"
+    locations = data[COPILOT_SETTINGS_KEY]
+    # The existing entry is preserved.
+    assert locations["/Users/other/prompts"] is True
+    # And the praxis prompts directory is added.
+    assert locations[str(user_dir / "prompts")] is True
+
+
+def test_install_copilot_user_level_is_idempotent(tmp_home, force_darwin):
+    """Re-running does not duplicate the prompts-dir entry."""
+    install_copilot_user_level()
+    install_copilot_user_level()
+    install_copilot_user_level()
+
+    user_dir = _darwin_user_dir(tmp_home)
+    data = json.loads(
+        (user_dir / "settings.json").read_text(encoding="utf-8")
+    )
+    locations = data[COPILOT_SETTINGS_KEY]
+    # Exactly one entry pointing at the praxis prompts dir.
+    matching = [k for k in locations if k == str(user_dir / "prompts")]
+    assert matching == [str(user_dir / "prompts")]
+
+
+def test_install_copilot_user_level_aborts_on_unparseable_settings(
+    tmp_home, force_darwin
+):
+    """Unparseable user settings.json -> InstallCoachError + file untouched."""
+    user_dir = _darwin_user_dir(tmp_home)
+    user_dir.mkdir(parents=True)
+    bad_bytes = b"{not valid json,,"
+    (user_dir / "settings.json").write_bytes(bad_bytes)
+
+    with pytest.raises(InstallCoachError) as exc_info:
+        install_copilot_user_level()
+
+    assert (user_dir / "settings.json").read_bytes() == bad_bytes
+    msg = str(exc_info.value)
+    assert "not valid JSON" in msg
+    assert str(user_dir / "settings.json") in msg
+    assert "praxis install-coach" in msg
+
+
+def test_install_copilot_user_level_aborts_when_settings_top_level_not_object(
+    tmp_home, force_darwin
+):
+    """Top-level JSON array is structurally invalid -> InstallCoachError."""
+    user_dir = _darwin_user_dir(tmp_home)
+    user_dir.mkdir(parents=True)
+    (user_dir / "settings.json").write_text("[1, 2]", encoding="utf-8")
+
+    with pytest.raises(InstallCoachError) as exc_info:
+        install_copilot_user_level()
+
+    assert "JSON object" in str(exc_info.value)
+    assert (
+        (user_dir / "settings.json").read_text(encoding="utf-8") == "[1, 2]"
+    )
+
+
+def test_install_copilot_user_level_empty_settings_treated_as_fresh(
+    tmp_home, force_darwin
+):
+    """Whitespace-only settings.json is treated as {}."""
+    user_dir = _darwin_user_dir(tmp_home)
+    user_dir.mkdir(parents=True)
+    (user_dir / "settings.json").write_text("   \n\t  \n", encoding="utf-8")
+
+    install_copilot_user_level()
+
+    data = json.loads(
+        (user_dir / "settings.json").read_text(encoding="utf-8")
+    )
+    assert COPILOT_SETTINGS_KEY in data
+
+
+def test_install_copilot_user_level_overwrites_non_dict_locations(
+    tmp_home, force_darwin
+):
+    """When 'chat.instructionsFilesLocations' is not a dict, install replaces it.
+
+    A user with a malformed entry (e.g., a list or string) shouldn't cause
+    a crash; install replaces it with a proper dict containing the praxis
+    prompts dir entry.
+    """
+    user_dir = _darwin_user_dir(tmp_home)
+    user_dir.mkdir(parents=True)
+    (user_dir / "settings.json").write_text(
+        json.dumps({COPILOT_SETTINGS_KEY: ["unexpected", "list"]}),
+        encoding="utf-8",
+    )
+
+    install_copilot_user_level()
+
+    data = json.loads(
+        (user_dir / "settings.json").read_text(encoding="utf-8")
+    )
+    locations = data[COPILOT_SETTINGS_KEY]
+    assert isinstance(locations, dict)
+    assert locations[str(user_dir / "prompts")] is True
+
+
+def test_install_copilot_user_level_home_override(tmp_path, force_darwin):
+    """Explicit home= overrides Path.home() for direct callers."""
+    other = tmp_path / "alt-home"
+    other.mkdir()
+    prompt_path, settings_path = install_copilot_user_level(home=other)
+    assert (
+        prompt_path == _darwin_user_dir(other) / "prompts" / COPILOT_INSTRUCTION_FILENAME
+    )
+    assert settings_path == _darwin_user_dir(other) / "settings.json"
+
+
+# ---------------------------------------------------------------------------
+# CLI integration for the Copilot branch.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_install_coach_copilot_workspace_with_yes(
+    tmp_home, tmp_cwd, capsys, no_copilot
+):
+    """`praxis install-coach --tool copilot --yes` writes only the workspace surface.
+
+    Per AC: --yes does NOT opt into the user-level surface (explicit
+    confirmation required).
+    """
+    code = main(["install-coach", "--tool", "copilot", "--yes"])
+    out = capsys.readouterr().out
+    assert code == 0
+    workspace_file = tmp_cwd / ".github" / "copilot-instructions.md"
+    assert workspace_file.exists()
+    # The user-level surface was NOT touched because --yes does not opt in.
+    # On macOS the path would be tmp_home/Library/Application Support/Code/User
+    user_dir_mac = tmp_home / "Library" / "Application Support" / "Code" / "User"
+    user_dir_linux = tmp_home / ".config" / "Code" / "User"
+    assert not (user_dir_mac / "prompts" / COPILOT_INSTRUCTION_FILENAME).exists()
+    assert not (user_dir_linux / "prompts" / COPILOT_INSTRUCTION_FILENAME).exists()
+    # Output mentions the workspace file written.
+    assert str(workspace_file) in out
+
+
+def test_cli_install_coach_copilot_user_level_with_explicit_yes(
+    tmp_home, tmp_cwd, monkeypatch, capsys, force_darwin, no_copilot
+):
+    """Interactive flow that confirms both prompts writes both surfaces."""
+    replies = iter(["y", "y", "y"])  # top-level, workspace, user-level
+
+    def _input(_prompt):
+        return next(replies)
+
+    monkeypatch.setattr("builtins.input", _input)
+
+    code = main(["install-coach", "--tool", "copilot"])
+    capsys.readouterr()
+    assert code == 0
+    assert (tmp_cwd / ".github" / "copilot-instructions.md").exists()
+    user_dir = _darwin_user_dir(tmp_home)
+    assert (user_dir / "prompts" / COPILOT_INSTRUCTION_FILENAME).exists()
+    assert (user_dir / "settings.json").exists()
+
+
+def test_cli_install_coach_copilot_decline_user_level_skips_it(
+    tmp_home, tmp_cwd, monkeypatch, capsys, force_darwin, no_copilot
+):
+    """Declining the user-level prompt skips both user-level paths."""
+    replies = iter(["y", "y", "n"])  # top-level Y, workspace Y, user-level N
+
+    def _input(_prompt):
+        return next(replies)
+
+    monkeypatch.setattr("builtins.input", _input)
+
+    code = main(["install-coach", "--tool", "copilot"])
+    capsys.readouterr()
+    assert code == 0
+    assert (tmp_cwd / ".github" / "copilot-instructions.md").exists()
+    user_dir = _darwin_user_dir(tmp_home)
+    assert not (user_dir / "prompts" / COPILOT_INSTRUCTION_FILENAME).exists()
+    assert not (user_dir / "settings.json").exists()
+
+
+def test_cli_install_coach_copilot_decline_workspace_does_not_write_workspace(
+    tmp_home, tmp_cwd, monkeypatch, capsys, force_darwin, no_copilot
+):
+    """Declining the workspace prompt leaves <cwd>/.github untouched."""
+    replies = iter(["y", "n", "n"])  # top-level Y, workspace N, user-level N
+
+    def _input(_prompt):
+        return next(replies)
+
+    monkeypatch.setattr("builtins.input", _input)
+
+    code = main(["install-coach", "--tool", "copilot"])
+    capsys.readouterr()
+    assert code == 0
+    assert not (tmp_cwd / ".github").exists()
+
+
+def test_cli_install_coach_copilot_workspace_prompt_mentions_cwd_path(
+    tmp_home, tmp_cwd, monkeypatch, capsys, force_darwin, no_copilot
+):
+    """The workspace prompt names the absolute target path."""
+    seen: list[str] = []
+    # Say YES to the top-level so we reach the workspace prompt; then NO
+    # to the workspace and user-level prompts so we don't actually write.
+    replies = iter(["y", "n", "n"])
+
+    def _input(prompt):
+        seen.append(prompt)
+        return next(replies)
+
+    monkeypatch.setattr("builtins.input", _input)
+
+    code = main(["install-coach", "--tool", "copilot"])
+    capsys.readouterr()
+    assert code == 0
+    # We expect: top-level Found Copilot. + workspace prompt + user-level prompt.
+    assert any("Found Copilot." in p for p in seen)
+    workspace_target = tmp_cwd / ".github" / "copilot-instructions.md"
+    assert any(str(workspace_target) in p for p in seen)
+
+
+def test_cli_install_coach_copilot_user_level_prompt_default_no(
+    tmp_home, tmp_cwd, monkeypatch, capsys, force_darwin, no_copilot
+):
+    """Hitting Enter at the user-level prompt declines (default-N)."""
+    # Top-level Y, workspace Y, user-level "" (default-N => skipped).
+    replies = iter(["y", "y", ""])
+
+    def _input(_prompt):
+        return next(replies)
+
+    monkeypatch.setattr("builtins.input", _input)
+
+    code = main(["install-coach", "--tool", "copilot"])
+    capsys.readouterr()
+    assert code == 0
+    user_dir = _darwin_user_dir(tmp_home)
+    assert not (user_dir / "prompts" / COPILOT_INSTRUCTION_FILENAME).exists()
+    assert not (user_dir / "settings.json").exists()
+
+
+def test_cli_install_coach_copilot_user_level_prompt_default_yes_for_workspace(
+    tmp_home, tmp_cwd, monkeypatch, capsys, force_darwin, no_copilot
+):
+    """Empty input at workspace prompt is treated as YES (default-Y)."""
+    # Top-level "" => default Y, workspace "" => default Y, user-level "" => default N.
+    replies = iter(["", "", ""])
+
+    def _input(_prompt):
+        return next(replies)
+
+    monkeypatch.setattr("builtins.input", _input)
+
+    code = main(["install-coach", "--tool", "copilot"])
+    capsys.readouterr()
+    assert code == 0
+    # Workspace surface WAS written.
+    assert (tmp_cwd / ".github" / "copilot-instructions.md").exists()
+
+
+def test_cli_install_coach_copilot_user_level_unparseable_prints_error_continues(
+    tmp_home, tmp_cwd, monkeypatch, capsys, force_darwin, no_copilot
+):
+    """Unparseable user settings.json -> stderr message, CLI still exits 0."""
+    user_dir = _darwin_user_dir(tmp_home)
+    user_dir.mkdir(parents=True)
+    (user_dir / "settings.json").write_text("not-json", encoding="utf-8")
+
+    replies = iter(["y", "y", "y"])  # top-level Y, workspace Y, user-level Y
+
+    def _input(_prompt):
+        return next(replies)
+
+    monkeypatch.setattr("builtins.input", _input)
+
+    code = main(["install-coach", "--tool", "copilot"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "not valid JSON" in captured.err
+    # The user-level settings.json was NOT overwritten.
+    assert (user_dir / "settings.json").read_text(encoding="utf-8") == "not-json"
+    # The workspace surface still landed (independent of user-level failure).
+    assert (tmp_cwd / ".github" / "copilot-instructions.md").exists()

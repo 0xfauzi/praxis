@@ -6,8 +6,9 @@ weekly commitment at the start of work and capture a reflection at the
 end. US-028 wired detection + per-tool yes/no prompting; US-029 fills
 in the Claude Code branch with a real settings.json merger (atomic
 write, sentinel-tagged blocks); US-030 fills in the Codex branch with
-a parallel installer that writes ``~/.codex/hooks.json``. US-031
-(Copilot) follows.
+a parallel installer that writes ``~/.codex/hooks.json``; US-031 fills
+in the Copilot branch with a workspace-level markdown injector and an
+optional user-level prompt-file + settings.json patcher.
 
 Detection criteria (AC US-028):
   - Claude Code: ``~/.claude/settings.json`` OR ``~/.claude/projects/``
@@ -58,11 +59,33 @@ Codex installer (US-030):
     pointing the user at the directory; no partial file is created
     because ``tempfile.mkstemp`` fails atomically before any content
     is written.
+
+Copilot installer (US-031):
+  - Workspace surface (per-repo, default Y): manages a marker-bounded
+    block ``<!-- praxisManaged:begin --> ... <!-- praxisManaged:end -->``
+    inside ``<cwd>/.github/copilot-instructions.md``. Creates the file
+    if absent; replaces an existing managed block in place, preserving
+    surrounding markdown byte-for-byte. Re-runs are idempotent. The
+    workspace prompt is asked separately from the top-level
+    "Found Copilot. Install...?" prompt because committing a managed
+    block to a shared repo is opt-in per-repo.
+  - User-level surface (optional, default N): writes
+    ``<vscode-user-dir>/prompts/praxis-commitment.instructions.md`` and
+    patches user-level ``settings.json`` so VS Code auto-loads the file
+    via ``chat.instructionsFilesLocations``. This is gated behind a
+    second explicit prompt because it modifies user-level VS Code
+    settings; ``--yes`` does NOT opt into this surface (the AC says the
+    user must explicitly confirm). If the user declines, neither path
+    is touched.
+  - Unparseable user-level ``settings.json`` and non-object top level
+    abort with :class:`InstallCoachError`; the file is never
+    overwritten.
 """
 from __future__ import annotations
 
 import json
 import os
+import platform
 import sys
 import tempfile
 from collections.abc import Iterable
@@ -98,6 +121,12 @@ CODEX_HOOK_COMMANDS: dict[str, str] = {
     "SessionStart": "praxis nudge --format codex",
     "Stop": "praxis reflect --session-end --non-interactive-fallback",
 }
+
+
+COPILOT_MARKER_BEGIN = "<!-- praxisManaged:begin -->"
+COPILOT_MARKER_END = "<!-- praxisManaged:end -->"
+COPILOT_INSTRUCTION_FILENAME = "praxis-commitment.instructions.md"
+COPILOT_SETTINGS_KEY = "chat.instructionsFilesLocations"
 
 
 class InstallCoachError(Exception):
@@ -227,6 +256,32 @@ def _build_claude_block(command: str) -> dict[str, Any]:
     }
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Atomic write helper for text files.
+
+    Tempfile in the same dir (so ``os.replace`` is atomic on POSIX),
+    cleans up the tempfile on failure. Used by both the JSON installers
+    (via :func:`_atomic_write_json`) and the Copilot markdown injector.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_fd, tmp_str = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    tmp_path = Path(tmp_str)
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def _atomic_write_json(path: Path, data: object) -> None:
     """Validate + atomic-write JSON to ``path``.
 
@@ -237,23 +292,7 @@ def _atomic_write_json(path: Path, data: object) -> None:
     file intact.
     """
     encoded = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_fd, tmp_str = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=str(path.parent),
-    )
-    tmp_path = Path(tmp_str)
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
-            fh.write(encoded)
-        os.replace(tmp_path, path)
-    except Exception:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
+    _atomic_write_text(path, encoded)
 
 
 def install_claude_code(home: Path | None = None) -> Path:
@@ -440,19 +479,186 @@ def install_codex(home: Path | None = None) -> Path:
     return hooks_path
 
 
-def install_for_tool(tool: str) -> None:
+def copilot_workspace_path(cwd: Path | None = None) -> Path:
+    """Return the canonical workspace-level Copilot instructions path.
+
+    Defaults to ``<cwd>/.github/copilot-instructions.md``; tests pass an
+    explicit ``cwd`` to scope writes to ``tmp_path`` without relying on
+    ``monkeypatch.chdir``. The path is VS Code's auto-loaded location
+    (per spec section "Copilot"), so files written here are picked up by
+    Copilot Chat with zero settings changes.
+    """
+    base = cwd if cwd is not None else Path.cwd()
+    return base / ".github" / "copilot-instructions.md"
+
+
+def vscode_user_dir(home: Path | None = None) -> Path:
+    """Return the platform-specific VS Code ``User`` directory.
+
+      - macOS:   ``~/Library/Application Support/Code/User``
+      - Linux:   ``~/.config/Code/User``
+      - Windows: ``%APPDATA%/Code/User``  (falls back to
+        ``~/AppData/Roaming/Code/User`` when ``APPDATA`` is unset)
+
+    Other platforms fall through to the Linux layout. We deliberately
+    pick the plain "Code" variant (not Insiders / VSCodium / Cursor): a
+    user opting into the user-level surface most commonly means the
+    primary VS Code install. Forks/Insiders users can copy the prompt
+    file manually if needed.
+    """
+    base = home if home is not None else Path.home()
+    system = platform.system()
+    if system == "Darwin":
+        return base / "Library" / "Application Support" / "Code" / "User"
+    if system == "Windows":
+        appdata_env = os.environ.get("APPDATA")
+        if appdata_env:
+            return Path(appdata_env) / "Code" / "User"
+        return base / "AppData" / "Roaming" / "Code" / "User"
+    return base / ".config" / "Code" / "User"
+
+
+def _build_copilot_block_content() -> str:
+    """Return the Praxis-managed Copilot block (markers included).
+
+    At install time we write a placeholder pointing the user at
+    ``praxis commit``. The block is rewritten by ``praxis commit`` when
+    the active commitment changes (future story); the install layer only
+    establishes the managed surface. The exact bytes are fixed so
+    re-running ``install-coach`` is idempotent.
+    """
+    return (
+        f"{COPILOT_MARKER_BEGIN}\n"
+        "This week's focus: (not yet set - run `praxis commit` to set "
+        "this week's focus.)\n"
+        "\n"
+        "(Praxis - your AI usage coach. Run `praxis review` to see how "
+        "it's going.)\n"
+        f"{COPILOT_MARKER_END}"
+    )
+
+
+def _replace_or_append_copilot_block(content: str, new_block: str) -> str:
+    """Replace the Praxis-managed block, or append if absent.
+
+    Preserves byte-level content outside the markers. When no begin
+    marker is found, append the new block with a blank-line separator
+    (or alone on an empty file). When the begin marker is found but the
+    end marker is truncated, replace from the begin marker to end of
+    file so the file ends with a well-formed managed block.
+    """
+    begin = content.find(COPILOT_MARKER_BEGIN)
+    if begin == -1:
+        if not content:
+            return new_block + "\n"
+        sep = "\n" if content.endswith("\n") else "\n\n"
+        return content + sep + new_block + "\n"
+
+    end = content.find(COPILOT_MARKER_END, begin)
+    if end == -1:
+        return content[:begin] + new_block + "\n"
+
+    end_after = end + len(COPILOT_MARKER_END)
+    return content[:begin] + new_block + content[end_after:]
+
+
+def install_copilot_workspace(cwd: Path | None = None) -> Path:
+    """Install (or refresh) the workspace-level Copilot instructions block.
+
+    Reads ``<cwd>/.github/copilot-instructions.md`` (or starts from an
+    empty string if absent), replaces the Praxis-managed block in place
+    (or appends if no block is present), then writes back atomically.
+    Content outside the markers is preserved byte-for-byte.
+
+    Returns the path of the written file.
+    """
+    target = copilot_workspace_path(cwd)
+    existing = target.read_text(encoding="utf-8") if target.exists() else ""
+    new_content = _replace_or_append_copilot_block(
+        existing, _build_copilot_block_content()
+    )
+    _atomic_write_text(target, new_content)
+    return target
+
+
+def install_copilot_user_level(home: Path | None = None) -> tuple[Path, Path]:
+    """Install the user-level Copilot prompt file + settings.json patch.
+
+    Writes ``<vscode-user-dir>/prompts/praxis-commitment.instructions.md``
+    and adds the prompts directory to the ``chat.instructionsFilesLocations``
+    dict in user-level ``settings.json``. Returns
+    ``(prompt_path, settings_path)``.
+
+    Raises :class:`InstallCoachError` when the existing user
+    ``settings.json`` is unparseable JSON or its top-level value is not
+    a JSON object; in either error case the file on disk is left
+    untouched.
+    """
+    user_dir = vscode_user_dir(home)
+    prompts_dir = user_dir / "prompts"
+    prompt_path = prompts_dir / COPILOT_INSTRUCTION_FILENAME
+
+    prompt_content = _build_copilot_block_content() + "\n"
+    _atomic_write_text(prompt_path, prompt_content)
+
+    settings_path = user_dir / "settings.json"
+    settings_data: dict[str, Any]
+    if settings_path.exists():
+        raw = settings_path.read_text(encoding="utf-8")
+        if raw.strip() == "":
+            settings_data = {}
+        else:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise InstallCoachError(
+                    f"Cannot install Copilot user-level surface: "
+                    f"{settings_path} is not valid JSON ({exc.msg} at "
+                    f"line {exc.lineno} column {exc.colno}). Fix the "
+                    "file manually and re-run `praxis install-coach`."
+                ) from exc
+            if not isinstance(parsed, dict):
+                raise InstallCoachError(
+                    f"Cannot install Copilot user-level surface: "
+                    f"{settings_path} top level must be a JSON object, "
+                    f"got {type(parsed).__name__}. Fix the file "
+                    "manually and re-run `praxis install-coach`."
+                )
+            settings_data = parsed
+    else:
+        settings_data = {}
+
+    raw_locations = settings_data.get(COPILOT_SETTINGS_KEY)
+    locations: dict[str, Any]
+    if isinstance(raw_locations, dict):
+        locations = raw_locations
+    else:
+        locations = {}
+    locations[str(prompts_dir)] = True
+    settings_data[COPILOT_SETTINGS_KEY] = locations
+
+    _atomic_write_json(settings_path, settings_data)
+    return prompt_path, settings_path
+
+
+def install_for_tool(tool: str, *, assume_yes: bool = False) -> None:
     """Per-tool installer dispatch.
 
     US-029 fills in the Claude Code branch with the real settings.json
     merger (sentinel + atomic write); US-030 fills in the Codex branch
-    with the parallel ``~/.codex/hooks.json`` installer. US-031
-    (Copilot) replaces its matching branch later. Until then the
-    Copilot branch prints a placeholder so users get acknowledgement
-    rather than silence.
+    with the parallel ``~/.codex/hooks.json`` installer; US-031 fills
+    in the Copilot branch with the workspace markdown injector and an
+    opt-in user-level prompt-file + settings.json patcher.
+
+    The Copilot branch reads ``assume_yes`` to know whether to skip the
+    workspace prompt. The user-level surface is gated behind an
+    explicit confirmation regardless of ``assume_yes``, per AC US-031
+    ("behind an explicit prompt the user must confirm").
 
     Errors raised by a per-tool installer are caught here and printed
     to stderr; we deliberately do NOT abort the whole ``install-coach``
-    run -- a bad Claude Code settings file should not block Codex.
+    run -- a bad Claude Code settings file should not block Codex, and
+    a bad workspace markdown should not block the user-level prompt.
     """
     label = display_name(tool)
     if tool == TOOL_CLAUDE_CODE:
@@ -472,26 +678,71 @@ def install_for_tool(tool: str) -> None:
         print(f"Installed {label} coaching hook: {path}")
         return
     if tool == TOOL_COPILOT:
-        print(f"Installing {label} coaching hook... (not yet implemented)")
+        workspace_target = copilot_workspace_path()
+        if assume_yes or _prompt_yes_text(
+            f"Write the Praxis commitment block to {workspace_target}?",
+            default_yes=True,
+        ):
+            try:
+                path = install_copilot_workspace()
+            except InstallCoachError as exc:
+                print(str(exc), file=sys.stderr)
+            else:
+                print(f"Installed {label} workspace surface: {path}")
+        # User-level surface is gated behind explicit confirmation.
+        # --yes does NOT opt into it: the AC says the user must confirm.
+        if assume_yes:
+            return
+        prompts_file = (
+            vscode_user_dir() / "prompts" / COPILOT_INSTRUCTION_FILENAME
+        )
+        if _prompt_yes_text(
+            (
+                f"Also write a user-level prompt file at {prompts_file} "
+                "and update VS Code settings.json?"
+            ),
+            default_yes=False,
+        ):
+            try:
+                prompt_path, settings_path = install_copilot_user_level()
+            except InstallCoachError as exc:
+                print(str(exc), file=sys.stderr)
+            else:
+                print(f"Installed {label} user-level prompt: {prompt_path}")
+                print(f"Updated VS Code user settings: {settings_path}")
         return
     print(f"Installing {label} coaching hook... (not yet implemented)")
 
 
 def _prompt_yes(tool_display: str) -> bool:
-    """Prompt with default-Y for a single tool.
+    """Top-level per-tool prompt (default Y, EOF -> no).
 
-    Returns True for empty input, 'y', or 'yes' (case-insensitive);
-    False otherwise. ``EOFError`` (e.g. piped stdin closes after the
-    first prompt) is treated as 'no' so a non-interactive shell that
-    reaches this branch silently skips rather than hanging.
+    Matches AC US-028: ``Found <Tool>. Install the Praxis coaching
+    hook? [Y/n]:``. Delegates to :func:`_prompt_yes_text` so the empty/
+    EOF semantics stay consistent across prompts.
     """
+    return _prompt_yes_text(
+        f"Found {tool_display}. Install the Praxis coaching hook?",
+        default_yes=True,
+    )
+
+
+def _prompt_yes_text(prompt_text: str, *, default_yes: bool = True) -> bool:
+    """Generalized yes/no prompt with selectable default.
+
+    Returns ``default_yes`` for empty input; ``True`` for 'y'/'yes';
+    ``False`` for anything else. ``EOFError`` (e.g. piped stdin closes
+    after the first prompt) is treated as 'no' so a non-interactive
+    shell silently declines rather than hanging.
+    """
+    suffix = " [Y/n]: " if default_yes else " [y/N]: "
     try:
-        reply = input(
-            f"Found {tool_display}. Install the Praxis coaching hook? [Y/n]: "
-        ).strip().lower()
+        reply = input(prompt_text + suffix).strip().lower()
     except EOFError:
         return False
-    return reply in {"", "y", "yes"}
+    if reply == "":
+        return default_yes
+    return reply in {"y", "yes"}
 
 
 def run_install_coach(
@@ -527,5 +778,5 @@ def run_install_coach(
 
     for t in targets:
         if assume_yes or _prompt_yes(display_name(t)):
-            install_for_tool(t)
+            install_for_tool(t, assume_yes=assume_yes)
     return 0
