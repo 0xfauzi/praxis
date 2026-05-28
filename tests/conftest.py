@@ -18,9 +18,16 @@ import pytest
 from praxis.models import Provider, Role, Session, Turn
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def tmp_home(monkeypatch, tmp_path):
-    """Redirect Path.home() and all PRAXIS_* env vars to a tmp dir."""
+    """Redirect Path.home() and all PRAXIS_* env vars to a tmp dir.
+
+    autouse: applies to EVERY test so a stray ``ProfileStore()`` (or any
+    code that re-resolves ``resolve_home()`` with ``PRAXIS_HOME`` unset)
+    can never touch the developer's real ``~/.praxis/profile.db``. Tests
+    that need the sandbox path still request ``tmp_home`` by name and get
+    this same instance's return value.
+    """
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setenv("PRAXIS_HOME", str(tmp_path / ".praxis"))
     monkeypatch.setenv("PRAXIS_CLAUDE_ROOT", str(tmp_path / ".claude" / "projects"))
