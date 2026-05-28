@@ -199,3 +199,12 @@
     * `_remove_copilot_block` handles the truncated-block case (begin marker but no end marker) by dropping from begin to EOF. If a future test fixture wants to assert "leaves the dangling begin marker", it'd need a behavior change here -- but doing so would break the symmetry property because re-install would then double-write the block.
     * Uninstall of Copilot user-level deletes the prompt file but keeps settings.json. The reason is documented in the function docstring: VS Code user-level settings is shared with other tooling. If a future story wants a `--purge` flag to delete it too, that's a clean extension point on `uninstall_copilot_user_level`.
 ---
+
+## Iteration 11 - Lint gate cleanup (no new story)
+- What I did: All 5 PRD stories were marked passing at the start of this iteration, but the harness verification gate (ruff) was failing with 5 errors that blocked completion detection. Fixed: two F541 f-string-without-placeholders in tests/make_synthetic_data.py (lines 239, 246, pre-existing), one F541 in tests/test_digest_html.py (line 730, pre-existing), one F841 unused local `prompts_dir` in tests/test_install_coach.py:1939 (introduced by US-032), and one F401 unused `Role` import in tests/test_scanners.py:12 (pre-existing). Each fix is the minimal change (drop the f-prefix on no-placeholder strings, delete the unused line/import).
+- Files changed: tests/make_synthetic_data.py, tests/test_digest_html.py, tests/test_install_coach.py, tests/test_scanners.py.
+- Verification: `uv run ruff check .` -> clean. `uv run mypy praxis` -> 50 source files, 0 errors. `uv run pytest` -> 1235 passed. All three gates green.
+- What the next iteration should know:
+  - Ralph should detect <promise>COMPLETE</promise> now -- the prd.json status was already at 5/5 passes; this iteration's only job was unblocking the lint gate.
+  - The pyright "Code is unreachable" / "pytest could not be resolved" / "tmp_home is not accessed" diagnostics noted throughout earlier iterations are still present and still pre-existing noise; they are NOT in the verification gate.
+---
