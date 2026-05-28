@@ -1161,3 +1161,512 @@ def test_cmd_commit_invalid_choice_does_not_persist(
 
     store = ProfileStore()
     assert store.load_follow_up(current_iso_week()) is None
+
+
+# ---- US-023: mid-week replace semantics ------------------------------------
+
+
+def test_active_follow_up_for_week_returns_pending_row(tmp_home):
+    """The helper finds the active pending commitment for a given week."""
+    store = ProfileStore()
+    fu = FollowUp(
+        week_iso="2026-W21",
+        dim_key="planning",
+        commitment_text="state the goal in one line",
+        target_metric="planning_dim_mean",
+        baseline_value=0.0,
+        outcome="pending",
+        user_chosen=1,
+        display_text="state the goal in one line",
+    )
+    store.insert_follow_up(fu)
+    active = store.active_follow_up_for_week("2026-W21")
+    assert active is not None
+    assert active.display_text == "state the goal in one line"
+    assert active.outcome == "pending"
+
+
+def test_active_follow_up_for_week_returns_none_when_no_pending(tmp_home):
+    """No active row for the given week yields None."""
+    store = ProfileStore()
+    active = store.active_follow_up_for_week("2026-W21")
+    assert active is None
+
+
+def test_active_follow_up_for_week_ignores_superseded_rows(tmp_home):
+    """Rows with non-NULL superseded_by are excluded by the predicate."""
+    import sqlite3
+
+    store = ProfileStore()
+    fu = FollowUp(
+        week_iso="2026-W21",
+        dim_key="planning",
+        commitment_text="first",
+        target_metric="planning_dim_mean",
+        baseline_value=0.0,
+        outcome="pending",
+        user_chosen=1,
+        display_text="first",
+    )
+    row_id = store.insert_follow_up(fu)
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            "UPDATE follow_ups SET outcome = 'superseded', superseded_by = ? "
+            "WHERE id = ?",
+            (row_id + 999, row_id),
+        )
+        conn.commit()
+    assert store.active_follow_up_for_week("2026-W21") is None
+
+
+def test_active_follow_up_for_week_ignores_other_weeks(tmp_home):
+    """Only the requested week's active row is returned."""
+    store = ProfileStore()
+    store.insert_follow_up(
+        FollowUp(
+            week_iso="2026-W20",
+            dim_key="planning",
+            commitment_text="prior week",
+            target_metric="planning_dim_mean",
+            baseline_value=0.0,
+            outcome="pending",
+            user_chosen=1,
+            display_text="prior week",
+        )
+    )
+    assert store.active_follow_up_for_week("2026-W21") is None
+    assert store.active_follow_up_for_week("2026-W20") is not None
+
+
+def test_supersede_and_insert_marks_prior_superseded_and_inserts_new(tmp_home):
+    """The transactional method flips the prior row and inserts the new one."""
+    import sqlite3
+
+    store = ProfileStore()
+    prior_id = store.insert_follow_up(
+        FollowUp(
+            week_iso="2026-W21",
+            dim_key="planning",
+            commitment_text="old commitment",
+            target_metric="planning_dim_mean",
+            baseline_value=0.0,
+            outcome="pending",
+            user_chosen=1,
+            display_text="old commitment",
+        )
+    )
+    new_fu = FollowUp(
+        week_iso="2026-W21",
+        dim_key="context",
+        commitment_text="new commitment",
+        target_metric="context_dim_mean",
+        baseline_value=0.0,
+        outcome="pending",
+        user_chosen=1,
+        display_text="new commitment",
+    )
+    new_id = store.supersede_and_insert_follow_up(
+        prior_id=prior_id, new_follow_up=new_fu
+    )
+    assert new_id != prior_id
+
+    with sqlite3.connect(store.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        prior_row = conn.execute(
+            "SELECT outcome, superseded_by FROM follow_ups WHERE id = ?",
+            (prior_id,),
+        ).fetchone()
+        new_row = conn.execute(
+            "SELECT outcome, superseded_by, display_text FROM follow_ups WHERE id = ?",
+            (new_id,),
+        ).fetchone()
+
+    assert prior_row["outcome"] == "superseded"
+    assert prior_row["superseded_by"] == new_id
+    assert new_row["outcome"] == "pending"
+    assert new_row["superseded_by"] is None
+    assert new_row["display_text"] == "new commitment"
+
+
+def test_supersede_and_insert_active_helper_returns_new_row_after(tmp_home):
+    """After supersede, the new row is the one active_follow_up_for_week returns."""
+    store = ProfileStore()
+    prior_id = store.insert_follow_up(
+        FollowUp(
+            week_iso="2026-W21",
+            dim_key="planning",
+            commitment_text="old",
+            target_metric="planning_dim_mean",
+            baseline_value=0.0,
+            outcome="pending",
+            user_chosen=1,
+            display_text="old",
+        )
+    )
+    new_fu = FollowUp(
+        week_iso="2026-W21",
+        dim_key="planning",
+        commitment_text="new",
+        target_metric="planning_dim_mean",
+        baseline_value=0.0,
+        outcome="pending",
+        user_chosen=1,
+        display_text="new",
+    )
+    store.supersede_and_insert_follow_up(prior_id=prior_id, new_follow_up=new_fu)
+    active = store.active_follow_up_for_week("2026-W21")
+    assert active is not None
+    assert active.display_text == "new"
+
+
+def test_supersede_and_insert_rolls_back_on_missing_prior_id(tmp_home):
+    """If prior_id does not exist, both writes roll back."""
+    import sqlite3
+
+    store = ProfileStore()
+    # Seed one unrelated row so we can confirm the table is unchanged.
+    store.insert_follow_up(
+        FollowUp(
+            week_iso="2026-W20",
+            dim_key="planning",
+            commitment_text="unrelated",
+            target_metric="planning_dim_mean",
+            baseline_value=0.0,
+            outcome="pending",
+            user_chosen=1,
+            display_text="unrelated",
+        )
+    )
+    new_fu = FollowUp(
+        week_iso="2026-W21",
+        dim_key="context",
+        commitment_text="ghost",
+        target_metric="context_dim_mean",
+        baseline_value=0.0,
+        outcome="pending",
+        user_chosen=1,
+        display_text="ghost",
+    )
+    with pytest.raises(RuntimeError):
+        store.supersede_and_insert_follow_up(
+            prior_id=99999, new_follow_up=new_fu
+        )
+    with sqlite3.connect(store.db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM follow_ups").fetchone()[0]
+    assert count == 1  # only the unrelated seed row
+
+
+def test_resolve_replace_choice_maps_r_k_c():
+    """Each letter (and the long form) maps to the corresponding choice."""
+    from praxis.cli.commit import resolve_replace_choice
+
+    assert resolve_replace_choice("r") == "replace"
+    assert resolve_replace_choice("k") == "keep"
+    assert resolve_replace_choice("c") == "cancel"
+    assert resolve_replace_choice("replace") == "replace"
+    assert resolve_replace_choice("keep") == "keep"
+    assert resolve_replace_choice("cancel") == "cancel"
+    assert resolve_replace_choice("  R\n") == "replace"
+    assert resolve_replace_choice("K") == "keep"
+
+
+def test_resolve_replace_choice_returns_none_for_unknown_input():
+    """Unknown letters and empty input return None."""
+    from praxis.cli.commit import resolve_replace_choice
+
+    assert resolve_replace_choice("x") is None
+    assert resolve_replace_choice("") is None
+    assert resolve_replace_choice("rep") is None  # not a full word, not 'r'
+    assert resolve_replace_choice("1") is None
+
+
+def test_format_replace_keep_cancel_preamble_quotes_display_text():
+    """The preamble echoes the existing display_text in quotes."""
+    from praxis.cli.commit import format_replace_keep_cancel_preamble
+
+    rendered = format_replace_keep_cancel_preamble(
+        "ask for source links before accepting any claim"
+    )
+    assert (
+        '"ask for source links before accepting any claim"' in rendered
+    )
+    assert "[r]eplace" in rendered
+    assert "[k]eep" in rendered
+    assert "[c]ancel" in rendered
+    assert "Your choice [r, k, c]:" in rendered
+
+
+def test_cmd_commit_shows_replace_prompt_when_active_commitment_exists(
+    monkeypatch, tmp_home, capsys
+):
+    """An active pending row triggers the [r/k/c] preamble before suggestions."""
+    _force_tty(monkeypatch)
+    store = ProfileStore()
+    store.insert_follow_up(
+        FollowUp(
+            week_iso=current_iso_week(),
+            dim_key="planning",
+            commitment_text="state the goal",
+            target_metric="planning_dim_mean",
+            baseline_value=0.0,
+            outcome="pending",
+            user_chosen=1,
+            display_text="state the goal",
+        )
+    )
+    # 'c' = cancel, so the second input is never read.
+    inputs = iter(["c"])
+    monkeypatch.setattr(builtins, "input", lambda *_a, **_kw: next(inputs))
+
+    code = main(["commit"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "You already have an active commitment this week:" in out
+    assert '"state the goal"' in out
+    # The suggestion prompt should NOT render when cancel is chosen.
+    assert "Pick a commitment for this week" not in out
+
+
+def test_cmd_commit_keep_writes_nothing_and_exits_zero(
+    monkeypatch, tmp_home, capsys
+):
+    """[k]eep is a no-op: existing row stays, no new row is inserted."""
+    _force_tty(monkeypatch)
+    store = ProfileStore()
+    store.insert_follow_up(
+        FollowUp(
+            week_iso=current_iso_week(),
+            dim_key="planning",
+            commitment_text="keep me",
+            target_metric="planning_dim_mean",
+            baseline_value=0.0,
+            outcome="pending",
+            user_chosen=1,
+            display_text="keep me",
+        )
+    )
+    inputs = iter(["k"])
+    monkeypatch.setattr(builtins, "input", lambda *_a, **_kw: next(inputs))
+
+    code = main(["commit"])
+    capsys.readouterr()
+    assert code == 0
+
+    import sqlite3
+    with sqlite3.connect(store.db_path) as conn:
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM follow_ups WHERE week_iso = ?",
+            (current_iso_week(),),
+        ).fetchone()
+    assert rows[0] == 1
+    active = store.active_follow_up_for_week(current_iso_week())
+    assert active is not None
+    assert active.display_text == "keep me"
+
+
+def test_cmd_commit_cancel_writes_nothing_and_exits_zero(
+    monkeypatch, tmp_home, capsys
+):
+    """[c]ancel is a no-op: same as [k]eep but the explicit "leave" branch."""
+    _force_tty(monkeypatch)
+    store = ProfileStore()
+    store.insert_follow_up(
+        FollowUp(
+            week_iso=current_iso_week(),
+            dim_key="planning",
+            commitment_text="prior commitment",
+            target_metric="planning_dim_mean",
+            baseline_value=0.0,
+            outcome="pending",
+            user_chosen=1,
+            display_text="prior commitment",
+        )
+    )
+    inputs = iter(["c"])
+    monkeypatch.setattr(builtins, "input", lambda *_a, **_kw: next(inputs))
+
+    code = main(["commit"])
+    capsys.readouterr()
+    assert code == 0
+
+    import sqlite3
+    with sqlite3.connect(store.db_path) as conn:
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM follow_ups WHERE week_iso = ?",
+            (current_iso_week(),),
+        ).fetchone()
+    assert rows[0] == 1
+
+
+def test_cmd_commit_replace_supersedes_prior_and_inserts_new(
+    monkeypatch, tmp_home, capsys
+):
+    """[r]eplace path: prior row flipped to 'superseded', new row inserted."""
+    _force_tty(monkeypatch)
+    store = ProfileStore()
+    prior_id = store.insert_follow_up(
+        FollowUp(
+            week_iso=current_iso_week(),
+            dim_key="planning",
+            commitment_text="old commitment",
+            target_metric="planning_dim_mean",
+            baseline_value=0.0,
+            outcome="pending",
+            user_chosen=1,
+            display_text="old commitment",
+        )
+    )
+    # 'r' to enter replace, then 'w' to choose free-text, then the new text.
+    inputs = iter(["r", "w", "new free-text commitment"])
+    monkeypatch.setattr(builtins, "input", lambda *_a, **_kw: next(inputs))
+
+    code = main(["commit"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "You already have an active commitment this week:" in out
+    assert '"new free-text commitment"' in out
+
+    import sqlite3
+    with sqlite3.connect(store.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        prior = conn.execute(
+            "SELECT outcome, superseded_by FROM follow_ups WHERE id = ?",
+            (prior_id,),
+        ).fetchone()
+        new = conn.execute(
+            "SELECT id, display_text, outcome, superseded_by FROM follow_ups "
+            "WHERE id != ? AND week_iso = ?",
+            (prior_id, current_iso_week()),
+        ).fetchone()
+
+    assert prior["outcome"] == "superseded"
+    assert prior["superseded_by"] == new["id"]
+    assert new["display_text"] == "new free-text commitment"
+    assert new["outcome"] == "pending"
+    assert new["superseded_by"] is None
+
+
+def test_cmd_commit_replace_followed_by_invalid_choice_leaves_db_unchanged(
+    monkeypatch, tmp_home, capsys
+):
+    """If the user picks [r] but then types junk at the suggestion prompt, no writes."""
+    _force_tty(monkeypatch)
+    store = ProfileStore()
+    store.insert_follow_up(
+        FollowUp(
+            week_iso=current_iso_week(),
+            dim_key="planning",
+            commitment_text="old commitment",
+            target_metric="planning_dim_mean",
+            baseline_value=0.0,
+            outcome="pending",
+            user_chosen=1,
+            display_text="old commitment",
+        )
+    )
+    inputs = iter(["r", "garbage"])
+    monkeypatch.setattr(builtins, "input", lambda *_a, **_kw: next(inputs))
+
+    code = main(["commit"])
+    capsys.readouterr()
+    assert code == 0
+
+    import sqlite3
+    with sqlite3.connect(store.db_path) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM follow_ups WHERE week_iso = ?",
+            (current_iso_week(),),
+        ).fetchone()[0]
+    # Only the original active row exists.
+    assert count == 1
+    active = store.active_follow_up_for_week(current_iso_week())
+    assert active is not None
+    assert active.display_text == "old commitment"
+
+
+def test_cmd_commit_replace_prompt_non_tty_exits_zero(tmp_home, capsys):
+    """Non-TTY runs with an active commitment print the preamble and exit 0."""
+    store = ProfileStore()
+    store.insert_follow_up(
+        FollowUp(
+            week_iso=current_iso_week(),
+            dim_key="planning",
+            commitment_text="active text",
+            target_metric="planning_dim_mean",
+            baseline_value=0.0,
+            outcome="pending",
+            user_chosen=1,
+            display_text="active text",
+        )
+    )
+
+    code = main(["commit"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "You already have an active commitment this week:" in out
+    # The suggestion menu is not also rendered in the non-TTY replace path.
+    assert "Pick a commitment for this week" not in out
+
+
+def test_cmd_commit_replace_unknown_choice_treated_as_keep(
+    monkeypatch, tmp_home, capsys
+):
+    """Unknown letter at the replace prompt is a no-op (treated as do-nothing)."""
+    _force_tty(monkeypatch)
+    store = ProfileStore()
+    store.insert_follow_up(
+        FollowUp(
+            week_iso=current_iso_week(),
+            dim_key="planning",
+            commitment_text="prior",
+            target_metric="planning_dim_mean",
+            baseline_value=0.0,
+            outcome="pending",
+            user_chosen=1,
+            display_text="prior",
+        )
+    )
+    inputs = iter(["q"])
+    monkeypatch.setattr(builtins, "input", lambda *_a, **_kw: next(inputs))
+
+    code = main(["commit"])
+    capsys.readouterr()
+    assert code == 0
+
+    import sqlite3
+    with sqlite3.connect(store.db_path) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM follow_ups"
+        ).fetchone()[0]
+    assert count == 1
+    active = store.active_follow_up_for_week(current_iso_week())
+    assert active is not None
+    assert active.display_text == "prior"
+
+
+def test_cmd_commit_replace_with_eof_during_replace_prompt_exits_zero(
+    monkeypatch, tmp_home, capsys
+):
+    """Ctrl-D at the replace prompt aborts cleanly."""
+    _force_tty(monkeypatch)
+    store = ProfileStore()
+    store.insert_follow_up(
+        FollowUp(
+            week_iso=current_iso_week(),
+            dim_key="planning",
+            commitment_text="prior",
+            target_metric="planning_dim_mean",
+            baseline_value=0.0,
+            outcome="pending",
+            user_chosen=1,
+            display_text="prior",
+        )
+    )
+
+    def raising_input(*_a, **_kw):
+        raise EOFError()
+
+    monkeypatch.setattr(builtins, "input", raising_input)
+    code = main(["commit"])
+    capsys.readouterr()
+    assert code == 0

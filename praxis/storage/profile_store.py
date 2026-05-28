@@ -818,6 +818,111 @@ class ProfileStore:
             raise RuntimeError("insert_follow_up: lastrowid was None after INSERT")
         return int(row_id)
 
+    def active_follow_up_for_week(self, week_iso: str) -> FollowUp | None:
+        """Return the active pending commitment for ``week_iso``, or None.
+
+        "Active" means the row matches the partial-unique index predicate:
+        ``outcome='pending' AND superseded_by IS NULL``. At most one such
+        row can exist per week thanks to ``idx_follow_ups_one_active_per_week``,
+        so we do not need a tiebreaker. ``praxis commit`` calls this before
+        printing the suggestion list -- when a row comes back, the user
+        sees the [r]eplace / [k]eep / [c]ancel preamble (US-023) instead.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT id, week_iso, dim_key, commitment_text, target_metric, "
+                "       baseline_value, measured_value, outcome, "
+                "       user_chosen, display_text "
+                "FROM follow_ups "
+                "WHERE week_iso = ? "
+                "  AND outcome = 'pending' "
+                "  AND superseded_by IS NULL "
+                "LIMIT 1",
+                (week_iso,),
+            ).fetchone()
+        if row is None:
+            return None
+        outcome: Outcome = row["outcome"]
+        return FollowUp(
+            week_iso=row["week_iso"],
+            dim_key=row["dim_key"],
+            commitment_text=row["commitment_text"],
+            target_metric=row["target_metric"],
+            baseline_value=row["baseline_value"],
+            measured_value=row["measured_value"],
+            outcome=outcome,
+            user_chosen=row["user_chosen"],
+            display_text=row["display_text"],
+        )
+
+    def supersede_and_insert_follow_up(
+        self, *, prior_id: int, new_follow_up: FollowUp
+    ) -> int:
+        """Atomically supersede the prior row and insert ``new_follow_up``.
+
+        Performed inside a single transaction (single ``_conn()`` block,
+        sqlite3's implicit transaction): the UPDATE that flips the prior
+        row to ``outcome='superseded'`` and the INSERT for the new row
+        both succeed or both roll back. If the prior row does not exist
+        the UPDATE matches zero rows and we abort before the INSERT; if
+        anything later in the block raises, the prior UPDATE rolls back
+        with it (sqlite3's implicit transaction commits only when the
+        ``with`` block exits cleanly).
+
+        Statement order matters: the partial-unique index
+        ``idx_follow_ups_one_active_per_week`` enforces at most one row
+        per ``week_iso`` matching ``outcome='pending' AND superseded_by
+        IS NULL``. We flip the prior row's outcome first so it drops out
+        of the partial predicate, then INSERT the new active row, then
+        write ``superseded_by`` on the prior row pointing at the new id.
+        Doing the INSERT first would collide with the still-active prior
+        row.
+
+        Returns the new row's ``id``. US-023's replace path uses this to
+        pivot from one active commitment to another without ever leaving
+        the DB in a state with two pending+un-superseded rows.
+        """
+        with self._conn() as conn:
+            updated = conn.execute(
+                "UPDATE follow_ups SET outcome = 'superseded' WHERE id = ?",
+                (prior_id,),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError(
+                    f"supersede_and_insert_follow_up: prior_id {prior_id} "
+                    f"not found; rolling back."
+                )
+            cur = conn.execute(
+                """
+                INSERT INTO follow_ups
+                (week_iso, dim_key, commitment_text, target_metric,
+                 baseline_value, measured_value, outcome,
+                 user_chosen, display_text)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_follow_up.week_iso,
+                    new_follow_up.dim_key,
+                    new_follow_up.commitment_text,
+                    new_follow_up.target_metric,
+                    new_follow_up.baseline_value,
+                    new_follow_up.measured_value,
+                    new_follow_up.outcome,
+                    new_follow_up.user_chosen,
+                    new_follow_up.display_text,
+                ),
+            )
+            new_id = cur.lastrowid
+            if new_id is None:
+                raise RuntimeError(
+                    "supersede_and_insert_follow_up: lastrowid was None after INSERT"
+                )
+            conn.execute(
+                "UPDATE follow_ups SET superseded_by = ? WHERE id = ?",
+                (new_id, prior_id),
+            )
+        return int(new_id)
+
     def load_follow_up(self, week_iso: str) -> FollowUp | None:
         """Load the most recent follow_ups row for ``week_iso``, or None.
 

@@ -792,16 +792,22 @@ def cmd_commit(args: argparse.Namespace) -> int:  # noqa: ARG001
         commitment exists (latest follow-up with ``outcome='pending'``).
       - 'Write your own', always.
 
+    Mid-week replace (US-023): when an active pending commitment already
+    exists for the current ISO week, the handler short-circuits to the
+    [r]eplace / [k]eep / [c]ancel preamble before printing the suggestion
+    list. ``[k]eep`` and ``[c]ancel`` exit 0 without writing; ``[r]eplace``
+    falls through to the suggestion prompt and the eventual persist call
+    becomes :meth:`ProfileStore.supersede_and_insert_follow_up`, which
+    flips the prior row's ``outcome='superseded'`` + ``superseded_by`` to
+    the new row's id in a single transaction.
+
     When stdin is a TTY (interactive shell), the handler additionally
     reads the user's choice. ``'w'`` opens a validated single-line read
     via :func:`prompt_free_text`; ``'1'``..``'N'`` / ``'k'`` pick a
     pre-built suggestion. On any successful selection the handler writes
     one ``follow_ups`` row via :meth:`ProfileStore.insert_follow_up` with
     ``user_chosen=1``, ``outcome='pending'``, and the verbatim user-facing
-    string in ``display_text``. A second pending row for the same week
-    raises :class:`sqlite3.IntegrityError`; the handler catches it and
-    surfaces a replace-flow hint (the actual replace prompt lands in
-    US-023).
+    string in ``display_text``.
 
     Non-TTY invocations (pytest, piped scripts, cron) print the prompt
     and exit 0 without attempting to read. Ctrl-C / Ctrl-D during the
@@ -816,13 +822,56 @@ def cmd_commit(args: argparse.Namespace) -> int:  # noqa: ARG001
         build_commit_suggestions,
         build_user_chosen_follow_up,
         format_commit_prompt,
+        format_replace_keep_cancel_preamble,
         load_commit_context,
         prompt_free_text,
         resolve_choice,
+        resolve_replace_choice,
     )
 
     week_iso = current_iso_week()
     store = ProfileStore()
+
+    # Mid-week replace gate (US-023). Runs BEFORE the suggestion prompt so
+    # the user is never surprised by an IntegrityError from a stale active
+    # row. Falls through to the normal selection flow on [r]eplace.
+    active = store.active_follow_up_for_week(week_iso)
+    replace_prior_id: int | None = None
+    if active is not None:
+        existing_text = active.display_text or active.commitment_text
+        print(format_replace_keep_cancel_preamble(existing_text), end="")
+        if not sys.stdin.isatty():
+            # Non-interactive: print the preamble and exit 0. The user is
+            # explicitly informed there is an active commitment, but we
+            # don't try to read a choice from a non-TTY stdin.
+            return 0
+        try:
+            raw_replace_choice = input()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        decision = resolve_replace_choice(raw_replace_choice)
+        if decision in (None, "keep", "cancel"):
+            # Unknown input is treated as "do nothing" -- consistent with
+            # the suggestion-prompt's behavior for invalid choices.
+            return 0
+        # decision == "replace": find the prior row id so the transactional
+        # supersede has something to update, then fall through.
+        with sqlite3.connect(store.db_path) as conn:
+            row = conn.execute(
+                "SELECT id FROM follow_ups "
+                "WHERE week_iso = ? AND outcome = 'pending' "
+                "  AND superseded_by IS NULL "
+                "LIMIT 1",
+                (week_iso,),
+            ).fetchone()
+        if row is None:
+            # Active row vanished between the two reads (e.g. concurrent
+            # CLI run). Fall back to the plain insert path.
+            replace_prior_id = None
+        else:
+            replace_prior_id = int(row[0])
+
     ctx = load_commit_context(store, week_iso=week_iso)
     suggestions = build_commit_suggestions(ctx)
     print(format_commit_prompt(suggestions), end="")
@@ -858,17 +907,20 @@ def cmd_commit(args: argparse.Namespace) -> int:  # noqa: ARG001
         prior=prior,
     )
     try:
-        store.insert_follow_up(follow_up)
+        if replace_prior_id is not None:
+            store.supersede_and_insert_follow_up(
+                prior_id=replace_prior_id, new_follow_up=follow_up
+            )
+        else:
+            store.insert_follow_up(follow_up)
     except sqlite3.IntegrityError:
-        # The partial-unique index ``idx_follow_ups_one_active_per_week``
-        # fired: another active pending commitment already exists for this
-        # week. The mid-week replace/keep/cancel prompt is US-023; for
-        # US-022 we surface a friendly hint and exit cleanly so the user
-        # is never left with a traceback.
+        # Defensive: the partial-unique index fired despite the replace
+        # gate above (e.g. a concurrent write between our checks). Surface
+        # a friendly hint instead of a traceback.
         print()
         print(
             f"You already have an active commitment for {week_iso}. "
-            "Re-run `praxis commit` once the replace flow lands (US-023)."
+            "Re-run `praxis commit` to retry."
         )
         return 0
 

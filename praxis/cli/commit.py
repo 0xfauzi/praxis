@@ -197,7 +197,17 @@ def load_commit_context(store: ProfileStore, *, week_iso: str) -> CommitContext:
 
     open_prior_text: str | None = None
     prior = store.latest_follow_up()
-    if prior is not None and prior.outcome == "pending":
+    if (
+        prior is not None
+        and prior.outcome == "pending"
+        and prior.week_iso != week_iso
+    ):
+        # Only show "Keep last week" when the pending commitment is from
+        # a prior ISO week. A still-active row for the current week is
+        # handled by the mid-week replace gate (US-023) in ``cmd_commit``,
+        # which routes the user to [r]eplace / [k]eep / [c]ancel before
+        # the suggestion prompt renders -- so it must not also surface
+        # here as a keep_last suggestion.
         open_prior_text = prior.commitment_text
 
     return CommitContext(
@@ -334,6 +344,60 @@ def build_user_chosen_follow_up(
         user_chosen=1,
         display_text=display_text,
     )
+
+
+ReplaceChoice = Literal["replace", "keep", "cancel"]
+
+
+def format_replace_keep_cancel_preamble(existing_display_text: str) -> str:
+    """Render the mid-week replace preamble (US-023 / PLAN.md Section 2).
+
+    Shown only when an active pending commitment already exists for the
+    current ISO week. The quoted ``display_text`` echoes the verbatim
+    user-facing string the user typed (or accepted) on the prior
+    ``praxis commit`` run, so the choice between [r]eplace / [k]eep /
+    [c]ancel is grounded in what's actually live.
+
+    The returned string ends with a single newline so the caller can
+    ``print()`` it directly without doubling the spacing.
+    """
+    lines: list[str] = [
+        "",
+        "You already have an active commitment this week:",
+        f'  "{existing_display_text}"',
+        "",
+        "  [r]eplace      Pick a new focus (the existing one is marked "
+        "'superseded' and kept in history)",
+        "  [k]eep         No change; the existing commitment stays active",
+        "  [c]ancel       Exit without writing",
+        "",
+        "Your choice [r, k, c]:",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def resolve_replace_choice(raw: str) -> ReplaceChoice | None:
+    """Map the user's typed choice for the replace prompt.
+
+    Accepts (case-insensitive, whitespace-trimmed):
+      - ``'r'`` / ``'replace'`` -> ``'replace'``
+      - ``'k'`` / ``'keep'``    -> ``'keep'``
+      - ``'c'`` / ``'cancel'``  -> ``'cancel'``
+
+    Returns ``None`` for any unrecognized input so the caller can decide
+    whether to re-prompt or exit silently. Today's caller treats unknown
+    input as "do nothing" (exit 0 without writing); a future iteration
+    could add a re-prompt loop here if usability data shows users miss
+    the prompt.
+    """
+    normalised = raw.strip().lower()
+    if normalised in ("r", "replace"):
+        return "replace"
+    if normalised in ("k", "keep"):
+        return "keep"
+    if normalised in ("c", "cancel"):
+        return "cancel"
+    return None
 
 
 def prompt_free_text(
