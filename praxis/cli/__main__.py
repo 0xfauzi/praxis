@@ -25,6 +25,7 @@ import traceback
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from praxis import __version__
 from praxis.config import ensure_config_file
@@ -46,7 +47,13 @@ from praxis.scoring.baseline import (
     is_baseline_forming,
 )
 from praxis.scoring.rubric import RUBRIC
-from praxis.storage.profile_store import ProfileStore, resolve_home
+from praxis.storage.profile_store import (
+    ActiveCommitment,
+    MultipleActiveCommitmentsError,
+    ProfileStore,
+    SelfReport,
+    resolve_home,
+)
 
 
 def _weekly_html_path(week_iso: str) -> Path:
@@ -815,6 +822,143 @@ def cmd_rubric(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+_REFLECT_PROMPT_HEADER = 'Did you focus on: "{display_text}"'
+_REFLECT_OPTIONS_HINT = "  [y]es / [n]o / [p]artial / [s]kip"
+_REFLECT_NOTE_PROMPT = "Optional one-line note (press Enter to skip): "
+_REFLECT_NO_COMMITMENT_MSG = (
+    "No active commitment this week. Run `praxis commit` to start."
+)
+
+_SELF_REPORT_BY_CHOICE: dict[str, SelfReport] = {
+    "y": "yes",
+    "yes": "yes",
+    "n": "no",
+    "no": "no",
+    "p": "partial",
+    "partial": "partial",
+    "s": "skip",
+    "skip": "skip",
+}
+
+
+def _read_self_report_choice(stream: Any) -> SelfReport | None:
+    """Read one line from ``stream`` and map to a self_report value.
+
+    Returns None on EOF / empty input so the caller can decide whether
+    to re-prompt or fall back to 'skip'. Recognized choices are case-
+    insensitive and accept either the single letter or the full word.
+    """
+    raw = stream.readline()
+    if not raw:
+        return None
+    choice = raw.strip().lower()
+    if not choice:
+        return None
+    return _SELF_REPORT_BY_CHOICE.get(choice)
+
+
+def _read_optional_note(stream: Any) -> str | None:
+    """Read one line of optional note text; empty line -> None.
+
+    Only the first line is kept (we strip a trailing newline). Callers
+    pass None for skip; this helper is invoked only on yes/no/partial.
+    """
+    raw = stream.readline()
+    if not raw:
+        return None
+    stripped = raw.rstrip("\r\n").strip()
+    return stripped or None
+
+
+def cmd_reflect(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Interactively reflect on this week's active commitment.
+
+    Prompts for [y]es / [n]o / [p]artial / [s]kip, then accepts an
+    optional one-line note. Inserts one row into ``session_reflections``
+    so opt-outs are still counted.
+
+    Exit codes:
+      0 -- a reflection row was inserted, or no active commitment
+           exists for the current week (silent no-op with a hint).
+      1 -- input parsing gave up (>3 invalid choices) or the
+           commitment invariant was violated.
+    """
+    store = ProfileStore()
+    week_iso = current_iso_week()
+    try:
+        active = store.load_active_commitment(week_iso)
+    except MultipleActiveCommitmentsError as exc:
+        print(f"praxis reflect: {exc}", file=sys.stderr)
+        return 1
+
+    if active is None:
+        print(_REFLECT_NO_COMMITMENT_MSG)
+        return 0
+
+    return _run_interactive_reflect(store, active, sys.stdin, sys.stdout)
+
+
+def _run_interactive_reflect(
+    store: ProfileStore,
+    active: ActiveCommitment,
+    stdin: Any,
+    stdout: Any,
+) -> int:
+    """Drive the interactive prompt against the given streams.
+
+    Split out from ``cmd_reflect`` so tests can pass in StringIOs
+    without monkeypatching sys.stdin/stdout and so the --session-end
+    detached-child code path (US-027) can reuse it against /dev/tty.
+    """
+    print(
+        _REFLECT_PROMPT_HEADER.format(display_text=active.display_text),
+        file=stdout,
+    )
+    print(_REFLECT_OPTIONS_HINT, file=stdout)
+    stdout.flush()
+
+    # Allow a few retries on invalid choices to forgive typos, but
+    # don't loop forever -- a piped/EOF stream must terminate.
+    choice: SelfReport | None = None
+    for _ in range(3):
+        choice = _read_self_report_choice(stdin)
+        if choice is not None:
+            break
+        print(
+            "Please answer with y, n, p, or s.",
+            file=stdout,
+        )
+        stdout.flush()
+    if choice is None:
+        print(
+            "praxis reflect: no valid choice received; aborting "
+            "without writing a reflection.",
+            file=sys.stderr,
+        )
+        return 1
+
+    note: str | None = None
+    if choice != "skip":
+        print(_REFLECT_NOTE_PROMPT, end="", file=stdout)
+        stdout.flush()
+        note = _read_optional_note(stdin)
+
+    # No associated AI session in the interactive path (US-024). Mark
+    # the row as 'manual:<iso-week>' so reports can distinguish opt-in
+    # reflections from session-end reflections (US-025). The id is
+    # human-readable but not unique on its own; session_reflections.id
+    # (the autoincrement PK) is the real key.
+    session_stable_id = f"manual:{active.follow_up.week_iso}"
+    store.insert_session_reflection(
+        session_stable_id=session_stable_id,
+        follow_up_id=active.follow_up_id,
+        self_report=choice,
+        note=note,
+    )
+    print(f"Recorded reflection: {choice}", file=stdout)
+    return 0
+
+
 def cmd_install_weekly(args: argparse.Namespace) -> int:  # noqa: ARG001
     """Generate and load the macOS LaunchAgent for ``praxis week --notify``.
 
@@ -1292,6 +1436,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show the most recent weekly commitment and its outcome.",
     )
     fup.set_defaults(func=cmd_follow_up)
+
+    rfl = sub.add_parser(
+        "reflect",
+        help=(
+            "Reflect on this week's active commitment "
+            "(interactive 2-question prompt)."
+        ),
+        description=(
+            "Look up the active follow_ups row for the current ISO "
+            "week, prompt the user with the commitment's display_text, "
+            "and record one row in session_reflections (yes / no / "
+            "partial / skip plus an optional one-line note). When no "
+            "active commitment exists for this week, exits 0 with a "
+            "hint to run `praxis commit` first."
+        ),
+    )
+    rfl.set_defaults(func=cmd_reflect)
 
     mod = sub.add_parser("models",
                          help="List model cards or show one in detail.")

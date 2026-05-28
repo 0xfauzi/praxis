@@ -15,10 +15,10 @@ import os
 import shutil
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 
 def _utcnow() -> datetime:
@@ -26,6 +26,36 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 from praxis.follow_up import FollowUp, Outcome
+
+
+SelfReport = Literal["yes", "no", "partial", "skip"]
+
+
+@dataclass(frozen=True)
+class ActiveCommitment:
+    """The single active commitment for a given ISO week.
+
+    `follow_up_id` is the value to write into
+    session_reflections.follow_up_id. We prefer follow_ups.id when the
+    schema-migrations branch's US-002 column exists, falling back to
+    the sqlite rowid otherwise. `display_text` is the user-facing
+    one-liner (US-002 column); when absent it falls back to
+    commitment_text.
+    """
+
+    follow_up_id: int
+    display_text: str
+    follow_up: FollowUp
+
+
+class MultipleActiveCommitmentsError(RuntimeError):
+    """Raised when >1 follow_ups rows look active for the same week.
+
+    The schema-migrations branch's US-002 partial-unique index makes
+    this impossible at the DB level; this guard catches the case where
+    that index has not yet been applied and the legacy schema is in
+    use.
+    """
 from praxis.models import Moment, compute_moment_id
 from praxis.redactor import redact_secrets
 from praxis.scoring.aggregate import ProfileSnapshot, SessionScore
@@ -138,6 +168,18 @@ CREATE TABLE IF NOT EXISTS follow_ups (
     measured_value REAL,
     outcome TEXT NOT NULL CHECK (outcome IN ('improved','unchanged','worse','pending'))
 );
+
+CREATE TABLE IF NOT EXISTS session_reflections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_stable_id TEXT NOT NULL,
+    follow_up_id INTEGER NOT NULL,
+    self_report TEXT NOT NULL CHECK (self_report IN ('yes','no','partial','skip')),
+    note TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reflections_follow_up
+    ON session_reflections(follow_up_id);
 """
 
 
@@ -162,6 +204,7 @@ class ProfileStore:
                     # in-place so older v3 DBs gain new optional columns
                     # (signals_json) without a full table rebuild.
                     self._ensure_session_scores_columns(conn)
+                    self._ensure_reflect_tables(conn)
                     return
 
         # Migration needed (fresh DB, v0.1, or v0.2 DB without the v3 marker).
@@ -194,6 +237,32 @@ class ProfileStore:
             conn.execute(
                 "ALTER TABLE session_scores ADD COLUMN signals_json TEXT"
             )
+
+    @staticmethod
+    def _ensure_reflect_tables(conn: sqlite3.Connection) -> None:
+        """Create the session_reflections table on pre-existing v3 DBs.
+
+        The full SCHEMA includes session_reflections, but DBs that
+        reached v3 before this story landed never ran SCHEMA on init
+        (the v3 marker short-circuits it). This helper closes that gap
+        without forcing a destructive migration. Idempotent.
+        """
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_reflections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_stable_id TEXT NOT NULL,
+                follow_up_id INTEGER NOT NULL,
+                self_report TEXT NOT NULL CHECK (self_report IN ('yes','no','partial','skip')),
+                note TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reflections_follow_up "
+            "ON session_reflections(follow_up_id)"
+        )
 
     def _apply_v2_schema(self, conn: sqlite3.Connection) -> None:
         # Wrapped in a method so tests can monkeypatch it to inject failures
@@ -878,3 +947,127 @@ class ProfileStore:
             measured_value=row["measured_value"],
             outcome=outcome,
         )
+
+    # ---- reflect (active commitment + session_reflections) -------------
+
+    def load_active_commitment(self, week_iso: str) -> ActiveCommitment | None:
+        """Return the single active commitment for the given ISO week.
+
+        Active = follow_ups row with outcome='pending' for this week. When
+        the schema-migrations branch's US-002 `superseded_by` column is
+        present, the row must also have `superseded_by IS NULL`. The
+        `id` column (also US-002) is preferred for the returned
+        `follow_up_id`; otherwise the sqlite rowid is used as a stable
+        fallback so session_reflections rows still link to a real row.
+
+        Raises MultipleActiveCommitmentsError when >1 row qualifies (only
+        possible on the legacy schema, before the partial-unique index
+        from US-002 lands).
+        """
+        with self._conn() as conn:
+            cur = conn.execute("PRAGMA table_info(follow_ups)")
+            cols = {row[1] for row in cur.fetchall()}
+            has_superseded = "superseded_by" in cols
+            has_id = "id" in cols
+            has_display_text = "display_text" in cols
+
+            select_cols = [
+                "rowid AS _rowid",
+                "week_iso",
+                "dim_key",
+                "commitment_text",
+                "target_metric",
+                "baseline_value",
+                "measured_value",
+                "outcome",
+            ]
+            if has_id:
+                select_cols.append("id AS _id")
+            if has_display_text:
+                select_cols.append("display_text AS _display_text")
+
+            sql = (
+                "SELECT " + ", ".join(select_cols)
+                + " FROM follow_ups WHERE week_iso = ? AND outcome = 'pending'"
+            )
+            if has_superseded:
+                sql += " AND superseded_by IS NULL"
+            rows = conn.execute(sql, (week_iso,)).fetchall()
+
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise MultipleActiveCommitmentsError(
+                f"Expected one active commitment for {week_iso}, found "
+                f"{len(rows)}. The follow_ups unique-active-per-week "
+                "invariant has been violated (apply schema-migrations "
+                "US-002 to enforce it)."
+            )
+        row = rows[0]
+        outcome: Outcome = row["outcome"]
+        fu = FollowUp(
+            week_iso=row["week_iso"],
+            dim_key=row["dim_key"],
+            commitment_text=row["commitment_text"],
+            target_metric=row["target_metric"],
+            baseline_value=row["baseline_value"],
+            measured_value=row["measured_value"],
+            outcome=outcome,
+        )
+        follow_up_id = int(row["_id"]) if has_id else int(row["_rowid"])
+        display_text = (
+            row["_display_text"]
+            if has_display_text and row["_display_text"]
+            else fu.commitment_text
+        )
+        return ActiveCommitment(
+            follow_up_id=follow_up_id,
+            display_text=display_text,
+            follow_up=fu,
+        )
+
+    def insert_session_reflection(
+        self,
+        *,
+        session_stable_id: str,
+        follow_up_id: int,
+        self_report: SelfReport,
+        note: str | None,
+        created_at: datetime | None = None,
+    ) -> int:
+        """Append one session_reflections row; return its rowid.
+
+        The CHECK constraint on the table enforces the
+        ('yes','no','partial','skip') domain; this helper does not
+        re-validate (we let SQLite be the source of truth so a future
+        schema-tightening lands once, not in two places).
+        """
+        when = (created_at or _utcnow()).isoformat()
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO session_reflections
+                    (session_stable_id, follow_up_id, self_report, note, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (session_stable_id, follow_up_id, self_report, note, when),
+            )
+            return int(cur.lastrowid or 0)
+
+    def load_session_reflections(
+        self, *, follow_up_id: int
+    ) -> list[dict[str, Any]]:
+        """Read back every session_reflections row for one follow-up.
+
+        Returns a list of dicts ordered by id ASC (insertion order).
+        Used by tests today; the digest panel will read it post-MVP.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id, session_stable_id, follow_up_id, self_report, "
+                "       note, created_at "
+                "FROM session_reflections WHERE follow_up_id = ? "
+                "ORDER BY id ASC",
+                (follow_up_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
