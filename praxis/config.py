@@ -67,6 +67,10 @@ redact_secrets = true    # MUST default true (Section 4.4)
 # so opt-outs / nuisance sessions are still counted in the digest panel.
 turns_min = 2
 elapsed_seconds_min = 60
+# Soft budget for the Stop-hook parent to return (US-027). The parent
+# always returns immediately after spawning a detached child, so this
+# value is the documented upper bound rather than an enforced timeout.
+hook_timeout_seconds = 5
 """
 
 
@@ -134,17 +138,27 @@ class PrivacyConfig:
 
 @dataclass(frozen=True)
 class ReflectConfig:
-    """Threshold gates for ``praxis reflect --session-end`` (US-026).
+    """Threshold and timing gates for ``praxis reflect --session-end``.
 
-    Both values are integers in seconds / turn count and must be
-    non-negative. The loader rejects negative values at load time so a
-    typo in ``config.toml`` surfaces immediately rather than silently
-    producing surprising threshold behavior. Zero is allowed (it
-    effectively disables the corresponding gate).
+    ``turns_min`` and ``elapsed_seconds_min`` (US-026) gate whether the
+    Stop hook escalates to an interactive prompt. ``hook_timeout_seconds``
+    (US-027) is the soft budget for the parent process to return before
+    the AI tool considers the hook hung; the actual parent spawn returns
+    immediately, so this value documents the upper bound rather than
+    enforcing a timeout.
+
+    All three are integers and must be non-negative. The loader rejects
+    negative values at load time so a typo in ``config.toml`` surfaces
+    immediately rather than silently producing surprising behavior. Zero
+    is allowed for the threshold gates (it disables them) but not for
+    ``hook_timeout_seconds`` (a zero budget would defeat the purpose of
+    the soft limit; we still accept zero in case a future story wants to
+    opt the parent into blocking).
     """
 
     turns_min: int = 2
     elapsed_seconds_min: int = 60
+    hook_timeout_seconds: int = 5
 
     def __post_init__(self) -> None:
         if not isinstance(self.turns_min, int) or isinstance(self.turns_min, bool):
@@ -159,6 +173,13 @@ class ReflectConfig:
                 "[reflect] elapsed_seconds_min must be a non-negative integer; "
                 f"got {self.elapsed_seconds_min!r}"
             )
+        if not isinstance(self.hook_timeout_seconds, int) or isinstance(
+            self.hook_timeout_seconds, bool
+        ):
+            raise ValueError(
+                "[reflect] hook_timeout_seconds must be a non-negative integer; "
+                f"got {self.hook_timeout_seconds!r}"
+            )
         if self.turns_min < 0:
             raise ValueError(
                 "[reflect] turns_min must be >= 0; "
@@ -168,6 +189,11 @@ class ReflectConfig:
             raise ValueError(
                 "[reflect] elapsed_seconds_min must be >= 0; "
                 f"got {self.elapsed_seconds_min}"
+            )
+        if self.hook_timeout_seconds < 0:
+            raise ValueError(
+                "[reflect] hook_timeout_seconds must be >= 0; "
+                f"got {self.hook_timeout_seconds}"
             )
 
 

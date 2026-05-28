@@ -49,10 +49,13 @@ import pytest
 from praxis.cli.__main__ import (
     _HOOK_PAYLOAD_MISSING_NOTE,
     _HOOK_PAYLOAD_NO_SESSION_NOTE,
+    _PARENT_TERMINAL_CLOSED_NOTE,
     _REFLECT_NO_COMMITMENT_MSG,
     _SESSION_TOO_SHORT_NOTE,
+    _SPAWN_FAILED_NOTE,
     _TRANSCRIPT_MISSING_NOTE,
     _check_transcript_threshold,
+    _cmd_reflect_child,
     _cmd_reflect_session_end,
     _extract_session_id,
     _extract_transcript_path,
@@ -78,6 +81,42 @@ from praxis.storage.profile_store import (
 _FU_DIM = "verification"
 _FU_COMMITMENT = "ask 'list every table this migration writes'"
 _FU_METRIC = "verification_rate"
+
+
+@pytest.fixture
+def stub_spawn(monkeypatch):
+    """Replace ``_spawn_reflect_child`` with a recording stub.
+
+    Tests that exercise the happy path of ``--session-end`` (US-025 /
+    US-026 / US-027) need the parent to NOT actually fork a praxis
+    process: the fork is the point of US-027 and is covered by its own
+    tests, but every other test only cares that the spawn was triggered
+    with the right shape. Returns a list of kwargs dicts that the test
+    can assert on.
+    """
+    from praxis.cli import __main__ as cli_main
+
+    calls: list[dict] = []
+
+    def _record(**kwargs):
+        calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(cli_main, "_spawn_reflect_child", _record)
+    return calls
+
+
+class _StringIONoClose(io.StringIO):
+    """StringIO that ignores .close() so the test can inspect output.
+
+    ``_cmd_reflect_child`` closes the TTY streams in a finally block
+    (real /dev/tty file objects need to be released). The tests want
+    to assert on the prompt text after the function returns, so we
+    swap in this no-close variant.
+    """
+
+    def close(self) -> None:  # type: ignore[override]
+        pass
 
 
 def _seed_active(store: ProfileStore, week_iso: str) -> ActiveCommitment:
@@ -519,14 +558,15 @@ def test_session_end_no_active_commitment_is_silent_noop(tmp_home, capsys):
     assert captured.err == ""
 
 
-def test_session_end_claude_code_shape_inserts_row_with_session_id(tmp_home):
+def test_session_end_claude_code_shape_triggers_spawn_with_session_id(
+    tmp_home, stub_spawn
+):
+    """US-027: happy-path Claude payload triggers the detached child spawn
+    rather than writing a row in the parent. The parent now hands off
+    to the child via the four resolved fields."""
     store = ProfileStore()
     active = _seed_active(store, "2026-W22")
 
-    # US-026 threshold gate fires only when transcript_path points at a
-    # file. Write a transcript that comfortably meets both default
-    # thresholds (2 user turns + 60s elapsed) so the happy-path
-    # placeholder (note=None) is preserved for US-025 backward compat.
     transcript = _write_claude_transcript(
         tmp_home / "claude" / "transcript-abc.jsonl"
     )
@@ -539,16 +579,23 @@ def test_session_end_claude_code_shape_inserts_row_with_session_id(tmp_home):
     code = _cmd_reflect_session_end(stdin)
 
     assert code == 0
-    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
-    assert len(rows) == 1
-    assert rows[0]["session_stable_id"] == "claude-abc-1"
-    assert rows[0]["self_report"] == "skip"
-    assert rows[0]["note"] is None
+    # No row written by the parent on happy path; the child is what
+    # records the reflection (after the user answers the prompt).
+    assert store.load_session_reflections(follow_up_id=active.follow_up_id) == []
+    assert len(stub_spawn) == 1
+    spawn = stub_spawn[0]
+    assert spawn["follow_up_id"] == active.follow_up_id
+    assert spawn["session_id"] == "claude-abc-1"
+    assert spawn["transcript_path"] == transcript
+    assert spawn["cwd"] == "/tmp/project"
 
 
-def test_session_end_codex_shape_inserts_row_with_session_id(tmp_home):
+def test_session_end_codex_shape_triggers_spawn_with_session_id(
+    tmp_home, stub_spawn
+):
     """Codex payload omits transcript_path; the duck-typed parse must
-    still recognize it because session_id is present."""
+    still recognize it (session_id is present) and the parent must
+    still spawn the child."""
     store = ProfileStore()
     active = _seed_active(store, "2026-W22")
 
@@ -556,11 +603,14 @@ def test_session_end_codex_shape_inserts_row_with_session_id(tmp_home):
     code = _cmd_reflect_session_end(stdin)
 
     assert code == 0
-    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
-    assert len(rows) == 1
-    assert rows[0]["session_stable_id"] == "codex-xyz-2"
-    assert rows[0]["self_report"] == "skip"
-    assert rows[0]["note"] is None
+    assert store.load_session_reflections(follow_up_id=active.follow_up_id) == []
+    assert len(stub_spawn) == 1
+    spawn = stub_spawn[0]
+    assert spawn["follow_up_id"] == active.follow_up_id
+    assert spawn["session_id"] == "codex-xyz-2"
+    # Codex shape omits transcript_path entirely.
+    assert spawn["transcript_path"] is None
+    assert spawn["cwd"] == "/tmp/project"
 
 
 def test_session_end_empty_stdin_writes_missing_payload_skip(tmp_home):
@@ -645,7 +695,7 @@ def test_session_end_empty_session_id_is_treated_as_missing(tmp_home):
 
 
 def test_cli_reflect_session_end_dispatches_to_session_end_branch(
-    monkeypatch, tmp_home, capsys
+    monkeypatch, tmp_home, capsys, stub_spawn
 ):
     """Argparse wiring: ``--session-end`` reaches ``_cmd_reflect_session_end``
     rather than the interactive prompt."""
@@ -653,7 +703,7 @@ def test_cli_reflect_session_end_dispatches_to_session_end_branch(
     from praxis.cli import __main__ as cli_main
 
     monkeypatch.setattr(cli_main, "current_iso_week", lambda: "2026-W22")
-    _seed_active(store, "2026-W22")
+    active = _seed_active(store, "2026-W22")
 
     transcript = _write_claude_transcript(
         tmp_home / "claude" / "transcript-hook-id-9.jsonl"
@@ -677,12 +727,11 @@ def test_cli_reflect_session_end_dispatches_to_session_end_branch(
     assert "Did you focus on" not in captured.out
     assert "Recorded reflection" not in captured.out
 
-    active = store.load_active_commitment("2026-W22")
-    assert active is not None
-    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
-    assert len(rows) == 1
-    assert rows[0]["session_stable_id"] == "hook-id-9"
-    assert rows[0]["self_report"] == "skip"
+    # On the happy path the parent spawns a detached child; no row
+    # written by the parent itself.
+    assert store.load_session_reflections(follow_up_id=active.follow_up_id) == []
+    assert len(stub_spawn) == 1
+    assert stub_spawn[0]["session_id"] == "hook-id-9"
 
 
 def test_cli_reflect_session_end_exit_0_when_no_active_commitment(
@@ -1026,10 +1075,9 @@ def test_session_end_short_session_under_elapsed_writes_too_short(tmp_home):
     assert rows[0]["note"] == _SESSION_TOO_SHORT_NOTE
 
 
-def test_session_end_long_session_falls_through_to_happy_path(tmp_home):
-    """A transcript that meets both thresholds writes the placeholder
-    happy-path skip row (note=None) -- US-027 will replace this with
-    a detached child."""
+def test_session_end_long_session_triggers_spawn(tmp_home, stub_spawn):
+    """A transcript that meets both thresholds triggers the detached
+    child spawn (US-027). The parent writes no row of its own."""
     store = ProfileStore()
     active = _seed_active(store, "2026-W22")
     transcript = _write_claude_transcript(
@@ -1047,13 +1095,13 @@ def test_session_end_long_session_falls_through_to_happy_path(tmp_home):
     code = _cmd_reflect_session_end(stdin)
 
     assert code == 0
-    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
-    assert len(rows) == 1
-    assert rows[0]["self_report"] == "skip"
-    assert rows[0]["note"] is None
+    assert store.load_session_reflections(follow_up_id=active.follow_up_id) == []
+    assert len(stub_spawn) == 1
+    assert stub_spawn[0]["session_id"] == "claude-ample"
+    assert stub_spawn[0]["transcript_path"] == transcript
 
 
-def test_session_end_threshold_respects_user_overrides(tmp_home):
+def test_session_end_threshold_respects_user_overrides(tmp_home, stub_spawn):
     """A user-tuned ``[reflect]`` section gates differently than defaults."""
     cfg_path = tmp_home / ".praxis" / "config.toml"
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1081,15 +1129,15 @@ def test_session_end_threshold_respects_user_overrides(tmp_home):
     code = _cmd_reflect_session_end(stdin)
 
     assert code == 0
-    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
-    assert len(rows) == 1
-    assert rows[0]["note"] is None
+    # Override let us pass the threshold; parent spawned the child.
+    assert store.load_session_reflections(follow_up_id=active.follow_up_id) == []
+    assert len(stub_spawn) == 1
 
 
-def test_session_end_codex_shape_skips_threshold_gate(tmp_home):
+def test_session_end_codex_shape_skips_threshold_gate(tmp_home, stub_spawn):
     """Codex payloads omit transcript_path, so threshold gating must
     not apply -- otherwise every Codex session would be 'transcript
-    missing'."""
+    missing'. The happy path spawns the detached child."""
     store = ProfileStore()
     active = _seed_active(store, "2026-W22")
 
@@ -1097,14 +1145,15 @@ def test_session_end_codex_shape_skips_threshold_gate(tmp_home):
     code = _cmd_reflect_session_end(stdin)
 
     assert code == 0
-    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
-    assert len(rows) == 1
-    assert rows[0]["self_report"] == "skip"
-    assert rows[0]["note"] is None
-    assert rows[0]["session_stable_id"] == "codex-no-gate"
+    assert store.load_session_reflections(follow_up_id=active.follow_up_id) == []
+    assert len(stub_spawn) == 1
+    assert stub_spawn[0]["session_id"] == "codex-no-gate"
+    assert stub_spawn[0]["transcript_path"] is None
 
 
-def test_session_end_threshold_never_crashes_on_malformed_config(tmp_home):
+def test_session_end_threshold_never_crashes_on_malformed_config(
+    tmp_home, stub_spawn
+):
     """Defense in depth: a corrupt config.toml must NOT break the Stop
     hook. The loader falls back to defaults so the gate still applies."""
     cfg_path = tmp_home / ".praxis" / "config.toml"
@@ -1128,6 +1177,455 @@ def test_session_end_threshold_never_crashes_on_malformed_config(tmp_home):
     code = _cmd_reflect_session_end(stdin)
 
     assert code == 0
+    assert store.load_session_reflections(follow_up_id=active.follow_up_id) == []
+    assert len(stub_spawn) == 1
+
+
+# ---- US-027: detached child spawn from --session-end ------------------
+
+
+def test_session_end_spawn_failure_writes_fallback_skip_row(monkeypatch, tmp_home):
+    """If the subprocess.Popen raises (no praxis binary, OS rejection),
+    the parent still records a skip row so the session is observable."""
+    from praxis.cli import __main__ as cli_main
+
+    monkeypatch.setattr(cli_main, "_spawn_reflect_child", lambda **_: False)
+
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+    transcript = _write_claude_transcript(
+        tmp_home / "claude" / "spawn-fail.jsonl",
+        user_turns=3,
+        elapsed_seconds=120,
+    )
+    stdin = io.StringIO(
+        _claude_code_payload(
+            session_id="spawn-fail-sess",
+            transcript_path=str(transcript),
+        )
+    )
+    code = _cmd_reflect_session_end(stdin)
+
+    assert code == 0
     rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
     assert len(rows) == 1
+    assert rows[0]["self_report"] == "skip"
+    assert rows[0]["note"] == _SPAWN_FAILED_NOTE
+    assert rows[0]["session_stable_id"] == "spawn-fail-sess"
+
+
+def test_spawn_reflect_child_uses_start_new_session_on_posix(monkeypatch):
+    """POSIX: subprocess.Popen must be called with start_new_session=True
+    so the child detaches and the parent can return immediately."""
+    from praxis.cli import __main__ as cli_main
+
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    captured: dict = {}
+
+    class _FakePopen:
+        def __init__(self, argv, **kwargs):
+            captured["argv"] = argv
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(cli_main.subprocess, "Popen", _FakePopen)
+
+    ok = cli_main._spawn_reflect_child(
+        follow_up_id=42,
+        session_id="sess-1",
+        transcript_path=Path("/tmp/x.jsonl"),
+        cwd="/work",
+    )
+    assert ok is True
+
+    assert captured["kwargs"]["start_new_session"] is True
+    assert "creationflags" not in captured["kwargs"]
+    assert captured["kwargs"]["stdin"] is cli_main.subprocess.DEVNULL
+    assert captured["kwargs"]["stdout"] is cli_main.subprocess.DEVNULL
+    assert captured["kwargs"]["stderr"] is cli_main.subprocess.DEVNULL
+
+    argv = captured["argv"]
+    assert "reflect" in argv
+    assert "--child" in argv
+    # Flag ordering is positional; verify each --flag is followed by its
+    # value (argparse pattern).
+    flag_index = argv.index("--follow-up-id")
+    assert argv[flag_index + 1] == "42"
+    flag_index = argv.index("--session-id")
+    assert argv[flag_index + 1] == "sess-1"
+    flag_index = argv.index("--transcript-path")
+    assert argv[flag_index + 1] == "/tmp/x.jsonl"
+    flag_index = argv.index("--cwd")
+    assert argv[flag_index + 1] == "/work"
+
+
+def test_spawn_reflect_child_uses_creation_flags_on_windows(monkeypatch):
+    """Windows: subprocess.Popen must be called with
+    creationflags=CREATE_NEW_PROCESS_GROUP and start_new_session must
+    not be passed (it's POSIX-only)."""
+    from praxis.cli import __main__ as cli_main
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    # On Python 3.13+, ``shutil.which`` dives into a Windows-only
+    # winapi call when sys.platform == 'win32'; that attribute is None
+    # on macOS hosts, so we stub ``shutil.which`` (see iter 5 gotcha).
+    monkeypatch.setattr(cli_main.shutil, "which", lambda _: "C:\\bin\\praxis.exe")
+    # CREATE_NEW_PROCESS_GROUP only exists on Windows builds of
+    # subprocess; ensure the constant is defined for the test
+    # regardless of host OS.
+    monkeypatch.setattr(
+        cli_main.subprocess,
+        "CREATE_NEW_PROCESS_GROUP",
+        0x00000200,
+        raising=False,
+    )
+
+    captured: dict = {}
+
+    class _FakePopen:
+        def __init__(self, argv, **kwargs):
+            captured["argv"] = argv
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(cli_main.subprocess, "Popen", _FakePopen)
+
+    ok = cli_main._spawn_reflect_child(
+        follow_up_id=7,
+        session_id="winsess",
+        transcript_path=None,
+        cwd=None,
+    )
+    assert ok is True
+    assert captured["kwargs"]["creationflags"] == 0x00000200
+    assert "start_new_session" not in captured["kwargs"]
+
+
+def test_spawn_reflect_child_omits_optional_flags_when_absent(monkeypatch):
+    """If transcript_path / cwd are None, the corresponding CLI flags
+    should not appear in argv."""
+    from praxis.cli import __main__ as cli_main
+
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    captured: dict = {}
+
+    class _FakePopen:
+        def __init__(self, argv, **kwargs):
+            captured["argv"] = argv
+
+    monkeypatch.setattr(cli_main.subprocess, "Popen", _FakePopen)
+
+    cli_main._spawn_reflect_child(
+        follow_up_id=1,
+        session_id="bare",
+        transcript_path=None,
+        cwd=None,
+    )
+    argv = captured["argv"]
+    assert "--transcript-path" not in argv
+    assert "--cwd" not in argv
+
+
+def test_spawn_reflect_child_returns_false_on_oserror(monkeypatch):
+    """An OSError from Popen (binary not found, etc.) must NOT
+    propagate -- the parent uses the False return value to write a
+    fallback skip row."""
+    from praxis.cli import __main__ as cli_main
+
+    def _bad_popen(*_, **__):
+        raise OSError("praxis binary not found")
+
+    monkeypatch.setattr(cli_main.subprocess, "Popen", _bad_popen)
+    ok = cli_main._spawn_reflect_child(
+        follow_up_id=1,
+        session_id="bad",
+        transcript_path=None,
+        cwd=None,
+    )
+    assert ok is False
+
+
+# ---- US-027: --child re-entry path -----------------------------------
+
+
+def _mk_child_args(
+    follow_up_id: int = 0,
+    session_id: str = "",
+    transcript_path: str | None = None,
+    cwd: str | None = None,
+):
+    """Synthesize an argparse.Namespace shaped like the --child invocation."""
+    import argparse
+
+    return argparse.Namespace(
+        child=True,
+        session_end=False,
+        follow_up_id=follow_up_id,
+        session_id=session_id,
+        transcript_path=transcript_path,
+        cwd=cwd,
+    )
+
+
+def test_child_writes_parent_terminal_closed_when_no_tty(monkeypatch, tmp_home):
+    """When /dev/tty cannot be opened (daemon-style spawn, parent
+    terminal closed), the child writes a skip row with the AC's
+    'parent terminal closed' note."""
+    from praxis.cli import __main__ as cli_main
+
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+
+    monkeypatch.setattr(
+        cli_main, "_open_controlling_terminal", lambda: (None, None)
+    )
+
+    args = _mk_child_args(
+        follow_up_id=active.follow_up_id,
+        session_id="child-no-tty",
+    )
+    code = _cmd_reflect_child(args)
+
+    assert code == 0
+    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
+    assert len(rows) == 1
+    assert rows[0]["self_report"] == "skip"
+    assert rows[0]["note"] == _PARENT_TERMINAL_CLOSED_NOTE
+    assert rows[0]["session_stable_id"] == "child-no-tty"
+
+
+def test_child_prompts_against_tty_and_records_yes(monkeypatch, tmp_home):
+    """When a TTY is reachable, the child reuses the interactive prompt
+    against those streams; the row is stamped with the AI tool's
+    session_id (not the 'manual:<week>' interactive placeholder)."""
+    from praxis.cli import __main__ as cli_main
+
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+
+    tty_in = _StringIONoClose("y\nproductive session\n")
+    tty_out = _StringIONoClose()
+
+    monkeypatch.setattr(
+        cli_main, "_open_controlling_terminal", lambda: (tty_in, tty_out)
+    )
+
+    args = _mk_child_args(
+        follow_up_id=active.follow_up_id,
+        session_id="child-yes",
+        transcript_path="/tmp/t.jsonl",
+        cwd="/work",
+    )
+    code = _cmd_reflect_child(args)
+
+    assert code == 0
+    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
+    assert len(rows) == 1
+    assert rows[0]["self_report"] == "yes"
+    assert rows[0]["note"] == "productive session"
+    # The session_stable_id MUST be the AI tool's session id (not the
+    # 'manual:<week>' placeholder used by the bare interactive path).
+    assert rows[0]["session_stable_id"] == "child-yes"
+    out = tty_out.getvalue()
+    assert f'Did you focus on: "{_FU_COMMITMENT}"' in out
+    assert "Recorded reflection: yes" in out
+
+
+def test_child_skip_writes_row_without_note_prompt(monkeypatch, tmp_home):
+    """A '[s]kip' choice from the child must NOT prompt for a note
+    (matches the interactive AC: skip writes note=NULL)."""
+    from praxis.cli import __main__ as cli_main
+
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+
+    tty_in = _StringIONoClose("s\n")
+    tty_out = _StringIONoClose()
+    monkeypatch.setattr(
+        cli_main, "_open_controlling_terminal", lambda: (tty_in, tty_out)
+    )
+
+    args = _mk_child_args(
+        follow_up_id=active.follow_up_id, session_id="child-skip"
+    )
+    code = _cmd_reflect_child(args)
+
+    assert code == 0
+    out = tty_out.getvalue()
+    assert "Optional one-line note" not in out
+    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
+    assert rows[0]["self_report"] == "skip"
     assert rows[0]["note"] is None
+    assert rows[0]["session_stable_id"] == "child-skip"
+
+
+def test_child_with_unknown_follow_up_id_exits_clean(monkeypatch, tmp_home):
+    """If the parent's follow_up_id doesn't match any row (race with a
+    deletion), the child exits 0 cleanly without crashing."""
+    from praxis.cli import __main__ as cli_main
+
+    monkeypatch.setattr(
+        cli_main, "_open_controlling_terminal", lambda: (None, None)
+    )
+    store = ProfileStore()
+    _seed_active(store, "2026-W22")
+
+    args = _mk_child_args(follow_up_id=999_999, session_id="ghost")
+    code = _cmd_reflect_child(args)
+
+    assert code == 0
+
+
+def test_child_with_missing_session_id_or_zero_id_exits_clean(tmp_home):
+    """Defensive: malformed --child invocation (missing session_id or
+    --follow-up-id 0) must NOT crash."""
+    store = ProfileStore()
+    _seed_active(store, "2026-W22")
+
+    # Empty session_id
+    args = _mk_child_args(follow_up_id=1, session_id="")
+    assert _cmd_reflect_child(args) == 0
+    # Zero follow_up_id
+    args = _mk_child_args(follow_up_id=0, session_id="sess")
+    assert _cmd_reflect_child(args) == 0
+
+
+# ---- US-027: parent never returns exit code 2 -------------------------
+
+
+def test_session_end_never_returns_exit_code_2(monkeypatch, tmp_home):
+    """AC: the parent must NEVER return 2 (Claude Code's block sentinel).
+
+    We exercise every branch (no payload / malformed / no session_id /
+    transcript missing / too short / happy path / spawn failure) and
+    assert the return code is never 2.
+    """
+    from praxis.cli import __main__ as cli_main
+
+    store = ProfileStore()
+    _seed_active(store, "2026-W22")
+
+    monkeypatch.setattr(cli_main, "_spawn_reflect_child", lambda **_: True)
+
+    # No payload
+    assert _cmd_reflect_session_end(io.StringIO("")) != 2
+    # Malformed JSON
+    assert _cmd_reflect_session_end(io.StringIO("{not-json")) != 2
+    # No session_id
+    assert _cmd_reflect_session_end(
+        io.StringIO(json.dumps({"cwd": "/x"}))
+    ) != 2
+    # Transcript missing on disk
+    assert _cmd_reflect_session_end(
+        io.StringIO(
+            _claude_code_payload(transcript_path=str(tmp_home / "ghost.jsonl"))
+        )
+    ) != 2
+    # Session too short
+    short = _write_claude_transcript(
+        tmp_home / "claude" / "short-final.jsonl",
+        user_turns=0,
+        elapsed_seconds=0,
+    )
+    assert _cmd_reflect_session_end(
+        io.StringIO(_claude_code_payload(transcript_path=str(short)))
+    ) != 2
+    # Happy path (spawn stubbed True)
+    ample = _write_claude_transcript(
+        tmp_home / "claude" / "ample-final.jsonl",
+        user_turns=4,
+        elapsed_seconds=300,
+    )
+    assert _cmd_reflect_session_end(
+        io.StringIO(_claude_code_payload(transcript_path=str(ample)))
+    ) != 2
+    # Spawn failure
+    monkeypatch.setattr(cli_main, "_spawn_reflect_child", lambda **_: False)
+    assert _cmd_reflect_session_end(
+        io.StringIO(_claude_code_payload(transcript_path=str(ample)))
+    ) != 2
+
+
+def test_cli_main_reflect_child_routes_through_argparse(monkeypatch, tmp_home):
+    """End-to-end: ``praxis reflect --child --follow-up-id N --session-id S``
+    reaches ``_cmd_reflect_child`` via argparse and writes a row."""
+    from praxis.cli import __main__ as cli_main
+
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+
+    tty_in = _StringIONoClose("n\nfollowups stale\n")
+    tty_out = _StringIONoClose()
+    monkeypatch.setattr(
+        cli_main, "_open_controlling_terminal", lambda: (tty_in, tty_out)
+    )
+
+    code = main(
+        [
+            "reflect",
+            "--child",
+            "--follow-up-id",
+            str(active.follow_up_id),
+            "--session-id",
+            "cli-routed",
+        ]
+    )
+
+    assert code == 0
+    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
+    assert len(rows) == 1
+    assert rows[0]["self_report"] == "no"
+    assert rows[0]["note"] == "followups stale"
+    assert rows[0]["session_stable_id"] == "cli-routed"
+
+
+# ---- US-027: hook_timeout_seconds config field ------------------------
+
+
+def test_reflect_config_includes_hook_timeout_default():
+    """Default is 5 (per AC '5 seconds (hook_timeout_seconds,
+    configurable)')."""
+    cfg = ReflectConfig()
+    assert cfg.hook_timeout_seconds == 5
+
+
+def test_reflect_config_rejects_negative_hook_timeout():
+    with pytest.raises(ValueError):
+        ReflectConfig(hook_timeout_seconds=-1)
+
+
+def test_reflect_config_rejects_non_integer_hook_timeout():
+    with pytest.raises(ValueError):
+        ReflectConfig(hook_timeout_seconds="5")  # type: ignore[arg-type]
+
+
+def test_load_config_reads_hook_timeout_override(tmp_home):
+    cfg_path = tmp_home / ".praxis" / "config.toml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(
+        "[reflect]\nturns_min = 2\nelapsed_seconds_min = 60\n"
+        "hook_timeout_seconds = 10\n",
+        encoding="utf-8",
+    )
+    cfg = load_config()
+    assert cfg.reflect.hook_timeout_seconds == 10
+
+
+# ---- US-027: load_commitment_by_id ------------------------------------
+
+
+def test_load_commitment_by_id_returns_commitment(tmp_home):
+    """The child needs to look up the parent's resolved follow_up_id."""
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+
+    loaded = store.load_commitment_by_id(active.follow_up_id)
+    assert loaded is not None
+    assert loaded.follow_up_id == active.follow_up_id
+    assert loaded.display_text == _FU_COMMITMENT
+
+
+def test_load_commitment_by_id_returns_none_for_unknown(tmp_home):
+    store = ProfileStore()
+    _seed_active(store, "2026-W22")
+    assert store.load_commitment_by_id(999_999) is None

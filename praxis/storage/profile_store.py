@@ -1026,6 +1026,74 @@ class ProfileStore:
             follow_up=fu,
         )
 
+    def load_commitment_by_id(
+        self, follow_up_id: int
+    ) -> ActiveCommitment | None:
+        """Load a follow_ups row by its id and wrap it as ActiveCommitment.
+
+        Used by the US-027 detached child path: the parent has already
+        resolved the active commitment, so the child receives the
+        ``follow_up_id`` directly and avoids re-running the week-scoped
+        active-commitment query (which could disagree with the parent
+        if the ISO week boundary just rolled over).
+
+        Returns None when no row matches (e.g., the row was deleted
+        between parent and child). Schema-tolerant in the same way as
+        ``load_active_commitment``: prefers ``id`` and ``display_text``
+        columns when present, falls back to rowid and commitment_text.
+        """
+        with self._conn() as conn:
+            cur = conn.execute("PRAGMA table_info(follow_ups)")
+            cols = {row[1] for row in cur.fetchall()}
+            has_id = "id" in cols
+            has_display_text = "display_text" in cols
+
+            select_cols = [
+                "rowid AS _rowid",
+                "week_iso",
+                "dim_key",
+                "commitment_text",
+                "target_metric",
+                "baseline_value",
+                "measured_value",
+                "outcome",
+            ]
+            if has_id:
+                select_cols.append("id AS _id")
+            if has_display_text:
+                select_cols.append("display_text AS _display_text")
+
+            id_expr = "id" if has_id else "rowid"
+            sql = (
+                "SELECT " + ", ".join(select_cols)
+                + f" FROM follow_ups WHERE {id_expr} = ?"
+            )
+            row = conn.execute(sql, (follow_up_id,)).fetchone()
+
+        if row is None:
+            return None
+        outcome: Outcome = row["outcome"]
+        fu = FollowUp(
+            week_iso=row["week_iso"],
+            dim_key=row["dim_key"],
+            commitment_text=row["commitment_text"],
+            target_metric=row["target_metric"],
+            baseline_value=row["baseline_value"],
+            measured_value=row["measured_value"],
+            outcome=outcome,
+        )
+        resolved_id = int(row["_id"]) if has_id else int(row["_rowid"])
+        display_text = (
+            row["_display_text"]
+            if has_display_text and row["_display_text"]
+            else fu.commitment_text
+        )
+        return ActiveCommitment(
+            follow_up_id=resolved_id,
+            display_text=display_text,
+            follow_up=fu,
+        )
+
     def insert_session_reflection(
         self,
         *,

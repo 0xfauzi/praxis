@@ -847,6 +847,14 @@ _HOOK_PAYLOAD_NO_SESSION_NOTE = "hook payload missing session_id"
 _TRANSCRIPT_MISSING_NOTE = "transcript missing"
 _SESSION_TOO_SHORT_NOTE = "session too short"
 
+# US-027 (detached child). When the parent process is not attached to a
+# terminal (the Stop-hook case), the prompt is delegated to a detached
+# child that opens /dev/tty (POSIX) or CONIN$/CONOUT$ (Windows) on its
+# own. If the child cannot reach a controlling terminal, it writes a
+# 'parent terminal closed' skip row so the session is still observable.
+_PARENT_TERMINAL_CLOSED_NOTE = "parent terminal closed"
+_SPAWN_FAILED_NOTE = "failed to spawn reflect child"
+
 _SELF_REPORT_BY_CHOICE: dict[str, SelfReport] = {
     "y": "yes",
     "yes": "yes",
@@ -1073,22 +1081,34 @@ def _has_user_text(content: object) -> bool:
 def cmd_reflect(args: argparse.Namespace) -> int:
     """Reflect on this week's active commitment.
 
-    Two modes:
+    Three modes:
       * Interactive (default, US-024): prompt [y]es / [n]o / [p]artial /
         [s]kip on stdin, then accept an optional one-line note. Inserts
         one row into ``session_reflections`` so opt-outs are still
         counted.
-      * --session-end (US-025): read a JSON Stop-hook payload from
-        stdin (Claude Code or Codex shape) within a 100ms timeout and
-        persist a reflection row. Never blocks the AI tool; every code
-        path exits 0.
+      * --session-end (US-025/US-026): read a JSON Stop-hook payload
+        from stdin (Claude Code or Codex shape) within a 100ms timeout
+        and either persist a skip row (degenerate payload / threshold
+        gate fail) or spawn a detached child for the interactive prompt
+        (US-027). Never blocks the AI tool; every code path exits 0.
+      * --child (US-027): re-entry point used by the detached child
+        spawn. Opens /dev/tty (POSIX) or CONIN$/CONOUT$ (Windows),
+        reuses ``_run_interactive_reflect`` against those streams, and
+        falls back to a 'parent terminal closed' skip row if no
+        controlling terminal is available.
 
     Exit codes (interactive mode):
       0 -- a reflection row was inserted, or no active commitment
            exists for the current week (silent no-op with a hint).
       1 -- input parsing gave up (>3 invalid choices) or the
            commitment invariant was violated.
+
+    The --session-end and --child branches NEVER return exit code 2:
+    Claude Code interprets exit 2 as a 'block' signal that aborts the
+    AI tool's session; reflect must stay out of that codespace.
     """
+    if getattr(args, "child", False):
+        return _cmd_reflect_child(args)
     if getattr(args, "session_end", False):
         return _cmd_reflect_session_end(sys.stdin)
 
@@ -1116,16 +1136,24 @@ def _cmd_reflect_session_end(stdin: Any) -> int:
     written with a descriptive note so opt-outs / hook failures are
     counted in the digest panel. When the payload includes a
     ``transcript_path`` (Claude Code shape), US-026 threshold gating
-    checks the transcript before falling through to the placeholder
-    happy path:
+    checks the transcript before reaching the happy path:
 
       * file missing on disk -> skip + 'transcript missing'.
       * user_turns < turns_min OR elapsed_seconds < elapsed_seconds_min
         -> skip + 'session too short'.
 
-    Codex-shape payloads (no transcript_path) bypass the threshold
-    gate; US-027 will replace this branch with a detached child that
-    opens /dev/tty for the interactive prompt.
+    Codex-shape payloads (no transcript_path) bypass the threshold gate.
+
+    Happy path (US-027): spawn a detached child via ``subprocess.Popen``
+    with ``start_new_session=True`` (POSIX) /
+    ``CREATE_NEW_PROCESS_GROUP`` (Windows). The parent returns 0
+    immediately so the AI tool's hook completes within the timeout. The
+    child opens /dev/tty (or CONIN$/CONOUT$) and runs the interactive
+    prompt; if the spawn fails (no praxis binary, OS rejection), the
+    parent writes a fallback skip row so the session is still
+    observable.
+
+    Exit code is always 0 -- the AI tool must not see a block signal.
     """
     store = ProfileStore()
     week_iso = current_iso_week()
@@ -1175,16 +1203,274 @@ def _cmd_reflect_session_end(stdin: Any) -> int:
             )
             return 0
 
-    # Happy path: valid payload with a session_id (and, for Claude shape,
-    # a transcript that met the configured thresholds). Write a
-    # placeholder skip row so the invocation is observable; US-027 will
-    # rebuild this branch as a detached interactive child.
-    store.insert_session_reflection(
-        session_stable_id=session_id,
+    # Happy path: spawn the detached child and return 0 immediately.
+    # The child opens its own TTY and writes the row. We don't .wait()
+    # the child so the parent unblocks within the OS spawn time.
+    cwd_value = payload.get("cwd")
+    cwd_str: str | None = cwd_value if isinstance(cwd_value, str) and cwd_value else None
+    spawned = _spawn_reflect_child(
         follow_up_id=active.follow_up_id,
-        self_report="skip",
-        note=None,
+        session_id=session_id,
+        transcript_path=transcript_path,
+        cwd=cwd_str,
     )
+    if not spawned:
+        # Spawn failed (no praxis binary on PATH, OS rejected the
+        # process, etc.). Fall back to a skip row so the session is
+        # still observable instead of silently lost.
+        store.insert_session_reflection(
+            session_stable_id=session_id,
+            follow_up_id=active.follow_up_id,
+            self_report="skip",
+            note=_SPAWN_FAILED_NOTE,
+        )
+    return 0
+
+
+def _spawn_reflect_child(
+    *,
+    follow_up_id: int,
+    session_id: str,
+    transcript_path: Path | None,
+    cwd: str | None,
+) -> bool:
+    """Spawn the detached child for the interactive reflect prompt.
+
+    The child runs ``praxis reflect --child --follow-up-id <id>
+    --session-id <sid>`` (plus optional --transcript-path / --cwd) in
+    its own process group / session, with stdin/stdout/stderr pointed
+    at /dev/null. The child re-opens /dev/tty (POSIX) or
+    CONIN$/CONOUT$ (Windows) to talk to the user.
+
+    Returns True on successful spawn; False on OSError so the caller
+    can write a fallback skip row. Tests monkeypatch this function to
+    capture spawn invocations without creating real subprocesses.
+
+    The Popen call returns immediately -- we deliberately do NOT call
+    .wait(), so the parent returns within the OS spawn time (well
+    under the 5s hook_timeout_seconds budget on any modern system).
+    """
+    argv = _resolve_reflect_child_command() + [
+        "reflect",
+        "--child",
+        "--follow-up-id",
+        str(follow_up_id),
+        "--session-id",
+        session_id,
+    ]
+    if transcript_path is not None:
+        argv.extend(["--transcript-path", str(transcript_path)])
+    if cwd:
+        argv.extend(["--cwd", cwd])
+
+    popen_kwargs: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if sys.platform == "win32":
+        # CREATE_NEW_PROCESS_GROUP detaches from the parent's console
+        # so the child survives parent exit and the AI tool isn't
+        # blocked waiting for descendant processes.
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        popen_kwargs["creationflags"] = creationflags
+    else:
+        # start_new_session calls setsid() so the child becomes its own
+        # session leader and can open /dev/tty as the controlling
+        # terminal (Claude Code's Stop hook closes the parent's stdin
+        # but the user's terminal is still reachable).
+        popen_kwargs["start_new_session"] = True
+
+    try:
+        subprocess.Popen(argv, **popen_kwargs)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _resolve_reflect_child_command() -> list[str]:
+    """Return the argv prefix that re-launches ``praxis`` for the child.
+
+    Mirrors ``install_weekly._resolve_praxis_command``: prefer the
+    installed console script, fall back to ``[sys.executable, '-m',
+    'praxis.cli']`` so editable / venv installs still work.
+    """
+    found = shutil.which("praxis")
+    if found:
+        return [found]
+    return [sys.executable, "-m", "praxis.cli"]
+
+
+def _cmd_reflect_child(args: argparse.Namespace) -> int:
+    """Run the interactive prompt as the detached child (US-027).
+
+    The parent process spawned us with explicit ``--follow-up-id`` and
+    ``--session-id`` so we don't have to re-resolve the active
+    commitment. We open /dev/tty (POSIX) or CONIN$/CONOUT$ (Windows) for
+    stdin/stdout; when no controlling terminal is available (parent's
+    terminal closed before we got there), we still write a 'parent
+    terminal closed' skip row so the session is observable.
+
+    Exit codes (always 0 in practice):
+      0 -- a reflection row was inserted (interactive write OR the
+           fallback 'parent terminal closed' skip).
+
+    We never return exit code 2 -- the AI tool already moved on, but we
+    keep reflect's exit codes inside {0, 1} to honor the same contract
+    the parent does.
+    """
+    follow_up_id = int(getattr(args, "follow_up_id", 0) or 0)
+    session_id = str(getattr(args, "session_id", "") or "")
+    transcript_path = getattr(args, "transcript_path", None)
+    cwd = getattr(args, "cwd", None)
+    # transcript_path and cwd are accepted for forward-compat with
+    # richer prompts (we may show the cwd in the question); the
+    # underscored locals quiet the unused-variable warning today.
+    _ = transcript_path
+    _ = cwd
+
+    store = ProfileStore()
+    if follow_up_id <= 0 or not session_id:
+        # Defensive: a malformed invocation shouldn't crash the child.
+        return 0
+
+    active = store.load_commitment_by_id(follow_up_id)
+    if active is None:
+        # The commitment was removed between parent spawn and child
+        # start; nothing to prompt about.
+        return 0
+
+    tty_stdin, tty_stdout = _open_controlling_terminal()
+    if tty_stdin is None or tty_stdout is None:
+        # No controlling terminal reachable. Write a skip row so the
+        # session is still observable in the digest panel.
+        store.insert_session_reflection(
+            session_stable_id=session_id,
+            follow_up_id=follow_up_id,
+            self_report="skip",
+            note=_PARENT_TERMINAL_CLOSED_NOTE,
+        )
+        return 0
+
+    try:
+        # _run_interactive_reflect writes 'manual:<week>' as the stable
+        # id today; override it to the real session_id so the row
+        # joins back to the AI tool's session.
+        return _run_interactive_reflect_with_session(
+            store,
+            active,
+            tty_stdin,
+            tty_stdout,
+            session_stable_id=session_id,
+        )
+    finally:
+        for stream in (tty_stdin, tty_stdout):
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
+def _open_controlling_terminal() -> tuple[Any, Any]:
+    """Open the controlling terminal for read+write.
+
+    Returns ``(stdin_stream, stdout_stream)`` on success, ``(None,
+    None)`` if no TTY is reachable. POSIX uses /dev/tty; Windows uses
+    CONIN$ / CONOUT$ (the special device names the console subsystem
+    exposes for the current console).
+
+    Best-effort: any OSError (no controlling terminal, permissions,
+    closed-stdin under daemon-style spawn) returns the (None, None)
+    sentinel so the caller falls back to the 'parent terminal closed'
+    skip row.
+    """
+    if sys.platform == "win32":
+        try:
+            stdin_stream = open("CONIN$", "r", encoding="utf-8")
+        except OSError:
+            return (None, None)
+        try:
+            stdout_stream = open("CONOUT$", "w", encoding="utf-8")
+        except OSError:
+            try:
+                stdin_stream.close()
+            except OSError:
+                pass
+            return (None, None)
+        return (stdin_stream, stdout_stream)
+
+    try:
+        stdin_stream = open("/dev/tty", "r", encoding="utf-8")
+    except OSError:
+        return (None, None)
+    try:
+        stdout_stream = open("/dev/tty", "w", encoding="utf-8")
+    except OSError:
+        try:
+            stdin_stream.close()
+        except OSError:
+            pass
+        return (None, None)
+    return (stdin_stream, stdout_stream)
+
+
+def _run_interactive_reflect_with_session(
+    store: ProfileStore,
+    active: ActiveCommitment,
+    stdin: Any,
+    stdout: Any,
+    *,
+    session_stable_id: str,
+) -> int:
+    """Same as ``_run_interactive_reflect`` but stamps a custom session id.
+
+    Used by the US-027 child so the row joins back to the AI tool's
+    real session id rather than the ``manual:<week>`` placeholder the
+    bare-interactive path uses.
+    """
+    print(
+        _REFLECT_PROMPT_HEADER.format(display_text=active.display_text),
+        file=stdout,
+    )
+    print(_REFLECT_OPTIONS_HINT, file=stdout)
+    stdout.flush()
+
+    choice: SelfReport | None = None
+    for _ in range(3):
+        choice = _read_self_report_choice(stdin)
+        if choice is not None:
+            break
+        print(
+            "Please answer with y, n, p, or s.",
+            file=stdout,
+        )
+        stdout.flush()
+    if choice is None:
+        # Child cannot reach a valid answer. Write a skip row so the
+        # session is still observable -- the parent already returned
+        # so we never affect the AI tool's exit code.
+        store.insert_session_reflection(
+            session_stable_id=session_stable_id,
+            follow_up_id=active.follow_up_id,
+            self_report="skip",
+            note=_PARENT_TERMINAL_CLOSED_NOTE,
+        )
+        return 0
+
+    note: str | None = None
+    if choice != "skip":
+        print(_REFLECT_NOTE_PROMPT, end="", file=stdout)
+        stdout.flush()
+        note = _read_optional_note(stdin)
+
+    store.insert_session_reflection(
+        session_stable_id=session_stable_id,
+        follow_up_id=active.follow_up_id,
+        self_report=choice,
+        note=note,
+    )
+    print(f"Recorded reflection: {choice}", file=stdout)
     return 0
 
 
@@ -1792,6 +2078,44 @@ def build_parser() -> argparse.ArgumentParser:
             "skip row with a descriptive note when the payload is "
             "missing / malformed / has no session_id, and always exits 0."
         ),
+    )
+    # The --child path is an internal re-entry point used by the
+    # detached child the parent spawns in --session-end mode (US-027).
+    # The four flags below carry the state the parent resolved so the
+    # child doesn't have to re-derive it from scratch.
+    rfl.add_argument(
+        "--child",
+        action="store_true",
+        dest="child",
+        help=argparse.SUPPRESS,
+    )
+    rfl.add_argument(
+        "--follow-up-id",
+        type=int,
+        default=0,
+        dest="follow_up_id",
+        help=argparse.SUPPRESS,
+    )
+    rfl.add_argument(
+        "--session-id",
+        type=str,
+        default="",
+        dest="session_id",
+        help=argparse.SUPPRESS,
+    )
+    rfl.add_argument(
+        "--transcript-path",
+        type=str,
+        default=None,
+        dest="transcript_path",
+        help=argparse.SUPPRESS,
+    )
+    rfl.add_argument(
+        "--cwd",
+        type=str,
+        default=None,
+        dest="cwd",
+        help=argparse.SUPPRESS,
     )
     rfl.set_defaults(func=cmd_reflect)
 
