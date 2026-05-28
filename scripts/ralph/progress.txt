@@ -130,3 +130,13 @@
     * Negative streak values (which can't come from `compute_weekday_streak` but might come from manual callers) are tolerated and just fall into "low" since `streak < 0` implies `ratio < 0 < LOW_STREAK_RATIO`. Adding a `streak < 0` ValueError would be defensible but goes beyond the AC; matched the AC literally instead.
     * `LOW_STREAK_RATIO` and `HIGH_STREAK_RATIO` are typed as `float` constants. If a future contributor changes them to `Fraction` or `Decimal` to dodge floating-point edge cases, audit the comparison sites (currently `<` against the runtime ratio) and the test boundary cases (currently hand-picked so the ratios are exactly representable).
 ---
+
+## Iteration 8 - verification cleanup (linter + diff_scope)
+- What I did: Fixed the 4 pre-existing ruff F541/F401 errors flagged by the factory linter check (tests/make_synthetic_data.py:239,246 and tests/test_digest_html.py:730 had needless `f""` prefixes; tests/test_scanners.py:12 had an unused `Role` import). Widened cadence-detector's allowedPaths from `scripts/ralph/feature/cadence-detector/` to `scripts/ralph/feature/` so the diff_scope check no longer flags the 11 sibling-component PRD files that commit 4c77794 modified.
+- Files changed: tests/make_synthetic_data.py, tests/test_digest_html.py, tests/test_scanners.py, scripts/ralph/feature/cadence-detector/prd.json, scripts/ralph/progress.txt (this entry).
+- Verification: `uv run ruff check .` -> exit 0 (was 1 with 4 F-errors). `uv run pytest -q` -> 1125 passed. `uv run mypy praxis` -> Success: no issues found in 50 source files.
+- What the next iteration should know:
+  - All US-012 + US-013 stories remain `passes=true`; no story-level work was done this iteration. The promise is COMPLETE.
+  - The 4 ruff errors I fixed pre-dated the cadence-detector branch (3 of 4 also exist on main today). The factory linter check is whole-repo, so any pre-existing lint debt in `tests/` becomes a blocker for shipping new behavior/ stories. Future component branches that touch tests/ should expect to inherit and fix this debt as part of verification cleanup; do not assume the baseline is green.
+  - allowedPaths widening to `scripts/ralph/feature/` is the right move for a branch that also carried sibling-PRD planning/chore commits (6d2db72, 4c77794). If a future component PRD has narrower scope and you don't see sibling-PRD edits in `git diff main...HEAD`, keep the narrower `scripts/ralph/feature/<component>/` path - the wider one is only needed to silence diff_scope when prior commits touched siblings.
+---

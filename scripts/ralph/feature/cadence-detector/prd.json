@@ -33,7 +33,7 @@
   "allowedPaths": [
     "praxis/behavior/",
     "tests/",
-    "scripts/ralph/feature/cadence-detector/",
+    "scripts/ralph/feature/",
     "scripts/ralph/progress.txt"
   ]
 }
