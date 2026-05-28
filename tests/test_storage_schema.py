@@ -206,10 +206,16 @@ def test_weekly_digests_table_columns_and_fk(tmp_home):
 
 
 def test_follow_ups_table_columns(tmp_home):
+    # Post-US-002 the table is rebuilt with `id INTEGER PRIMARY KEY
+    # AUTOINCREMENT` (so multiple commitments per week can coexist) and
+    # week_iso becomes a plain NOT NULL column.
     ProfileStore(home=resolve_home())
     with _open_db() as conn:
         cols = _table_columns(conn, "follow_ups")
-    assert cols["week_iso"]["pk"] == 1
+    assert cols["id"]["pk"] == 1
+    assert cols["id"]["type"] == "INTEGER"
+    assert cols["week_iso"]["pk"] == 0
+    assert cols["week_iso"]["notnull"] == 1
     assert cols["dim_key"]["notnull"] == 1
     assert cols["commitment_text"]["notnull"] == 1
     assert cols["target_metric"]["notnull"] == 1
@@ -250,6 +256,180 @@ def test_follow_ups_outcome_check_accepts_all_four_values(tmp_home):
         conn.commit()
         count = conn.execute("SELECT COUNT(*) AS c FROM follow_ups").fetchone()["c"]
         assert count == 4
+
+
+# ---- US-002: new columns + partial-unique active-commitment index ----------
+
+
+def _insert_active_pending(conn, week_iso: str, commitment: str = "ask first") -> int:
+    """Insert one row with outcome='pending' and superseded_by NULL, return its id."""
+    cur = conn.execute(
+        "INSERT INTO follow_ups (week_iso, dim_key, commitment_text, target_metric, "
+        "baseline_value, outcome) VALUES (?, ?, ?, ?, ?, ?)",
+        (week_iso, "verification", commitment, "verification_rate", 0.4, "pending"),
+    )
+    return cur.lastrowid
+
+
+def test_follow_ups_has_user_chosen_column(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        cols = _table_columns(conn, "follow_ups")
+    assert cols["user_chosen"]["type"] == "INTEGER"
+    assert cols["user_chosen"]["notnull"] == 1
+    assert cols["user_chosen"]["dflt_value"] == "0"
+
+
+def test_follow_ups_has_display_text_column(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        cols = _table_columns(conn, "follow_ups")
+    assert cols["display_text"]["type"] == "TEXT"
+    assert cols["display_text"]["notnull"] == 0
+
+
+def test_follow_ups_has_superseded_by_column_with_self_fk(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        cols = _table_columns(conn, "follow_ups")
+        fks = conn.execute("PRAGMA foreign_key_list(follow_ups)").fetchall()
+    assert cols["superseded_by"]["type"] == "INTEGER"
+    assert cols["superseded_by"]["notnull"] == 0
+    matching = [
+        f for f in fks
+        if f["table"] == "follow_ups"
+        and f["from"] == "superseded_by"
+        and f["to"] == "id"
+    ]
+    assert len(matching) == 1, "superseded_by must FK-reference follow_ups(id)"
+
+
+def test_active_commitment_partial_unique_index_exists(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        row = conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'index' "
+            "AND name = 'idx_follow_ups_one_active_per_week'"
+        ).fetchone()
+    assert row is not None, "partial-unique index must exist"
+    sql = row["sql"].lower()
+    assert "unique" in sql
+    assert "where" in sql
+    assert "outcome" in sql and "pending" in sql
+    assert "superseded_by" in sql
+
+
+def test_second_active_pending_row_for_same_week_raises_integrity_error(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        _insert_active_pending(conn, "2026-W21")
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_active_pending(conn, "2026-W21", commitment="second active try")
+
+
+def test_second_active_row_succeeds_after_first_is_superseded(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        first_id = _insert_active_pending(conn, "2026-W21")
+        conn.commit()
+        # Mark the first row as superseded so the partial index predicate
+        # no longer matches it; a second active row can now coexist.
+        conn.execute(
+            "UPDATE follow_ups SET superseded_by = ? WHERE id = ?",
+            (first_id + 99, first_id),
+        )
+        conn.commit()
+        new_id = _insert_active_pending(conn, "2026-W21", commitment="replacement")
+        conn.commit()
+        rows = conn.execute(
+            "SELECT id, outcome, superseded_by FROM follow_ups "
+            "WHERE week_iso = ? ORDER BY id ASC",
+            ("2026-W21",),
+        ).fetchall()
+    assert [r["id"] for r in rows] == [first_id, new_id]
+    assert rows[0]["superseded_by"] == first_id + 99
+    assert rows[1]["superseded_by"] is None
+
+
+def test_distinct_outcomes_for_same_week_do_not_conflict(tmp_home):
+    # The partial index only restricts pending+unsuperseded rows. Once a row
+    # is closed (outcome != 'pending') the next week's pending row coexists.
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        conn.execute(
+            "INSERT INTO follow_ups (week_iso, dim_key, commitment_text, target_metric, "
+            "baseline_value, outcome) VALUES (?, ?, ?, ?, ?, ?)",
+            ("2026-W21", "verification", "ask first", "verification_rate", 0.4, "improved"),
+        )
+        _insert_active_pending(conn, "2026-W21", commitment="next attempt")
+        conn.commit()
+        count = conn.execute(
+            "SELECT COUNT(*) AS c FROM follow_ups WHERE week_iso = ?", ("2026-W21",)
+        ).fetchone()["c"]
+    assert count == 2
+
+
+def test_existing_follow_ups_rows_preserved_through_migration(tmp_home):
+    """A v0.2 follow_ups row written before US-002 should survive the rebuild
+    with its values intact and the three new columns defaulted."""
+    # Seed a v0.1-shaped DB so the v0.2 migration runs to create follow_ups
+    # via SCHEMA, then we seed one row, then the US-002 migration recreates
+    # the table. We can't go through ProfileStore for the seed (it would
+    # already have applied US-002), so we open the DB by hand to insert,
+    # then reopen via ProfileStore to trigger the runner.
+    home = tmp_home / ".praxis"
+    home.mkdir(parents=True, exist_ok=True)
+    db_path = home / "profile.db"
+    # First open: applies v0.2 SCHEMA + US-002 migration.
+    ProfileStore(home=resolve_home())
+    # Roll the table back to v0.2 shape so we can simulate a row that pre-
+    # dates US-002, then re-trigger the runner.
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DROP INDEX IF EXISTS idx_follow_ups_one_active_per_week")
+        conn.execute("DROP TABLE follow_ups")
+        conn.execute(
+            "CREATE TABLE follow_ups ("
+            "week_iso TEXT PRIMARY KEY, dim_key TEXT NOT NULL, "
+            "commitment_text TEXT NOT NULL, target_metric TEXT NOT NULL, "
+            "baseline_value REAL NOT NULL, measured_value REAL, "
+            "outcome TEXT NOT NULL CHECK (outcome IN ('improved','unchanged','worse','pending')))"
+        )
+        conn.execute(
+            "INSERT INTO follow_ups VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("2026-W14", "verification", "old commitment", "verification_rate",
+             0.4, 0.7, "improved"),
+        )
+        # Remove the schema_migrations row so the runner re-applies US-002.
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE version = ?",
+            ("001_follow_ups_active_commitment.sql",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    # Reopen: US-002 migration re-runs against the seeded v0.2 row.
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        row = conn.execute(
+            "SELECT week_iso, dim_key, commitment_text, target_metric, "
+            "baseline_value, measured_value, outcome, "
+            "user_chosen, display_text, superseded_by "
+            "FROM follow_ups WHERE week_iso = ?",
+            ("2026-W14",),
+        ).fetchone()
+    assert row is not None
+    assert row["dim_key"] == "verification"
+    assert row["commitment_text"] == "old commitment"
+    assert row["target_metric"] == "verification_rate"
+    assert row["baseline_value"] == 0.4
+    assert row["measured_value"] == 0.7
+    assert row["outcome"] == "improved"
+    # New columns get default values.
+    assert row["user_chosen"] == 0
+    assert row["display_text"] is None
+    assert row["superseded_by"] is None
 
 
 # ---- US-002: drop daily_consolidations, preserve session_scores and run_log -

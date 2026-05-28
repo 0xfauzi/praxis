@@ -775,11 +775,43 @@ class ProfileStore:
     # ---- follow-ups -----------------------------------------------------
 
     def save_follow_up(self, follow_up: FollowUp) -> None:
-        """Persist (or replace) one row of follow_ups keyed by week_iso."""
+        """Persist (or update) the follow-up row for this week.
+
+        Post-US-002, ``week_iso`` is no longer the primary key on
+        ``follow_ups`` so a future user-picks-from-alternatives flow can
+        store multiple rows per week. To keep this single-row API stable
+        we UPDATE the most-recent row for ``week_iso`` when one exists
+        (preserves ``id`` for any FK references) and INSERT only when
+        the week has no row yet.
+        """
         with self._conn() as conn:
+            existing = conn.execute(
+                "SELECT id FROM follow_ups WHERE week_iso = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (follow_up.week_iso,),
+            ).fetchone()
+            if existing is not None:
+                conn.execute(
+                    """
+                    UPDATE follow_ups
+                    SET dim_key = ?, commitment_text = ?, target_metric = ?,
+                        baseline_value = ?, measured_value = ?, outcome = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        follow_up.dim_key,
+                        follow_up.commitment_text,
+                        follow_up.target_metric,
+                        follow_up.baseline_value,
+                        follow_up.measured_value,
+                        follow_up.outcome,
+                        existing["id"],
+                    ),
+                )
+                return
             conn.execute(
                 """
-                INSERT OR REPLACE INTO follow_ups
+                INSERT INTO follow_ups
                 (week_iso, dim_key, commitment_text, target_metric,
                  baseline_value, measured_value, outcome)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -800,7 +832,8 @@ class ProfileStore:
             row = conn.execute(
                 "SELECT week_iso, dim_key, commitment_text, target_metric, "
                 "       baseline_value, measured_value, outcome "
-                "FROM follow_ups WHERE week_iso = ?",
+                "FROM follow_ups WHERE week_iso = ? "
+                "ORDER BY id DESC LIMIT 1",
                 (week_iso,),
             ).fetchone()
         if row is None:
@@ -924,7 +957,7 @@ class ProfileStore:
                 "SELECT week_iso, dim_key, commitment_text, target_metric, "
                 "       baseline_value, measured_value, outcome "
                 "FROM follow_ups WHERE week_iso < ? "
-                "ORDER BY week_iso DESC LIMIT 1",
+                "ORDER BY week_iso DESC, id DESC LIMIT 1",
                 (before_week_iso,),
             ).fetchone()
         if row is None:
@@ -949,7 +982,7 @@ class ProfileStore:
             row = conn.execute(
                 "SELECT week_iso, dim_key, commitment_text, target_metric, "
                 "       baseline_value, measured_value, outcome "
-                "FROM follow_ups ORDER BY week_iso DESC LIMIT 1"
+                "FROM follow_ups ORDER BY week_iso DESC, id DESC LIMIT 1"
             ).fetchone()
         if row is None:
             return None
