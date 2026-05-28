@@ -36,3 +36,6 @@ report.html
 
 # Ralph harness runtime state (worktrees, journals, regenerated per run)
 .ralph/
+
+# Copilot coaching surface written by `praxis install-coach` (regenerated)
+/.github/copilot-instructions.md
