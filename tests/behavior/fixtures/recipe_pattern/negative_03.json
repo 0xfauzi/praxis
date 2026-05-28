@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "What is the difference between map and flatMap on a JavaScript array of arrays?"},
+  {"role": "assistant", "content": "map preserves nesting..."}
+]

@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Set up the project structure: src/, tests/, docs/, with a directory layout we can iterate on later."},
+  {"role": "assistant", "content": "Project structure created..."}
+]

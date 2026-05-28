@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "What is the difference between map and flatMap in TypeScript?"},
+  {"role": "assistant", "content": "map preserves shape, flatMap flattens one level..."}
+]

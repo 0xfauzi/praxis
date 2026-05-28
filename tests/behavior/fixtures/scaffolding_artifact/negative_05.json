@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Convert this 2D array to flat using vanilla JavaScript. No new dependencies."},
+  {"role": "assistant", "content": "arr.flat() ..."}
+]

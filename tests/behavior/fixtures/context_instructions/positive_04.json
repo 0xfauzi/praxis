@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "For context: this file is part of a CI pipeline that runs nightly. Here is the relevant section of the pipeline config."},
+  {"role": "assistant", "content": "Thanks, that helps..."}
+]

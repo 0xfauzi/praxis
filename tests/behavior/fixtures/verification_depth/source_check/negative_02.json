@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Let's keep the retry logic in tenacity for now."},
+  {"role": "assistant", "content": "Sounds reasonable."}
+]

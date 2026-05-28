@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Write the parser implementation in full."},
+  {"role": "assistant", "content": "Drafting."}
+]

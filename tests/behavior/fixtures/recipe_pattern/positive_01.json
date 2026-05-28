@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Follow the same pattern as auth_service.py for the new billing_service.py - same constructor shape, same logging conventions."},
+  {"role": "assistant", "content": "Got it..."}
+]

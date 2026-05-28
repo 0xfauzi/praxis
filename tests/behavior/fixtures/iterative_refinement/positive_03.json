@@ -1,0 +1,5 @@
+[
+  {"role": "user", "content": "Sketch a digest header."},
+  {"role": "assistant", "content": "..."},
+  {"role": "user", "content": "Actually, let's try a quieter palette - tweak the header to use cream/terracotta and drop the bold weights."}
+]

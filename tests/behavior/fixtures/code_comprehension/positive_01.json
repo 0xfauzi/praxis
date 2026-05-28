@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "The function takes a config dict and returns a parsed Schedule object."},
+  {"role": "assistant", "content": "Right -- that's the entry point."}
+]

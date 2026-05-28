@@ -1,0 +1,5 @@
+[
+  {"role": "user", "content": "The page looks weird in Safari. Can you take a look?"},
+  {"role": "assistant", "content": "What looks weird?"},
+  {"role": "user", "content": "the colors are off and the font is huge"}
+]

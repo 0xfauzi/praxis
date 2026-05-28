@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Bootstrap a new Next.js 15 project with the app router and Tailwind. Just the skeleton, no example pages."},
+  {"role": "assistant", "content": "Bootstrapped..."}
+]

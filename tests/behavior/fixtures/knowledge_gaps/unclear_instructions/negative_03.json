@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Why does our auth use JWT instead of session cookies?"},
+  {"role": "assistant", "content": "Stateless verification scales better and lets us avoid session storage."}
+]

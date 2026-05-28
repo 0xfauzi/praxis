@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "I read the source for parse_response and it splits on commas, not tabs."},
+  {"role": "assistant", "content": "Got it -- I'll update the splitter accordingly."}
+]

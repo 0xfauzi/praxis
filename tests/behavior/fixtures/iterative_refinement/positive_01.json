@@ -1,0 +1,6 @@
+[
+  {"role": "user", "content": "Draft a 3-line bio."},
+  {"role": "assistant", "content": "..."},
+  {"role": "user", "content": "Now make it less formal and drop the third sentence."},
+  {"role": "assistant", "content": "..."}
+]

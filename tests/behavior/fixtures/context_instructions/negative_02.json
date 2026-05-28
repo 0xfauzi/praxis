@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Why does this regex not match the string 'hello-world' even though I escaped the hyphen?"},
+  {"role": "assistant", "content": "Because..."}
+]

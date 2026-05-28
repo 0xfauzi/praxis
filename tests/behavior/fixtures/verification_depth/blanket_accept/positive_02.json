@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Looks good, merge it."},
+  {"role": "assistant", "content": "Merging."}
+]

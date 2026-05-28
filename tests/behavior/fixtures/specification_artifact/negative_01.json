@@ -1,0 +1,6 @@
+[
+  {"role": "user", "content": "write me a python function to parse json"},
+  {"role": "assistant", "content": "Here is a function..."},
+  {"role": "user", "content": "make it handle errors"},
+  {"role": "assistant", "content": "Updated..."}
+]

@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "PRD: weekly digest emailer.\n\nRequirements:\n1. Pulls last 7 days of session_scores rows.\n2. Renders to HTML.\n3. Sends via SMTP.\n\nOut of scope: in-app inbox, push notifications."},
+  {"role": "assistant", "content": "Understood..."}
+]

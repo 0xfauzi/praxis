@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Use test-driven development on this. Red-green-refactor. Start with the simplest failing test for the empty-input case."},
+  {"role": "assistant", "content": "Red phase first..."}
+]

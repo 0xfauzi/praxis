@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "It is broken in src/api.py - any ideas?"},
+  {"role": "assistant", "content": "Let me look at that file."}
+]

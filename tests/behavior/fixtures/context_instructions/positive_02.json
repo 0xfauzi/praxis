@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "See AGENTS.md for the rule about not modifying generated files. The instructions file is the source of truth for that."},
+  {"role": "assistant", "content": "Understood, leaving them alone..."}
+]

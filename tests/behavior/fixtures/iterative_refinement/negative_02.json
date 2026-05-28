@@ -1,0 +1,5 @@
+[
+  {"role": "user", "content": "Explain how the GIL affects asyncio."},
+  {"role": "assistant", "content": "The GIL serializes bytecode execution..."},
+  {"role": "user", "content": "Got it."}
+]

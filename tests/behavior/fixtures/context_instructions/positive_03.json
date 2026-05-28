@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Follow the conventions in the README and read the context block below carefully before suggesting edits."},
+  {"role": "assistant", "content": "Reading the context block..."}
+]

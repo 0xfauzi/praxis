@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Read the instructions file before making changes - it lists all the constraints around env vars and secrets handling."},
+  {"role": "assistant", "content": "Reading..."}
+]

@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Browser console shows: Uncaught TypeError: Cannot read property 'map' of undefined at App.tsx:54. The error says items is undefined when MyList renders."},
+  {"role": "assistant", "content": "Default to []..."}
+]

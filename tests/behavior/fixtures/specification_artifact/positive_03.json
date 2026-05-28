@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Given a user with no sessions in the last 14 days, When they open the digest page, Then they should see an empty-state message and a link to the scan instructions."},
+  {"role": "assistant", "content": "Got it."}
+]

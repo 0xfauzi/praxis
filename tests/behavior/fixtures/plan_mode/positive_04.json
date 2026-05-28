@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Walk me through your plan for migrating from REST to gRPC. Don't write code until I approve the plan."},
+  {"role": "assistant", "content": "Proposed plan..."}
+]

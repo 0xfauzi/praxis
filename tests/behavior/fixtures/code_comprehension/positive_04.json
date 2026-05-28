@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "This is iterating over each turn and applying the verification_depth regexes one at a time."},
+  {"role": "assistant", "content": "Right."}
+]

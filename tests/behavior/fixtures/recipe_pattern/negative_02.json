@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Fix the bug at line 42 of processor.py where the indices are off by one."},
+  {"role": "assistant", "content": "Patched..."}
+]

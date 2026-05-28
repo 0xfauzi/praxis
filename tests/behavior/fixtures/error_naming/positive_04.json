@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "uv run mypy praxis crashes with ModuleNotFoundError: No module named 'praxis.behavior.foo'. The stack trace shows it happens during import in __init__.py. I think the export list is stale."},
+  {"role": "assistant", "content": "Yes, prune it..."}
+]

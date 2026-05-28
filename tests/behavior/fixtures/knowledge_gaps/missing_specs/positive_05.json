@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "implement a search feature"},
+  {"role": "assistant", "content": "Over what corpus, with what ranking, and how is success measured?"}
+]

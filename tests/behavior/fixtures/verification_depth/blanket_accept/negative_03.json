@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Fix the broken auth flow before continuing."},
+  {"role": "assistant", "content": "Looking."}
+]

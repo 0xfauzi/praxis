@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Write a function that handles JSON parsing with error recovery."},
+  {"role": "assistant", "content": "Here's a draft."}
+]

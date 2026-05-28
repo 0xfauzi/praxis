@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Write a new function that computes total revenue for the current quarter from the orders table."},
+  {"role": "assistant", "content": "def total_revenue(): ..."}
+]

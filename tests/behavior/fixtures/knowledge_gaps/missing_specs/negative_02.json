@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Build a dashboard. Requirements: must show DAU and weekly revenue. Out of scope: per-user export."},
+  {"role": "assistant", "content": "Understood. Mocking up the layout now."}
+]

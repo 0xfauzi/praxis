@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Fix this:\n```python\ndef foo():\n  return None\n```\nWhy does it return None?"},
+  {"role": "assistant", "content": "Because there is no return statement with a value."}
+]

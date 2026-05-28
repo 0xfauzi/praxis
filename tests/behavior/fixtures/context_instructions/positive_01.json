@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Per CLAUDE.md, no emojis and no em dashes in committed code. Please respect that for the next change."},
+  {"role": "assistant", "content": "Acknowledged..."}
+]

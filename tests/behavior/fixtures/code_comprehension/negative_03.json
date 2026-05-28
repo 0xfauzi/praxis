@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "What does this function do, in plain English?"},
+  {"role": "assistant", "content": "It extracts signals from a transcript."}
+]

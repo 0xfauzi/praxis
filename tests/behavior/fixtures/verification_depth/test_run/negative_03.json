@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Fix the broken assertion in test_auth.py line 42."},
+  {"role": "assistant", "content": "Looking at it."}
+]

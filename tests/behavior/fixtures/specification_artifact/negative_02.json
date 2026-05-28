@@ -1,0 +1,5 @@
+[
+  {"role": "user", "content": "hey can you help me with my code? it is broken somehow"},
+  {"role": "assistant", "content": "Sure, share the snippet."},
+  {"role": "user", "content": "thanks!"}
+]

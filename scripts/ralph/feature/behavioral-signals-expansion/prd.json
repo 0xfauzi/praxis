@@ -12,7 +12,7 @@
         "Tests pass: uv run pytest"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -26,7 +26,7 @@
         "Tests pass: uv run pytest"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -40,7 +40,7 @@
         "Tests pass: uv run pytest"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -54,14 +54,25 @@
         "Tests pass: uv run pytest"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": ""
     }
   ],
   "allowedPaths": [
     "praxis/behavior/",
     "tests/",
+    "scripts/ralph/feature/augmentation-automation-classifier/prd.json",
     "scripts/ralph/feature/behavioral-signals-expansion/",
+    "scripts/ralph/feature/cadence-detector/prd.json",
+    "scripts/ralph/feature/install-coach-uninstall-coach/prd.json",
+    "scripts/ralph/feature/praxis-commit-command/prd.json",
+    "scripts/ralph/feature/praxis-nudge-command/prd.json",
+    "scripts/ralph/feature/praxis-reflect-command/prd.json",
+    "scripts/ralph/feature/praxis-review-rename-and-masthead/prd.json",
+    "scripts/ralph/feature/readme-and-help-rewrite/prd.json",
+    "scripts/ralph/feature/repeat-task-detector/prd.json",
+    "scripts/ralph/feature/report-panels-expansion/prd.json",
+    "scripts/ralph/feature/schema-migrations/prd.json",
     "scripts/ralph/progress.txt"
   ]
 }

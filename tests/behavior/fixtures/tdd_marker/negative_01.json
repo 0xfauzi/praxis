@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Write a quick prototype to read CSV files into memory and print the columns."},
+  {"role": "assistant", "content": "Here is the prototype..."}
+]

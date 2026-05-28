@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Update the README to include installation steps for macOS and Linux."},
+  {"role": "assistant", "content": "Adding both sections now."}
+]
