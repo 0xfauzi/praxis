@@ -567,8 +567,10 @@ def test_session_scores_schema_unchanged_across_v0_2_migration(tmp_home):
     """v0.3 (US-029): session_scores gains a ``judge_pass`` column and a
     composite (stable_id, judge_pass) primary key so pass-1 and pass-2 rows
     coexist. v0.3.1 adds ``signals_json`` for the weekly-bucketed trajectory
-    (spec section 7). The v0.1 ``heuristic_scores_json`` column is also
-    dropped as part of the table recreation."""
+    (spec section 7). US-004 adds ``aug_auto_classification`` and
+    ``aug_auto_confidence`` for the augmentation/automation classifier output.
+    The v0.1 ``heuristic_scores_json`` column is also dropped as part of the
+    table recreation."""
     _seed_v0_1_db(tmp_home)
     ProfileStore(home=resolve_home())
     with _open_db() as conn:
@@ -578,6 +580,7 @@ def test_session_scores_schema_unchanged_across_v0_2_migration(tmp_home):
         "dimension_scores_json", "judge_result_json",
         "features_json", "source_path", "judge_model", "judge_pass",
         "signals_json",
+        "aug_auto_classification", "aug_auto_confidence",
     }
     # Composite PK on (stable_id, judge_pass): pk indices reflect column order.
     assert cols["stable_id"]["pk"] == 1
@@ -1144,3 +1147,161 @@ def test_insert_session_reflection_rejects_invalid_self_report(tmp_home):
             follow_up_id=fid,
             self_report="maybe",
         )
+
+
+# ---- US-004: session_scores aug_auto columns -------------------------------
+
+
+def _seed_session_score_row(
+    conn: sqlite3.Connection,
+    stable_id: str = "claude:aug:1",
+    judge_pass: int = 1,
+) -> None:
+    """Insert one minimal session_scores row with NULL aug_auto columns."""
+    conn.execute(
+        "INSERT INTO session_scores "
+        "(stable_id, provider, started_at, scored_at, overall, "
+        " dimension_scores_json, features_json, source_path, judge_pass) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            stable_id,
+            "claude",
+            "2026-05-26T10:00:00+00:00",
+            "2026-05-26T10:05:00+00:00",
+            7.0,
+            "{}",
+            "{}",
+            "/tmp/seed.jsonl",
+            judge_pass,
+        ),
+    )
+
+
+def test_session_scores_has_aug_auto_classification_column(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        cols = _table_columns(conn, "session_scores")
+    assert cols["aug_auto_classification"]["type"] == "TEXT"
+    assert cols["aug_auto_classification"]["notnull"] == 0
+
+
+def test_session_scores_has_aug_auto_confidence_column(tmp_home):
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        cols = _table_columns(conn, "session_scores")
+    assert cols["aug_auto_confidence"]["type"] == "REAL"
+    assert cols["aug_auto_confidence"]["notnull"] == 0
+
+
+def test_get_session_aug_auto_returns_none_none_for_pre_migration_row(tmp_home):
+    """Rows written before this migration get NULL in both columns; the
+    read helper reports that as (None, None)."""
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        _seed_session_score_row(conn, stable_id="claude:pre:1")
+        conn.commit()
+    assert store.get_session_aug_auto("claude:pre:1") == (None, None)
+
+
+def test_get_session_aug_auto_returns_none_none_for_missing_session(tmp_home):
+    store = ProfileStore(home=resolve_home())
+    assert store.get_session_aug_auto("does-not-exist") == (None, None)
+
+
+def test_set_and_get_session_aug_auto_round_trip(tmp_home):
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        _seed_session_score_row(conn, stable_id="claude:rt:1")
+        conn.commit()
+    store.set_session_aug_auto("claude:rt:1", "augmentation", 0.82)
+    assert store.get_session_aug_auto("claude:rt:1") == ("augmentation", 0.82)
+
+
+@pytest.mark.parametrize("classification", ["augmentation", "automation", "mixed"])
+def test_set_session_aug_auto_accepts_all_three_valid_values(tmp_home, classification):
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        _seed_session_score_row(conn, stable_id=f"claude:v:{classification}")
+        conn.commit()
+    store.set_session_aug_auto(f"claude:v:{classification}", classification, 0.5)
+    assert store.get_session_aug_auto(f"claude:v:{classification}") == (
+        classification,
+        0.5,
+    )
+
+
+@pytest.mark.parametrize("invalid", ["AUTOMATION", "augment", "manual", "", "unknown"])
+def test_set_session_aug_auto_rejects_invalid_classification(tmp_home, invalid):
+    """The Python helper raises ValueError BEFORE any SQL is issued."""
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        _seed_session_score_row(conn, stable_id="claude:bad:1")
+        conn.commit()
+    with pytest.raises(ValueError):
+        store.set_session_aug_auto("claude:bad:1", invalid, 0.5)
+    # And the underlying row's aug_auto fields stay NULL: no partial write.
+    with _open_db() as conn:
+        row = conn.execute(
+            "SELECT aug_auto_classification, aug_auto_confidence "
+            "FROM session_scores WHERE stable_id = ?",
+            ("claude:bad:1",),
+        ).fetchone()
+    assert row["aug_auto_classification"] is None
+    assert row["aug_auto_confidence"] is None
+
+
+def test_set_session_aug_auto_validates_before_opening_connection(tmp_home, monkeypatch):
+    """A SQL-issuing path is never reached for invalid input. We confirm by
+    patching `_conn` to fail loudly if it gets called."""
+    store = ProfileStore(home=resolve_home())
+
+    def boom(self):
+        raise AssertionError("_conn() must not be invoked for invalid input")
+
+    monkeypatch.setattr(ProfileStore, "_conn", boom)
+    with pytest.raises(ValueError):
+        store.set_session_aug_auto("claude:any:1", "not-a-class", 0.5)
+
+
+def test_set_session_aug_auto_updates_all_judge_passes(tmp_home):
+    """If a session has both a pass-1 and a pass-2 row, the helper updates
+    both so a later read finds the value regardless of which row it reads."""
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        _seed_session_score_row(conn, stable_id="claude:multi:1", judge_pass=1)
+        _seed_session_score_row(conn, stable_id="claude:multi:1", judge_pass=2)
+        conn.commit()
+    store.set_session_aug_auto("claude:multi:1", "mixed", 0.91)
+    with _open_db() as conn:
+        rows = conn.execute(
+            "SELECT judge_pass, aug_auto_classification, aug_auto_confidence "
+            "FROM session_scores WHERE stable_id = ? ORDER BY judge_pass",
+            ("claude:multi:1",),
+        ).fetchall()
+    assert len(rows) == 2
+    assert rows[0]["aug_auto_classification"] == "mixed"
+    assert rows[0]["aug_auto_confidence"] == 0.91
+    assert rows[1]["aug_auto_classification"] == "mixed"
+    assert rows[1]["aug_auto_confidence"] == 0.91
+
+
+def test_get_session_aug_auto_reads_from_highest_judge_pass(tmp_home):
+    """When the two passes disagree (e.g. an old pass-1 row predates a
+    pass-2 re-run that updated only the pass-2 row), the read helper
+    surfaces the pass-2 value to match ``load_one_session_score`` semantics."""
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        _seed_session_score_row(conn, stable_id="claude:hp:1", judge_pass=1)
+        _seed_session_score_row(conn, stable_id="claude:hp:1", judge_pass=2)
+        conn.execute(
+            "UPDATE session_scores SET aug_auto_classification = ?, "
+            "aug_auto_confidence = ? WHERE stable_id = ? AND judge_pass = ?",
+            ("augmentation", 0.30, "claude:hp:1", 1),
+        )
+        conn.execute(
+            "UPDATE session_scores SET aug_auto_classification = ?, "
+            "aug_auto_confidence = ? WHERE stable_id = ? AND judge_pass = ?",
+            ("automation", 0.85, "claude:hp:1", 2),
+        )
+        conn.commit()
+    assert store.get_session_aug_auto("claude:hp:1") == ("automation", 0.85)

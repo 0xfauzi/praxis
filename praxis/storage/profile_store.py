@@ -536,6 +536,58 @@ class ProfileStore:
         )
         return out
 
+    # ---- aug/auto classification (US-004) -------------------------------
+
+    _AUG_AUTO_VALID = ("augmentation", "automation", "mixed")
+
+    def set_session_aug_auto(
+        self,
+        stable_id: str,
+        classification: str,
+        confidence: float,
+    ) -> None:
+        """Persist the augmentation/automation classifier output for a session.
+
+        ``classification`` must be one of ``augmentation``, ``automation``,
+        ``mixed``; anything else raises ``ValueError`` before any SQL is
+        issued. The update touches every persisted row for ``stable_id``
+        (both pass-1 and pass-2 when present) so a subsequent read finds
+        the value regardless of which row it looks at.
+        """
+        if classification not in self._AUG_AUTO_VALID:
+            raise ValueError(
+                f"aug_auto_classification must be one of "
+                f"{self._AUG_AUTO_VALID}, got {classification!r}"
+            )
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE session_scores "
+                "SET aug_auto_classification = ?, aug_auto_confidence = ? "
+                "WHERE stable_id = ?",
+                (classification, confidence, stable_id),
+            )
+
+    def get_session_aug_auto(
+        self, stable_id: str
+    ) -> tuple[str | None, float | None]:
+        """Return ``(classification, confidence)`` for a session.
+
+        Returns ``(None, None)`` when the session row is missing or when
+        the columns are NULL (rows written before this migration ran, or
+        sessions the classifier has not yet labelled). Reads from the
+        highest-pass row for the session, matching ``load_one_session_score``.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT aug_auto_classification, aug_auto_confidence "
+                "FROM session_scores WHERE stable_id = ? "
+                "ORDER BY judge_pass DESC LIMIT 1",
+                (stable_id,),
+            ).fetchone()
+        if row is None:
+            return (None, None)
+        return (row["aug_auto_classification"], row["aug_auto_confidence"])
+
     # ---- moments --------------------------------------------------------
 
     def save_moments(

@@ -176,3 +176,29 @@
     * `cur.lastrowid` can be `None` per the sqlite3 type stubs even though SQLite's INSERT always populates it for AUTOINCREMENT tables. The `assert row_id is not None` line lets mypy/pyright narrow the type so the method returns `int` (not `int | None`). Don't remove the assert.
     * `datetime.fromisoformat()` on `2026-05-28T...+00:00` returns a tz-aware datetime on Python 3.11+. Our `requires-python = ">=3.10"` so 3.10 should also work for `+00:00` (3.10 supports it; what 3.10 doesn't support is the trailing `Z`). The runner's emitted timestamps use `+00:00` from `datetime.isoformat()`, so the round-trip works on all supported versions.
 ---
+
+## Iteration 4 (schema-migrations) - US-004: session_scores aug_auto columns
+- What I did: Added `praxis/storage/migrations/003_session_scores_aug_auto.sql` which runs two `ALTER TABLE session_scores ADD COLUMN ...` statements (`aug_auto_classification TEXT`, `aug_auto_confidence REAL`, both nullable). Added two helpers on `ProfileStore`: `set_session_aug_auto(stable_id, classification, confidence)` UPDATEs every persisted row for the session (both pass-1 and pass-2 when present) and raises `ValueError` BEFORE opening any DB connection when `classification not in ('augmentation','automation','mixed')`, and `get_session_aug_auto(stable_id) -> tuple[str | None, float | None]` reads from the highest-pass row (matching `load_one_session_score` semantics), returning `(None, None)` for missing sessions or NULL columns. Updated `test_session_scores_schema_unchanged_across_v0_2_migration` to include the two new columns in the expected set.
+- Files changed:
+  - praxis/storage/migrations/003_session_scores_aug_auto.sql (new)
+  - praxis/storage/profile_store.py (new `set_session_aug_auto` + `get_session_aug_auto` + `_AUG_AUTO_VALID` tuple in the session scores section)
+  - tests/test_storage_schema.py (added 16 US-004 tests + `_seed_session_score_row` helper; updated 1 pre-existing schema-shape assertion to include the new columns)
+  - scripts/ralph/feature/schema-migrations/prd.json (US-004 passes=true)
+  - scripts/ralph/progress.txt (this entry)
+- Verification:
+  - `uv run pytest -q` -> 1101 passed (16 new + 1 modified + 1084 prior; the prior baseline was 1085, the modified test is `test_session_scores_schema_unchanged_across_v0_2_migration` which I had to update to include the new columns).
+  - `uv run pytest tests/test_storage_schema.py -v` -> 73 passed (16 new US-004 tests + 57 prior).
+  - `uv run mypy praxis/storage/profile_store.py` -> 7 errors, identical to the US-001/US-002/US-003 baseline (transitive errors in praxis/scoring/judge.py + praxis/scoring/aggregate.py). My edits introduce 0 new mypy errors.
+  - `uv run pyright praxis/storage/profile_store.py` -> 0 errors.
+- What the next iteration should know:
+  - ALL 4 PRD STORIES NOW PASS. Ralph should detect <promise>COMPLETE</promise> on the next iteration.
+  - Patterns established:
+    * Two-helper pattern for "optional per-session derived data": `set_session_<thing>` (UPDATE, validates first, no-op when row missing) + `get_session_<thing>` (returns the value tuple, or all-Nones when missing/NULL). The set helper deliberately touches all judge_pass rows so the read helper sees the value regardless of which pass row it reads. If a future schema column is similarly "classifier output piggy-backed onto session_scores," this is the shape to copy.
+    * `_AUG_AUTO_VALID = ("augmentation", "automation", "mixed")` is a class-level tuple on `ProfileStore`. Validation is `if classification not in self._AUG_AUTO_VALID: raise ValueError(...)` BEFORE opening any connection. Tests verify this with a `monkeypatch.setattr(ProfileStore, "_conn", boom)` guard - the helper must raise before `_conn` is invoked. Reuse the same monkeypatch trick for any future "validate before SQL" helper.
+    * `set_session_aug_auto` UPDATE silently no-ops when no row matches the stable_id. We don't raise because the caller will typically `set_session_aug_auto` shortly after `save_session_score` and the row's absence would be a programmer error, not a runtime contingency. If a caller needs to know whether the update landed, they can `has_session(stable_id)` first.
+  - Hooks for upcoming stories: none - PRD complete. If a story lands later that wires up the augmentation/automation classifier itself, the natural integration point is to call `store.set_session_aug_auto(sid, label, confidence)` after `store.save_session_score(score)` in the scoring pipeline (`praxis/scoring/...`).
+  - Gotchas:
+    * The pre-existing `test_session_scores_schema_unchanged_across_v0_2_migration` asserts the full column set. Adding any new column to `session_scores` (now or later) must update this set or the test will fail. The test isn't testing migration behavior per se; it's pinning the column shape so an accidental schema drift is caught.
+    * `aug_auto_confidence` is REAL with no range constraint at the DB layer (so confidence > 1.0 or negative values would persist if anything wrote them). The Python write helper also does not range-check confidence. If a future requirement needs 0.0 <= confidence <= 1.0 enforcement, add it inside `set_session_aug_auto` (before `_conn()`); don't add a CHECK constraint because that would require yet another migration.
+    * The migration uses `ALTER TABLE ... ADD COLUMN` (not a table rebuild) because no PK/composite-PK change is needed. Pre-existing rows automatically get NULL in the new columns. SQLite's `ALTER TABLE ADD COLUMN` is O(1) (just updates the schema, no row rewrite), so the migration is cheap even on large DBs.
+---
