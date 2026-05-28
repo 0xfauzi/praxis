@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Given a user submitting login, when they enter wrong creds, then return 401."},
+  {"role": "assistant", "content": "Clear contract -- I will wire that."}
+]

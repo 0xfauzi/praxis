@@ -1,0 +1,40 @@
+{
+  "branchName": "ralph/factory/readme-and-help-rewrite",
+  "userStories": [
+    {
+      "id": "US-043",
+      "title": "README rewrite",
+      "acceptanceCriteria": [
+        "README.md leads with the tagline 'Your AI usage coach.' followed by the four-step loop (Commit / Cue / Reflect / Review) and an `install` -> `praxis install-coach` quickstart.",
+        "The string 'scorecard' (case-insensitive) does not appear anywhere in README.md; existing rubric + research-grounding sections are retained but moved below the loop description.",
+        "A test (or grep-based CI check) asserts the README contains the headings '# Praxis', '## The loop', and the four verbs by name; if any are missing, the test fails.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-044",
+      "title": "`praxis --help` reorganisation",
+      "acceptanceCriteria": [
+        "`praxis --help` lists commit, nudge, reflect, review, install-coach first under a 'Loop' or 'Coaching' heading; scan, re-score, baseline, history, show, report, open, last, status, rubric, follow-up, models, config, install-weekly, uninstall-weekly, shell-nudge, install-shell-nudge, uninstall-shell-nudge appear under a 'More' heading.",
+        "`praxis week --help` exits non-zero (the verb was removed in US-033); `praxis review --help` succeeds and matches the new masthead documentation.",
+        "An automated test captures stdout of `praxis --help` and asserts the ordering: 'commit' appears before 'scan' in the output text.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    }
+  ],
+  "allowedPaths": [
+    "README.md",
+    "praxis/cli/",
+    "tests/",
+    "scripts/ralph/feature/readme-and-help-rewrite/",
+    "scripts/ralph/progress.txt"
+  ]
+}

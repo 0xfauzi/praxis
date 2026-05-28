@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Before you implement anything, propose a plan: which files, what order, what tests to add. We will iterate on the plan first."},
+  {"role": "assistant", "content": "Sure, here is a proposed plan..."}
+]

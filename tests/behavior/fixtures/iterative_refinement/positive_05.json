@@ -1,0 +1,5 @@
+[
+  {"role": "user", "content": "Generate a SQL migration."},
+  {"role": "assistant", "content": "..."},
+  {"role": "user", "content": "Let's rewrite this as an additive change, but with the NOT NULL constraint deferred. Change DROP COLUMN to ALTER COLUMN."}
+]

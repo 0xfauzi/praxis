@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Add error handling for None returns from the upstream service."},
+  {"role": "assistant", "content": "Added a None guard..."}
+]

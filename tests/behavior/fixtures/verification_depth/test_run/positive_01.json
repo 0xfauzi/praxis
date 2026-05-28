@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "I ran uv run pytest and all 1082 tests pass."},
+  {"role": "assistant", "content": "Nice -- clean baseline."}
+]

@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Refactor the authentication module."},
+  {"role": "assistant", "content": "Mind sharing the constraints?"}
+]

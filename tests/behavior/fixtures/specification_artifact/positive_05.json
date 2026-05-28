@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "## Goal\nRefactor the scanner to deduplicate sessions by stable_id.\n\n## Inputs\nA list of Session objects.\n\n## Outputs\nThe same list with duplicates removed, oldest copy kept.\n\n## Constraints\n- Deterministic order\n- O(n) memory"},
+  {"role": "assistant", "content": "Plan: ..."}
+]

@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "What is wrong with that?"},
+  {"role": "assistant", "content": "Could you share what 'that' refers to?"}
+]

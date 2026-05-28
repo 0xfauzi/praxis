@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Generate a SQL query that returns the top 10 customers by revenue this quarter."},
+  {"role": "assistant", "content": "SELECT customer_id, ..."}
+]

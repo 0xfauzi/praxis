@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "I spot-checked three random rows in the output and they look right."},
+  {"role": "assistant", "content": "Good signal."}
+]

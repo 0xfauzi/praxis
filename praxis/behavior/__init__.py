@@ -1,5 +1,16 @@
 """Behavioral analysis - measures skill formation vs atrophy over time."""
 
+from praxis.behavior.cadence import (
+    DEFAULT_STREAK_WINDOW_DAYS,
+    HIGH_STREAK_RATIO,
+    LOW_STREAK_RATIO,
+    MIN_ELAPSED_SECONDS,
+    MIN_USER_TURNS,
+    HighAdopterPosition,
+    compute_weekday_streak,
+    high_adopter_position,
+    is_substantive_session,
+)
 from praxis.behavior.signals import BehavioralSignals, extract
 from praxis.behavior.trajectory import (
     TrajectoryAssessment,
@@ -38,6 +49,17 @@ from praxis.behavior.weekly import (
     iso_week_start,
     iso_week_tag,
 )
+from praxis.behavior.repeat_task import (
+    MIN_OTHER_CLUSTERS_FOR_REPEAT,
+    MIN_TOKENS_FOR_COMPARISON,
+    OVERLAP_THRESHOLD,
+    STOPWORDS,
+    Cluster,
+    RepeatTask,
+    detect_repeats,
+    overlap_ratio,
+    tokenize,
+)
 
 __all__ = [
     "BehavioralSignals",
@@ -45,6 +67,15 @@ __all__ = [
     "TrajectoryAssessment",
     "TrajectoryLabel",
     "assess",
+    "DEFAULT_STREAK_WINDOW_DAYS",
+    "HIGH_STREAK_RATIO",
+    "LOW_STREAK_RATIO",
+    "MIN_ELAPSED_SECONDS",
+    "MIN_USER_TURNS",
+    "HighAdopterPosition",
+    "compute_weekday_streak",
+    "high_adopter_position",
+    "is_substantive_session",
     "DEFAULT_WINDOW_DAYS",
     "MIN_SESSIONS_FOR_FIT",
     "WeeklyBucket",
@@ -69,4 +100,13 @@ __all__ = [
     "HEADLINE_MAX_CHARS",
     "fallback_headline",
     "generate_headline",
+    "MIN_OTHER_CLUSTERS_FOR_REPEAT",
+    "MIN_TOKENS_FOR_COMPARISON",
+    "OVERLAP_THRESHOLD",
+    "STOPWORDS",
+    "Cluster",
+    "RepeatTask",
+    "detect_repeats",
+    "overlap_ratio",
+    "tokenize",
 ]

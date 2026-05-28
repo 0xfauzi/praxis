@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Write a function that returns the n-th Fibonacci number using memoization."},
+  {"role": "assistant", "content": "def fib(n): ..."}
+]

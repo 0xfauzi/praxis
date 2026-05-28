@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "I would like the dashboard to look nicer somehow."},
+  {"role": "assistant", "content": "Could you point to a reference, or name two things you would change?"}
+]

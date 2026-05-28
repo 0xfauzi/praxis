@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Checked the docs for tenacity.retry and the keyword is `stop`, not `max_attempts`."},
+  {"role": "assistant", "content": "Correct -- the field is named stop."}
+]

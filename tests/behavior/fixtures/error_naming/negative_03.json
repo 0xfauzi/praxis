@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Walk me through how the scanner discovers Codex rollouts. I want to understand the directory layout."},
+  {"role": "assistant", "content": "It descends ~/.codex/sessions/YYYY/MM/DD/..."}
+]

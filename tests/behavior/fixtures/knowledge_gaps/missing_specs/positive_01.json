@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "write me a function to parse CSV"},
+  {"role": "assistant", "content": "Sure -- one quick clarifier: should it handle quoted fields?"}
+]

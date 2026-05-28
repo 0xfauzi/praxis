@@ -1,8 +1,14 @@
 """CLI entry point.
 
-Commands (v0.2 surface):
-  week             Render this week's digest (the primary verb in v0.2).
-  scan             Scan + score new sessions; no digest rendered (spec 12.1).
+Surface organisation (US-044):
+  Loop verbs (Commit -> Cue -> Reflect -> Review, plus install-coach) are
+  listed first in `praxis --help`; everything else lives under a "More"
+  heading.
+
+Active commands:
+  review           Render this week's digest (the Review step of the loop;
+                   was named `week` in v0.2 and renamed in US-033/US-044).
+  scan             Scan + score new sessions; no digest rendered.
   re-score         Re-run the frontier judge for one session and update its row.
   baseline         Print the current 90-day baseline (read-only).
   follow-up        Print the most recent weekly commitment and its outcome.
@@ -17,17 +23,22 @@ Commands (v0.2 surface):
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import select
 import shutil
 import subprocess
 import sys
 import traceback
 import webbrowser
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from praxis import __version__
-from praxis.config import ensure_config_file
+from praxis.cli.nudge_throttle import is_throttled, record_fire
+from praxis.config import ReflectConfig, ensure_config_file, load_config
+from praxis.follow_up import FollowUp
 from praxis.orchestrator import (
     NO_API_KEY_MESSAGE,
     InvalidWeekError,
@@ -36,19 +47,24 @@ from praxis.orchestrator import (
     has_api_key_configured,
     list_persisted_weeks,
     no_sessions_message,
+    parse_iso_week,
     re_score_session,
     run,
     run_weekly,
 )
-from praxis.reports.html_report import render as render_html_legacy
-from praxis.reports.terminal import render as render_terminal_legacy
 from praxis.scoring.baseline import (
     BaselineInputSession,
     compute_baseline,
     is_baseline_forming,
 )
 from praxis.scoring.rubric import RUBRIC
-from praxis.storage.profile_store import ProfileStore, resolve_home
+from praxis.storage.profile_store import (
+    ActiveCommitment,
+    MultipleActiveCommitmentsError,
+    ProfileStore,
+    SelfReport,
+    resolve_home,
+)
 
 
 def _weekly_html_path(week_iso: str) -> Path:
@@ -318,8 +334,8 @@ def _weekly_error_log_path() -> Path:
     return log_dir / "weekly.err.log"
 
 
-def _handle_week_failure(exc: BaseException) -> None:
-    """Surface an unhandled `cmd_week --notify` crash.
+def _handle_review_failure(exc: BaseException) -> None:
+    """Surface an unhandled `cmd_review --notify` crash.
 
     Two effects: append a timestamped traceback to
     `~/.praxis/logs/weekly.err.log`, and post a distinct failure
@@ -330,7 +346,7 @@ def _handle_week_failure(exc: BaseException) -> None:
     log_path = _weekly_error_log_path()
     stamp = datetime.now(timezone.utc).isoformat()
     tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-    entry = f"\n[{stamp}] praxis week --notify failed\n{tb}\n"
+    entry = f"\n[{stamp}] praxis review --notify failed\n{tb}\n"
     try:
         with log_path.open("a", encoding="utf-8") as f:
             f.write(entry)
@@ -346,8 +362,148 @@ def _handle_week_failure(exc: BaseException) -> None:
     )
 
 
-def cmd_week(args: argparse.Namespace) -> int:
+# Spec section 2 (coaching-reposition): the masthead's follow-up prompt
+# offers three choices. The single-letter responses are the contract the
+# test suite asserts on, so a copy change here must update the prompt
+# test in tests/test_cli.py.
+_FOLLOWUP_PROMPT_TEXT = (
+    "Choose:  [k]eep this commitment / [n]ew commitment / [d]igest only > "
+)
+_FOLLOWUP_CHOICE_KEEP = "k"
+_FOLLOWUP_CHOICE_NEW = "n"
+_FOLLOWUP_CHOICE_DIGEST = "d"
+_VALID_FOLLOWUP_CHOICES = (
+    _FOLLOWUP_CHOICE_KEEP,
+    _FOLLOWUP_CHOICE_NEW,
+    _FOLLOWUP_CHOICE_DIGEST,
+)
+
+
+def _next_iso_week(week_iso: str) -> str:
+    """Return the ISO-week tag for the week immediately after ``week_iso``.
+
+    Used by the [k]eep / [n]ew prompt paths so a chosen commitment lands
+    in the next week's row regardless of which week was rendered. Raises
+    ``InvalidWeekError`` for malformed input, mirroring the orchestrator's
+    contract on its sibling ``_prior_iso_week`` helper.
+    """
+    week_start, _ = parse_iso_week(week_iso)
+    nxt = week_start + timedelta(days=7)
+    year, week, _ = nxt.isocalendar()
+    return f"{year:04d}-W{week:02d}"
+
+
+def _should_prompt_for_followup_choice(args: argparse.Namespace) -> bool:
+    """Gate the [k]/[n]/[d] prompt on stdin TTY + the opt-out flags.
+
+    Per spec section 2 / US-036 AC #2: the prompt only renders when the
+    user is at an interactive terminal AND the run was not invoked
+    through the scheduled daemon path (--notify) AND the user did not
+    explicitly opt out (--non-interactive). The three predicates compose
+    so the launchd-fired `praxis review --notify --non-interactive` path
+    never blocks waiting on input.
+    """
+    if getattr(args, "notify", False):
+        return False
+    if getattr(args, "non_interactive", False):
+        return False
+    if not sys.stdin.isatty():
+        return False
+    return True
+
+
+def _read_followup_choice() -> str:
+    """Prompt the user for [k]/[n]/[d] and return the normalized choice.
+
+    Repeatedly reads from stdin until the user enters one of the three
+    valid letters (case-insensitive). EOF (Ctrl-D) is treated as 'd'
+    (digest only) so a pipe-closed shell does not hang the run.
+    """
+    while True:
+        try:
+            raw = input(_FOLLOWUP_PROMPT_TEXT)
+        except EOFError:
+            return _FOLLOWUP_CHOICE_DIGEST
+        choice = raw.strip().lower()[:1]
+        if choice in _VALID_FOLLOWUP_CHOICES:
+            return choice
+        print("  Please enter k, n, or d.")
+
+
+def _keep_commitment_for_next_week(
+    store: ProfileStore, current: FollowUp
+) -> str:
+    """Insert a follow_ups row for next week carrying the same commitment.
+
+    The new row mirrors the current commitment's dim_key, target_metric,
+    and baseline_value so next week's review can close the loop on the
+    same metric. measured_value/outcome reset to None/'pending' since the
+    new week has not been measured yet. Returns the new row's week_iso so
+    the caller can confirm the dispatch.
+    """
+    next_week = _next_iso_week(current.week_iso)
+    new_row = FollowUp(
+        week_iso=next_week,
+        dim_key=current.dim_key,
+        commitment_text=current.commitment_text,
+        target_metric=current.target_metric,
+        baseline_value=current.baseline_value,
+        measured_value=None,
+        outcome="pending",
+    )
+    store.save_follow_up(new_row)
+    return next_week
+
+
+# NOTE: a simpler `cmd_commit` (interactive prompt → save row for next
+# week) was defined here by ralph/factory/praxis-review-rename-and-masthead
+# (US-036). The canonical `cmd_commit` defined further below
+# (ralph/factory/praxis-commit-command, US-020..023) is a superset of
+# that behavior (suggestion sources, free-text 280-cap, supersede flow)
+# so the inline simpler version was removed at merge time. Python's
+# late binding means `_handle_followup_prompt`'s `[n]ew` branch resolves
+# to the canonical implementation automatically.
+
+
+def _handle_followup_prompt(summary_week_iso: str | None) -> None:
+    """Render the masthead's follow-up prompt and dispatch on the answer.
+
+    Caller has already confirmed the prompt should render (see
+    ``_should_prompt_for_followup_choice``) and that the rendered digest
+    carried a commitment rollup, so a follow_up row for the targeted
+    week must exist. The dispatch is a side effect only: the function
+    returns nothing because the digest has already been printed and the
+    review verb's exit code is decided in ``_cmd_review_impl``.
+    """
+    store = ProfileStore()
+    target_week = summary_week_iso or current_iso_week()
+    current = store.load_follow_up(target_week)
+    if current is None:
+        # Defensive: rollup was present at render time but the row
+        # disappeared between then and now. Skip the prompt rather than
+        # raise; the user can still re-run.
+        return
+    choice = _read_followup_choice()
+    if choice == _FOLLOWUP_CHOICE_DIGEST:
+        return
+    if choice == _FOLLOWUP_CHOICE_KEEP:
+        next_week = _keep_commitment_for_next_week(store, current)
+        print(f"  Kept commitment for {next_week}.")
+        return
+    if choice == _FOLLOWUP_CHOICE_NEW:
+        # Canonical cmd_commit (US-020..023) ignores its args argument
+        # but is typed as Namespace; pass an empty Namespace so the
+        # inline-from-review dispatch type-checks cleanly.
+        cmd_commit(argparse.Namespace())
+
+
+def cmd_review(args: argparse.Namespace) -> int:
     """Render this week's digest (or a past week with --week <iso>).
+
+    `review` is the Review step of the Commit -> Cue -> Reflect -> Review
+    loop documented in the README masthead. It was named `week` in v0.2;
+    the rename landed in US-033/US-044 alongside the help reorganisation
+    so the CLI vocabulary matches the coaching narrative.
 
     Flag behavior (spec sections 12.1, 13.1-13.3):
       --week <iso>      Render the persisted data for that past ISO week
@@ -396,16 +552,16 @@ def cmd_week(args: argparse.Namespace) -> int:
         # stderr. Direct (non-notify) invocations skip this wrap so
         # debugging stays Pythonic.
         try:
-            return _cmd_week_impl(args)
+            return _cmd_review_impl(args)
         except SystemExit:
             raise
         except BaseException as exc:  # noqa: BLE001
-            _handle_week_failure(exc)
+            _handle_review_failure(exc)
             return 4
-    return _cmd_week_impl(args)
+    return _cmd_review_impl(args)
 
 
-def _cmd_week_impl(args: argparse.Namespace) -> int:
+def _cmd_review_impl(args: argparse.Namespace) -> int:
     needs_judge = args.week is None and not args.dry_run
     if needs_judge and not has_api_key_configured():
         print(NO_API_KEY_MESSAGE, file=sys.stderr)
@@ -481,17 +637,30 @@ def _cmd_week_impl(args: argparse.Namespace) -> int:
             traj_label = _TRAJECTORY_LABEL_DISPLAY.get(raw, raw.title())
         _post_notify(trajectory_label=traj_label)
 
+    # Spec section 2 (coaching-reposition): after the terminal masthead
+    # prints, the interactive review offers the [k]eep / [n]ew / [d]igest
+    # choice. The prompt only fires when an active commitment exists
+    # (rollup is not None) AND the caller is at an interactive TTY AND
+    # neither --notify nor --non-interactive was passed. The launchd
+    # daemon path satisfies the --notify suppression; scripted runs that
+    # want the rendered output without the prompt pass --non-interactive.
+    if (
+        summary.commitment_rollup is not None
+        and _should_prompt_for_followup_choice(args)
+    ):
+        _handle_followup_prompt(summary.week_iso)
+
     return 0
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
     """Scan source files and score newly-discovered sessions.
 
-    Per spec 12.1 the v0.2 ``scan`` verb is intentionally NOT a digest
+    Per spec 12.1 the ``scan`` verb is intentionally NOT a digest
     renderer: it does the work of discovering new sessions and persisting
     judge results, and prints a one-line summary of what changed. The
     digest (terminal masthead, dimensions, coaching, trajectory) is the
-    job of ``praxis week`` and ``praxis show <week_iso>``.
+    job of ``praxis review`` and ``praxis show <week_iso>``.
 
     The output is a compact progress report so the user can confirm the
     scan made progress and, if invoked from a cron job, the log lines
@@ -516,7 +685,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         f"scored {summary.sessions_scored} via judge "
         f"({summary.elapsed_seconds}s)."
     )
-    print(f"Render the digest with: praxis week")
+    print("Render the digest with: praxis review")
     return 0
 
 
@@ -581,7 +750,7 @@ def cmd_baseline(args: argparse.Namespace) -> int:  # noqa: ARG001
     print(f"  Sessions in window: {baseline.session_count}")
     if forming:
         print("  Baseline forming. Come back in 2 more weeks for week-over-week.")
-        print(f"  Overall:           --")
+        print("  Overall:           --")
         for d in RUBRIC:
             print(f"  {d.title.ljust(22)} --")
         return 0
@@ -602,7 +771,7 @@ def cmd_history(args: argparse.Namespace) -> int:  # noqa: ARG001
     """
     weeks = list_persisted_weeks()
     if not weeks:
-        print("No history yet. Run: praxis scan, then praxis week.")
+        print("No history yet. Run: praxis scan, then praxis review.")
         return 0
     print("\nPRAXIS - WEEKLY HISTORY\n")
     print(f"  {'Week'.ljust(12)} {'Sessions'.rjust(8)}   Overall  HTML")
@@ -620,15 +789,15 @@ def cmd_history(args: argparse.Namespace) -> int:  # noqa: ARG001
             f"{entry['overall_mean']:.2f}/10  "
             f"{html_marker}"
         )
-    print(f"\nInspect one week: praxis show <week_iso>")
-    print(f"Open this week:   praxis open")
+    print("\nInspect one week: praxis show <week_iso>")
+    print("Open this week:   praxis open")
     return 0
 
 
 def cmd_show(args: argparse.Namespace) -> int:
     """Render a past week's digest from persisted data.
 
-    Read-only: equivalent to ``praxis week --week <iso>`` but skips the
+    Read-only: equivalent to ``praxis review --week <iso>`` but skips the
     HTML/notify side-effect flags.
 
     Exit codes (spec 12.3):
@@ -712,7 +881,7 @@ def cmd_open(args: argparse.Namespace) -> int:
     html = _latest_html_path()
     if not html.exists():
         print(
-            "No weekly digest yet. Run `praxis week --write-html` or "
+            "No weekly digest yet. Run `praxis review --write-html` or "
             "install the daemon with `praxis install-weekly`.",
             file=sys.stderr,
         )
@@ -736,7 +905,7 @@ def cmd_last(args: argparse.Namespace) -> int:  # noqa: ARG001
     html = _latest_html_path()
     if not html.exists():
         print(
-            "No weekly digest yet. Run `praxis week --write-html` or "
+            "No weekly digest yet. Run `praxis review --write-html` or "
             "install the daemon with `praxis install-weekly`.",
             file=sys.stderr,
         )
@@ -781,6 +950,156 @@ def cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+def cmd_commit(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Render the commit prompt, read the user's selection, persist it.
+
+    Resolves the suggestion list from the latest persisted state:
+      - The current ISO week's headline_moment.suggested_alternative
+        (if a digest has run this week and it has a headline moment).
+      - The first canned drill from each of the two weakest dimensions
+        (sourced from praxis.scoring.coach.FALLBACK_DRILLS via the
+        latest weekly_digests snapshot).
+      - 'Keep last week's commitment', when a still-open prior
+        commitment exists (latest follow-up with ``outcome='pending'``).
+      - 'Write your own', always.
+
+    Mid-week replace (US-023): when an active pending commitment already
+    exists for the current ISO week, the handler short-circuits to the
+    [r]eplace / [k]eep / [c]ancel preamble before printing the suggestion
+    list. ``[k]eep`` and ``[c]ancel`` exit 0 without writing; ``[r]eplace``
+    falls through to the suggestion prompt and the eventual persist call
+    becomes :meth:`ProfileStore.supersede_and_insert_follow_up`, which
+    flips the prior row's ``outcome='superseded'`` + ``superseded_by`` to
+    the new row's id in a single transaction.
+
+    When stdin is a TTY (interactive shell), the handler additionally
+    reads the user's choice. ``'w'`` opens a validated single-line read
+    via :func:`prompt_free_text`; ``'1'``..``'N'`` / ``'k'`` pick a
+    pre-built suggestion. On any successful selection the handler writes
+    one ``follow_ups`` row via :meth:`ProfileStore.insert_follow_up` with
+    ``user_chosen=1``, ``outcome='pending'``, and the verbatim user-facing
+    string in ``display_text``.
+
+    Non-TTY invocations (pytest, piped scripts, cron) print the prompt
+    and exit 0 without attempting to read. Ctrl-C / Ctrl-D during the
+    interactive read also exit 0 cleanly without writing.
+
+    Exit codes:
+      0  prompt rendered (and selection handled when interactive).
+    """
+    import sqlite3
+
+    from praxis.cli.commit import (
+        build_commit_suggestions,
+        build_user_chosen_follow_up,
+        format_commit_prompt,
+        format_replace_keep_cancel_preamble,
+        load_commit_context,
+        prompt_free_text,
+        resolve_choice,
+        resolve_replace_choice,
+    )
+
+    week_iso = current_iso_week()
+    store = ProfileStore()
+
+    # Mid-week replace gate (US-023). Runs BEFORE the suggestion prompt so
+    # the user is never surprised by an IntegrityError from a stale active
+    # row. Falls through to the normal selection flow on [r]eplace.
+    active = store.active_follow_up_for_week(week_iso)
+    replace_prior_id: int | None = None
+    if active is not None:
+        existing_text = active.display_text or active.commitment_text
+        print(format_replace_keep_cancel_preamble(existing_text), end="")
+        if not sys.stdin.isatty():
+            # Non-interactive: print the preamble and exit 0. The user is
+            # explicitly informed there is an active commitment, but we
+            # don't try to read a choice from a non-TTY stdin.
+            return 0
+        try:
+            raw_replace_choice = input()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        decision = resolve_replace_choice(raw_replace_choice)
+        if decision in (None, "keep", "cancel"):
+            # Unknown input is treated as "do nothing" -- consistent with
+            # the suggestion-prompt's behavior for invalid choices.
+            return 0
+        # decision == "replace": find the prior row id so the transactional
+        # supersede has something to update, then fall through.
+        with sqlite3.connect(store.db_path) as conn:
+            row = conn.execute(
+                "SELECT id FROM follow_ups "
+                "WHERE week_iso = ? AND outcome = 'pending' "
+                "  AND superseded_by IS NULL "
+                "LIMIT 1",
+                (week_iso,),
+            ).fetchone()
+        if row is None:
+            # Active row vanished between the two reads (e.g. concurrent
+            # CLI run). Fall back to the plain insert path.
+            replace_prior_id = None
+        else:
+            replace_prior_id = int(row[0])
+
+    ctx = load_commit_context(store, week_iso=week_iso)
+    suggestions = build_commit_suggestions(ctx)
+    print(format_commit_prompt(suggestions), end="")
+
+    if not sys.stdin.isatty():
+        return 0
+
+    try:
+        raw_choice = input()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 0
+
+    chosen = resolve_choice(raw_choice, suggestions)
+    if chosen is None:
+        return 0
+
+    if chosen.kind == "free_text":
+        print("Write your own commitment for this week.")
+        try:
+            display_text = prompt_free_text()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+    else:
+        display_text = chosen.text
+
+    prior = store.latest_follow_up()
+    follow_up = build_user_chosen_follow_up(
+        week_iso=week_iso,
+        suggestion=chosen,
+        display_text=display_text,
+        prior=prior,
+    )
+    try:
+        if replace_prior_id is not None:
+            store.supersede_and_insert_follow_up(
+                prior_id=replace_prior_id, new_follow_up=follow_up
+            )
+        else:
+            store.insert_follow_up(follow_up)
+    except sqlite3.IntegrityError:
+        # Defensive: the partial-unique index fired despite the replace
+        # gate above (e.g. a concurrent write between our checks). Surface
+        # a friendly hint instead of a traceback.
+        print()
+        print(
+            f"You already have an active commitment for {week_iso}. "
+            "Re-run `praxis commit` to retry."
+        )
+        return 0
+
+    print(f'Your commitment for {week_iso}:')
+    print(f'  "{display_text}"')
+    return 0
+
+
 def cmd_follow_up(args: argparse.Namespace) -> int:  # noqa: ARG001
     """Print the most recent weekly commitment status.
 
@@ -807,6 +1126,87 @@ def cmd_follow_up(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+def _resolve_active_commitment(week_iso: str) -> FollowUp | None:
+    """Return the single active commitment for ``week_iso``, or None.
+
+    Raises ``RuntimeError`` when more than one active row exists -- that's
+    the "would only happen if the unique index was bypassed" case in the
+    spec (US-016 AC #3). Surfacing it loud is the whole point: silently
+    picking one would mask the corrupted invariant.
+    """
+    store = ProfileStore()
+    commitments = store.load_active_commitments(week_iso)
+    if len(commitments) > 1:
+        raise RuntimeError(
+            f"praxis nudge: {len(commitments)} active commitments found for "
+            f"{week_iso}; expected at most one (active = outcome='pending' "
+            "AND superseded_by IS NULL). The follow_ups unique-index "
+            "invariant has been violated."
+        )
+    return commitments[0] if commitments else None
+
+
+def cmd_nudge(args: argparse.Namespace) -> int:
+    """Print this week's active commitment, or stay silent.
+
+    Resolves the single follow_ups row for the current ISO week that has
+    ``outcome='pending'`` (and, once the schema-migrations columns land,
+    ``superseded_by IS NULL``). The ``--format`` flag selects the surface:
+
+      text         (default) ``[Praxis] This week: <commitment>`` + newline,
+                   for human-readable shell / terminal surfaces.
+      claude-code  ``{"hookSpecificOutput":{"additionalContext":"[Praxis] ``
+                   ``This week's focus: <commitment>"}}`` (single-line JSON,
+                   for Claude Code SessionStart hooks per spec section 5).
+      codex        Same JSON shape as claude-code (Codex SessionStart hooks
+                   share the additionalContext envelope per spec section 5).
+
+    Throttling (US-018): the first action is a check against
+    ``~/.praxis/.last_nudge`` -- if the same (surface, cwd) fired within
+    ``[nudge].throttle_minutes`` (default 30) the command exits 0 with empty
+    stdout and never opens the DB. A successful surfacing writes a fresh
+    timestamp into that file, keyed by ``f"{surface}:{sha1(cwd)}"``.
+
+    Exit codes:
+      0  active commitment printed, or no active commitment (silent),
+         or throttled (silent).
+      4  invariant violated: more than one active row for the current week.
+    """
+    fmt = getattr(args, "format", "text")
+    surface = getattr(args, "surface", "cli")
+
+    # Throttle check runs BEFORE any DB access so a throttled call stays
+    # cheap (one stat + one read of the small JSON file) and never opens
+    # profile.db. The malformed-JSON recovery happens inside is_throttled.
+    cfg = load_config()
+    if is_throttled(surface, throttle_minutes=cfg.nudge.throttle_minutes):
+        return 0
+
+    week_iso = current_iso_week()
+    try:
+        active = _resolve_active_commitment(week_iso)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 4
+    if active is None:
+        # No commitment to surface: don't record a fire, otherwise the
+        # next legitimate cue (once the user commits) would be throttled
+        # away. Silent-no-op surfaces remain free to retry on every hook.
+        return 0
+    display_text = active.commitment_text
+    if fmt == "text":
+        print(f"[Praxis] This week: {display_text}")
+    else:
+        payload = {
+            "hookSpecificOutput": {
+                "additionalContext": f"[Praxis] This week's focus: {display_text}",
+            },
+        }
+        print(json.dumps(payload, separators=(",", ":")))
+    record_fire(surface)
+    return 0
+
+
 def cmd_rubric(args: argparse.Namespace) -> int:  # noqa: ARG001
     print("\nPRAXIS — SCORING RUBRIC\n")
     for d in RUBRIC:
@@ -817,8 +1217,758 @@ def cmd_rubric(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+_REFLECT_PROMPT_HEADER = 'Did you focus on: "{display_text}"'
+_REFLECT_OPTIONS_HINT = "  [y]es / [n]o / [p]artial / [s]kip"
+_REFLECT_NOTE_PROMPT = "Optional one-line note (press Enter to skip): "
+_REFLECT_NO_COMMITMENT_MSG = (
+    "No active commitment this week. Run `praxis commit` to start."
+)
+
+# US-025 (--session-end with stdin payload). The 100ms timeout matches
+# the AC: AI tools post the Stop-hook JSON payload immediately on
+# session end and we must not block them. Notes are user-readable so
+# the digest panel can explain why an opt-out row landed.
+_HOOK_TIMEOUT_SECONDS = 0.1
+_HOOK_PAYLOAD_MISSING_NOTE = "hook payload missing or unparseable"
+_HOOK_PAYLOAD_NO_SESSION_NOTE = "hook payload missing session_id"
+
+# US-026 (threshold gating). When the AI tool's Stop hook fires we
+# only escalate to an interactive prompt if the session was long enough
+# to be worth reflecting on; shorter sessions write a 'skip' row with
+# the corresponding note so opt-outs / nuisance sessions are still
+# counted in the digest panel.
+_TRANSCRIPT_MISSING_NOTE = "transcript missing"
+_SESSION_TOO_SHORT_NOTE = "session too short"
+
+# US-027 (detached child). When the parent process is not attached to a
+# terminal (the Stop-hook case), the prompt is delegated to a detached
+# child that opens /dev/tty (POSIX) or CONIN$/CONOUT$ (Windows) on its
+# own. If the child cannot reach a controlling terminal, it writes a
+# 'parent terminal closed' skip row so the session is still observable.
+_PARENT_TERMINAL_CLOSED_NOTE = "parent terminal closed"
+_SPAWN_FAILED_NOTE = "failed to spawn reflect child"
+
+_SELF_REPORT_BY_CHOICE: dict[str, SelfReport] = {
+    "y": "yes",
+    "yes": "yes",
+    "n": "no",
+    "no": "no",
+    "p": "partial",
+    "partial": "partial",
+    "s": "skip",
+    "skip": "skip",
+}
+
+
+def _read_self_report_choice(stream: Any) -> SelfReport | None:
+    """Read one line from ``stream`` and map to a self_report value.
+
+    Returns None on EOF / empty input so the caller can decide whether
+    to re-prompt or fall back to 'skip'. Recognized choices are case-
+    insensitive and accept either the single letter or the full word.
+    """
+    raw = stream.readline()
+    if not raw:
+        return None
+    choice = raw.strip().lower()
+    if not choice:
+        return None
+    return _SELF_REPORT_BY_CHOICE.get(choice)
+
+
+def _read_optional_note(stream: Any) -> str | None:
+    """Read one line of optional note text; empty line -> None.
+
+    Only the first line is kept (we strip a trailing newline). Callers
+    pass None for skip; this helper is invoked only on yes/no/partial.
+    """
+    raw = stream.readline()
+    if not raw:
+        return None
+    stripped = raw.rstrip("\r\n").strip()
+    return stripped or None
+
+
+def _read_hook_payload(
+    stream: Any,
+    timeout_seconds: float = _HOOK_TIMEOUT_SECONDS,
+) -> str | None:
+    """Read a Stop-hook JSON payload from ``stream`` within ``timeout_seconds``.
+
+    Returns the raw text (caller parses JSON) or None on timeout / EOF /
+    error. The 100ms default timeout matches the US-025 AC: AI tools
+    post the hook payload immediately on session end and we must not
+    block them. On POSIX the timeout is enforced via ``select.select``;
+    on Windows or on streams without a real file descriptor (test
+    StringIOs), the read is unconditional and returns whatever is
+    available -- in practice the hook closes stdin right after writing
+    so EOF arrives quickly anyway.
+    """
+    fileno: int | None = None
+    try:
+        fileno = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        fileno = None
+
+    if fileno is not None and sys.platform != "win32":
+        try:
+            ready, _, _ = select.select([fileno], [], [], timeout_seconds)
+        except (OSError, ValueError):
+            return None
+        if not ready:
+            return None
+
+    try:
+        data = stream.read()
+    except (OSError, ValueError):
+        return None
+    if not data:
+        return None
+    if isinstance(data, bytes):
+        try:
+            data = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    return data
+
+
+def _parse_hook_payload(raw: str | None) -> dict[str, Any] | None:
+    """Parse a hook payload string. None on missing / malformed.
+
+    Duck-typed: we accept any top-level JSON object regardless of which
+    keys are present. The caller decides whether the required fields
+    for Claude Code (session_id, transcript_path, cwd, hook_event_name)
+    or Codex (session_id, cwd, hook_event_name) are satisfied.
+    """
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    try:
+        payload = json.loads(stripped)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _extract_session_id(payload: dict[str, Any]) -> str | None:
+    """Pluck ``session_id`` from a hook payload if it's a non-empty string.
+
+    Both Claude Code and Codex shapes name this field identically, so
+    the duck-typed check on ``session_id`` covers both providers
+    without per-shape branching.
+    """
+    sid = payload.get("session_id")
+    if isinstance(sid, str) and sid.strip():
+        return sid
+    return None
+
+
+def _extract_transcript_path(payload: dict[str, Any]) -> Path | None:
+    """Return the transcript_path from a hook payload as a Path.
+
+    Claude Code's Stop hook posts ``transcript_path`` pointing at a
+    JSONL file on disk; Codex's Stop hook omits this field entirely.
+    Returns None when the field is absent, blank, or not a string so
+    callers can distinguish "no transcript was sent" (Codex shape) from
+    "transcript was sent but unreadable" (Claude shape, file missing).
+    """
+    raw = payload.get("transcript_path")
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    return Path(text)
+
+
+def _read_transcript_stats(transcript_path: Path) -> tuple[int, float] | None:
+    """Return ``(user_turns, elapsed_seconds)`` for a Claude Code transcript.
+
+    The transcript is the JSONL file Claude Code posts as
+    ``transcript_path`` in its Stop hook. Each line is one event; we
+    only care about two facts:
+
+      * how many ``type == "user"`` entries had non-empty content (the
+        "user turns" the AC counts), and
+      * the elapsed time between the earliest and latest ``timestamp``
+        on the file (any entry contributes its timestamp, not just user
+        turns -- the user can sit idle while the assistant works).
+
+    Returns ``None`` if the file can't be opened (the caller treats
+    this the same as 'transcript missing'). Malformed JSON lines are
+    skipped silently so a partially-written transcript doesn't blow up
+    the read; elapsed time falls back to 0.0 when there are no
+    timestamps. The parser is intentionally tolerant: this code path
+    runs under the Stop hook and we must never crash the AI tool.
+    """
+    user_turns = 0
+    first_ts: datetime | None = None
+    last_ts: datetime | None = None
+
+    try:
+        with transcript_path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    entry = json.loads(stripped)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+
+                if entry.get("type") == "user":
+                    message = entry.get("message") or {}
+                    content = message.get("content") if isinstance(message, dict) else None
+                    if _has_user_text(content):
+                        user_turns += 1
+
+                ts_raw = entry.get("timestamp")
+                if isinstance(ts_raw, str):
+                    try:
+                        ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                    except (TypeError, ValueError):
+                        ts = None
+                    if ts is not None:
+                        if first_ts is None or ts < first_ts:
+                            first_ts = ts
+                        if last_ts is None or ts > last_ts:
+                            last_ts = ts
+    except OSError:
+        return None
+
+    if first_ts is not None and last_ts is not None:
+        elapsed = (last_ts - first_ts).total_seconds()
+    else:
+        elapsed = 0.0
+    return (user_turns, elapsed)
+
+
+def _has_user_text(content: object) -> bool:
+    """Best-effort check that a Claude Code ``message.content`` has text.
+
+    Claude Code's content is either a plain string or a list of typed
+    blocks ({type: "text", text: ...} et al.). We count the turn as a
+    real user turn only if at least one text block has non-whitespace
+    characters -- empty 'system' frames (tool_use_result with no text)
+    shouldn't bump the user-turn count.
+    """
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str) and text.strip():
+                    return True
+    return False
+
+
+def cmd_reflect(args: argparse.Namespace) -> int:
+    """Reflect on this week's active commitment.
+
+    Three modes:
+      * Interactive (default, US-024): prompt [y]es / [n]o / [p]artial /
+        [s]kip on stdin, then accept an optional one-line note. Inserts
+        one row into ``session_reflections`` so opt-outs are still
+        counted.
+      * --session-end (US-025/US-026): read a JSON Stop-hook payload
+        from stdin (Claude Code or Codex shape) within a 100ms timeout
+        and either persist a skip row (degenerate payload / threshold
+        gate fail) or spawn a detached child for the interactive prompt
+        (US-027). Never blocks the AI tool; every code path exits 0.
+      * --child (US-027): re-entry point used by the detached child
+        spawn. Opens /dev/tty (POSIX) or CONIN$/CONOUT$ (Windows),
+        reuses ``_run_interactive_reflect`` against those streams, and
+        falls back to a 'parent terminal closed' skip row if no
+        controlling terminal is available.
+
+    Exit codes (interactive mode):
+      0 -- a reflection row was inserted, or no active commitment
+           exists for the current week (silent no-op with a hint).
+      1 -- input parsing gave up (>3 invalid choices) or the
+           commitment invariant was violated.
+
+    The --session-end and --child branches NEVER return exit code 2:
+    Claude Code interprets exit 2 as a 'block' signal that aborts the
+    AI tool's session; reflect must stay out of that codespace.
+    """
+    if getattr(args, "child", False):
+        return _cmd_reflect_child(args)
+    if getattr(args, "session_end", False):
+        return _cmd_reflect_session_end(sys.stdin)
+
+    store = ProfileStore()
+    week_iso = current_iso_week()
+    try:
+        active = store.load_active_commitment(week_iso)
+    except MultipleActiveCommitmentsError as exc:
+        print(f"praxis reflect: {exc}", file=sys.stderr)
+        return 1
+
+    if active is None:
+        print(_REFLECT_NO_COMMITMENT_MSG)
+        return 0
+
+    return _run_interactive_reflect(store, active, sys.stdin, sys.stdout)
+
+
+def _cmd_reflect_session_end(stdin: Any) -> int:
+    """Handle ``praxis reflect --session-end``: parse a Stop-hook JSON
+    payload from stdin and persist a reflection row.
+
+    Never blocks the AI tool: every code path exits 0. When the payload
+    is missing, malformed, or has no session_id, a skip row is still
+    written with a descriptive note so opt-outs / hook failures are
+    counted in the digest panel. When the payload includes a
+    ``transcript_path`` (Claude Code shape), US-026 threshold gating
+    checks the transcript before reaching the happy path:
+
+      * file missing on disk -> skip + 'transcript missing'.
+      * user_turns < turns_min OR elapsed_seconds < elapsed_seconds_min
+        -> skip + 'session too short'.
+
+    Codex-shape payloads (no transcript_path) bypass the threshold gate.
+
+    Happy path (US-027): spawn a detached child via ``subprocess.Popen``
+    with ``start_new_session=True`` (POSIX) /
+    ``CREATE_NEW_PROCESS_GROUP`` (Windows). The parent returns 0
+    immediately so the AI tool's hook completes within the timeout. The
+    child opens /dev/tty (or CONIN$/CONOUT$) and runs the interactive
+    prompt; if the spawn fails (no praxis binary, OS rejection), the
+    parent writes a fallback skip row so the session is still
+    observable.
+
+    Exit code is always 0 -- the AI tool must not see a block signal.
+    """
+    store = ProfileStore()
+    week_iso = current_iso_week()
+    try:
+        active = store.load_active_commitment(week_iso)
+    except MultipleActiveCommitmentsError:
+        # Can't pick a follow_up_id without violating the invariant.
+        # Silent exit 0 -- printing to stderr here would pollute the
+        # AI tool's session log.
+        return 0
+    if active is None:
+        # Nothing to reflect on this week. Silent exit 0.
+        return 0
+
+    raw = _read_hook_payload(stdin)
+    payload = _parse_hook_payload(raw)
+    fallback_stable_id = f"session-end:{week_iso}"
+    if payload is None:
+        store.insert_session_reflection(
+            session_stable_id=fallback_stable_id,
+            follow_up_id=active.follow_up_id,
+            self_report="skip",
+            note=_HOOK_PAYLOAD_MISSING_NOTE,
+        )
+        return 0
+
+    session_id = _extract_session_id(payload)
+    if session_id is None:
+        store.insert_session_reflection(
+            session_stable_id=fallback_stable_id,
+            follow_up_id=active.follow_up_id,
+            self_report="skip",
+            note=_HOOK_PAYLOAD_NO_SESSION_NOTE,
+        )
+        return 0
+
+    transcript_path = _extract_transcript_path(payload)
+    if transcript_path is not None:
+        reflect_cfg = _load_reflect_config()
+        gate_note = _check_transcript_threshold(transcript_path, reflect_cfg)
+        if gate_note is not None:
+            store.insert_session_reflection(
+                session_stable_id=session_id,
+                follow_up_id=active.follow_up_id,
+                self_report="skip",
+                note=gate_note,
+            )
+            return 0
+
+    # Happy path: spawn the detached child and return 0 immediately.
+    # The child opens its own TTY and writes the row. We don't .wait()
+    # the child so the parent unblocks within the OS spawn time.
+    cwd_value = payload.get("cwd")
+    cwd_str: str | None = cwd_value if isinstance(cwd_value, str) and cwd_value else None
+    spawned = _spawn_reflect_child(
+        follow_up_id=active.follow_up_id,
+        session_id=session_id,
+        transcript_path=transcript_path,
+        cwd=cwd_str,
+    )
+    if not spawned:
+        # Spawn failed (no praxis binary on PATH, OS rejected the
+        # process, etc.). Fall back to a skip row so the session is
+        # still observable instead of silently lost.
+        store.insert_session_reflection(
+            session_stable_id=session_id,
+            follow_up_id=active.follow_up_id,
+            self_report="skip",
+            note=_SPAWN_FAILED_NOTE,
+        )
+    return 0
+
+
+def _spawn_reflect_child(
+    *,
+    follow_up_id: int,
+    session_id: str,
+    transcript_path: Path | None,
+    cwd: str | None,
+) -> bool:
+    """Spawn the detached child for the interactive reflect prompt.
+
+    The child runs ``praxis reflect --child --follow-up-id <id>
+    --session-id <sid>`` (plus optional --transcript-path / --cwd) in
+    its own process group / session, with stdin/stdout/stderr pointed
+    at /dev/null. The child re-opens /dev/tty (POSIX) or
+    CONIN$/CONOUT$ (Windows) to talk to the user.
+
+    Returns True on successful spawn; False on OSError so the caller
+    can write a fallback skip row. Tests monkeypatch this function to
+    capture spawn invocations without creating real subprocesses.
+
+    The Popen call returns immediately -- we deliberately do NOT call
+    .wait(), so the parent returns within the OS spawn time (well
+    under the 5s hook_timeout_seconds budget on any modern system).
+    """
+    argv = _resolve_reflect_child_command() + [
+        "reflect",
+        "--child",
+        "--follow-up-id",
+        str(follow_up_id),
+        "--session-id",
+        session_id,
+    ]
+    if transcript_path is not None:
+        argv.extend(["--transcript-path", str(transcript_path)])
+    if cwd:
+        argv.extend(["--cwd", cwd])
+
+    popen_kwargs: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if sys.platform == "win32":
+        # CREATE_NEW_PROCESS_GROUP detaches from the parent's console
+        # so the child survives parent exit and the AI tool isn't
+        # blocked waiting for descendant processes.
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        popen_kwargs["creationflags"] = creationflags
+    else:
+        # start_new_session calls setsid() so the child becomes its own
+        # session leader and can open /dev/tty as the controlling
+        # terminal (Claude Code's Stop hook closes the parent's stdin
+        # but the user's terminal is still reachable).
+        popen_kwargs["start_new_session"] = True
+
+    try:
+        subprocess.Popen(argv, **popen_kwargs)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _resolve_reflect_child_command() -> list[str]:
+    """Return the argv prefix that re-launches ``praxis`` for the child.
+
+    Mirrors ``install_weekly._resolve_praxis_command``: prefer the
+    installed console script, fall back to ``[sys.executable, '-m',
+    'praxis.cli']`` so editable / venv installs still work.
+    """
+    found = shutil.which("praxis")
+    if found:
+        return [found]
+    return [sys.executable, "-m", "praxis.cli"]
+
+
+def _cmd_reflect_child(args: argparse.Namespace) -> int:
+    """Run the interactive prompt as the detached child (US-027).
+
+    The parent process spawned us with explicit ``--follow-up-id`` and
+    ``--session-id`` so we don't have to re-resolve the active
+    commitment. We open /dev/tty (POSIX) or CONIN$/CONOUT$ (Windows) for
+    stdin/stdout; when no controlling terminal is available (parent's
+    terminal closed before we got there), we still write a 'parent
+    terminal closed' skip row so the session is observable.
+
+    Exit codes (always 0 in practice):
+      0 -- a reflection row was inserted (interactive write OR the
+           fallback 'parent terminal closed' skip).
+
+    We never return exit code 2 -- the AI tool already moved on, but we
+    keep reflect's exit codes inside {0, 1} to honor the same contract
+    the parent does.
+    """
+    follow_up_id = int(getattr(args, "follow_up_id", 0) or 0)
+    session_id = str(getattr(args, "session_id", "") or "")
+    transcript_path = getattr(args, "transcript_path", None)
+    cwd = getattr(args, "cwd", None)
+    # transcript_path and cwd are accepted for forward-compat with
+    # richer prompts (we may show the cwd in the question); the
+    # underscored locals quiet the unused-variable warning today.
+    _ = transcript_path
+    _ = cwd
+
+    store = ProfileStore()
+    if follow_up_id <= 0 or not session_id:
+        # Defensive: a malformed invocation shouldn't crash the child.
+        return 0
+
+    active = store.load_commitment_by_id(follow_up_id)
+    if active is None:
+        # The commitment was removed between parent spawn and child
+        # start; nothing to prompt about.
+        return 0
+
+    tty_stdin, tty_stdout = _open_controlling_terminal()
+    if tty_stdin is None or tty_stdout is None:
+        # No controlling terminal reachable. Write a skip row so the
+        # session is still observable in the digest panel.
+        store.insert_session_reflection(
+            session_stable_id=session_id,
+            follow_up_id=follow_up_id,
+            self_report="skip",
+            note=_PARENT_TERMINAL_CLOSED_NOTE,
+        )
+        return 0
+
+    try:
+        # _run_interactive_reflect writes 'manual:<week>' as the stable
+        # id today; override it to the real session_id so the row
+        # joins back to the AI tool's session.
+        return _run_interactive_reflect_with_session(
+            store,
+            active,
+            tty_stdin,
+            tty_stdout,
+            session_stable_id=session_id,
+        )
+    finally:
+        for stream in (tty_stdin, tty_stdout):
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
+def _open_controlling_terminal() -> tuple[Any, Any]:
+    """Open the controlling terminal for read+write.
+
+    Returns ``(stdin_stream, stdout_stream)`` on success, ``(None,
+    None)`` if no TTY is reachable. POSIX uses /dev/tty; Windows uses
+    CONIN$ / CONOUT$ (the special device names the console subsystem
+    exposes for the current console).
+
+    Best-effort: any OSError (no controlling terminal, permissions,
+    closed-stdin under daemon-style spawn) returns the (None, None)
+    sentinel so the caller falls back to the 'parent terminal closed'
+    skip row.
+    """
+    if sys.platform == "win32":
+        try:
+            stdin_stream = open("CONIN$", "r", encoding="utf-8")
+        except OSError:
+            return (None, None)
+        try:
+            stdout_stream = open("CONOUT$", "w", encoding="utf-8")
+        except OSError:
+            try:
+                stdin_stream.close()
+            except OSError:
+                pass
+            return (None, None)
+        return (stdin_stream, stdout_stream)
+
+    try:
+        stdin_stream = open("/dev/tty", "r", encoding="utf-8")
+    except OSError:
+        return (None, None)
+    try:
+        stdout_stream = open("/dev/tty", "w", encoding="utf-8")
+    except OSError:
+        try:
+            stdin_stream.close()
+        except OSError:
+            pass
+        return (None, None)
+    return (stdin_stream, stdout_stream)
+
+
+def _run_interactive_reflect_with_session(
+    store: ProfileStore,
+    active: ActiveCommitment,
+    stdin: Any,
+    stdout: Any,
+    *,
+    session_stable_id: str,
+) -> int:
+    """Same as ``_run_interactive_reflect`` but stamps a custom session id.
+
+    Used by the US-027 child so the row joins back to the AI tool's
+    real session id rather than the ``manual:<week>`` placeholder the
+    bare-interactive path uses.
+    """
+    print(
+        _REFLECT_PROMPT_HEADER.format(display_text=active.display_text),
+        file=stdout,
+    )
+    print(_REFLECT_OPTIONS_HINT, file=stdout)
+    stdout.flush()
+
+    choice: SelfReport | None = None
+    for _ in range(3):
+        choice = _read_self_report_choice(stdin)
+        if choice is not None:
+            break
+        print(
+            "Please answer with y, n, p, or s.",
+            file=stdout,
+        )
+        stdout.flush()
+    if choice is None:
+        # Child cannot reach a valid answer. Write a skip row so the
+        # session is still observable -- the parent already returned
+        # so we never affect the AI tool's exit code.
+        store.insert_session_reflection(
+            session_stable_id=session_stable_id,
+            follow_up_id=active.follow_up_id,
+            self_report="skip",
+            note=_PARENT_TERMINAL_CLOSED_NOTE,
+        )
+        return 0
+
+    note: str | None = None
+    if choice != "skip":
+        print(_REFLECT_NOTE_PROMPT, end="", file=stdout)
+        stdout.flush()
+        note = _read_optional_note(stdin)
+
+    store.insert_session_reflection(
+        session_stable_id=session_stable_id,
+        follow_up_id=active.follow_up_id,
+        self_report=choice,
+        note=note,
+    )
+    print(f"Recorded reflection: {choice}", file=stdout)
+    return 0
+
+
+def _load_reflect_config() -> ReflectConfig:
+    """Load the [reflect] section, falling back to defaults on errors.
+
+    A malformed ``~/.praxis/config.toml`` (invalid TOML, negative
+    threshold, etc.) MUST NOT crash the Stop hook -- the AI tool sees a
+    non-zero exit as a block signal. We swallow any load error and use
+    the documented defaults so the gate still applies sensibly.
+    """
+    try:
+        return load_config().reflect
+    except (OSError, ValueError, TypeError):
+        return ReflectConfig()
+
+
+def _check_transcript_threshold(
+    transcript_path: Path,
+    cfg: ReflectConfig,
+) -> str | None:
+    """Return the skip-note for a sub-threshold transcript, else None.
+
+    The two branches encode the AC for US-026:
+      * file missing on disk -> 'transcript missing'
+      * stats below either threshold -> 'session too short'
+      * meets both thresholds -> None (caller falls through to the
+        happy path)
+    """
+    if not transcript_path.is_file():
+        return _TRANSCRIPT_MISSING_NOTE
+    stats = _read_transcript_stats(transcript_path)
+    if stats is None:
+        # Unreadable transcript: treat as 'missing' so the user-facing
+        # note matches the AC's wording.
+        return _TRANSCRIPT_MISSING_NOTE
+    user_turns, elapsed_seconds = stats
+    if user_turns < cfg.turns_min or elapsed_seconds < cfg.elapsed_seconds_min:
+        return _SESSION_TOO_SHORT_NOTE
+    return None
+
+
+def _run_interactive_reflect(
+    store: ProfileStore,
+    active: ActiveCommitment,
+    stdin: Any,
+    stdout: Any,
+) -> int:
+    """Drive the interactive prompt against the given streams.
+
+    Split out from ``cmd_reflect`` so tests can pass in StringIOs
+    without monkeypatching sys.stdin/stdout and so the --session-end
+    detached-child code path (US-027) can reuse it against /dev/tty.
+    """
+    print(
+        _REFLECT_PROMPT_HEADER.format(display_text=active.display_text),
+        file=stdout,
+    )
+    print(_REFLECT_OPTIONS_HINT, file=stdout)
+    stdout.flush()
+
+    # Allow a few retries on invalid choices to forgive typos, but
+    # don't loop forever -- a piped/EOF stream must terminate.
+    choice: SelfReport | None = None
+    for _ in range(3):
+        choice = _read_self_report_choice(stdin)
+        if choice is not None:
+            break
+        print(
+            "Please answer with y, n, p, or s.",
+            file=stdout,
+        )
+        stdout.flush()
+    if choice is None:
+        print(
+            "praxis reflect: no valid choice received; aborting "
+            "without writing a reflection.",
+            file=sys.stderr,
+        )
+        return 1
+
+    note: str | None = None
+    if choice != "skip":
+        print(_REFLECT_NOTE_PROMPT, end="", file=stdout)
+        stdout.flush()
+        note = _read_optional_note(stdin)
+
+    # No associated AI session in the interactive path (US-024). Mark
+    # the row as 'manual:<iso-week>' so reports can distinguish opt-in
+    # reflections from session-end reflections (US-025). The id is
+    # human-readable but not unique on its own; session_reflections.id
+    # (the autoincrement PK) is the real key.
+    session_stable_id = f"manual:{active.follow_up.week_iso}"
+    store.insert_session_reflection(
+        session_stable_id=session_stable_id,
+        follow_up_id=active.follow_up_id,
+        self_report=choice,
+        note=note,
+    )
+    print(f"Recorded reflection: {choice}", file=stdout)
+    return 0
+
+
 def cmd_install_weekly(args: argparse.Namespace) -> int:  # noqa: ARG001
-    """Generate and load the macOS LaunchAgent for ``praxis week --notify``.
+    """Generate and load the macOS LaunchAgent for ``praxis review --notify``.
 
     On macOS, writes ``~/Library/LaunchAgents/co.praxis.weekly.plist``
     with the day/time from ``~/.praxis/config.toml`` and loads it via
@@ -1015,6 +2165,53 @@ def cmd_uninstall_weekly(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+def cmd_install_coach(args: argparse.Namespace) -> int:
+    """Detect supported AI coding tools and install the coaching hooks.
+
+    Per AC US-028: prompts ``Found <Tool>. Install the Praxis coaching
+    hook? [Y/n]:`` for each detected tool. ``--yes`` skips prompting;
+    ``--tool NAME`` restricts to a single tool (still prompts unless
+    paired with ``--yes``); ``--all`` proceeds regardless of detection
+    (and is mutually exclusive with ``--tool``).
+
+    Exit codes:
+      0  -- happy path, including the "no tools detected" branch.
+      1  -- invalid ``--tool`` argument.
+    """
+    from praxis.cli.install_coach import run_install_coach
+
+    return run_install_coach(
+        assume_yes=getattr(args, "yes", False),
+        tool=getattr(args, "tool", None),
+        all_tools=getattr(args, "all", False),
+    )
+
+
+def cmd_uninstall_coach(args: argparse.Namespace) -> int:
+    """Symmetric teardown of the coaching hooks installed by ``install-coach``.
+
+    Per AC US-032: removes only blocks/entries carrying
+    ``_praxisManaged: true`` (Claude Code, Codex) or bounded by the
+    ``praxisManaged`` markdown markers (Copilot); user-authored content
+    at the same event names is preserved. ``--yes`` skips prompts;
+    ``--tool NAME`` restricts to one tool; ``--all`` iterates every
+    known tool regardless of detection. On a system where Praxis was
+    never installed (no managed content anywhere) the command prints
+    ``Nothing to uninstall.`` and exits 0 without any file writes.
+
+    Exit codes:
+      0  -- happy path (including the "nothing to uninstall" branch).
+      1  -- invalid ``--tool`` argument.
+    """
+    from praxis.cli.install_coach import run_uninstall_coach
+
+    return run_uninstall_coach(
+        assume_yes=getattr(args, "yes", False),
+        tool=getattr(args, "tool", None),
+        all_tools=getattr(args, "all", False),
+    )
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     from praxis.config_cli import (
         ConfigCLIError,
@@ -1105,29 +2302,119 @@ def cmd_models(args: argparse.Namespace) -> int:
             print(f"    {card.id.ljust(28)} {card.tier.ljust(12)} {card.display_name}")
         print()
     print(f"Custom cards: drop JSON files in {resolve_home() / 'model_cards'}")
-    print(f"Inspect one card: praxis models --show <id>")
+    print("Inspect one card: praxis models --show <id>")
+    return 0
+
+
+_LOOP_HELP_EPILOG = """\
+Loop:
+  commit                  Pick this week's focus (Commit step).
+  nudge                   Print the active commitment for in-session cueing (Cue step).
+  reflect                 Post-session check-in (Reflect step).
+  review                  Render this week's digest (Review step; was 'week' in v0.2).
+  install-coach           Wire the loop into Claude Code / Codex / Copilot.
+
+More:
+  scan                    Scan + score newly-discovered sessions (no digest render).
+  re-score                Re-run the frontier judge for one session.
+  baseline                Print the current 90-day baseline (read-only).
+  history                 List past weekly digests (read-only).
+  show                    Render a past week's digest from persisted data.
+  report                  Open or print the legacy v0.1 HTML report.
+  open                    Open this week's digest in the browser.
+  last                    Print the latest digest's path / ISO week / trajectory.
+  status                  Show what's been scored, when, and where.
+  rubric                  Print the scoring rubric and weights.
+  follow-up               Show the most recent weekly commitment and its outcome.
+  models                  List or describe the built-in model cards.
+  config                  View / --get / --set ~/.praxis/config.toml.
+  install-weekly          Install the macOS LaunchAgent for `praxis review --notify`.
+  uninstall-weekly        Remove the weekly LaunchAgent.
+  shell-nudge             Print the shell snippet for `eval` in ~/.zshrc / ~/.bashrc.
+  install-shell-nudge     Append the shell-nudge eval line to RC files.
+  uninstall-shell-nudge   Remove the shell-nudge eval line.
+
+Run 'praxis <command> --help' for command-specific options.
+"""
+
+
+class _GroupedSubparsersFormatter(argparse.RawDescriptionHelpFormatter):
+    """Help formatter that hides argparse's auto-generated subparser list.
+
+    Each loop / more subparser is registered with ``help=argparse.SUPPRESS``,
+    but that only blanks the per-row help column; the row itself (and the
+    ``{commit,nudge,...}`` metavar line) still renders. Skipping the
+    ``_SubParsersAction`` here removes the auto-list entirely so the
+    curated ``Loop:`` / ``More:`` epilog is the only canonical listing
+    the user sees in ``praxis --help`` (AC US-044 #1).
+    """
+
+    def _format_action(self, action: argparse.Action) -> str:
+        if isinstance(action, argparse._SubParsersAction):
+            return ""
+        return super()._format_action(action)
+
+
+def cmd_coming_soon(args: argparse.Namespace) -> int:
+    """Stub handler for loop verbs that have not been wired up yet.
+
+    `praxis commit`, `praxis nudge`, `praxis reflect`, and
+    `praxis install-coach` ship as registered subparsers (so they show
+    up in `praxis --help` under the "Loop" heading) but their handlers
+    have not landed yet. Invocations print a friendly note pointing the
+    user at the live `praxis review` verb and exit 0 so scripted users
+    do not see a crash.
+
+    See PLAN.md for the schedule that lands each verb's real handler.
+    """
+    verb = getattr(args, "cmd", "<unknown>")
+    print(
+        f"`praxis {verb}` is part of the Commit -> Cue -> Reflect -> Review "
+        f"loop and is not wired up yet."
+    )
+    print(
+        "Run `praxis review` to render this week's digest; see README.md "
+        "(`## The loop`) for the full plan."
+    )
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="praxis",
-        description="Scan your Claude / Codex / Copilot chat history "
-                    "and score your AI usage against research-backed criteria.",
+        description="Your AI usage coach. Commit -> Cue -> Reflect -> Review.",
+        formatter_class=_GroupedSubparsersFormatter,
+        epilog=_LOOP_HELP_EPILOG,
     )
     p.add_argument("--version", action="version", version=f"praxis {__version__}")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    # ``help=argparse.SUPPRESS`` on every subparser hides the auto-generated
+    # "{commit,nudge,...}" list so the curated epilog above is the canonical
+    # listing the user sees. The ordering of ``add_parser`` calls below is
+    # purely cosmetic in that mode, but we keep loop verbs first so any
+    # downstream tooling that introspects ``sub.choices`` sees them in
+    # narrative order too.
+    sub = p.add_subparsers(dest="cmd", required=True, metavar="<command>")
 
-    week = sub.add_parser(
-        "week",
-        help="Render this week's digest (the v0.2 primary verb).",
+    # --- Loop verb: review ---
+    # The commit / nudge / reflect / install-coach parsers are registered
+    # later in this function (added by their respective branches: US-019,
+    # US-020..023, US-024..027, US-028..032). US-044's "loop verbs first"
+    # surface organisation is reflected in the help text + the README
+    # masthead; we keep `review`'s help visible (rather than SUPPRESS) so
+    # `praxis --help` advertises the primary read verb.
+
+    review = sub.add_parser(
+        "review",
+        help="Render this week's digest (the Review step of the loop).",
         description=(
-            "Render the weekly digest from the current data, or render a "
-            "past week with --week <iso>. The terminal output always "
-            "renders; HTML and notifications are opt-in via flags."
+            "Render this week's digest -- what changed against last week's "
+            "commitment (the Review step of the Commit -> Cue -> Reflect -> "
+            "Review loop). Was named `week` in v0.2; renamed in US-033/US-044 "
+            "to match the README masthead. The terminal output always renders; "
+            "HTML and notifications are opt-in via flags."
         ),
     )
-    week.add_argument(
+    review.add_argument(
         "--week",
         type=str,
         default=None,
@@ -1137,7 +2424,7 @@ def build_parser() -> argparse.ArgumentParser:
             "are skipped; the snapshot is rebuilt from the persisted DB rows."
         ),
     )
-    week.add_argument(
+    review.add_argument(
         "--dry-run",
         action="store_true",
         help=(
@@ -1145,7 +2432,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Useful for previewing the digest against current data."
         ),
     )
-    week.add_argument(
+    review.add_argument(
         "--frontier-only",
         action="store_true",
         help=(
@@ -1154,7 +2441,7 @@ def build_parser() -> argparse.ArgumentParser:
             "flag is wired here so the CLI seam stays stable."
         ),
     )
-    week.add_argument(
+    review.add_argument(
         "--explain-judging",
         action="store_true",
         help=(
@@ -1162,7 +2449,7 @@ def build_parser() -> argparse.ArgumentParser:
             "(spec 9.6). Will note when no distribution was recorded."
         ),
     )
-    week.add_argument(
+    review.add_argument(
         "--notify",
         action="store_true",
         help=(
@@ -1171,7 +2458,7 @@ def build_parser() -> argparse.ArgumentParser:
             "--write-html."
         ),
     )
-    week.add_argument(
+    review.add_argument(
         "--write-html",
         action="store_true",
         help=(
@@ -1179,16 +2466,28 @@ def build_parser() -> argparse.ArgumentParser:
             "(spec 13.1). The terminal render is always printed."
         ),
     )
-    week.set_defaults(func=cmd_week)
+    review.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help=(
+            "Skip the [k]eep / [n]ew / [d]igest prompt that follows the "
+            "terminal masthead (spec section 2). Always implied by the "
+            "scheduled --notify path; pass this flag for scripted runs "
+            "that should never block on stdin."
+        ),
+    )
+    review.set_defaults(func=cmd_review)
+
+    # --- More (operational + read-only) ---
 
     scan = sub.add_parser(
         "scan",
-        help="Scan + score newly-discovered sessions (no digest render).",
+        help=argparse.SUPPRESS,
         description=(
             "Discover new sessions and run the judge against them, "
             "persisting results into ~/.praxis/profile.db. Prints a "
             "one-line summary; the digest itself lives behind "
-            "'praxis week' / 'praxis show <iso>'."
+            "'praxis review' / 'praxis show <iso>'."
         ),
     )
     scan.add_argument("--since-days", type=int, default=30,
@@ -1199,7 +2498,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     rescore = sub.add_parser(
         "re-score",
-        help="Re-run the frontier judge for one session and update its row.",
+        help=argparse.SUPPRESS,
         description=(
             "Look up the persisted session by stable_id, re-parse its "
             "source file, run the frontier judge, and overwrite the row "
@@ -1216,7 +2515,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     base = sub.add_parser(
         "baseline",
-        help="Print the current 90-day baseline (read-only).",
+        help=argparse.SUPPRESS,
         description=(
             "Read-only summary of the 90-day rolling baseline that the "
             "weekly digest panel uses. Renders '--' when the user has "
@@ -1227,7 +2526,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     hist = sub.add_parser(
         "history",
-        help="List past weekly digests, newest first (read-only).",
+        help=argparse.SUPPRESS,
         description=(
             "Enumerate the ISO weeks present in session_scores with "
             "their session count and mean overall score. Drill into one "
@@ -1238,7 +2537,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     show = sub.add_parser(
         "show",
-        help="Render a past week's digest from persisted data (read-only).",
+        help=argparse.SUPPRESS,
         description=(
             "Render the persisted snapshot for the given ISO week "
             "(e.g. 2026-W21). No scanning, no scoring, no writes."
@@ -1252,14 +2551,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     show.set_defaults(func=cmd_show)
 
-    rep = sub.add_parser("report", help="Open or print the legacy v0.1 HTML report.")
+    rep = sub.add_parser("report", help=argparse.SUPPRESS)
     rep.add_argument("--print", action="store_true",
                      help="Print HTML to stdout instead of opening browser.")
     rep.set_defaults(func=cmd_report)
 
     opn = sub.add_parser(
         "open",
-        help="Open this week's digest in the default browser.",
+        help=argparse.SUPPRESS,
         description=(
             "Open ~/.praxis/latest.html (the symlink the daemon updates "
             "on every weekly run). Touches ~/.praxis/.last_opened so the "
@@ -1272,7 +2571,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     lst = sub.add_parser(
         "last",
-        help="Print the latest digest's path, ISO week, and trajectory label.",
+        help=argparse.SUPPRESS,
         description=(
             "Read-only metadata about ~/.praxis/latest.html. Does not "
             "open a browser window. Use --path-only for scripting "
@@ -1283,31 +2582,143 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Print only the absolute path (one line, no labels).")
     lst.set_defaults(func=cmd_last)
 
-    sts = sub.add_parser("status", help="Show current scorecard status.")
+    sts = sub.add_parser("status", help=argparse.SUPPRESS)
     sts.set_defaults(func=cmd_status)
 
-    rub = sub.add_parser("rubric", help="Print the scoring rubric.")
+    rub = sub.add_parser("rubric", help=argparse.SUPPRESS)
     rub.set_defaults(func=cmd_rubric)
 
-    fup = sub.add_parser(
-        "follow-up",
-        help="Show the most recent weekly commitment and its outcome.",
-    )
+    fup = sub.add_parser("follow-up", help=argparse.SUPPRESS)
     fup.set_defaults(func=cmd_follow_up)
 
-    mod = sub.add_parser("models",
-                         help="List model cards or show one in detail.")
+    nudge = sub.add_parser(
+        "nudge",
+        help="Print this week's active commitment (silent when none exists).",
+        description=(
+            "Resolve the single follow_ups row with outcome='pending' for the "
+            "current ISO week and print it on one line. Exits 0 with empty "
+            "stdout when there is no active commitment so hooks (Claude Code "
+            "SessionStart, Codex, shell startup) stay silent until the first "
+            "commitment is recorded."
+        ),
+    )
+    nudge.add_argument(
+        "--format",
+        choices=["text", "claude-code", "codex"],
+        default="text",
+        help=(
+            "Output format. 'text' (default) is a single human-readable line. "
+            "'claude-code' and 'codex' emit a single-line JSON envelope "
+            "({\"hookSpecificOutput\":{\"additionalContext\":...}}) for "
+            "SessionStart hooks per spec section 5."
+        ),
+    )
+    nudge.add_argument(
+        "--surface",
+        type=str,
+        default="cli",
+        help=(
+            "Surface identifier used for throttling. The throttle file "
+            "(~/.praxis/.last_nudge) is keyed by (surface, sha1(cwd)); "
+            "callers using the default share a single throttle entry so "
+            "a shell startup right after a SessionStart hook stays silent."
+        ),
+    )
+    nudge.set_defaults(func=cmd_nudge)
+
+    cmt = sub.add_parser(
+        "commit",
+        help="Pick a coaching commitment for this ISO week.",
+        description=(
+            "Print the numbered commitment-suggestion prompt for the "
+            "current ISO week. Sources: this week's headline moment, "
+            "drills for the two weakest dimensions, an optional "
+            "'Keep last week' option when a still-open commitment "
+            "exists, and the 'Write your own' fallback."
+        ),
+    )
+    cmt.set_defaults(func=cmd_commit)
+
+    rfl = sub.add_parser(
+        "reflect",
+        help=(
+            "Reflect on this week's active commitment "
+            "(interactive 2-question prompt)."
+        ),
+        description=(
+            "Look up the active follow_ups row for the current ISO "
+            "week, prompt the user with the commitment's display_text, "
+            "and record one row in session_reflections (yes / no / "
+            "partial / skip plus an optional one-line note). When no "
+            "active commitment exists for this week, exits 0 with a "
+            "hint to run `praxis commit` first."
+        ),
+    )
+    rfl.add_argument(
+        "--session-end",
+        action="store_true",
+        dest="session_end",
+        help=(
+            "Read a Stop-hook JSON payload from stdin (Claude Code or "
+            "Codex shape) instead of running the interactive prompt. "
+            "Used by editor hooks; never blocks the AI tool. Writes a "
+            "skip row with a descriptive note when the payload is "
+            "missing / malformed / has no session_id, and always exits 0."
+        ),
+    )
+    # The --child path is an internal re-entry point used by the
+    # detached child the parent spawns in --session-end mode (US-027).
+    # The four flags below carry the state the parent resolved so the
+    # child doesn't have to re-derive it from scratch.
+    rfl.add_argument(
+        "--child",
+        action="store_true",
+        dest="child",
+        help=argparse.SUPPRESS,
+    )
+    rfl.add_argument(
+        "--follow-up-id",
+        type=int,
+        default=0,
+        dest="follow_up_id",
+        help=argparse.SUPPRESS,
+    )
+    rfl.add_argument(
+        "--session-id",
+        type=str,
+        default="",
+        dest="session_id",
+        help=argparse.SUPPRESS,
+    )
+    rfl.add_argument(
+        "--transcript-path",
+        type=str,
+        default=None,
+        dest="transcript_path",
+        help=argparse.SUPPRESS,
+    )
+    rfl.add_argument(
+        "--cwd",
+        type=str,
+        default=None,
+        dest="cwd",
+        help=argparse.SUPPRESS,
+    )
+    rfl.set_defaults(func=cmd_reflect)
+
+    mod = sub.add_parser("models", help=argparse.SUPPRESS)
     mod.add_argument("--show", type=str, default=None,
                      help="Show full details for one model card (by id or alias).")
     mod.set_defaults(func=cmd_models)
 
     iw = sub.add_parser(
         "install-weekly",
-        help="Install the macOS LaunchAgent that runs 'praxis week --notify'.",
+        help=argparse.SUPPRESS,
         description=(
             "Generate ~/Library/LaunchAgents/co.praxis.weekly.plist from "
             "the schedule in ~/.praxis/config.toml and load it via "
-            "launchctl. Idempotent. On non-macOS this command prints the "
+            "launchctl, so `praxis review --notify` runs on schedule. "
+            "Idempotent. On non-macOS this command prints the "
             "equivalent snippet without scheduling anything (spec 12.4)."
         ),
     )
@@ -1324,7 +2735,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     uw = sub.add_parser(
         "uninstall-weekly",
-        help="Unload and remove the macOS LaunchAgent installed by install-weekly.",
+        help=argparse.SUPPRESS,
         description=(
             "Run 'launchctl unload' against "
             "~/Library/LaunchAgents/co.praxis.weekly.plist and delete the "
@@ -1335,7 +2746,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sn = sub.add_parser(
         "shell-nudge",
-        help="Print the shell snippet for `eval` in ~/.zshrc / ~/.bashrc.",
+        help=argparse.SUPPRESS,
         description=(
             "Emit a tiny shell function that prints one reminder line "
             "when ~/.praxis/latest.html is fresh and unread. Designed "
@@ -1347,7 +2758,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     isn = sub.add_parser(
         "install-shell-nudge",
-        help="Append the shell-nudge eval line to ~/.zshrc and ~/.bashrc.",
+        help=argparse.SUPPRESS,
         description=(
             "Idempotent. Adds `eval \"$(praxis shell-nudge)\"` to every "
             "existing RC file (zsh and/or bash). Skips files that "
@@ -1356,14 +2767,70 @@ def build_parser() -> argparse.ArgumentParser:
     )
     isn.set_defaults(func=cmd_install_shell_nudge)
 
-    usn = sub.add_parser(
-        "uninstall-shell-nudge",
-        help="Remove the shell-nudge eval line from ~/.zshrc and ~/.bashrc.",
-    )
+    usn = sub.add_parser("uninstall-shell-nudge", help=argparse.SUPPRESS)
     usn.set_defaults(func=cmd_uninstall_shell_nudge)
 
-    cfg = sub.add_parser("config",
-                         help="View, --get, or --set ~/.praxis/config.toml.")
+    ic = sub.add_parser(
+        "install-coach",
+        help="Install the Praxis coaching hooks into your AI coding tools.",
+        description=(
+            "Detect Claude Code / Codex / Copilot and prompt to install "
+            "the SessionStart + Stop coaching hooks for each one. The "
+            "detection criteria are ~/.claude/settings.json or "
+            "~/.claude/projects/ (Claude Code), ~/.codex/ (Codex), and "
+            "any VS Code workspace storage with Copilot chat artifacts "
+            "(Copilot)."
+        ),
+    )
+    ic.add_argument(
+        "--yes", action="store_true",
+        help="Assume yes for every prompt (useful in scripted installs).",
+    )
+    ic_scope = ic.add_mutually_exclusive_group()
+    ic_scope.add_argument(
+        "--tool", type=str, default=None, metavar="NAME",
+        help=(
+            "Restrict to a single tool (claude-code, codex, copilot). "
+            "Still prompts unless --yes is also set."
+        ),
+    )
+    ic_scope.add_argument(
+        "--all", action="store_true",
+        help="Iterate every known tool regardless of detection.",
+    )
+    ic.set_defaults(func=cmd_install_coach)
+
+    uc = sub.add_parser(
+        "uninstall-coach",
+        help="Remove the Praxis coaching hooks from your AI coding tools.",
+        description=(
+            "Remove only blocks/entries carrying the _praxisManaged "
+            "sentinel (Claude Code, Codex) or bounded by the "
+            "praxisManaged markdown markers (Copilot). User-authored "
+            "content at the same event names is preserved. On a system "
+            "where Praxis was never installed, prints 'Nothing to "
+            "uninstall.' and exits 0 without any file writes."
+        ),
+    )
+    uc.add_argument(
+        "--yes", action="store_true",
+        help="Assume yes for every prompt (useful in scripted uninstalls).",
+    )
+    uc_scope = uc.add_mutually_exclusive_group()
+    uc_scope.add_argument(
+        "--tool", type=str, default=None, metavar="NAME",
+        help=(
+            "Restrict to a single tool (claude-code, codex, copilot). "
+            "Still prompts unless --yes is also set."
+        ),
+    )
+    uc_scope.add_argument(
+        "--all", action="store_true",
+        help="Iterate every known tool regardless of detection.",
+    )
+    uc.set_defaults(func=cmd_uninstall_coach)
+
+    cfg = sub.add_parser("config", help=argparse.SUPPRESS)
     cfg_action = cfg.add_mutually_exclusive_group()
     cfg_action.add_argument("--get", type=str, default=None, metavar="KEY",
                             help="Print the value of a dotted key "

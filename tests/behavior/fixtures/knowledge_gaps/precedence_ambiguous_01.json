@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "build me a new feature for the dashboard somehow"},
+  {"role": "assistant", "content": "I need at least a name and a single user need before I start."}
+]

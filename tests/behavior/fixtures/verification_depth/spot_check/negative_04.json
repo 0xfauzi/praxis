@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "What's the right way to set this up for production?"},
+  {"role": "assistant", "content": "Depends on your traffic..."}
+]

@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "What is a closure in JavaScript and when would I use one instead of a class?"},
+  {"role": "assistant", "content": "A closure is..."}
+]

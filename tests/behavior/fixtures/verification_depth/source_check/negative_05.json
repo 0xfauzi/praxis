@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Default tool_calls should be an empty list. Add a unit test for that."},
+  {"role": "assistant", "content": "Got it."}
+]

@@ -1,0 +1,40 @@
+{
+  "branchName": "ralph/factory/repeat-task-detector",
+  "userStories": [
+    {
+      "id": "US-014",
+      "title": "Token-overlap repeat-task detector",
+      "acceptanceCriteria": [
+        "repeat_task.py defines tokenize(s) as lowercase whitespace-split tokens with a documented English stopword list removed; exposes overlap_ratio(a, b) = |a&b| / max(|a|,|b|).",
+        "detect_repeats(clusters, window_days) returns a list of RepeatTask(canonical_first_sentence, occurrences, example_session_ids[]) for any cluster whose first-sentence overlap_ratio >= 0.70 with 2+ other clusters in the window.",
+        "Two clusters with first-sentences of <3 non-stopword tokens are excluded from comparison (too short to overlap meaningfully) and that case is covered by a test.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "Cost-savings hint per repeat",
+      "acceptanceCriteria": [
+        "RepeatTask carries an estimated_minutes_per_occurrence field computed as median session duration across the cluster; the report layer uses it later to render 'a skill could reclaim ~X min/week'.",
+        "detect_repeats returns an empty list when no cluster recurs 3+ times; callers must handle the empty case (no fabricated suggestions).",
+        "An invocation with an empty clusters input returns [] without raising.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    }
+  ],
+  "allowedPaths": [
+    "praxis/behavior/",
+    "praxis/scoring/clustering.py",
+    "tests/",
+    "scripts/ralph/feature/",
+    "scripts/ralph/progress.txt"
+  ]
+}

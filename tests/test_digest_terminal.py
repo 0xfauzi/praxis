@@ -2,14 +2,16 @@
 
 Covers US-066 (80-column hard cap) and US-067 (the three mandatory
 sections always render, with a clear placeholder when an upstream
-input is missing). Later stories (US-068/069) will add their own
-section-specific tests on top of the contracts locked in here.
+input is missing). US-068 / US-069 added the cost ledger, tasks and
+six-dim footer; US-035 added the masthead's commitment block. Each
+story's tests sit in its own labelled section below.
 """
 from __future__ import annotations
 
 import re
 
 from praxis.reports import digest_terminal
+from praxis.reports.commitment_rollup import CommitmentRollup
 from praxis.reports.digest_terminal import (
     MAX_LINE_WIDTH,
     MAX_TASKS_RENDERED,
@@ -26,7 +28,10 @@ from praxis.reports.digest_terminal import (
     _COST_LEDGER_PLACEHOLDER,
     _DIMENSIONS_PLACEHOLDER,
     _FOLLOW_UP_PLACEHOLDER,
+    _GAP_AGREE_LINE,
+    _GAP_DISAGREE_LINE,
     _HEADLINE_MOMENT_PLACEHOLDER,
+    _NO_SESSIONS_LOGGED,
     _TASKS_PLACEHOLDER,
     _TRAJECTORY_PLACEHOLDER,
 )
@@ -1154,7 +1159,16 @@ def test_six_dim_panel_renders_six_body_lines():
     digest = WeeklyDigest(dimensions=_realistic_dimensions())
     text = render(digest)
     panel_start = text.find("THE SIX DIMENSIONS")
-    panel_text = text[panel_start:]
+    # US-038 added a behavioral-patterns panel after the six-dim footer.
+    # Bound the slice between the two eyebrows so this test still
+    # measures only the six-dim rows, ignoring the trailing ANSI/blank
+    # lines that lead into the next eyebrow.
+    next_panel = text.find("BEHAVIORAL PATTERNS", panel_start)
+    if next_panel > -1:
+        line_start = text.rfind("\n", 0, next_panel)
+        panel_text = text[panel_start:line_start if line_start > -1 else next_panel]
+    else:
+        panel_text = text[panel_start:]
     body_lines = [
         line for line in panel_text.split("\n")
         if line.strip()
@@ -1185,3 +1199,1509 @@ def test_six_dim_panel_renders_in_caller_provided_order():
         "renderer must preserve caller's order; "
         f"verification@{verif_pos} should precede planning@{plan_pos}"
     )
+
+
+# ------------------------------------------- US-035 masthead commitment block
+
+
+def _rollup_full(
+    *,
+    display_text: str = (
+        "Before debugging, paste the error + your expected output."
+    ),
+    target_dim_key: str = "verification",
+    sessions_this_week: int = 7,
+    sessions_prior_week: int = 5,
+    self_report_tally: dict[str, int] | None = None,
+    dim_before: dict[str, float] | None = None,
+    dim_after: dict[str, float] | None = None,
+) -> CommitmentRollup:
+    """Fixture: a rollup with every field populated to a plausible week.
+
+    Defaults mirror the spec section 2 example so the masthead
+    assertions below read against the same canonical scenario the spec
+    documents.
+    """
+    return CommitmentRollup(
+        display_text=display_text,
+        target_dim_key=target_dim_key,
+        sessions_this_week=sessions_this_week,
+        sessions_prior_week=sessions_prior_week,
+        self_report_tally=(
+            self_report_tally
+            if self_report_tally is not None
+            else {"yes": 4, "no": 2, "partial": 1, "skip": 0}
+        ),
+        dim_before=dim_before if dim_before is not None else {"verification": 4.8},
+        dim_after=dim_after if dim_after is not None else {"verification": 6.2},
+    )
+
+
+def test_masthead_omits_commitment_block_when_rollup_none():
+    """No active commitment for the week => the block does not render.
+
+    Spec section 2 says the masthead's commitment block is omitted
+    cleanly when there's nothing to roll up; the rest of the digest
+    (trajectory, moment, follow-up, ...) renders unchanged.
+    """
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=None)))
+    assert "Your focus this week:" not in text
+    assert "How it went:" not in text
+    # The masthead title must still render so the digest's structural
+    # shape is preserved.
+    assert "PRAXIS" in text
+
+
+def test_masthead_renders_focus_header_and_quoted_display_text():
+    """The focus block shows the header and the display_text in quotes.
+
+    Spec section 2 lays out the masthead with the focus quote at the
+    top so the reader sees the active commitment immediately.
+    """
+    rollup = _rollup_full()
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "Your focus this week:" in text
+    assert (
+        '"Before debugging, paste the error + your expected output."'
+        in text
+    )
+
+
+def test_masthead_renders_how_it_went_header():
+    """The status block opens with the 'How it went:' header.
+
+    The header is the visual anchor for the four field rows beneath
+    it (Sessions / You said / Data says / Gap).
+    """
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=_rollup_full())))
+    assert "How it went:" in text
+
+
+def test_masthead_sessions_line_includes_this_and_prior_week_counts():
+    """The Sessions row carries both this-week and prior-week counts.
+
+    The '(vs. N last week)' suffix is the direction-of-travel anchor;
+    suppressing either count would leave the reader without context.
+    """
+    rollup = _rollup_full(sessions_this_week=7, sessions_prior_week=5)
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "Sessions:" in text
+    assert "7 (vs. 5 last week)" in text
+
+
+def test_masthead_self_report_tally_lists_nonzero_buckets():
+    """The 'You said' row reads '4 yes / 1 partial / 2 no'.
+
+    Zero-count buckets are dropped to keep the line tight; the spec
+    section 2 example shows only the non-empty buckets ordered
+    yes -> partial -> no.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 4, "partial": 1, "no": 2, "skip": 0}
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "You said:" in text
+    assert "4 yes / 1 partial / 2 no" in text
+
+
+def test_masthead_self_report_tally_drops_zero_buckets():
+    """A single-bucket tally renders just that bucket, not three zeros.
+
+    Avoids the noise of '4 yes / 0 partial / 0 no' when the user has
+    only ticked one box this week.
+    """
+    rollup = _rollup_full(self_report_tally={"yes": 4})
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "4 yes" in text
+    assert "0 partial" not in text
+    assert "0 no" not in text
+
+
+def test_masthead_self_report_tally_empty_shows_no_check_ins_placeholder():
+    """No reflections logged this week => 'no check-ins yet' placeholder.
+
+    A four-zero tally would render as nothing under the bucket-drop
+    rule above; the placeholder keeps the field visible.
+    """
+    rollup = _rollup_full(self_report_tally={"yes": 0, "no": 0, "partial": 0, "skip": 0})
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "no check-ins yet" in text
+
+
+def test_masthead_data_says_includes_dim_title_and_before_after():
+    """The Data says row renders the dim title with X.X -> Y.Y means.
+
+    Resolves the target_dim_key through the rubric so the reader sees
+    'Verification habits' rather than the bare 'verification' key, and
+    pairs the dim_before / dim_after means as a single before -> after
+    transition.
+    """
+    rollup = _rollup_full(
+        dim_before={"verification": 4.8},
+        dim_after={"verification": 6.2},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "Data says:" in text
+    assert "Verification habits" in text
+    assert "4.8 -> 6.2" in text
+
+
+def test_masthead_data_says_annotates_improved_when_delta_significant():
+    """A dim that rose by >= 0.3 reads '(improved)'.
+
+    Locks the significance gate at 0.3 (spec section 8.3) so the
+    masthead annotation matches the six-dim footer's delta arrows.
+    """
+    rollup = _rollup_full(
+        dim_before={"verification": 4.8},
+        dim_after={"verification": 6.2},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "(improved)" in text
+
+
+def test_masthead_data_says_annotates_worse_when_delta_negative():
+    """A dim that fell by >= 0.3 reads '(worse)'."""
+    rollup = _rollup_full(
+        dim_before={"verification": 6.5},
+        dim_after={"verification": 5.0},
+        self_report_tally={"no": 3, "partial": 1},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "(worse)" in text
+
+
+def test_masthead_data_says_annotates_unchanged_inside_noise_band():
+    """A within-noise delta (< 0.3 magnitude) reads '(unchanged)'.
+
+    Mirrors the six-dim footer's behavior of refusing to dress up
+    sub-threshold movement as a real direction.
+    """
+    rollup = _rollup_full(
+        dim_before={"verification": 5.0},
+        dim_after={"verification": 5.1},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "(unchanged)" in text
+
+
+def test_masthead_data_says_baseline_forming_when_no_prior_week():
+    """Without dim_before, the row reads '(baseline forming)'.
+
+    First-week digest has no prior-week mean to compare against; the
+    masthead must surface the current value and explain why no delta
+    is shown rather than inventing one.
+    """
+    rollup = _rollup_full(
+        dim_before={},
+        dim_after={"verification": 6.2},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "6.2" in text
+    assert "baseline forming" in text
+    # No '->' separator when there is no baseline to compare against.
+    masthead_segment = text.split("TRAJECTORY")[0]
+    assert "->" not in masthead_segment
+
+
+def test_masthead_gap_line_agree_when_yes_heavy_and_dim_improved():
+    """Yes-heavy self-report + improved dim => the agree line.
+
+    The user said 'I did it' and the data shows the dim went up; the
+    masthead reports agreement using the verbatim spec-section-2 line.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 4, "no": 1, "partial": 1},
+        dim_before={"verification": 4.5},
+        dim_after={"verification": 6.0},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert _GAP_AGREE_LINE in text
+    assert _GAP_DISAGREE_LINE not in text
+
+
+def test_masthead_gap_line_agree_when_no_heavy_and_dim_unchanged_or_worse():
+    """Honest 'no' tally + no improvement => still agreement.
+
+    The user said 'I didn't do it' and the data confirms no movement;
+    the two signals agree even though neither shows progress.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 1, "no": 4, "partial": 1},
+        dim_before={"verification": 6.0},
+        dim_after={"verification": 4.5},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert _GAP_AGREE_LINE in text
+
+
+def test_masthead_gap_line_disagree_when_yes_heavy_but_dim_worse():
+    """Yes-heavy self-report + dim regressed => the disagree fallback.
+
+    The user claims progress but the data shows the opposite. US-035
+    renders the static neutral phrasing here; US-037 swaps in
+    constrained-judge prose when an API key is available. The literal
+    fallback line wraps across two body rows under the field-label
+    indent, so we assert on the two distinctive substrings rather
+    than the wrap-sensitive full string.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 5, "no": 0, "partial": 0},
+        dim_before={"verification": 6.5},
+        dim_after={"verification": 5.0},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "Self-report and data differ this week." in text
+    assert "curiosity" in text
+    assert _GAP_AGREE_LINE not in text
+
+
+def test_masthead_gap_line_disagree_when_no_heavy_but_dim_improved():
+    """No-heavy self-report + dim improved => the disagree fallback.
+
+    Less common but still a real divergence: the data shows movement
+    the user didn't report. The renderer flags it for curiosity rather
+    than passing it through as 'agreement'.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 0, "no": 4, "partial": 1},
+        dim_before={"verification": 4.0},
+        dim_after={"verification": 6.0},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "Self-report and data differ this week." in text
+    assert "curiosity" in text
+
+
+def test_masthead_gap_line_defaults_to_agree_when_self_report_empty():
+    """Empty tally => default to agreement (no evidence of mismatch).
+
+    Without self-report data we can't claim disagreement honestly. The
+    masthead opts for the neutral 'agree' line rather than the
+    disagreement phrasing.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 0, "no": 0, "partial": 0, "skip": 0},
+        dim_before={"verification": 4.0},
+        dim_after={"verification": 6.0},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert _GAP_AGREE_LINE in text
+
+
+def test_masthead_gap_line_defaults_to_agree_when_dim_baseline_missing():
+    """No prior week => no data signal => default to agreement.
+
+    First-week digest has no comparison; the gap line stays neutral
+    rather than implying a contradiction that cannot be measured.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 5, "no": 0, "partial": 0},
+        dim_before={},
+        dim_after={"verification": 6.0},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert _GAP_AGREE_LINE in text
+
+
+def test_masthead_sessions_zero_renders_no_sessions_line():
+    """Spec acceptance: sessions=0 prints the empty-state line.
+
+    Avoids the divide-by-zero / confusing-zero numeric line by
+    collapsing the 'How it went' block to one explicit message when
+    no sessions were logged this week.
+    """
+    rollup = _rollup_full(
+        sessions_this_week=0,
+        sessions_prior_week=3,
+        self_report_tally={"yes": 0, "no": 0, "partial": 0, "skip": 0},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert _NO_SESSIONS_LOGGED in text
+    # The numeric Sessions / You said / Data says / Gap rows must NOT
+    # render when we've collapsed to the empty-state line.
+    assert "Sessions:" not in text
+    assert "You said:" not in text
+    assert "Data says:" not in text
+    assert "Gap:" not in text
+
+
+def test_masthead_sessions_zero_still_renders_focus_quote():
+    """The focus quote is independent of session count; it always renders.
+
+    Even when no sessions were logged, the user's active commitment
+    sits at the top of the masthead so they remember what they
+    committed to even on a slow week.
+    """
+    rollup = _rollup_full(
+        sessions_this_week=0,
+        display_text="ask before running migrations",
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "Your focus this week:" in text
+    assert '"ask before running migrations"' in text
+
+
+def test_masthead_commitment_block_appears_before_trajectory():
+    """Spec section 2: the commitment block opens the digest.
+
+    The block sits between the masthead title and the trajectory
+    section so the reader sees the active commitment first, before
+    the multi-week behavioral read. A future refactor that reorders
+    these would silently change the editorial cadence.
+    """
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=_rollup_full())))
+    focus_pos = text.find("Your focus this week:")
+    traj_pos = text.find("TRAJECTORY")
+    assert -1 < focus_pos < traj_pos
+
+
+def test_masthead_commitment_block_lines_under_80():
+    """The masthead's commitment block respects the 79-col budget.
+
+    Uses a realistically long display_text and a long dim title to
+    push the wrap path; every emitted line must still measure under
+    the spec section 6.2 cap.
+    """
+    long_display = (
+        "Before any debugging, paste the actual error message verbatim "
+        "AND state the expected output in writing, every single time, "
+        "no exceptions."
+    )
+    rollup = _rollup_full(display_text=long_display)
+    lines = _all_lines(WeeklyDigest(commitment_rollup=rollup))
+    over = [
+        (i, _strip_ansi(line))
+        for i, line in enumerate(lines)
+        if visible_width(line) > MAX_LINE_WIDTH
+    ]
+    assert not over, f"Lines exceed {MAX_LINE_WIDTH} cols: {over}"
+
+
+def test_masthead_commitment_block_unknown_dim_key_does_not_crash():
+    """An unknown target_dim_key falls through to the raw key.
+
+    Mirrors the _dim_title contract elsewhere in the renderer: rubric
+    drift must not crash the masthead; the bare key renders instead
+    so the line still emits.
+    """
+    rollup = _rollup_full(
+        target_dim_key="not_a_real_dim",
+        dim_before={"not_a_real_dim": 4.0},
+        dim_after={"not_a_real_dim": 6.0},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "not_a_real_dim" in text
+
+
+def test_masthead_commitment_block_resilient_to_missing_target_dim_key():
+    """target_dim_key absent from dim_after => dim defaults to 0.0.
+
+    Defensive: a target_dim_key set without populated dim_after must
+    not crash; the renderer treats the missing entry as a zero score
+    so the field still emits.
+    """
+    rollup = _rollup_full(
+        target_dim_key="verification",
+        dim_before={},
+        dim_after={},  # target_dim_key not present
+    )
+    digest = WeeklyDigest(commitment_rollup=rollup)
+    text = _strip_ansi(render(digest))
+    assert "Data says:" in text
+    assert "0.0" in text
+
+
+# --------------------------------------- US-037 gap-judge prose at renderer
+
+
+def test_masthead_gap_line_uses_judge_prose_when_attached():
+    """When a disagree rollup carries gap_prose, the renderer uses it.
+
+    US-037 attaches constrained-judge prose to the rollup upstream; the
+    renderer's job is to surface it under the "Gap:" field instead of
+    the static fallback line.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 5, "no": 0, "partial": 0},
+        dim_before={"verification": 6.5},
+        dim_after={"verification": 4.8},
+    )
+    rollup = CommitmentRollup(
+        display_text=rollup.display_text,
+        target_dim_key=rollup.target_dim_key,
+        sessions_this_week=rollup.sessions_this_week,
+        sessions_prior_week=rollup.sessions_prior_week,
+        self_report_tally=rollup.self_report_tally,
+        dim_before=rollup.dim_before,
+        dim_after=rollup.dim_after,
+        gap_prose="The numbers and your reflections diverged this week.",
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "The numbers and your reflections diverged this week." in text
+    # The static disagree fallback is NOT used when prose is attached.
+    assert _GAP_DISAGREE_LINE not in text
+
+
+def test_masthead_gap_line_truncates_prose_over_two_sentences():
+    """Spec acceptance: prose > 2 sentences renders with the ellipsis cap.
+
+    The renderer applies the documented truncation rather than emitting
+    an unbounded blob; the third sentence onward is replaced with "..."
+    so the reader sees the cut explicitly.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 5, "no": 0, "partial": 0},
+        dim_before={"verification": 6.5},
+        dim_after={"verification": 4.8},
+    )
+    rollup = CommitmentRollup(
+        display_text=rollup.display_text,
+        target_dim_key=rollup.target_dim_key,
+        sessions_this_week=rollup.sessions_this_week,
+        sessions_prior_week=rollup.sessions_prior_week,
+        self_report_tally=rollup.self_report_tally,
+        dim_before=rollup.dim_before,
+        dim_after=rollup.dim_after,
+        gap_prose=(
+            "First short observation. Second short note. Third extra. Fourth."
+        ),
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "First short observation. Second short note..." in text
+    # The third+ sentences must NOT survive truncation.
+    assert "Third extra" not in text
+    assert "Fourth" not in text
+
+
+def test_masthead_gap_line_falls_back_to_static_when_prose_is_none():
+    """No prose on the rollup => the static disagree line still renders.
+
+    The renderer never leaves the Gap field blank: when the judge wasn't
+    called (or returned None) the documented neutral phrasing fires.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 5, "no": 0, "partial": 0},
+        dim_before={"verification": 6.5},
+        dim_after={"verification": 4.8},
+        # gap_prose stays None by default
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "Self-report and data differ this week." in text
+
+
+def test_masthead_gap_line_falls_back_to_static_when_prose_is_empty():
+    """An empty-string prose collapses to the static fallback.
+
+    An empty Gap field would be worse than a documented neutral line;
+    the renderer treats an empty prose the same way it treats a None
+    prose.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 5, "no": 0, "partial": 0},
+        dim_before={"verification": 6.5},
+        dim_after={"verification": 4.8},
+    )
+    rollup = CommitmentRollup(
+        display_text=rollup.display_text,
+        target_dim_key=rollup.target_dim_key,
+        sessions_this_week=rollup.sessions_this_week,
+        sessions_prior_week=rollup.sessions_prior_week,
+        self_report_tally=rollup.self_report_tally,
+        dim_before=rollup.dim_before,
+        dim_after=rollup.dim_after,
+        gap_prose="   ",
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "Self-report and data differ this week." in text
+
+
+def test_masthead_gap_line_ignores_prose_on_agreement():
+    """Prose attached but no disagreement => the agree line still wins.
+
+    The judge would never be called in this case in production
+    (`apply_gap_prose` short-circuits on agreement), but if a future
+    caller attaches prose anyway the renderer must still emit the
+    agree line so the masthead does not accuse the user falsely.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 5, "no": 0, "partial": 0},
+        dim_before={"verification": 4.5},
+        dim_after={"verification": 6.5},
+    )
+    rollup = CommitmentRollup(
+        display_text=rollup.display_text,
+        target_dim_key=rollup.target_dim_key,
+        sessions_this_week=rollup.sessions_this_week,
+        sessions_prior_week=rollup.sessions_prior_week,
+        self_report_tally=rollup.self_report_tally,
+        dim_before=rollup.dim_before,
+        dim_after=rollup.dim_after,
+        gap_prose="A spurious judge prose that should be ignored.",
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert _GAP_AGREE_LINE in text
+    assert "spurious judge prose" not in text
+# -------------------------------------- US-038: behavioral-patterns panel
+
+
+def _behavioral_panel_with_signals():
+    """Build a panel with two populated signals for tests."""
+    from praxis.reports.panel_inputs import (
+        BehavioralPatternRow,
+        BehavioralPatternsPanel,
+    )
+    return BehavioralPatternsPanel(rows=(
+        BehavioralPatternRow(
+            signal_kind="why_question",
+            label="Why-questions",
+            count=4,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+            excerpts=(
+                "why does this approach work for caching?",
+                "why is this slower than the previous version?",
+            ),
+        ),
+        BehavioralPatternRow(
+            signal_kind="pure_delegation",
+            label="Pure delegation",
+            count=2,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+            excerpts=(
+                "write me a function",
+                "make it handle errors",
+            ),
+        ),
+    ))
+
+
+def _empty_behavioral_panel():
+    """Build a panel where every row has count==0 (empty-state path)."""
+    from praxis.reports.panel_inputs import (
+        BehavioralPatternRow,
+        BehavioralPatternsPanel,
+    )
+    return BehavioralPatternsPanel(rows=(
+        BehavioralPatternRow(
+            signal_kind="why_question",
+            label="Why-questions",
+            count=0,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+        ),
+    ))
+
+
+def _panel_inputs(panel):
+    from praxis.reports.panel_inputs import PanelInputs
+    return PanelInputs(behavioral_signals=panel)
+
+
+def test_behavioral_patterns_section_eyebrow_is_present():
+    """The section always renders an eyebrow so the document shape stays
+    stable across empty + populated states (mirrors the other panel
+    placeholders' contract)."""
+    digest = WeeklyDigest(panel_inputs=_panel_inputs(_behavioral_panel_with_signals()))
+    text = _strip_ansi(render(digest))
+    assert "BEHAVIORAL PATTERNS" in text
+
+
+def test_behavioral_patterns_renders_label_and_count():
+    """Each populated row emits 'Label: N times' so the reader sees the
+    raw count alongside the signal label."""
+    digest = WeeklyDigest(panel_inputs=_panel_inputs(_behavioral_panel_with_signals()))
+    text = _strip_ansi(render(digest))
+    assert "Why-questions: 4 times" in text
+    assert "Pure delegation: 2 times" in text
+
+
+def test_behavioral_patterns_renders_excerpts_inline():
+    """Each populated row renders up to two raw user-turn excerpts
+    beneath the count line so the reader can ground the count in
+    actual transcript text."""
+    digest = WeeklyDigest(panel_inputs=_panel_inputs(_behavioral_panel_with_signals()))
+    text = _strip_ansi(render(digest))
+    assert "why does this approach work for caching?" in text
+    assert "write me a function" in text
+
+
+def test_behavioral_patterns_renders_citation_per_row():
+    """The primary source for each signal renders as a small footnote
+    beneath that signal's excerpts (US-038 acceptance)."""
+    digest = WeeklyDigest(panel_inputs=_panel_inputs(_behavioral_panel_with_signals()))
+    text = _strip_ansi(render(digest))
+    assert text.count("Source: Shen & Tamkin 2026 (arXiv 2601.20245)") >= 2
+
+
+def test_behavioral_patterns_renders_empty_state_when_zero_signals():
+    """When every row has count==0 the section surfaces a clear
+    empty-state message instead of an empty table."""
+    digest = WeeklyDigest(panel_inputs=_panel_inputs(_empty_behavioral_panel()))
+    text = _strip_ansi(render(digest))
+    assert "No behavioral patterns captured this week." in text
+
+
+def test_behavioral_patterns_renders_empty_state_when_no_panel():
+    """The renderer's None handling defaults to the same empty-state
+    copy as the all-zero path; a caller that forgets to populate the
+    panel never produces a malformed section."""
+    digest = WeeklyDigest()  # no panel_inputs at all
+    text = _strip_ansi(render(digest))
+    assert "BEHAVIORAL PATTERNS" in text
+    assert "No behavioral patterns captured this week." in text
+
+
+def test_behavioral_patterns_zero_count_rows_are_hidden_when_others_fire():
+    """When some signals fired and some did not, the zero-count rows
+    are dropped from the table; the reader sees only what triggered."""
+    from praxis.reports.panel_inputs import (
+        BehavioralPatternRow,
+        BehavioralPatternsPanel,
+    )
+    panel = BehavioralPatternsPanel(rows=(
+        BehavioralPatternRow(
+            signal_kind="why_question",
+            label="Why-questions",
+            count=3,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+            excerpts=("why is this slow?",),
+        ),
+        BehavioralPatternRow(
+            signal_kind="pure_delegation",
+            label="Pure delegation",
+            count=0,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+        ),
+    ))
+    digest = WeeklyDigest(panel_inputs=_panel_inputs(panel))
+    text = _strip_ansi(render(digest))
+    # Why-questions row is present.
+    assert "Why-questions: 3 times" in text
+    # The empty row is dropped (no "Pure delegation: 0 times" line).
+    assert "Pure delegation: 0 times" not in text
+
+
+def test_behavioral_patterns_lines_respect_80_column_budget():
+    """US-066 contract: every line in the terminal digest must fit in
+    <80 columns. The behavioral-patterns panel must respect the same
+    budget as the rest of the digest."""
+    digest = WeeklyDigest(panel_inputs=_panel_inputs(_behavioral_panel_with_signals()))
+    text = render(digest)
+    for line in text.split("\n"):
+        assert visible_width(line) <= MAX_LINE_WIDTH, (
+            f"line exceeds {MAX_LINE_WIDTH} cols: {line!r}"
+        )
+
+
+def test_behavioral_patterns_section_appears_after_six_dim_panel():
+    """The behavioral patterns panel sits after the six-dim footer so
+    the reader sees the structural /10 read first and then the
+    raw-pattern evidence that informs it (intentional ordering)."""
+    digest = WeeklyDigest(
+        dimensions=_realistic_dimensions(),
+        panel_inputs=_panel_inputs(_behavioral_panel_with_signals()),
+    )
+    text = _strip_ansi(render(digest))
+    six_dim_pos = text.find("THE SIX DIMENSIONS")
+    bp_pos = text.find("BEHAVIORAL PATTERNS")
+    assert 0 <= six_dim_pos < bp_pos
+
+
+# ---------------- US-039: aug/auto balance + cadence panels (terminal) -------
+
+
+from praxis.reports.digest_terminal import (  # noqa: E402
+    _AUG_AUTO_BALANCE_CLASSIFIER_UNAVAILABLE,
+    _CADENCE_NO_ACTIVITY,
+)
+from praxis.reports.panel_inputs import (  # noqa: E402
+    AugAutoBalancePanel,
+    CadencePanel,
+    PanelInputs,
+)
+
+
+def _aug_auto_populated() -> AugAutoBalancePanel:
+    """Three classified sessions: 2 aug, 1 auto, 1 mixed (33% auto?)"""
+    return AugAutoBalancePanel(
+        augmentation_count=2,
+        automation_count=1,
+        mixed_count=1,
+        unclassified_count=0,
+    )
+
+
+def _cadence_populated() -> CadencePanel:
+    return CadencePanel(
+        weekday_streak=4,
+        substantive_session_count=6,
+        high_adopter_position="moderate",
+    )
+
+
+def _full_panel_inputs(*, aug_auto=None, cadence=None) -> PanelInputs:
+    return PanelInputs(
+        aug_auto_balance=aug_auto,
+        cadence=cadence,
+    )
+
+
+def test_aug_auto_balance_eyebrow_always_renders():
+    """The section eyebrow renders regardless of data state so the
+    document shape is stable across empty + populated runs."""
+    text_empty = _strip_ansi(render(WeeklyDigest()))
+    text_full = _strip_ansi(
+        render(WeeklyDigest(panel_inputs=_full_panel_inputs(aug_auto=_aug_auto_populated())))
+    )
+    assert "AUGMENTATION/AUTOMATION" in text_empty
+    assert "AUGMENTATION/AUTOMATION" in text_full
+
+
+def test_aug_auto_balance_renders_classifier_unavailable():
+    """When every session in the week is unclassified, the panel
+    surfaces the verbatim US-039 unavailable copy."""
+    panel = AugAutoBalancePanel(
+        unclassified_count=3,
+        classifier_unavailable=True,
+    )
+    digest = WeeklyDigest(panel_inputs=_full_panel_inputs(aug_auto=panel))
+    text = _strip_ansi(render(digest))
+    assert _AUG_AUTO_BALANCE_CLASSIFIER_UNAVAILABLE in text
+
+
+def test_aug_auto_balance_renders_shares_when_populated():
+    """The three shares render as percentages so the reader sees the
+    user's split rather than raw counts."""
+    digest = WeeklyDigest(
+        panel_inputs=_full_panel_inputs(aug_auto=_aug_auto_populated())
+    )
+    text = _strip_ansi(render(digest))
+    # 2/4 = 50% aug; 1/4 = 25% auto; 1/4 = 25% mixed
+    assert "Augmentation: 50%" in text
+    assert "Automation: 25%" in text
+    assert "Mixed: 25%" in text
+
+
+def test_aug_auto_balance_renders_industry_anchor_citation():
+    """The Anthropic Economic Index anchor (~52%/45%) is cited inline
+    as a footnote so the reader can compare against the industry baseline."""
+    digest = WeeklyDigest(
+        panel_inputs=_full_panel_inputs(aug_auto=_aug_auto_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "Anthropic Economic Index" in text
+    assert "52%" in text
+    assert "45%" in text
+
+
+def test_aug_auto_balance_no_panel_renders_unavailable():
+    """A digest with no aug_auto panel at all falls back to the
+    unavailable copy rather than an empty section."""
+    digest = WeeklyDigest()
+    text = _strip_ansi(render(digest))
+    assert "AUGMENTATION/AUTOMATION" in text
+    assert _AUG_AUTO_BALANCE_CLASSIFIER_UNAVAILABLE in text
+
+
+def test_cadence_eyebrow_always_renders():
+    """Same stability contract as the aug/auto panel."""
+    text_empty = _strip_ansi(render(WeeklyDigest()))
+    text_full = _strip_ansi(
+        render(WeeklyDigest(panel_inputs=_full_panel_inputs(cadence=_cadence_populated())))
+    )
+    assert "CADENCE" in text_empty
+    assert "CADENCE" in text_full
+
+
+def test_cadence_renders_no_activity_message():
+    """When zero substantive sessions fell in the window, the panel
+    surfaces the verbatim US-039 message."""
+    panel = CadencePanel(weekday_streak=0, substantive_session_count=0)
+    digest = WeeklyDigest(panel_inputs=_full_panel_inputs(cadence=panel))
+    text = _strip_ansi(render(digest))
+    assert _CADENCE_NO_ACTIVITY in text
+
+
+def test_cadence_omits_high_adopter_label_when_no_activity():
+    """The high-adopter label is undefined without any activity to
+    position; the renderer must not surface 'Low-adopter' as a stand-in
+    (would mislead readers into reading inactivity as low engagement)."""
+    panel = CadencePanel(weekday_streak=0, substantive_session_count=0)
+    digest = WeeklyDigest(panel_inputs=_full_panel_inputs(cadence=panel))
+    text = _strip_ansi(render(digest))
+    assert "Low-adopter" not in text
+    assert "Moderate-adopter" not in text
+    assert "High-adopter" not in text
+
+
+def test_cadence_renders_streak_when_populated():
+    """The streak shows as 'N of 21 days' so the reader can see how
+    much of the window they were active."""
+    digest = WeeklyDigest(
+        panel_inputs=_full_panel_inputs(cadence=_cadence_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "Weekday streak: 4 of 21 days" in text
+
+
+def test_cadence_renders_spectrum_label_when_populated():
+    """The high-adopter position renders as a human-facing label."""
+    digest = WeeklyDigest(
+        panel_inputs=_full_panel_inputs(cadence=_cadence_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "Spectrum: Moderate-adopter" in text
+
+
+def test_cadence_renders_arxiv_citation():
+    """The arXiv 2509.19708 anchor is cited inline (US-039 acceptance)."""
+    digest = WeeklyDigest(
+        panel_inputs=_full_panel_inputs(cadence=_cadence_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "arXiv 2509.19708" in text
+
+
+def test_aug_auto_and_cadence_panels_respect_80_column_budget():
+    """US-066: every line must fit in 79 columns. Both new panels
+    must respect the same budget as the rest of the digest."""
+    digest = WeeklyDigest(
+        panel_inputs=_full_panel_inputs(
+            aug_auto=_aug_auto_populated(),
+            cadence=_cadence_populated(),
+        )
+    )
+    for line in render(digest).split("\n"):
+        assert visible_width(line) <= MAX_LINE_WIDTH, (
+            f"line exceeds {MAX_LINE_WIDTH} cols: {line!r}"
+        )
+
+
+# ---------------- US-040: repeat-task radar + verification calibration -------
+
+
+from praxis.reports.digest_terminal import (  # noqa: E402
+    _REPEAT_TASK_EMPTY,
+    _VERIFICATION_CALIBRATION_NO_SESSIONS,
+)
+from praxis.reports.panel_inputs import (  # noqa: E402
+    REPEAT_TASK_SKILL_TAG,
+    RepeatTaskRadarPanel,
+    RepeatTaskRow,
+    VerificationCalibrationPanel,
+)
+
+
+def _repeat_task_populated() -> RepeatTaskRadarPanel:
+    return RepeatTaskRadarPanel(
+        rows=(
+            RepeatTaskRow(
+                canonical_first_sentence=(
+                    "fix the failing auth test"
+                ),
+                occurrences=3,
+                estimated_minutes_per_occurrence=12.0,
+            ),
+            RepeatTaskRow(
+                canonical_first_sentence=(
+                    "regenerate the changelog entry"
+                ),
+                occurrences=4,
+                estimated_minutes_per_occurrence=8.5,
+            ),
+        )
+    )
+
+
+def _verification_populated() -> VerificationCalibrationPanel:
+    return VerificationCalibrationPanel(
+        source_check_count=2,
+        test_run_count=3,
+        spot_check_count=1,
+        blanket_accept_count=4,
+    )
+
+
+def _us040_panel_inputs(
+    *,
+    repeat_task: RepeatTaskRadarPanel | None = None,
+    verification: VerificationCalibrationPanel | None = None,
+) -> PanelInputs:
+    return PanelInputs(
+        repeat_task_radar=repeat_task,
+        verification_calibration=verification,
+    )
+
+
+def test_repeat_task_radar_eyebrow_always_renders():
+    """The section eyebrow renders regardless of data state so the
+    document shape is stable across empty + populated runs."""
+    text_empty = _strip_ansi(render(WeeklyDigest()))
+    text_full = _strip_ansi(
+        render(
+            WeeklyDigest(panel_inputs=_us040_panel_inputs(repeat_task=_repeat_task_populated()))
+        )
+    )
+    assert "REPEAT-TASK RADAR" in text_empty
+    assert "REPEAT-TASK RADAR" in text_full
+
+
+def test_repeat_task_radar_renders_no_repeats_empty_state():
+    """When detect_repeats returned nothing the panel renders the
+    verbatim US-040 empty-state copy (no misleading header above an
+    empty table)."""
+    panel = RepeatTaskRadarPanel()  # no rows
+    digest = WeeklyDigest(panel_inputs=_us040_panel_inputs(repeat_task=panel))
+    text = _strip_ansi(render(digest))
+    assert _REPEAT_TASK_EMPTY in text
+
+
+def test_repeat_task_radar_no_panel_renders_empty_state():
+    """A digest with no panel_inputs falls back to the verbatim
+    empty-state copy rather than an empty body."""
+    text = _strip_ansi(render(WeeklyDigest()))
+    assert _REPEAT_TASK_EMPTY in text
+
+
+def test_repeat_task_radar_renders_each_row():
+    """Each RepeatTask renders its canonical sentence, occurrence
+    count, per-occurrence minutes, and the 'Could become a skill' tag."""
+    digest = WeeklyDigest(
+        panel_inputs=_us040_panel_inputs(repeat_task=_repeat_task_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "fix the failing auth test" in text
+    assert "regenerate the changelog entry" in text
+    assert "3 times" in text
+    assert "4 times" in text
+    assert REPEAT_TASK_SKILL_TAG in text
+
+
+def test_repeat_task_radar_renders_estimated_minutes():
+    """The per-occurrence minutes show up so the reader knows the
+    rough reclaimable time per occurrence."""
+    digest = WeeklyDigest(
+        panel_inputs=_us040_panel_inputs(repeat_task=_repeat_task_populated())
+    )
+    text = _strip_ansi(render(digest))
+    # 12.0 minutes renders as "12 min"; 8.5 renders as "8.5 min".
+    assert "12 min" in text
+    assert "8.5 min" in text
+
+
+def test_repeat_task_radar_renders_citation():
+    """The OpenAI + Anthropic Skills citation renders inline as a
+    small footnote (US-040 AC)."""
+    digest = WeeklyDigest(
+        panel_inputs=_us040_panel_inputs(repeat_task=_repeat_task_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "OpenAI" in text
+    assert "Anthropic Skills" in text
+
+
+def test_verification_calibration_eyebrow_always_renders():
+    """Same stability contract as the other panels."""
+    text_empty = _strip_ansi(render(WeeklyDigest()))
+    text_full = _strip_ansi(
+        render(
+            WeeklyDigest(panel_inputs=_us040_panel_inputs(verification=_verification_populated()))
+        )
+    )
+    assert "VERIFICATION CALIBRATION" in text_empty
+    assert "VERIFICATION CALIBRATION" in text_full
+
+
+def test_verification_calibration_renders_no_sessions_empty_state():
+    """When the week has no sessions to categorize the panel surfaces
+    the explicit empty-state copy rather than four zeros."""
+    panel = VerificationCalibrationPanel()  # all zeros, has_sessions=False
+    digest = WeeklyDigest(panel_inputs=_us040_panel_inputs(verification=panel))
+    text = _strip_ansi(render(digest))
+    assert _VERIFICATION_CALIBRATION_NO_SESSIONS in text
+
+
+def test_verification_calibration_renders_each_bucket_count():
+    """All four buckets render in display order."""
+    digest = WeeklyDigest(
+        panel_inputs=_us040_panel_inputs(verification=_verification_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "Source-check: 2 sessions" in text
+    assert "Test-run: 3 sessions" in text
+    assert "Spot-check: 1 session" in text
+    assert "Blanket-accept: 4 sessions" in text
+
+
+def test_verification_calibration_renders_citation():
+    """The Sonar / Stack Overflow 2025 / automation-bias citation
+    renders inline (US-040 AC)."""
+    digest = WeeklyDigest(
+        panel_inputs=_us040_panel_inputs(verification=_verification_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "Sonar" in text
+    assert "Stack Overflow" in text
+    assert "automation-bias" in text
+
+
+def test_us040_panels_respect_80_column_budget():
+    """US-066: every line in the rendered digest must fit in 79
+    columns. The two new panels must respect the same budget."""
+    digest = WeeklyDigest(
+        panel_inputs=_us040_panel_inputs(
+            repeat_task=_repeat_task_populated(),
+            verification=_verification_populated(),
+        )
+    )
+    for line in render(digest).split("\n"):
+        assert visible_width(line) <= MAX_LINE_WIDTH, (
+            f"line exceeds {MAX_LINE_WIDTH} cols: {line!r}"
+        )
+
+
+# ---------------- US-041: spec adoption + context engineering + gaps ---------
+
+
+from praxis.reports.digest_terminal import (  # noqa: E402
+    _CONTEXT_ENGINEERING_NO_ARTIFACTS,
+    _KNOWLEDGE_GAP_EMPTY,
+    _SPECIFICATION_ADOPTION_NO_SESSIONS,
+)
+from praxis.reports.panel_inputs import (  # noqa: E402
+    ContextEngineeringDepthPanel,
+    ContextEngineeringRow,
+    KnowledgeGapDistributionPanel,
+    KnowledgeGapRow,
+    SpecificationAdoptionPanel,
+)
+
+
+def _specification_populated() -> SpecificationAdoptionPanel:
+    return SpecificationAdoptionPanel(
+        sessions_with_spec=3,
+        total_sessions=5,
+    )
+
+
+def _context_engineering_populated() -> ContextEngineeringDepthPanel:
+    return ContextEngineeringDepthPanel(
+        rows=(
+            ContextEngineeringRow(
+                kind="claude_md",
+                label="CLAUDE.md",
+                sessions_with_artifact=2,
+            ),
+            ContextEngineeringRow(
+                kind="agents_md",
+                label="AGENTS.md",
+                sessions_with_artifact=1,
+            ),
+            ContextEngineeringRow(
+                kind="copilot_instructions",
+                label="copilot-instructions.md",
+                sessions_with_artifact=0,
+            ),
+            ContextEngineeringRow(
+                kind="projects",
+                label="Projects / Custom GPT",
+                sessions_with_artifact=0,
+            ),
+            ContextEngineeringRow(
+                kind="skills",
+                label="Skills / subagents / hooks",
+                sessions_with_artifact=3,
+            ),
+        ),
+        total_sessions=6,
+    )
+
+
+def _knowledge_gap_populated() -> KnowledgeGapDistributionPanel:
+    return KnowledgeGapDistributionPanel(
+        rows=(
+            KnowledgeGapRow(
+                kind="missing_context",
+                label="Missing context",
+                count=4,
+            ),
+            KnowledgeGapRow(
+                kind="missing_specs",
+                label="Missing specifications",
+                count=7,
+            ),
+            KnowledgeGapRow(
+                kind="multiple_context",
+                label="Multiple contexts",
+                count=1,
+            ),
+            KnowledgeGapRow(
+                kind="unclear_instructions",
+                label="Unclear instructions",
+                count=2,
+            ),
+        )
+    )
+
+
+def _us041_panel_inputs(
+    *,
+    specification: SpecificationAdoptionPanel | None = None,
+    context_engineering: ContextEngineeringDepthPanel | None = None,
+    knowledge_gap: KnowledgeGapDistributionPanel | None = None,
+) -> PanelInputs:
+    return PanelInputs(
+        specification_adoption=specification,
+        context_engineering=context_engineering,
+        knowledge_gap_distribution=knowledge_gap,
+    )
+
+
+def test_specification_adoption_eyebrow_always_renders():
+    """The eyebrow renders regardless of data state."""
+    text_empty = _strip_ansi(render(WeeklyDigest()))
+    text_full = _strip_ansi(
+        render(
+            WeeklyDigest(
+                panel_inputs=_us041_panel_inputs(specification=_specification_populated())
+            )
+        )
+    )
+    assert "SPECIFICATION ADOPTION" in text_empty
+    assert "SPECIFICATION ADOPTION" in text_full
+
+
+def test_specification_adoption_renders_no_sessions_message():
+    """When no sessions exist the panel surfaces the verbatim
+    no-sessions copy."""
+    panel = SpecificationAdoptionPanel()  # zero sessions
+    digest = WeeklyDigest(panel_inputs=_us041_panel_inputs(specification=panel))
+    text = _strip_ansi(render(digest))
+    assert _SPECIFICATION_ADOPTION_NO_SESSIONS in text
+
+
+def test_specification_adoption_renders_share_when_populated():
+    """The share renders as 'N% (X of Y sessions)' so the reader sees
+    both the rate and the denominator."""
+    digest = WeeklyDigest(
+        panel_inputs=_us041_panel_inputs(specification=_specification_populated())
+    )
+    text = _strip_ansi(render(digest))
+    # 3/5 = 60%
+    assert "60%" in text
+    assert "3 of 5" in text
+
+
+def test_specification_adoption_renders_citations():
+    """The Woodward + SpecKit + Sean Grove citation renders inline."""
+    digest = WeeklyDigest(
+        panel_inputs=_us041_panel_inputs(specification=_specification_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "Woodward" in text
+    assert "SpecKit" in text
+    assert "Sean Grove" in text
+
+
+def test_context_engineering_eyebrow_always_renders():
+    """Same stability contract as the other panels."""
+    text_empty = _strip_ansi(render(WeeklyDigest()))
+    text_full = _strip_ansi(
+        render(
+            WeeklyDigest(
+                panel_inputs=_us041_panel_inputs(
+                    context_engineering=_context_engineering_populated()
+                )
+            )
+        )
+    )
+    assert "CONTEXT ENGINEERING" in text_empty
+    assert "CONTEXT ENGINEERING" in text_full
+
+
+def test_context_engineering_renders_no_artifacts_message():
+    """When no scaffolding kinds fired, the panel emits the verbatim
+    no-artifacts message."""
+    panel = ContextEngineeringDepthPanel()
+    digest = WeeklyDigest(
+        panel_inputs=_us041_panel_inputs(context_engineering=panel)
+    )
+    text = _strip_ansi(render(digest))
+    assert _CONTEXT_ENGINEERING_NO_ARTIFACTS in text
+
+
+def test_context_engineering_renders_present_kinds_only():
+    """Rows with zero count are skipped so the reader sees only what
+    fired this week."""
+    digest = WeeklyDigest(
+        panel_inputs=_us041_panel_inputs(
+            context_engineering=_context_engineering_populated()
+        )
+    )
+    text = _strip_ansi(render(digest))
+    assert "CLAUDE.md: 2 sessions" in text
+    assert "AGENTS.md: 1 session" in text
+    assert "Skills / subagents / hooks: 3 sessions" in text
+    # Kinds with zero count are not rendered.
+    assert "copilot-instructions.md: 0 sessions" not in text
+
+
+def test_context_engineering_renders_citation():
+    """The DORA 2025 + Anthropic Skills citation renders inline."""
+    digest = WeeklyDigest(
+        panel_inputs=_us041_panel_inputs(
+            context_engineering=_context_engineering_populated()
+        )
+    )
+    text = _strip_ansi(render(digest))
+    assert "DORA 2025" in text
+    assert "Anthropic" in text
+
+
+def test_knowledge_gap_eyebrow_always_renders():
+    """Same stability contract."""
+    text_empty = _strip_ansi(render(WeeklyDigest()))
+    text_full = _strip_ansi(
+        render(
+            WeeklyDigest(
+                panel_inputs=_us041_panel_inputs(
+                    knowledge_gap=_knowledge_gap_populated()
+                )
+            )
+        )
+    )
+    assert "KNOWLEDGE GAPS" in text_empty
+    assert "KNOWLEDGE GAPS" in text_full
+
+
+def test_knowledge_gap_renders_empty_state_when_every_category_zero():
+    """US-041 AC: the panel renders the verbatim 'No knowledge gaps
+    detected this week.' copy ONLY when every category is zero."""
+    panel = KnowledgeGapDistributionPanel(
+        rows=(
+            KnowledgeGapRow(kind="missing_context", label="Missing context", count=0),
+            KnowledgeGapRow(kind="missing_specs", label="Missing specifications", count=0),
+            KnowledgeGapRow(kind="multiple_context", label="Multiple contexts", count=0),
+            KnowledgeGapRow(kind="unclear_instructions", label="Unclear instructions", count=0),
+        )
+    )
+    digest = WeeklyDigest(panel_inputs=_us041_panel_inputs(knowledge_gap=panel))
+    text = _strip_ansi(render(digest))
+    assert _KNOWLEDGE_GAP_EMPTY in text
+
+
+def test_knowledge_gap_renders_all_four_categories_when_populated():
+    """When any category has a positive count, all four categories
+    render (including explicit zeros) so the histogram reads as
+    honest. US-041 AC: 'a session with zero detected gaps still
+    contributes a zero to each category (no silent drops)'."""
+    panel = KnowledgeGapDistributionPanel(
+        rows=(
+            KnowledgeGapRow(kind="missing_context", label="Missing context", count=0),
+            KnowledgeGapRow(kind="missing_specs", label="Missing specifications", count=3),
+            KnowledgeGapRow(kind="multiple_context", label="Multiple contexts", count=0),
+            KnowledgeGapRow(kind="unclear_instructions", label="Unclear instructions", count=1),
+        )
+    )
+    digest = WeeklyDigest(panel_inputs=_us041_panel_inputs(knowledge_gap=panel))
+    text = _strip_ansi(render(digest))
+    assert "Missing context: 0 turns" in text
+    assert "Missing specifications: 3 turns" in text
+    assert "Multiple contexts: 0 turns" in text
+    assert "Unclear instructions: 1 turn" in text
+
+
+def test_knowledge_gap_renders_citation():
+    """The arXiv 2501.11709 citation renders inline."""
+    digest = WeeklyDigest(
+        panel_inputs=_us041_panel_inputs(knowledge_gap=_knowledge_gap_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "2501.11709" in text
+
+
+def test_us041_panels_respect_80_column_budget():
+    """US-066: the three new panels respect the 79-column hard cap."""
+    digest = WeeklyDigest(
+        panel_inputs=_us041_panel_inputs(
+            specification=_specification_populated(),
+            context_engineering=_context_engineering_populated(),
+            knowledge_gap=_knowledge_gap_populated(),
+        )
+    )
+    for line in render(digest).split("\n"):
+        assert visible_width(line) <= MAX_LINE_WIDTH, (
+            f"line exceeds {MAX_LINE_WIDTH} cols: {line!r}"
+        )
+
+
+# =========================================================================
+# US-042: tool/agent ladder + refined cost-effectiveness panels (terminal)
+# =========================================================================
+
+
+from praxis.reports.digest_terminal import (  # noqa: E402
+    _COST_EFFECTIVENESS_NO_COST_DATA,
+    _TOOL_AGENT_LADDER_NO_ACTIVITY,
+)
+from praxis.reports.panel_inputs import (  # noqa: E402
+    LadderRungRow,
+    RefinedCostEffectivenessPanel,
+    ToolAgentLadderPanel,
+)
+
+
+def _ladder_populated() -> ToolAgentLadderPanel:
+    return ToolAgentLadderPanel(
+        rows=(
+            LadderRungRow(kind="prompt_only", label="Prompt-only", session_count=2),
+            LadderRungRow(kind="tools_on", label="Tools-on", session_count=3),
+            LadderRungRow(kind="skills", label="Skills", session_count=1),
+            LadderRungRow(kind="hooks", label="Hooks", session_count=0),
+            LadderRungRow(kind="subagents", label="Subagents", session_count=0),
+        ),
+        max_rung_kind="skills",
+        max_rung_label="Skills",
+    )
+
+
+def _cost_effectiveness_populated() -> RefinedCostEffectivenessPanel:
+    return RefinedCostEffectivenessPanel(
+        higher_tier_display="Claude Opus 4.7",
+        lower_tier_display="Claude Haiku 4.5",
+        spent_on_higher_tier_usd=12.34,
+        overspend_usd=10.50,
+        qualifying_session_count=2,
+        has_cost_data=True,
+    )
+
+
+def _us042_panel_inputs(
+    *,
+    ladder: ToolAgentLadderPanel | None = None,
+    cost_effectiveness: RefinedCostEffectivenessPanel | None = None,
+) -> PanelInputs:
+    return PanelInputs(
+        tool_agent_ladder=ladder,
+        refined_cost_effectiveness=cost_effectiveness,
+    )
+
+
+def test_tool_agent_ladder_eyebrow_always_renders():
+    """The eyebrow renders regardless of data state."""
+    text_empty = _strip_ansi(render(WeeklyDigest()))
+    text_full = _strip_ansi(
+        render(
+            WeeklyDigest(
+                panel_inputs=_us042_panel_inputs(ladder=_ladder_populated())
+            )
+        )
+    )
+    assert "TOOL/AGENT LADDER" in text_empty
+    assert "TOOL/AGENT LADDER" in text_full
+
+
+def test_tool_agent_ladder_empty_state_renders_placeholder():
+    """When no sessions were observed the panel emits the explicit
+    empty-state copy verbatim."""
+    text = _strip_ansi(render(WeeklyDigest()))
+    assert _TOOL_AGENT_LADDER_NO_ACTIVITY in text
+
+
+def test_tool_agent_ladder_renders_max_rung_headline():
+    """A populated panel surfaces the max-rung headline ('Max rung: Skills')."""
+    digest = WeeklyDigest(
+        panel_inputs=_us042_panel_inputs(ladder=_ladder_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "Max rung: Skills" in text
+
+
+def test_tool_agent_ladder_renders_per_rung_counts():
+    """A populated panel lists per-rung counts in rung order."""
+    digest = WeeklyDigest(
+        panel_inputs=_us042_panel_inputs(ladder=_ladder_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "Prompt-only: 2 sessions" in text
+    assert "Tools-on: 3 sessions" in text
+    assert "Skills: 1 session" in text
+    assert "Hooks: 0 sessions" in text
+
+
+def test_tool_agent_ladder_renders_citation():
+    """The Anthropic Skills/hooks/subagents + OpenAI harness-engineering
+    citation renders inline."""
+    digest = WeeklyDigest(
+        panel_inputs=_us042_panel_inputs(ladder=_ladder_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "Anthropic" in text
+    assert "OpenAI" in text
+
+
+def test_cost_effectiveness_eyebrow_always_renders():
+    """The eyebrow renders regardless of data state."""
+    text_empty = _strip_ansi(render(WeeklyDigest()))
+    text_full = _strip_ansi(
+        render(
+            WeeklyDigest(
+                panel_inputs=_us042_panel_inputs(
+                    cost_effectiveness=_cost_effectiveness_populated()
+                )
+            )
+        )
+    )
+    assert "COST-EFFECTIVENESS" in text_empty
+    assert "COST-EFFECTIVENESS" in text_full
+
+
+def test_cost_effectiveness_renders_no_cost_data_empty_state():
+    """US-042 AC: when the cost ledger has no entries this week the
+    panel renders 'No cost data this week.' verbatim rather than $0
+    overspend (which would falsely imply optimality)."""
+    text = _strip_ansi(render(WeeklyDigest()))
+    assert _COST_EFFECTIVENESS_NO_COST_DATA in text
+    # And the $0 overspend literal must NOT appear in the empty path,
+    # since that would falsely read as "optimized".
+    assert "$0.00 overspend" not in text
+
+
+def test_cost_effectiveness_renders_canonical_sentence():
+    """US-042 AC: the panel renders 'You spent $X on <higher> for tasks
+    <lower> could have done = $Y overspend' verbatim when overspend > 0."""
+    digest = WeeklyDigest(
+        panel_inputs=_us042_panel_inputs(
+            cost_effectiveness=_cost_effectiveness_populated()
+        )
+    )
+    text = _strip_ansi(render(digest))
+    assert "You spent $12.34 on Claude Opus 4.7" in text
+    assert "Claude Haiku 4.5" in text
+    assert "$10.50 overspend" in text
+
+
+def test_cost_effectiveness_renders_clean_signal_when_no_overspend():
+    """When cost data is present but no qualifying overspend exists,
+    the panel renders a positive-signal sentence (not the empty-state
+    placeholder, which would conflate 'no data' with 'no waste')."""
+    panel = RefinedCostEffectivenessPanel(has_cost_data=True)
+    digest = WeeklyDigest(
+        panel_inputs=_us042_panel_inputs(cost_effectiveness=panel)
+    )
+    text = _strip_ansi(render(digest))
+    assert "No tier-mismatch overspend" in text
+    assert _COST_EFFECTIVENESS_NO_COST_DATA not in text
+
+
+def test_us042_panels_respect_80_column_budget():
+    """US-066: the two new panels respect the 79-column hard cap."""
+    digest = WeeklyDigest(
+        panel_inputs=_us042_panel_inputs(
+            ladder=_ladder_populated(),
+            cost_effectiveness=_cost_effectiveness_populated(),
+        )
+    )
+    for line in render(digest).split("\n"):
+        assert visible_width(line) <= MAX_LINE_WIDTH, (
+            f"line exceeds {MAX_LINE_WIDTH} cols: {line!r}"
+        )

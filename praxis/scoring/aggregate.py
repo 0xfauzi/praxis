@@ -166,8 +166,8 @@ class ProfileSnapshot:
         for s in scores:
             providers[s.provider] = providers.get(s.provider, 0) + 1
 
-        strongest = max(dim_means, key=dim_means.get)
-        weakest = min(dim_means, key=dim_means.get)
+        strongest = max(dim_means, key=lambda k: dim_means[k])
+        weakest = min(dim_means, key=lambda k: dim_means[k])
 
         # Pull a few standout moments + failure modes from the most recent judged
         # sessions. Per spec 9.5: take their first standout/failure each, dedupe

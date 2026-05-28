@@ -1,0 +1,5 @@
+[
+  {"role": "user", "content": "Goal: add a search box to the digest page that filters tasks by label."},
+  {"role": "assistant", "content": "Plan: add a controlled input..."},
+  {"role": "user", "content": "Sounds good. Why is debounce 300ms and not 200?"}
+]

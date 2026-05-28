@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Add a function that returns a parsed Schedule."},
+  {"role": "assistant", "content": "OK."}
+]

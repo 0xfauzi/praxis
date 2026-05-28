@@ -15,20 +15,55 @@ import os
 import shutil
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import asdict
-from datetime import date, datetime, timedelta, timezone
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 
 def _utcnow() -> datetime:
     """Tz-aware UTC now. Wraps datetime.now(timezone.utc) for terseness."""
     return datetime.now(timezone.utc)
 
+
+def _sqlite_literal(s: str) -> str:
+    """Escape ``s`` for use inside a SQLite single-quoted string literal."""
+    return s.replace("'", "''")
+
 from praxis.follow_up import FollowUp, Outcome
 from praxis.models import Moment, compute_moment_id
 from praxis.redactor import redact_secrets
 from praxis.scoring.aggregate import ProfileSnapshot, SessionScore
+
+
+SelfReport = Literal["yes", "no", "partial", "skip"]
+
+
+@dataclass(frozen=True)
+class ActiveCommitment:
+    """The single active commitment for a given ISO week.
+
+    `follow_up_id` is the value to write into
+    session_reflections.follow_up_id. We prefer follow_ups.id when the
+    schema-migrations branch's US-002 column exists, falling back to
+    the sqlite rowid otherwise. `display_text` is the user-facing
+    one-liner (US-002 column); when absent it falls back to
+    commitment_text.
+    """
+
+    follow_up_id: int
+    display_text: str
+    follow_up: FollowUp
+
+
+class MultipleActiveCommitmentsError(RuntimeError):
+    """Raised when >1 follow_ups rows look active for the same week.
+
+    The schema-migrations branch's US-002 partial-unique index makes
+    this impossible at the DB level; this guard catches the case where
+    that index has not yet been applied and the legacy schema is in
+    use.
+    """
 
 
 class MigrationError(RuntimeError):
@@ -64,6 +99,9 @@ CREATE TABLE IF NOT EXISTS session_scores (
     judge_model TEXT,
     judge_pass INTEGER NOT NULL DEFAULT 1,
     signals_json TEXT,
+    -- aug_auto_classification + aug_auto_confidence are added by migration
+    -- 003_session_scores_aug_auto.sql (not here) to keep SCHEMA aligned with
+    -- the migration runner's expectations.
     PRIMARY KEY (stable_id, judge_pass)
 );
 
@@ -130,14 +168,38 @@ CREATE TABLE IF NOT EXISTS weekly_digests (
 );
 
 CREATE TABLE IF NOT EXISTS follow_ups (
-    week_iso TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    week_iso TEXT NOT NULL,
     dim_key TEXT NOT NULL,
     commitment_text TEXT NOT NULL,
     target_metric TEXT NOT NULL,
     baseline_value REAL NOT NULL,
     measured_value REAL,
-    outcome TEXT NOT NULL CHECK (outcome IN ('improved','unchanged','worse','pending'))
+    outcome TEXT NOT NULL CHECK (outcome IN ('improved','unchanged','worse','pending','superseded')),
+    user_chosen INTEGER NOT NULL DEFAULT 0,
+    display_text TEXT,
+    superseded_by INTEGER REFERENCES follow_ups(id)
 );
+
+-- The partial-unique index idx_follow_ups_one_active_per_week is created
+-- by _ensure_follow_ups_v4(), not here, because a user upgrading from
+-- v0.2 (where follow_ups exists with the legacy `week_iso PRIMARY KEY`
+-- shape and no superseded_by column) needs the column added before the
+-- index references it. CREATE TABLE IF NOT EXISTS above is a no-op on
+-- existing tables, so referencing superseded_by inline would crash with
+-- "no such column" and bounce the user to a restore-from-backup.
+
+CREATE TABLE IF NOT EXISTS session_reflections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_stable_id TEXT NOT NULL,
+    follow_up_id INTEGER NOT NULL REFERENCES follow_ups(id),
+    self_report TEXT NOT NULL CHECK (self_report IN ('yes','no','partial','skip')),
+    note TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reflections_follow_up
+    ON session_reflections(follow_up_id);
 """
 
 
@@ -158,10 +220,16 @@ class ProfileStore:
         if db_existed:
             with self._conn() as conn:
                 if self._has_schema_v3_marker(conn):
-                    # Already at v3+. Run any later additive column migrations
-                    # in-place so older v3 DBs gain new optional columns
-                    # (signals_json) without a full table rebuild.
+                    # Already at v3+. Run additive column migrations in-place
+                    # so older v3 DBs gain optional columns (signals_json)
+                    # without a full table rebuild; bring follow_ups up to v4
+                    # if it's still on the v3 shape; then run the numbered SQL
+                    # migrations to pick up anything later (session_reflections,
+                    # aug_auto columns, future additions).
                     self._ensure_session_scores_columns(conn)
+                    self._ensure_follow_ups_v4(conn)
+                    self._ensure_reflect_tables(conn)
+                    self._run_sql_migrations()
                     return
 
         # Migration needed (fresh DB, v0.1, or v0.2 DB without the v3 marker).
@@ -171,6 +239,7 @@ class ProfileStore:
         try:
             with self._conn() as conn:
                 self._apply_v2_schema(conn)
+                self._ensure_follow_ups_v4(conn)
                 self._mark_schema_v3(conn)
         except Exception as exc:
             if backup_path is not None:
@@ -178,15 +247,78 @@ class ProfileStore:
             raise MigrationError(
                 self._migration_failure_message(backup_path, exc)
             ) from exc
+        self._run_sql_migrations()
+
+    @staticmethod
+    def _ensure_follow_ups_v4(conn: sqlite3.Connection) -> None:
+        """Migrate ``follow_ups`` to the v0.4 shape (US-022 / schema-migrations US-002).
+
+        Adds ``user_chosen``, ``display_text``, and ``superseded_by`` columns,
+        swaps the ``week_iso`` PRIMARY KEY for an ``id`` AUTOINCREMENT PK so
+        the supersede flow can keep historical rows for the same week, widens
+        the ``outcome`` CHECK to include ``'superseded'``, and installs the
+        partial-unique index ``idx_follow_ups_one_active_per_week`` that
+        enforces one active pending commitment per week.
+
+        Idempotent: a DB that already has ``user_chosen`` is left alone.
+        Note: the CHECK clause is part of the table definition, so widening
+        it to accept ``'superseded'`` requires recreating the table even on
+        DBs that already had the columns added by an earlier draft.
+        """
+        cur = conn.execute("PRAGMA table_info(follow_ups)")
+        existing_cols = {row[1] for row in cur.fetchall()}
+        if "user_chosen" in existing_cols:
+            # Already at v4. Make sure the partial-unique index exists too --
+            # SCHEMA cannot create it inline because that would break the
+            # v0.2 -> v3 upgrade path (the index references superseded_by,
+            # which only exists after this method runs the first time).
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "idx_follow_ups_one_active_per_week "
+                "ON follow_ups(week_iso) "
+                "WHERE outcome = 'pending' AND superseded_by IS NULL"
+            )
+            return
+        conn.executescript(
+            """
+            CREATE TABLE follow_ups_v4 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                week_iso TEXT NOT NULL,
+                dim_key TEXT NOT NULL,
+                commitment_text TEXT NOT NULL,
+                target_metric TEXT NOT NULL,
+                baseline_value REAL NOT NULL,
+                measured_value REAL,
+                outcome TEXT NOT NULL CHECK (outcome IN ('improved','unchanged','worse','pending','superseded')),
+                user_chosen INTEGER NOT NULL DEFAULT 0,
+                display_text TEXT,
+                superseded_by INTEGER REFERENCES follow_ups(id)
+            );
+            INSERT INTO follow_ups_v4
+                (week_iso, dim_key, commitment_text, target_metric,
+                 baseline_value, measured_value, outcome)
+            SELECT week_iso, dim_key, commitment_text, target_metric,
+                   baseline_value, measured_value, outcome
+            FROM follow_ups;
+            DROP TABLE follow_ups;
+            ALTER TABLE follow_ups_v4 RENAME TO follow_ups;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_follow_ups_one_active_per_week
+                ON follow_ups(week_iso)
+                WHERE outcome = 'pending' AND superseded_by IS NULL;
+            """
+        )
 
     @staticmethod
     def _ensure_session_scores_columns(conn: sqlite3.Connection) -> None:
         """Add additive columns introduced after the v3 marker landed.
 
-        Currently only `signals_json` (spec section 7 - persists per-session
-        BehavioralSignals so the weekly-bucketed trajectory can replay 90
-        days of history without re-parsing source files). Idempotent: a
-        DB that already has the column is left alone.
+        Currently tracks ``signals_json`` (spec section 7 - persists per-session
+        BehavioralSignals so the weekly-bucketed trajectory can replay 90 days
+        of history without re-parsing source files). ``aug_auto_*`` columns
+        are added by the numbered SQL migration runner (003_session_scores_
+        aug_auto.sql), not here, so we don't double-apply on first init.
+
+        Idempotent: a DB that already has the columns is left alone.
         """
         cur = conn.execute("PRAGMA table_info(session_scores)")
         existing_cols = {row[1] for row in cur.fetchall()}
@@ -194,6 +326,32 @@ class ProfileStore:
             conn.execute(
                 "ALTER TABLE session_scores ADD COLUMN signals_json TEXT"
             )
+
+    @staticmethod
+    def _ensure_reflect_tables(conn: sqlite3.Connection) -> None:
+        """Create the session_reflections table on pre-existing v3 DBs.
+
+        The full SCHEMA includes session_reflections, but DBs that
+        reached v3 before this story landed never ran SCHEMA on init
+        (the v3 marker short-circuits it). This helper closes that gap
+        without forcing a destructive migration. Idempotent.
+        """
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_reflections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_stable_id TEXT NOT NULL,
+                follow_up_id INTEGER NOT NULL,
+                self_report TEXT NOT NULL CHECK (self_report IN ('yes','no','partial','skip')),
+                note TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reflections_follow_up "
+            "ON session_reflections(follow_up_id)"
+        )
 
     def _apply_v2_schema(self, conn: sqlite3.Connection) -> None:
         # Wrapped in a method so tests can monkeypatch it to inject failures
@@ -203,6 +361,12 @@ class ProfileStore:
         # prior state (fresh, v0.1, v0.2) is brought to v0.3 in one shot.
         conn.executescript(SCHEMA)
         self._migrate_session_scores_to_v3(conn)
+        # The v3 table-rebuild path in _migrate_session_scores_to_v3 does
+        # not include columns added after the v3 marker landed (aug_auto_*),
+        # so run the additive-column step here too. Idempotent: fresh DBs
+        # already have the columns from SCHEMA above and the ALTER lines
+        # short-circuit.
+        self._ensure_session_scores_columns(conn)
 
     def _migrate_session_scores_to_v3(self, conn: sqlite3.Connection) -> None:
         """Spec §9.6 (US-029): add ``judge_pass`` to session_scores and make
@@ -309,6 +473,84 @@ class ProfileStore:
             "VALUES (?, ?, ?, ?, ?)",
             (_utcnow().isoformat(), "schema_version", 0, 0, "3"),
         )
+
+    # ---- sql-file migration runner (US-001) -----------------------------
+
+    @classmethod
+    def _migrations_dir(cls) -> Path:
+        """Directory holding numbered ``*.sql`` migration files.
+
+        Overridable in tests via ``monkeypatch.setattr(ProfileStore,
+        "_migrations_dir", classmethod(lambda cls: tmp_path))``.
+        """
+        return Path(__file__).parent / "migrations"
+
+    def _run_sql_migrations(self) -> None:
+        """Apply any pending ``*.sql`` migrations in lexical order.
+
+        ``schema_migrations(version, applied_at)`` is created on first run.
+        Each pending migration runs wrapped in a ``BEGIN; ... COMMIT;``
+        transaction together with the row that records the version, so on
+        ``sqlite3.OperationalError`` we rollback and re-raise. ``version``
+        stays absent from ``schema_migrations`` for failed migrations, so
+        the next invocation re-attempts the same file.
+        """
+        self._ensure_schema_migrations_table()
+        migrations_dir = self._migrations_dir()
+        if not migrations_dir.is_dir():
+            return
+        applied = self._applied_migration_versions()
+        for sql_path in sorted(migrations_dir.glob("*.sql")):
+            if sql_path.name in applied:
+                continue
+            self._apply_sql_migration(sql_path.name, sql_path.read_text())
+
+    def _ensure_schema_migrations_table(self) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS schema_migrations ("
+                "  version TEXT PRIMARY KEY,"
+                "  applied_at TEXT NOT NULL"
+                ")"
+            )
+
+    def _applied_migration_versions(self) -> set[str]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT version FROM schema_migrations"
+            ).fetchall()
+        return {row["version"] for row in rows}
+
+    def _apply_sql_migration(self, version: str, body_sql: str) -> None:
+        """Run one migration's SQL + the marker insert in one transaction.
+
+        Uses ``executescript`` with the ``BEGIN; ... COMMIT;`` boundaries
+        inside the script string so a partial failure rolls back the body
+        and leaves no marker row behind. Outside that script, ``conn`` runs
+        with default sqlite3 transaction handling.
+        """
+        applied_at = _utcnow().isoformat()
+        script = (
+            "BEGIN;\n"
+            + body_sql.rstrip(" \t\r\n;") + ";\n"
+            + "INSERT INTO schema_migrations (version, applied_at) VALUES ("
+            + f"'{_sqlite_literal(version)}', '{_sqlite_literal(applied_at)}'"
+            + ");\n"
+            + "COMMIT;\n"
+        )
+        conn = sqlite3.connect(self.db_path)
+        try:
+            try:
+                conn.executescript(script)
+            except sqlite3.OperationalError:
+                if conn.in_transaction:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass
+                raise
+        finally:
+            conn.close()
 
     @contextmanager
     def _conn(self):
@@ -450,6 +692,62 @@ class ProfileStore:
             json.loads(out["judge_result_json"]) if out["judge_result_json"] else None
         )
         return out
+
+    # ---- aug/auto classification (US-004 + US-010) ----------------------
+
+    _AUG_AUTO_VALID = ("augmentation", "automation", "mixed")
+
+    def set_session_aug_auto(
+        self,
+        stable_id: str,
+        classification: str,
+        confidence: float,
+    ) -> None:
+        """Persist the augmentation/automation classifier output for a session.
+
+        ``classification`` must be one of ``augmentation``, ``automation``,
+        ``mixed``; anything else raises ``ValueError`` before any SQL is
+        issued. The update touches every persisted row for ``stable_id``
+        (both pass-1 and pass-2 when present) so a subsequent read finds
+        the value regardless of which row it looks at.
+        """
+        if classification not in self._AUG_AUTO_VALID:
+            raise ValueError(
+                f"aug_auto_classification must be one of "
+                f"{self._AUG_AUTO_VALID}, got {classification!r}"
+            )
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE session_scores "
+                "SET aug_auto_classification = ?, aug_auto_confidence = ? "
+                "WHERE stable_id = ?",
+                (classification, confidence, stable_id),
+            )
+
+    # Alias used by the orchestrator's classifier pass (US-010 call site).
+    # Delegates to set_session_aug_auto so validation stays in one place.
+    save_session_aug_auto = set_session_aug_auto
+
+    def get_session_aug_auto(
+        self, stable_id: str
+    ) -> tuple[str | None, float | None]:
+        """Return ``(classification, confidence)`` for a session.
+
+        Returns ``(None, None)`` when the session row is missing or when
+        the columns are NULL (rows written before this migration ran, or
+        sessions the classifier has not yet labelled). Reads from the
+        highest-pass row for the session, matching ``load_one_session_score``.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT aug_auto_classification, aug_auto_confidence "
+                "FROM session_scores WHERE stable_id = ? "
+                "ORDER BY judge_pass DESC LIMIT 1",
+                (stable_id,),
+            ).fetchone()
+        if row is None:
+            return (None, None)
+        return (row["aug_auto_classification"], row["aug_auto_confidence"])
 
     # ---- moments --------------------------------------------------------
 
@@ -690,14 +988,51 @@ class ProfileStore:
     # ---- follow-ups -----------------------------------------------------
 
     def save_follow_up(self, follow_up: FollowUp) -> None:
-        """Persist (or replace) one row of follow_ups keyed by week_iso."""
+        """Persist (or update) the follow-up row for this week.
+
+        Post-US-002, ``week_iso`` is no longer the primary key on
+        ``follow_ups`` so the user-picks-from-alternatives flow (US-023)
+        can store multiple rows per week. To keep this single-row API
+        stable we UPDATE the most-recent row for ``week_iso`` when one
+        exists (preserves ``id`` for any FK references) and INSERT only
+        when the week has no row yet. The supersede flow uses
+        :meth:`insert_follow_up` instead so historical rows are preserved.
+        """
         with self._conn() as conn:
+            existing = conn.execute(
+                "SELECT id FROM follow_ups WHERE week_iso = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (follow_up.week_iso,),
+            ).fetchone()
+            if existing is not None:
+                conn.execute(
+                    """
+                    UPDATE follow_ups
+                    SET dim_key = ?, commitment_text = ?, target_metric = ?,
+                        baseline_value = ?, measured_value = ?, outcome = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        follow_up.dim_key,
+                        follow_up.commitment_text,
+                        follow_up.target_metric,
+                        follow_up.baseline_value,
+                        follow_up.measured_value,
+                        follow_up.outcome,
+                        existing["id"],
+                    ),
+                )
+                return
+            conn.execute(
+                "DELETE FROM follow_ups WHERE week_iso = ?", (follow_up.week_iso,)
+            )
             conn.execute(
                 """
-                INSERT OR REPLACE INTO follow_ups
+                INSERT INTO follow_ups
                 (week_iso, dim_key, commitment_text, target_metric,
-                 baseline_value, measured_value, outcome)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                 baseline_value, measured_value, outcome,
+                 user_chosen, display_text)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     follow_up.week_iso,
@@ -707,15 +1042,68 @@ class ProfileStore:
                     follow_up.baseline_value,
                     follow_up.measured_value,
                     follow_up.outcome,
+                    follow_up.user_chosen,
+                    follow_up.display_text,
                 ),
             )
 
-    def load_follow_up(self, week_iso: str) -> FollowUp | None:
+    def insert_follow_up(self, follow_up: FollowUp) -> int:
+        """INSERT one follow_ups row, returning the new row id.
+
+        Unlike :meth:`save_follow_up` (idempotent on week_iso), this is a
+        plain INSERT and will raise :class:`sqlite3.IntegrityError` when
+        the partial-unique index ``idx_follow_ups_one_active_per_week`` is
+        violated: i.e. another row already exists for ``week_iso`` with
+        ``outcome='pending'`` and ``superseded_by IS NULL``. ``praxis
+        commit`` catches that error and routes the user through the
+        replace-or-keep prompt (US-023).
+        """
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO follow_ups
+                (week_iso, dim_key, commitment_text, target_metric,
+                 baseline_value, measured_value, outcome,
+                 user_chosen, display_text)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    follow_up.week_iso,
+                    follow_up.dim_key,
+                    follow_up.commitment_text,
+                    follow_up.target_metric,
+                    follow_up.baseline_value,
+                    follow_up.measured_value,
+                    follow_up.outcome,
+                    follow_up.user_chosen,
+                    follow_up.display_text,
+                ),
+            )
+            row_id = cur.lastrowid
+        if row_id is None:
+            raise RuntimeError("insert_follow_up: lastrowid was None after INSERT")
+        return int(row_id)
+
+    def active_follow_up_for_week(self, week_iso: str) -> FollowUp | None:
+        """Return the active pending commitment for ``week_iso``, or None.
+
+        "Active" means the row matches the partial-unique index predicate:
+        ``outcome='pending' AND superseded_by IS NULL``. At most one such
+        row can exist per week thanks to ``idx_follow_ups_one_active_per_week``,
+        so we do not need a tiebreaker. ``praxis commit`` calls this before
+        printing the suggestion list -- when a row comes back, the user
+        sees the [r]eplace / [k]eep / [c]ancel preamble (US-023) instead.
+        """
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT week_iso, dim_key, commitment_text, target_metric, "
-                "       baseline_value, measured_value, outcome "
-                "FROM follow_ups WHERE week_iso = ?",
+                "SELECT id, week_iso, dim_key, commitment_text, target_metric, "
+                "       baseline_value, measured_value, outcome, "
+                "       user_chosen, display_text "
+                "FROM follow_ups "
+                "WHERE week_iso = ? "
+                "  AND outcome = 'pending' "
+                "  AND superseded_by IS NULL "
+                "LIMIT 1",
                 (week_iso,),
             ).fetchone()
         if row is None:
@@ -729,6 +1117,107 @@ class ProfileStore:
             baseline_value=row["baseline_value"],
             measured_value=row["measured_value"],
             outcome=outcome,
+            user_chosen=row["user_chosen"],
+            display_text=row["display_text"],
+        )
+
+    def supersede_and_insert_follow_up(
+        self, *, prior_id: int, new_follow_up: FollowUp
+    ) -> int:
+        """Atomically supersede the prior row and insert ``new_follow_up``.
+
+        Performed inside a single transaction (single ``_conn()`` block,
+        sqlite3's implicit transaction): the UPDATE that flips the prior
+        row to ``outcome='superseded'`` and the INSERT for the new row
+        both succeed or both roll back. If the prior row does not exist
+        the UPDATE matches zero rows and we abort before the INSERT; if
+        anything later in the block raises, the prior UPDATE rolls back
+        with it (sqlite3's implicit transaction commits only when the
+        ``with`` block exits cleanly).
+
+        Statement order matters: the partial-unique index
+        ``idx_follow_ups_one_active_per_week`` enforces at most one row
+        per ``week_iso`` matching ``outcome='pending' AND superseded_by
+        IS NULL``. We flip the prior row's outcome first so it drops out
+        of the partial predicate, then INSERT the new active row, then
+        write ``superseded_by`` on the prior row pointing at the new id.
+        Doing the INSERT first would collide with the still-active prior
+        row.
+
+        Returns the new row's ``id``. US-023's replace path uses this to
+        pivot from one active commitment to another without ever leaving
+        the DB in a state with two pending+un-superseded rows.
+        """
+        with self._conn() as conn:
+            updated = conn.execute(
+                "UPDATE follow_ups SET outcome = 'superseded' WHERE id = ?",
+                (prior_id,),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError(
+                    f"supersede_and_insert_follow_up: prior_id {prior_id} "
+                    f"not found; rolling back."
+                )
+            cur = conn.execute(
+                """
+                INSERT INTO follow_ups
+                (week_iso, dim_key, commitment_text, target_metric,
+                 baseline_value, measured_value, outcome,
+                 user_chosen, display_text)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_follow_up.week_iso,
+                    new_follow_up.dim_key,
+                    new_follow_up.commitment_text,
+                    new_follow_up.target_metric,
+                    new_follow_up.baseline_value,
+                    new_follow_up.measured_value,
+                    new_follow_up.outcome,
+                    new_follow_up.user_chosen,
+                    new_follow_up.display_text,
+                ),
+            )
+            new_id = cur.lastrowid
+            if new_id is None:
+                raise RuntimeError(
+                    "supersede_and_insert_follow_up: lastrowid was None after INSERT"
+                )
+            conn.execute(
+                "UPDATE follow_ups SET superseded_by = ? WHERE id = ?",
+                (new_id, prior_id),
+            )
+        return int(new_id)
+
+    def load_follow_up(self, week_iso: str) -> FollowUp | None:
+        """Load the most recent follow_ups row for ``week_iso``, or None.
+
+        With the v0.4 schema a week can hold multiple rows (one active +
+        any number superseded by the replace flow); we return the highest
+        ``id`` to surface the most recent write to that week.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT week_iso, dim_key, commitment_text, target_metric, "
+                "       baseline_value, measured_value, outcome, "
+                "       user_chosen, display_text "
+                "FROM follow_ups WHERE week_iso = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (week_iso,),
+            ).fetchone()
+        if row is None:
+            return None
+        outcome: Outcome = row["outcome"]
+        return FollowUp(
+            week_iso=row["week_iso"],
+            dim_key=row["dim_key"],
+            commitment_text=row["commitment_text"],
+            target_metric=row["target_metric"],
+            baseline_value=row["baseline_value"],
+            measured_value=row["measured_value"],
+            outcome=outcome,
+            user_chosen=row["user_chosen"],
+            display_text=row["display_text"],
         )
 
     # ---- weekly digests -------------------------------------------------
@@ -801,6 +1290,20 @@ class ProfileStore:
                 "SELECT COUNT(*) AS c FROM weekly_digests"
             ).fetchone()["c"]
 
+    def latest_weekly_digest_week(self) -> str | None:
+        """Return the most recent ISO week with a weekly_digests row, or None.
+
+        ISO week strings are zero-padded (YYYY-Www), so lexical order matches
+        chronological order; `ORDER BY week_iso DESC LIMIT 1` is correct
+        across year boundaries.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT week_iso FROM weekly_digests "
+                "ORDER BY week_iso DESC LIMIT 1"
+            ).fetchone()
+        return row["week_iso"] if row else None
+
     def weekly_cost_baseline(
         self, before_week_iso: str, lookback_days: int = 90
     ) -> float | None:
@@ -832,14 +1335,17 @@ class ProfileStore:
 
         ISO week strings are zero-padded (YYYY-Www), so lexical order matches
         chronological order; a plain `<` comparison correctly handles the
-        year boundary (e.g. '2025-W52' < '2026-W01').
+        year boundary (e.g. '2025-W52' < '2026-W01'). When multiple rows
+        exist for the same prior week (the replace flow keeps superseded
+        history), the highest ``id`` is the most recent write and wins.
         """
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT week_iso, dim_key, commitment_text, target_metric, "
-                "       baseline_value, measured_value, outcome "
+                "       baseline_value, measured_value, outcome, "
+                "       user_chosen, display_text "
                 "FROM follow_ups WHERE week_iso < ? "
-                "ORDER BY week_iso DESC LIMIT 1",
+                "ORDER BY week_iso DESC, id DESC LIMIT 1",
                 (before_week_iso,),
             ).fetchone()
         if row is None:
@@ -853,18 +1359,22 @@ class ProfileStore:
             baseline_value=row["baseline_value"],
             measured_value=row["measured_value"],
             outcome=outcome,
+            user_chosen=row["user_chosen"],
+            display_text=row["display_text"],
         )
 
     def latest_follow_up(self) -> FollowUp | None:
         """Return the most recent follow_up by week_iso, or None if the table is empty.
 
         Same lexical-equals-chronological argument as `prior_follow_up`.
+        ``id DESC`` is the tiebreaker when a week has multiple rows.
         """
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT week_iso, dim_key, commitment_text, target_metric, "
-                "       baseline_value, measured_value, outcome "
-                "FROM follow_ups ORDER BY week_iso DESC LIMIT 1"
+                "       baseline_value, measured_value, outcome, "
+                "       user_chosen, display_text "
+                "FROM follow_ups ORDER BY week_iso DESC, id DESC LIMIT 1"
             ).fetchone()
         if row is None:
             return None
@@ -877,4 +1387,237 @@ class ProfileStore:
             baseline_value=row["baseline_value"],
             measured_value=row["measured_value"],
             outcome=outcome,
+            user_chosen=row["user_chosen"],
+            display_text=row["display_text"],
         )
+
+    # ---- reflect (active commitment + session_reflections) -------------
+
+    def load_active_commitment(self, week_iso: str) -> ActiveCommitment | None:
+        """Return the single active commitment for the given ISO week.
+
+        Active = follow_ups row with outcome='pending' for this week. When
+        the schema-migrations branch's US-002 `superseded_by` column is
+        present, the row must also have `superseded_by IS NULL`. The
+        `id` column (also US-002) is preferred for the returned
+        `follow_up_id`; otherwise the sqlite rowid is used as a stable
+        fallback so session_reflections rows still link to a real row.
+
+        Raises MultipleActiveCommitmentsError when >1 row qualifies (only
+        possible on the legacy schema, before the partial-unique index
+        from US-002 lands).
+        """
+        with self._conn() as conn:
+            cur = conn.execute("PRAGMA table_info(follow_ups)")
+            cols = {row[1] for row in cur.fetchall()}
+            has_superseded = "superseded_by" in cols
+            has_id = "id" in cols
+            has_display_text = "display_text" in cols
+
+            select_cols = [
+                "rowid AS _rowid",
+                "week_iso",
+                "dim_key",
+                "commitment_text",
+                "target_metric",
+                "baseline_value",
+                "measured_value",
+                "outcome",
+            ]
+            if has_id:
+                select_cols.append("id AS _id")
+            if has_display_text:
+                select_cols.append("display_text AS _display_text")
+
+            sql = (
+                "SELECT " + ", ".join(select_cols)
+                + " FROM follow_ups WHERE week_iso = ? AND outcome = 'pending'"
+            )
+            if has_superseded:
+                sql += " AND superseded_by IS NULL"
+            rows = conn.execute(sql, (week_iso,)).fetchall()
+
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise MultipleActiveCommitmentsError(
+                f"Expected one active commitment for {week_iso}, found "
+                f"{len(rows)}. The follow_ups unique-active-per-week "
+                "invariant has been violated (apply schema-migrations "
+                "US-002 to enforce it)."
+            )
+        row = rows[0]
+        outcome: Outcome = row["outcome"]
+        fu = FollowUp(
+            week_iso=row["week_iso"],
+            dim_key=row["dim_key"],
+            commitment_text=row["commitment_text"],
+            target_metric=row["target_metric"],
+            baseline_value=row["baseline_value"],
+            measured_value=row["measured_value"],
+            outcome=outcome,
+        )
+        follow_up_id = int(row["_id"]) if has_id else int(row["_rowid"])
+        display_text = (
+            row["_display_text"]
+            if has_display_text and row["_display_text"]
+            else fu.commitment_text
+        )
+        return ActiveCommitment(
+            follow_up_id=follow_up_id,
+            display_text=display_text,
+            follow_up=fu,
+        )
+
+    def load_commitment_by_id(
+        self, follow_up_id: int
+    ) -> ActiveCommitment | None:
+        """Load a follow_ups row by its id and wrap it as ActiveCommitment.
+
+        Used by the US-027 detached child path: the parent has already
+        resolved the active commitment, so the child receives the
+        ``follow_up_id`` directly and avoids re-running the week-scoped
+        active-commitment query (which could disagree with the parent
+        if the ISO week boundary just rolled over).
+
+        Returns None when no row matches (e.g., the row was deleted
+        between parent and child). Schema-tolerant in the same way as
+        ``load_active_commitment``: prefers ``id`` and ``display_text``
+        columns when present, falls back to rowid and commitment_text.
+        """
+        with self._conn() as conn:
+            cur = conn.execute("PRAGMA table_info(follow_ups)")
+            cols = {row[1] for row in cur.fetchall()}
+            has_id = "id" in cols
+            has_display_text = "display_text" in cols
+
+            select_cols = [
+                "rowid AS _rowid",
+                "week_iso",
+                "dim_key",
+                "commitment_text",
+                "target_metric",
+                "baseline_value",
+                "measured_value",
+                "outcome",
+            ]
+            if has_id:
+                select_cols.append("id AS _id")
+            if has_display_text:
+                select_cols.append("display_text AS _display_text")
+
+            id_expr = "id" if has_id else "rowid"
+            sql = (
+                "SELECT " + ", ".join(select_cols)
+                + f" FROM follow_ups WHERE {id_expr} = ?"
+            )
+            row = conn.execute(sql, (follow_up_id,)).fetchone()
+
+        if row is None:
+            return None
+        outcome: Outcome = row["outcome"]
+        fu = FollowUp(
+            week_iso=row["week_iso"],
+            dim_key=row["dim_key"],
+            commitment_text=row["commitment_text"],
+            target_metric=row["target_metric"],
+            baseline_value=row["baseline_value"],
+            measured_value=row["measured_value"],
+            outcome=outcome,
+        )
+        resolved_id = int(row["_id"]) if has_id else int(row["_rowid"])
+        display_text = (
+            row["_display_text"]
+            if has_display_text and row["_display_text"]
+            else fu.commitment_text
+        )
+        return ActiveCommitment(
+            follow_up_id=resolved_id,
+            display_text=display_text,
+            follow_up=fu,
+        )
+
+    def load_active_commitments(self, week_iso: str) -> list[FollowUp]:
+        """Return all active commitments for ``week_iso`` (list form).
+
+        "Active" = ``outcome='pending'``, and (when ``superseded_by`` is
+        present) ``superseded_by IS NULL``. The partial-unique index from
+        US-002 enforces "at most one active row per week", so this list
+        should be 0 or 1 elements in practice; callers that need the
+        invariant-enforced singular accessor should use
+        :meth:`load_active_commitment` (raises on >1 row).
+        """
+        with self._conn() as conn:
+            cols = {
+                r[1] for r in conn.execute("PRAGMA table_info(follow_ups)").fetchall()
+            }
+            extra = " AND superseded_by IS NULL" if "superseded_by" in cols else ""
+            rows = conn.execute(
+                "SELECT week_iso, dim_key, commitment_text, target_metric, "
+                "       baseline_value, measured_value, outcome "
+                f"FROM follow_ups WHERE week_iso = ? AND outcome = 'pending'{extra} "
+                "ORDER BY rowid ASC",
+                (week_iso,),
+            ).fetchall()
+        result: list[FollowUp] = []
+        for row in rows:
+            outcome: Outcome = row["outcome"]
+            result.append(
+                FollowUp(
+                    week_iso=row["week_iso"],
+                    dim_key=row["dim_key"],
+                    commitment_text=row["commitment_text"],
+                    target_metric=row["target_metric"],
+                    baseline_value=row["baseline_value"],
+                    measured_value=row["measured_value"],
+                    outcome=outcome,
+                )
+            )
+        return result
+
+    def insert_session_reflection(
+        self,
+        *,
+        session_stable_id: str,
+        follow_up_id: int,
+        self_report: SelfReport,
+        note: str | None = None,
+        created_at: datetime | None = None,
+    ) -> int:
+        """Append one session_reflections row; return its rowid.
+
+        The CHECK constraint on the table enforces the
+        ('yes','no','partial','skip') domain; this helper does not
+        re-validate (we let SQLite be the source of truth so a future
+        schema-tightening lands once, not in two places). ``created_at``
+        defaults to UTC now() when not supplied.
+        """
+        when = (created_at or _utcnow()).isoformat()
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO session_reflections
+                    (session_stable_id, follow_up_id, self_report, note, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (session_stable_id, follow_up_id, self_report, note, when),
+            )
+            return int(cur.lastrowid or 0)
+
+    def load_session_reflections(
+        self, *, follow_up_id: int
+    ) -> list[dict[str, Any]]:
+        """Read back every session_reflections row for one follow-up.
+
+        Returns a list of dicts ordered by id ASC (insertion order).
+        Used by tests today; the digest panel will read it post-MVP.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id, session_stable_id, follow_up_id, self_report, "
+                "       note, created_at "
+                "FROM session_reflections WHERE follow_up_id = ? "
+                "ORDER BY id ASC",
+                (follow_up_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]

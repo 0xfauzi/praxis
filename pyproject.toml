@@ -35,9 +35,30 @@ praxis = "praxis.cli.__main__:main"
 include = ["praxis*"]
 
 [tool.setuptools.package-data]
-praxis = ["data/builtin_cards/*.json"]
+praxis = ["data/builtin_cards/*.json", "storage/migrations/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-q"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+# The Anthropic / OpenAI SDKs return content unions where the per-item
+# .text / .content attributes are only present on specific block types.
+# The codebase narrows via runtime checks (getattr(b, "type", None) == "text"
+# or `if have_anthropic` flags around dual-client paths) that mypy cannot
+# statically follow. Disabling union-attr here documents the convention;
+# new code that needs to access union attributes should use isinstance()
+# narrowing so this disable stays bounded to the existing pattern.
+disable_error_code = ["union-attr"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# E402: module-level imports after early-execution code (used in
+# storage/profile_store.py for sqlite registration before imports).
+# E501: line-length is enforced by --line-length above; ruff still
+# flags strings inside code that intentionally exceed the limit.
+ignore = ["E402", "E501", "E741"]

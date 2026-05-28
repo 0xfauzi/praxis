@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "The error message says invalid credentials. How do I trace the source?"},
+  {"role": "assistant", "content": "Start at the login handler and follow the credential validation path."}
+]

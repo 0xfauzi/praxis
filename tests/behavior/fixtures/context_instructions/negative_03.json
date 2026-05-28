@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Refactor this long function into smaller pieces. Keep the public signature unchanged."},
+  {"role": "assistant", "content": "Done..."}
+]

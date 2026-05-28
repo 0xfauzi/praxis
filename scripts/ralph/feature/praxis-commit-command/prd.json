@@ -1,0 +1,70 @@
+{
+  "branchName": "ralph/factory/praxis-commit-command",
+  "userStories": [
+    {
+      "id": "US-020",
+      "title": "Suggestion sources + selection prompt",
+      "acceptanceCriteria": [
+        "`praxis commit` prints three numbered suggestions in priority order: (1) current-week headline-moment.suggested_alternative if present, (2-3) drills for the two weakest dimensions pulled from praxis/scoring/coach.py's existing drill bank; plus 'Keep last week' option when a still-open prior commitment exists; plus 'Write your own'.",
+        "Suggestion deduplication: if the headline-moment drill is identical to a weakest-dim drill, only one copy appears and the third slot is filled by the next-weakest dim.",
+        "When no headline-moment, no prior commitment, and only one dim has a coach.py drill, the prompt still presents at least the free-text option and does not crash on an empty suggestion list.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-021",
+      "title": "Free-text path with 280-char cap",
+      "acceptanceCriteria": [
+        "Selecting the 'Write your own' option opens a single-line stdin read; the input is trimmed and validated.",
+        "Input length > 280 chars triggers a re-prompt with the message 'Keep it under 280 characters (current: <N>).' and accepts further attempts until the user enters a valid string or aborts with Ctrl-C.",
+        "An empty input (after trim) is re-prompted with 'Cannot be empty.'; an input that is whitespace-only is treated as empty.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-022",
+      "title": "Persist commitment with user_chosen + display_text",
+      "acceptanceCriteria": [
+        "build_follow_up in praxis/follow_up.py accepts user_chosen and display_text parameters and writes them via insert_follow_up; the Outcome literal gains 'superseded' alongside the existing values.",
+        "A successful selection inserts one follow_ups row for the current ISO week with outcome='pending', user_chosen=1 for free-text or chosen suggestion, display_text equal to the verbatim user-facing string.",
+        "Attempting to insert a second pending row while one already exists (without going through the replace flow) raises sqlite3.IntegrityError due to the partial-unique index; the CLI catches it and falls back to the replace prompt rather than crashing.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-023",
+      "title": "Mid-week replace semantics",
+      "acceptanceCriteria": [
+        "When `praxis commit` runs and an active pending commitment exists for the current ISO week, the prompt offers [r]eplace / [k]eep / [c]ancel exactly as Section 2 describes, printing the existing display_text in quotes.",
+        "On [r]eplace, the existing row's outcome is updated to 'superseded' and superseded_by is set to the new row's id, both writes happen in a single transaction with the new INSERT, and on failure neither row is left half-written.",
+        "On [c]ancel, no DB writes occur and the command exits 0; on [k]eep, no DB writes occur and the command exits 0.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    }
+  ],
+  "allowedPaths": [
+    "praxis/cli/",
+    "praxis/follow_up.py",
+    "praxis/scoring/coach.py",
+    "praxis/storage/",
+    "tests/",
+    "scripts/ralph/feature/praxis-commit-command/",
+    "scripts/ralph/progress.txt"
+  ]
+}

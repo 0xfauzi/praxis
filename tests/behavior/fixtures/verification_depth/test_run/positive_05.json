@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "After running tests the suite passed cleanly with no flakes."},
+  {"role": "assistant", "content": "Solid."}
+]

@@ -105,7 +105,7 @@ def assess_trajectory_heuristic(
     ver_slope = _linear_slope(verification_series)
 
     avg_eng = mean(engagement_series)
-    avg_del = mean(delegation_series)
+    mean(delegation_series)
     pure_delegator_count = sum(1 for _s, sig in sorted_pairs if sig.is_pure_delegator)
     pure_delegator_rate = pure_delegator_count / n
 
@@ -398,8 +398,8 @@ evidence: 1-4 items. risks: 0-3 items (empty for learning/engaged labels). inter
             text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
         else:
             from openai import OpenAI  # type: ignore
-            client = OpenAI()
-            resp = client.chat.completions.create(
+            client = OpenAI()  # type: ignore[assignment]
+            resp = client.chat.completions.create(  # type: ignore[attr-defined]
                 model="gpt-5",
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -407,7 +407,7 @@ evidence: 1-4 items. risks: 0-3 items (empty for learning/engaged labels). inter
                 ],
                 response_format={"type": "json_object"},
             )
-            text = resp.choices[0].message.content or ""
+            text = resp.choices[0].message.content or ""  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001
         print(f"[behavior] LLM trajectory call failed: {exc!r}", file=sys.stderr)
         return None

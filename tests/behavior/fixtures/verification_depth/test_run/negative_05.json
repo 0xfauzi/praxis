@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "The README says we use pytest for the test suite."},
+  {"role": "assistant", "content": "Yes, pytest is the standard."}
+]

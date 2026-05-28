@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Add caching to the user lookup endpoint with a 5min TTL."},
+  {"role": "assistant", "content": "Wiring an in-memory LRU with 5-minute expiry."}
+]

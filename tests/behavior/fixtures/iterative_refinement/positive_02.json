@@ -1,0 +1,5 @@
+[
+  {"role": "user", "content": "Write a SQL query for the weekly digest."},
+  {"role": "assistant", "content": "..."},
+  {"role": "user", "content": "Instead of GROUP BY day, let's group by ISO week. Can you also add a HAVING clause for sessions > 0?"}
+]

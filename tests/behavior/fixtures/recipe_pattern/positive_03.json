@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Use the recipe in docs/cli_pattern.md to add a new subcommand. Don't deviate from the existing convention."},
+  {"role": "assistant", "content": "Following the recipe..."}
+]

@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Switch to plan mode. I want to see proposed file edits and the migration order before any actual writes."},
+  {"role": "assistant", "content": "Switching to plan mode..."}
+]

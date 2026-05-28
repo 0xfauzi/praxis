@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Write a comprehensive integration test suite for the auth layer."},
+  {"role": "assistant", "content": "Got it."}
+]

@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "What should the test fixture look like for this scenario?"},
+  {"role": "assistant", "content": "Two roles per turn..."}
+]

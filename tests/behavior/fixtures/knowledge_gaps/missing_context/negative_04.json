@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "I am trying to refactor our authentication codebase but it keeps failing in staging when we deploy and I cannot figure out the root cause anywhere."},
+  {"role": "assistant", "content": "Long context provided -- let me dig in."}
+]

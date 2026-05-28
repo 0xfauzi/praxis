@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Refactor the AuthService class to use JWT tokens with 24h expiry."},
+  {"role": "assistant", "content": "Clear scope -- doing it."}
+]

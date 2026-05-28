@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Update the README only."},
+  {"role": "assistant", "content": "Just docs -- got it."}
+]

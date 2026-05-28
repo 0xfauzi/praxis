@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from statistics import mean
 
@@ -22,6 +22,237 @@ from praxis.models_advisor.cards import (
     ModelCard,
     find_card_for_model_hint,
 )
+
+
+# --------------------------------------------------------------------
+# US-042 counterfactual cost-effectiveness rule.
+#
+# The refined cost-effectiveness panel surfaces a deterministic
+# "You spent $X on <higher-tier model> for tasks <lower-tier model> could
+# have done = $Y overspend" line. The rule below is the canonical
+# definition: a session counts as overspent iff
+#   1. Its model resolves to a frontier-tier card with a fast-tier
+#      sibling in the same family,
+#   2. Its workload is small (<= COUNTERFACTUAL_MAX_USER_TURNS user
+#      turns AND <= COUNTERFACTUAL_MAX_AVG_PROMPT_CHARS average prompt
+#      length), which is the same shape the cost ledger's tier-fit
+#      panel uses.
+# The dollar-difference per session is computed under the same
+# chars-per-token + output-multiplier assumptions as
+# ``praxis.scoring.cost_ledger.estimate_session_cost_usd`` so the
+# numbers on this panel and on the cost ledger never disagree.
+#
+# When multiple frontier models qualify, the panel reports the pair that
+# accumulated the most overspend (deterministic tiebreak below). This is
+# both legible for the user and consistent under reordering of inputs.
+
+COUNTERFACTUAL_MAX_USER_TURNS = 3
+COUNTERFACTUAL_MAX_AVG_PROMPT_CHARS = 200.0
+COUNTERFACTUAL_CHARS_PER_TOKEN = 4.0
+COUNTERFACTUAL_OUTPUT_TO_INPUT_RATIO = 1.5
+
+
+@dataclass(frozen=True)
+class CounterfactualOverspend:
+    """Deterministic counterfactual overspend across the week's sessions.
+
+    ``higher_tier_display`` / ``lower_tier_display`` are the resolved
+    card display names of the dominant (frontier, fast) pair, or empty
+    strings when no session qualified. ``spent_on_higher_tier_usd`` is
+    the sum of frontier costs across qualifying sessions for that pair;
+    ``overspend_usd`` is the sum of (frontier_cost - fast_cost) across
+    qualifying sessions for that pair.
+
+    ``had_any_priced_session`` is True iff at least one input session
+    had a non-None frontier cost (i.e. a resolvable card with per-token
+    pricing). The refined cost-effectiveness panel uses this flag to
+    decide between "$Y overspend" copy and the explicit "No cost data
+    this week." empty-state (US-042 AC: $0 overspend must not be
+    rendered when no cost data exists, since 0 falsely implies
+    optimality).
+    """
+
+    higher_tier_display: str = ""
+    lower_tier_display: str = ""
+    spent_on_higher_tier_usd: float = 0.0
+    overspend_usd: float = 0.0
+    qualifying_session_count: int = 0
+    had_any_priced_session: bool = False
+
+
+def _counterfactual_costs(
+    card: ModelCard, total_input_chars: int,
+) -> float | None:
+    """Cost in USD for ``total_input_chars`` under ``card`` pricing.
+
+    Mirrors the assumptions in
+    ``praxis.scoring.cost_ledger.estimate_session_cost_usd`` so this
+    panel and the weekly ledger agree on every session's spend. Returns
+    None when the card lacks per-token pricing.
+    """
+    if card.input_per_million_usd is None or card.output_per_million_usd is None:
+        return None
+    if total_input_chars <= 0:
+        return 0.0
+    input_tokens = total_input_chars / COUNTERFACTUAL_CHARS_PER_TOKEN
+    output_tokens = input_tokens * COUNTERFACTUAL_OUTPUT_TO_INPUT_RATIO
+    return (
+        input_tokens * card.input_per_million_usd / 1_000_000
+        + output_tokens * card.output_per_million_usd / 1_000_000
+    )
+
+
+def _fast_tier_sibling(
+    family: str, all_cards: dict[str, ModelCard],
+) -> ModelCard | None:
+    """Lowest-priced fast-tier card in ``family``, deterministic by id.
+
+    When a family ships more than one fast-tier card the rule needs a
+    stable choice so the panel cannot flip across runs. Ties are broken
+    by ascending card id; that is the same order ``load_all_cards``
+    populates and any future ordering is decoupled from JSON-load
+    iteration order.
+    """
+    candidates = [
+        c for c in all_cards.values() if c.family == family and c.tier == "fast"
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: c.id)
+    return candidates[0]
+
+
+def compute_counterfactual_overspend(
+    sessions: list[Session],
+) -> CounterfactualOverspend:
+    """Apply the deterministic counterfactual rule to a session list.
+
+    A session ``s`` qualifies for overspend attribution iff every clause
+    below holds:
+
+      1. ``s.model_hint`` resolves to a frontier-tier card with
+         per-token pricing.
+      2. The family ships a fast-tier sibling with per-token pricing
+         (looked up via ``_fast_tier_sibling``; deterministic by card id
+         tiebreak).
+      3. ``len(s.user_turns) <= COUNTERFACTUAL_MAX_USER_TURNS``.
+      4. The session's average prompt char volume is at most
+         ``COUNTERFACTUAL_MAX_AVG_PROMPT_CHARS``.
+
+    For each qualifying session, the overspend is
+    ``frontier_cost - fast_cost``; the spent figure attributed to the
+    higher tier is ``frontier_cost``. The returned panel reports the
+    (higher, lower) display pair with the largest overspend; ties break
+    by the higher-tier card id ascending so the result is reproducible.
+
+    ``had_any_priced_session`` flips True the moment any input session
+    resolves to a card with per-token pricing AND a positive frontier
+    cost; this is the gate the panel uses to distinguish "$0 overspend
+    because nothing qualified" from "no cost data at all this week"
+    (US-042 AC).
+    """
+    if not sessions:
+        return CounterfactualOverspend()
+
+    all_cards = _load_all_cards_cached()
+
+    # Per-(higher_id, lower_id) pair: sum of frontier spend + overspend
+    # across qualifying sessions, plus display names + qualifying counts.
+    pair_higher_spend: dict[tuple[str, str], float] = defaultdict(float)
+    pair_overspend: dict[tuple[str, str], float] = defaultdict(float)
+    pair_session_count: dict[tuple[str, str], int] = defaultdict(int)
+    pair_display: dict[tuple[str, str], tuple[str, str]] = {}
+
+    had_any_priced_session = False
+
+    for session in sessions:
+        card = find_card_for_model_hint(getattr(session, "model_hint", None))
+        if card is None:
+            continue
+        # Compute frontier cost for this session against ITS card; this
+        # is how we detect "had cost data" - any session whose card has
+        # pricing and a positive cost counts.
+        user_turns = session.user_turns
+        total_chars = sum(len(t.content) for t in user_turns)
+        cost = _counterfactual_costs(card, total_chars)
+        if cost is None:
+            continue
+        # A session with a priced card AND a non-trivial spend counts as
+        # "we have cost data this week"; a card-only session whose char
+        # count is zero is borderline (the user opened the chat but did
+        # not write). We treat any priced session with cost > 0 as
+        # evidence of priced activity so the empty-state copy fires only
+        # on truly cost-free weeks.
+        if cost > 0:
+            had_any_priced_session = True
+
+        # Only frontier-tier sessions can be overspent.
+        if card.tier != "frontier":
+            continue
+
+        # Workload threshold gate. Compute the average prompt char count
+        # against the user-turn list; a session with no user turns
+        # technically has avg_chars = 0 which is <= the threshold, but
+        # it also has total_chars = 0 and contributes nothing to either
+        # spend or overspend, so the qualifying-count includes it
+        # honestly without inflating the dollar figures.
+        n_turns = len(user_turns)
+        avg_chars = (total_chars / n_turns) if n_turns else 0.0
+        if n_turns > COUNTERFACTUAL_MAX_USER_TURNS:
+            continue
+        if avg_chars > COUNTERFACTUAL_MAX_AVG_PROMPT_CHARS:
+            continue
+
+        # The session qualifies; resolve the fast-tier sibling.
+        fast = _fast_tier_sibling(card.family, all_cards)
+        if fast is None:
+            continue
+        fast_cost = _counterfactual_costs(fast, total_chars)
+        if fast_cost is None:
+            continue
+
+        pair_key = (card.id, fast.id)
+        pair_higher_spend[pair_key] += cost
+        pair_overspend[pair_key] += cost - fast_cost
+        pair_session_count[pair_key] += 1
+        # Display names are stable across sessions for a given (higher,
+        # lower) pair; setdefault preserves the first observed pair
+        # without rewriting.
+        pair_display.setdefault(
+            pair_key, (card.display_name, fast.display_name)
+        )
+
+    if not pair_overspend:
+        return CounterfactualOverspend(
+            had_any_priced_session=had_any_priced_session,
+        )
+
+    # Deterministic tiebreak: most overspend wins; ties broken by
+    # ascending higher-tier card id, then ascending fast-tier card id,
+    # so reordering inputs cannot flip the report.
+    winner = min(
+        pair_overspend,
+        key=lambda k: (-pair_overspend[k], k[0], k[1]),
+    )
+    higher_display, lower_display = pair_display[winner]
+    return CounterfactualOverspend(
+        higher_tier_display=higher_display,
+        lower_tier_display=lower_display,
+        spent_on_higher_tier_usd=round(pair_higher_spend[winner], 4),
+        overspend_usd=round(pair_overspend[winner], 4),
+        qualifying_session_count=pair_session_count[winner],
+        had_any_priced_session=had_any_priced_session,
+    )
+
+
+def _load_all_cards_cached() -> dict[str, ModelCard]:
+    """One-shot wrapper around ``load_all_cards`` so test fixtures can
+    monkey-patch the lookup if they need to inject custom cards. Kept as
+    a function (not a cached module-level dict) because user cards live
+    on disk and may change between tests.
+    """
+    from praxis.models_advisor.cards import load_all_cards
+    return load_all_cards()
 
 
 @dataclass
@@ -229,8 +460,8 @@ Return ONLY valid JSON, no preamble:
             text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
         else:
             from openai import OpenAI  # type: ignore
-            client = OpenAI()
-            resp = client.chat.completions.create(
+            client = OpenAI()  # type: ignore[assignment]
+            resp = client.chat.completions.create(  # type: ignore[attr-defined]
                 model="gpt-5",
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -238,7 +469,7 @@ Return ONLY valid JSON, no preamble:
                 ],
                 response_format={"type": "json_object"},
             )
-            text = resp.choices[0].message.content or ""
+            text = resp.choices[0].message.content or ""  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001
         print(f"[model_advisor] LLM call failed: {exc!r}", file=sys.stderr)
         return None

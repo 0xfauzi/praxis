@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Explain how Promise.all behaves when one of the promises rejects."},
+  {"role": "assistant", "content": "It short-circuits..."}
+]

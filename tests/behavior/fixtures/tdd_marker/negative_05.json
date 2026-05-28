@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "I am exploring different testing strategies for our codebase. Could you summarize the main ones used today?"},
+  {"role": "assistant", "content": "Sure - unit, integration, e2e..."}
+]

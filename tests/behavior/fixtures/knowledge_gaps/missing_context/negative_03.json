@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Why is it failing? Getting a TypeError on line 10."},
+  {"role": "assistant", "content": "TypeError usually means a type mismatch -- can you share line 10?"}
+]

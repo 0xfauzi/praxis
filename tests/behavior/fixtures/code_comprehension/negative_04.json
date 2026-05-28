@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Can you explain the extract function at a high level?"},
+  {"role": "assistant", "content": "Sure -- it scans user turns..."}
+]

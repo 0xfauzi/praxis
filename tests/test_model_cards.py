@@ -93,3 +93,185 @@ def test_export_card_roundtrips_to_dict():
 
 def test_build_profiles_empty_input_returns_empty():
     assert build_profiles([]) == []
+
+
+# =========================================================================
+# US-042: deterministic counterfactual overspend rule (advisor.py)
+# =========================================================================
+
+from datetime import datetime, timezone  # noqa: E402
+
+from praxis.models import Provider, Role, Session, Turn  # noqa: E402
+from praxis.models_advisor.advisor import (  # noqa: E402
+    COUNTERFACTUAL_MAX_AVG_PROMPT_CHARS,
+    COUNTERFACTUAL_MAX_USER_TURNS,
+    CounterfactualOverspend,
+    compute_counterfactual_overspend,
+)
+
+
+def _make_cf_session(
+    model_hint: str | None,
+    turn_texts: list[str],
+    *,
+    session_id_suffix: str = "",
+) -> Session:
+    """Build a session with the given model_hint and user-turn content."""
+    turns = [Turn(role=Role.USER, content=t) for t in turn_texts]
+    return Session(
+        provider=Provider.CLAUDE,
+        session_id=f"s-{model_hint or 'none'}-{session_id_suffix or len(turn_texts)}",
+        started_at=datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc),
+        turns=turns,
+        source_path="/tmp/test-cf",
+        model_hint=model_hint,
+    )
+
+
+def test_counterfactual_empty_sessions_returns_default():
+    """No sessions => empty result; no priced session observed."""
+    result = compute_counterfactual_overspend([])
+    assert isinstance(result, CounterfactualOverspend)
+    assert result.had_any_priced_session is False
+    assert result.qualifying_session_count == 0
+    assert result.overspend_usd == 0.0
+    assert result.higher_tier_display == ""
+
+
+def test_counterfactual_unknown_model_does_not_count():
+    """A session whose model_hint resolves to no card contributes
+    nothing - no priced session is recognised, no overspend, no
+    qualifying count."""
+    sessions = [_make_cf_session("totally-made-up-model-zzz", ["hello"])]
+    result = compute_counterfactual_overspend(sessions)
+    assert result.had_any_priced_session is False
+    assert result.qualifying_session_count == 0
+    assert result.overspend_usd == 0.0
+
+
+def test_counterfactual_priced_session_sets_had_any_priced(tmp_home):
+    """Any priced session (resolves to a card with pricing AND
+    non-trivial char volume) flips ``had_any_priced_session`` True so
+    the panel knows cost data exists, even when no session qualifies
+    for overspend attribution."""
+    # A long-prompt Opus session (does NOT qualify for overspend
+    # because avg_chars > threshold) still flips the priced flag.
+    long_prompt = "x" * 5000
+    sessions = [
+        _make_cf_session("claude-opus-4-7", [long_prompt]),
+    ]
+    result = compute_counterfactual_overspend(sessions)
+    assert result.had_any_priced_session is True
+    assert result.qualifying_session_count == 0
+    assert result.overspend_usd == 0.0
+
+
+def test_counterfactual_short_opus_session_overspends(tmp_home):
+    """A short-prompt Opus session qualifies and produces positive
+    overspend against Haiku. Use a prompt at the upper end of the
+    threshold so the 4-decimal rounding doesn't collapse the (spent,
+    overspend) numbers into the same value."""
+    sessions = [
+        # 200 chars = threshold ceiling; produces distinguishable
+        # frontier vs fast costs after the rule's 4-decimal rounding.
+        _make_cf_session("claude-opus-4-7", ["x" * 200]),
+    ]
+    result = compute_counterfactual_overspend(sessions)
+    assert result.had_any_priced_session is True
+    assert result.qualifying_session_count == 1
+    assert result.overspend_usd > 0.0
+    assert result.higher_tier_display == "Claude Opus 4.7"
+    assert result.lower_tier_display == "Claude Haiku 4.5"
+    # The frontier cost is the full $X spent on Opus this session; the
+    # overspend is (frontier_cost - haiku_cost), strictly less than
+    # frontier_cost since both costs are positive.
+    assert result.overspend_usd < result.spent_on_higher_tier_usd
+
+
+def test_counterfactual_haiku_session_does_not_qualify(tmp_home):
+    """A fast-tier session is never overspent: the qualifying rule is
+    frontier-tier only."""
+    sessions = [_make_cf_session("claude-haiku-4-5", ["quick lookup"])]
+    result = compute_counterfactual_overspend(sessions)
+    assert result.had_any_priced_session is True
+    assert result.qualifying_session_count == 0
+    assert result.overspend_usd == 0.0
+
+
+def test_counterfactual_long_prompt_opus_session_does_not_qualify(tmp_home):
+    """A session whose average prompt exceeds the threshold does NOT
+    qualify; large prompts are plausibly the right use of a frontier
+    model."""
+    long = "x" * int(COUNTERFACTUAL_MAX_AVG_PROMPT_CHARS + 50)
+    sessions = [_make_cf_session("claude-opus-4-7", [long])]
+    result = compute_counterfactual_overspend(sessions)
+    assert result.had_any_priced_session is True
+    assert result.qualifying_session_count == 0
+    assert result.overspend_usd == 0.0
+
+
+def test_counterfactual_too_many_turns_does_not_qualify(tmp_home):
+    """A session with more user turns than the threshold does NOT
+    qualify, even when each prompt is short. Many short turns is a
+    real chat workload that benefits from a frontier model's context."""
+    short_turns = ["hi"] * (COUNTERFACTUAL_MAX_USER_TURNS + 1)
+    sessions = [_make_cf_session("claude-opus-4-7", short_turns)]
+    result = compute_counterfactual_overspend(sessions)
+    assert result.had_any_priced_session is True
+    assert result.qualifying_session_count == 0
+
+
+def test_counterfactual_multiple_qualifying_sessions_sum(tmp_home):
+    """Across several qualifying Opus sessions, the overspend and
+    spend totals are the sums per (frontier, fast) pair."""
+    sessions = [
+        _make_cf_session(
+            "claude-opus-4-7",
+            ["lookup A"],
+            session_id_suffix="a",
+        ),
+        _make_cf_session(
+            "claude-opus-4-7",
+            ["lookup B"],
+            session_id_suffix="b",
+        ),
+        _make_cf_session(
+            "claude-opus-4-7",
+            ["lookup C"],
+            session_id_suffix="c",
+        ),
+    ]
+    result = compute_counterfactual_overspend(sessions)
+    assert result.qualifying_session_count == 3
+    assert result.overspend_usd > 0.0
+
+
+def test_counterfactual_deterministic_under_reordering(tmp_home):
+    """The result is identical regardless of input order: the rule's
+    tiebreaks are deterministic by card id, not by input position."""
+    a = _make_cf_session(
+        "claude-opus-4-7",
+        ["alpha"],
+        session_id_suffix="aa",
+    )
+    b = _make_cf_session(
+        "claude-opus-4-7",
+        ["beta"],
+        session_id_suffix="bb",
+    )
+    forward = compute_counterfactual_overspend([a, b])
+    reverse = compute_counterfactual_overspend([b, a])
+    assert forward == reverse
+
+
+def test_counterfactual_overspend_dataclass_is_frozen():
+    """CounterfactualOverspend is immutable so callers cannot mutate
+    the result."""
+    import dataclasses
+
+    result = CounterfactualOverspend()
+    try:
+        result.overspend_usd = 99.0  # type: ignore[misc]
+    except dataclasses.FrozenInstanceError:
+        return
+    raise AssertionError("CounterfactualOverspend must be frozen")

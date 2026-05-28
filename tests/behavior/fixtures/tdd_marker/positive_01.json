@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Let's do TDD here. Write a failing test for the JSON parser first, then implement the smallest change that makes it pass."},
+  {"role": "assistant", "content": "Failing test:..."}
+]

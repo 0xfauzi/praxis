@@ -23,7 +23,7 @@ class Coaching:
     generated_by: str
 
 
-_FALLBACK_DRILLS: dict[str, list[str]] = {
+FALLBACK_DRILLS: dict[str, list[str]] = {
     "planning": [
         "Before your next session, write the goal in one sentence, the constraints in three bullets, and the 'done when' criterion. Paste that in as turn one.",
         "Ask the assistant to restate your plan in its own words before doing anything. Correct it before approving.",
@@ -57,6 +57,15 @@ _FALLBACK_DRILLS: dict[str, list[str]] = {
 }
 
 
+def drills_for_dim(dim_key: str) -> list[str]:
+    """Return the canned drills for one rubric dim from the fallback bank.
+
+    Empty list when the dim is not in the bank. Returned list is a copy so
+    callers can mutate it without affecting the source.
+    """
+    return list(FALLBACK_DRILLS.get(dim_key, []))
+
+
 def _heuristic_coaching(snapshot: ProfileSnapshot) -> Coaching:
     """Fallback when no LLM is available — uses the canned drills above."""
     sorted_dims = sorted(snapshot.dimension_means.items(), key=lambda kv: kv[1])
@@ -72,7 +81,7 @@ def _heuristic_coaching(snapshot: ProfileSnapshot) -> Coaching:
                 "current_score": snapshot.dimension_means[key],
                 "target_score": min(10.0, snapshot.dimension_means[key] + 2.0),
                 "why_it_matters": dim.evidence,
-                "drills": _FALLBACK_DRILLS.get(key, []),
+                "drills": FALLBACK_DRILLS.get(key, []),
             }
         )
 
@@ -209,8 +218,8 @@ Exactly 2 focus areas. Exactly 3 drills per focus area."""
         else:
             from openai import OpenAI  # type: ignore
 
-            client = OpenAI()
-            response = client.chat.completions.create(
+            client = OpenAI()  # type: ignore[assignment]
+            response = client.chat.completions.create(  # type: ignore[attr-defined]
                 model="gpt-5",
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -218,7 +227,7 @@ Exactly 2 focus areas. Exactly 3 drills per focus area."""
                 ],
                 response_format={"type": "json_object"},
             )
-            text = response.choices[0].message.content or ""
+            text = response.choices[0].message.content or ""  # type: ignore[attr-defined]
             generated_by = "gpt-5"
     except Exception as exc:  # noqa: BLE001
         print(f"[coach] LLM call failed: {exc!r}", file=sys.stderr)

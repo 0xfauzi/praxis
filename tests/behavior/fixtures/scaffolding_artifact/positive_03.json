@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Generate boilerplate for a CRUD REST API using Express and Postgres. Include the project structure and Dockerfile."},
+  {"role": "assistant", "content": "Boilerplate ready..."}
+]

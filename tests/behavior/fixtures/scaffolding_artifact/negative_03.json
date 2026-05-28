@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Show me an example of a CTE in SQL that aggregates by month and joins back to the source table."},
+  {"role": "assistant", "content": "WITH monthly AS (...) ..."}
+]

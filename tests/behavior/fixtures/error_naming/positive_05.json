@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Got: AttributeError: 'Session' object has no attribute 'user_turns'. I think the dataclass was reordered and pickled sessions no longer load. The error says it happens during deserialization, not during normal use."},
+  {"role": "assistant", "content": "Add a migration shim..."}
+]

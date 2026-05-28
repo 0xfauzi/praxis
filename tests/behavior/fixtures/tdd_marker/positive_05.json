@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Tests before implementation, please. Cover the empty-input case and the happy path. Then we will tackle the implementation."},
+  {"role": "assistant", "content": "Writing the tests..."}
+]

@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Write me a function. Goal: parse our CSV. Acceptance criteria: handles utf-8 and empty rows."},
+  {"role": "assistant", "content": "Got it -- here is a draft."}
+]

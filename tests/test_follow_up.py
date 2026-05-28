@@ -695,3 +695,95 @@ def test_close_and_persist_updates_existing_row_in_place(tmp_home):
             conn.execute("SELECT * FROM follow_ups WHERE week_iso = ?", ("2026-W20",))
         )
     assert len(rows) == 1
+
+
+# =========================================================================
+# US-022: user_chosen + display_text + 'superseded' Outcome
+# =========================================================================
+
+
+def test_followup_defaults_user_chosen_zero_and_display_text_none():
+    """The new fields default so existing call sites keep working."""
+    fu = FollowUp(
+        week_iso="2026-W21",
+        dim_key="verification",
+        commitment_text="ask for source",
+        target_metric="verification_rate",
+        baseline_value=0.4,
+    )
+    assert fu.user_chosen == 0
+    assert fu.display_text is None
+
+
+def test_build_follow_up_accepts_user_chosen_and_display_text():
+    """build_follow_up threads the new params straight through to FollowUp."""
+    moment = HeadlineMoment(
+        dim_key="planning",
+        suggested_alternative="state goal + constraints before prompting",
+    )
+    fu = build_follow_up(
+        week_iso="2026-W21",
+        headline_moment=moment,
+        snapshot=_empty_snapshot({"planning": 6.0}),
+        verification_rate=0.5,
+        delegation_rate=0.2,
+        user_chosen=1,
+        display_text="state goal + constraints before prompting",
+    )
+    assert fu.user_chosen == 1
+    assert fu.display_text == "state goal + constraints before prompting"
+
+
+def test_build_follow_up_defaults_user_chosen_zero_when_omitted():
+    """Existing orchestrator callers should keep getting user_chosen=0."""
+    moment = HeadlineMoment(
+        dim_key="planning",
+        suggested_alternative="state goal + constraints",
+    )
+    fu = build_follow_up(
+        week_iso="2026-W21",
+        headline_moment=moment,
+        snapshot=_empty_snapshot({"planning": 6.0}),
+        verification_rate=0.5,
+        delegation_rate=0.2,
+    )
+    assert fu.user_chosen == 0
+    assert fu.display_text is None
+
+
+def test_outcome_literal_includes_superseded():
+    """Outcome literal accepts the new 'superseded' value.
+
+    Tested via dataclass construction with the literal string; mypy
+    enforces the Literal type at typecheck time, while this runtime
+    assertion guards against accidental removal.
+    """
+    fu = FollowUp(
+        week_iso="2026-W21",
+        dim_key="verification",
+        commitment_text="ask for source",
+        target_metric="verification_rate",
+        baseline_value=0.4,
+        outcome="superseded",
+    )
+    assert fu.outcome == "superseded"
+
+
+def test_save_follow_up_persists_user_chosen_and_display_text(tmp_home):
+    """save_follow_up writes both new columns and load_follow_up reads them back."""
+    store = ProfileStore()
+    fu = FollowUp(
+        week_iso="2026-W21",
+        dim_key="planning",
+        commitment_text="state goal + constraints",
+        target_metric="planning_dim_mean",
+        baseline_value=6.0,
+        outcome="pending",
+        user_chosen=1,
+        display_text="state goal + constraints",
+    )
+    store.save_follow_up(fu)
+    loaded = store.load_follow_up("2026-W21")
+    assert loaded is not None
+    assert loaded.user_chosen == 1
+    assert loaded.display_text == "state goal + constraints"

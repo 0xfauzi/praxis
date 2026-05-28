@@ -1,0 +1,69 @@
+{
+  "branchName": "ralph/factory/praxis-nudge-command",
+  "userStories": [
+    {
+      "id": "US-016",
+      "title": "Nudge verb reads active commitment",
+      "acceptanceCriteria": [
+        "`praxis nudge` is registered in praxis/cli/__main__.py and resolves the active commitment as the single follow_ups row with outcome='pending' AND superseded_by IS NULL for the current ISO week.",
+        "When there is no active commitment, the command exits 0 with empty stdout (no error, no banner) so hooks remain silent until the first commit.",
+        "If multiple active rows exist (would only happen if the unique index from US-002 was bypassed), the command exits non-zero with a clear error referencing the violated invariant.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Added ProfileStore.load_active_commitments(week_iso) (schema-tolerant: appends `AND superseded_by IS NULL` only when the column from schema-migrations US-002 is present). cmd_nudge prints `[Praxis] This week: <commitment_text>` on a single line; silent (exit 0, empty stdout/stderr) when no active commitment; exits 4 with stderr error referencing the violated invariant when >1 active rows are returned."
+    },
+    {
+      "id": "US-017",
+      "title": "--format flag with three outputs",
+      "acceptanceCriteria": [
+        "`--format claude-code` prints exactly the JSON {\"hookSpecificOutput\":{\"additionalContext\":\"[Praxis] This week's focus: <display_text>\"}} on a single line.",
+        "`--format codex` prints the same JSON shape per Section 5; `--format text` (default) prints exactly `[Praxis] This week: <display_text>` followed by newline.",
+        "Passing `--format html` (an unsupported value) exits non-zero with a usage-style error message naming the three accepted values.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "Added `--format {text,claude-code,codex}` to the nudge subparser (default text). text prints `[Praxis] This week: <commitment>\\n`; claude-code and codex emit the same single-line compact JSON envelope `{\"hookSpecificOutput\":{\"additionalContext\":\"[Praxis] This week's focus: <commitment>\"}}`. The display field is `commitment_text` from the FollowUp dataclass; when the schema-migrations `display_text` column lands, swap to it here without touching the CLI surface. argparse's `choices=` rejects `--format html` with exit 2 and a usage-style error naming all three accepted values."
+    },
+    {
+      "id": "US-018",
+      "title": "Throttling via ~/.praxis/.last_nudge",
+      "acceptanceCriteria": [
+        "A successful nudge writes a JSON object to ~/.praxis/.last_nudge keyed by (surface, sha1(cwd)) with last fire timestamp; throttle_minutes is read from ~/.praxis/config.toml [nudge] (default 30).",
+        "A second invocation for the same (surface, cwd) within throttle_minutes returns empty stdout and exit 0 without touching the DB.",
+        "If ~/.praxis/.last_nudge contains malformed JSON, the file is renamed to .last_nudge.corrupt and the current call proceeds as if no prior fire; the user-facing call never crashes on the bad file.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "Added praxis/cli/nudge_throttle.py with is_throttled / record_fire keyed by f'{surface}:{sha1(cwd)}'. Added NudgeConfig dataclass + [nudge] section to praxis/config.py (throttle_minutes default 30) and wove it into DEFAULT_CONFIG_TOML. cmd_nudge now runs the throttle check BEFORE _resolve_active_commitment so a throttled call never opens profile.db; record_fire is only invoked on the path that actually printed a commitment (silent no-op runs do NOT touch the file, otherwise a fresh user with no commitment would block themselves for 30 min after their first commit). Malformed JSON / non-object payloads are quarantined to .last_nudge.corrupt via _quarantine_corrupt_file and the current call proceeds with empty state."
+    },
+    {
+      "id": "US-019",
+      "title": "shell-nudge delegates to `praxis nudge --format text`",
+      "acceptanceCriteria": [
+        "`praxis install-shell-nudge` now emits a snippet that calls `praxis nudge --format text` instead of the prior hard-coded line; the snippet sources the same throttle file as the SessionStart hooks.",
+        "A shell startup occurring within throttle_minutes of a Claude Code SessionStart fire (for the same cwd) produces no shell output.",
+        "If `praxis nudge` is not on PATH, the emitted snippet fails closed (silent, exit 0) rather than printing a shell error to the user's prompt.",
+        "Typecheck passes: uv run mypy praxis",
+        "Tests pass: uv run pytest"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "Rewrote praxis/cli/shell_nudge.py emit_snippet() so the eval'd snippet (1) PATH-guards via `command -v praxis >/dev/null 2>&1 || return 0` so a missing binary fails closed silent, (2) delegates to `praxis nudge --format text 2>/dev/null || return 0` so any non-zero exit / stderr from praxis nudge never lands on the user's prompt, and (3) shares the ~/.praxis/.last_nudge throttle file with the SessionStart hooks (structural -- both call the same `praxis nudge` entry point, so a shell startup within `[nudge].throttle_minutes` of a Claude Code or Codex fire stays silent). The legacy latest.html/.last_opened/find -mtime logic is gone -- that decision now lives inside praxis nudge. Verified all 3 ACs via end-to-end smoke: with praxis on PATH + active commitment, prints `[Praxis] This week: <text>`; throttled second invocation is silent; PATH=/usr/bin invocation (praxis truly missing) exits 0 with empty output."
+    }
+  ],
+  "allowedPaths": [
+    "praxis/cli/",
+    "praxis/storage/",
+    "praxis/config.py",
+    "tests/",
+    "scripts/ralph/feature/praxis-nudge-command/",
+    "scripts/ralph/progress.txt"
+  ]
+}

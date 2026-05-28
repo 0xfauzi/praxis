@@ -21,7 +21,6 @@ from praxis.reports.cost_ledger_panel import (
     COST_DISCLAIMER_HTML_CLASS,
     format_cost_disclaimer_html,
 )
-from praxis.scoring.coach import Coaching
 from praxis.scoring.rubric import RUBRIC, by_key
 
 
@@ -411,7 +410,7 @@ def render(summary: RunSummary) -> str:
     consolidated_note = (
         f"Consolidated today · {summary.sessions_scored} new sessions analyzed"
         if summary.consolidated_for is not None
-        else f"Cached consolidation · next refresh tomorrow"
+        else "Cached consolidation · next refresh tomorrow"
     )
 
     return f"""<!doctype html>

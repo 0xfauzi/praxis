@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Implement _post_notify with a fallback for non-macOS."},
+  {"role": "assistant", "content": "Okay, here's a draft."}
+]

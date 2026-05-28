@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Why is this regex matching way more characters than I expected?"},
+  {"role": "assistant", "content": "Likely greedy quantifier..."}
+]
