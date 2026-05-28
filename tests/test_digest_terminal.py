@@ -1358,3 +1358,173 @@ def test_behavioral_patterns_section_appears_after_six_dim_panel():
     six_dim_pos = text.find("THE SIX DIMENSIONS")
     bp_pos = text.find("BEHAVIORAL PATTERNS")
     assert 0 <= six_dim_pos < bp_pos
+
+
+# ---------------- US-039: aug/auto balance + cadence panels (terminal) -------
+
+
+from praxis.reports.digest_terminal import (  # noqa: E402
+    _AUG_AUTO_BALANCE_CLASSIFIER_UNAVAILABLE,
+    _CADENCE_NO_ACTIVITY,
+)
+from praxis.reports.panel_inputs import (  # noqa: E402
+    AugAutoBalancePanel,
+    CadencePanel,
+    PanelInputs,
+)
+
+
+def _aug_auto_populated() -> AugAutoBalancePanel:
+    """Three classified sessions: 2 aug, 1 auto, 1 mixed (33% auto?)"""
+    return AugAutoBalancePanel(
+        augmentation_count=2,
+        automation_count=1,
+        mixed_count=1,
+        unclassified_count=0,
+    )
+
+
+def _cadence_populated() -> CadencePanel:
+    return CadencePanel(
+        weekday_streak=4,
+        substantive_session_count=6,
+        high_adopter_position="moderate",
+    )
+
+
+def _full_panel_inputs(*, aug_auto=None, cadence=None) -> PanelInputs:
+    return PanelInputs(
+        aug_auto_balance=aug_auto,
+        cadence=cadence,
+    )
+
+
+def test_aug_auto_balance_eyebrow_always_renders():
+    """The section eyebrow renders regardless of data state so the
+    document shape is stable across empty + populated runs."""
+    text_empty = _strip_ansi(render(WeeklyDigest()))
+    text_full = _strip_ansi(
+        render(WeeklyDigest(panel_inputs=_full_panel_inputs(aug_auto=_aug_auto_populated())))
+    )
+    assert "AUGMENTATION/AUTOMATION" in text_empty
+    assert "AUGMENTATION/AUTOMATION" in text_full
+
+
+def test_aug_auto_balance_renders_classifier_unavailable():
+    """When every session in the week is unclassified, the panel
+    surfaces the verbatim US-039 unavailable copy."""
+    panel = AugAutoBalancePanel(
+        unclassified_count=3,
+        classifier_unavailable=True,
+    )
+    digest = WeeklyDigest(panel_inputs=_full_panel_inputs(aug_auto=panel))
+    text = _strip_ansi(render(digest))
+    assert _AUG_AUTO_BALANCE_CLASSIFIER_UNAVAILABLE in text
+
+
+def test_aug_auto_balance_renders_shares_when_populated():
+    """The three shares render as percentages so the reader sees the
+    user's split rather than raw counts."""
+    digest = WeeklyDigest(
+        panel_inputs=_full_panel_inputs(aug_auto=_aug_auto_populated())
+    )
+    text = _strip_ansi(render(digest))
+    # 2/4 = 50% aug; 1/4 = 25% auto; 1/4 = 25% mixed
+    assert "Augmentation: 50%" in text
+    assert "Automation: 25%" in text
+    assert "Mixed: 25%" in text
+
+
+def test_aug_auto_balance_renders_industry_anchor_citation():
+    """The Anthropic Economic Index anchor (~52%/45%) is cited inline
+    as a footnote so the reader can compare against the industry baseline."""
+    digest = WeeklyDigest(
+        panel_inputs=_full_panel_inputs(aug_auto=_aug_auto_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "Anthropic Economic Index" in text
+    assert "52%" in text
+    assert "45%" in text
+
+
+def test_aug_auto_balance_no_panel_renders_unavailable():
+    """A digest with no aug_auto panel at all falls back to the
+    unavailable copy rather than an empty section."""
+    digest = WeeklyDigest()
+    text = _strip_ansi(render(digest))
+    assert "AUGMENTATION/AUTOMATION" in text
+    assert _AUG_AUTO_BALANCE_CLASSIFIER_UNAVAILABLE in text
+
+
+def test_cadence_eyebrow_always_renders():
+    """Same stability contract as the aug/auto panel."""
+    text_empty = _strip_ansi(render(WeeklyDigest()))
+    text_full = _strip_ansi(
+        render(WeeklyDigest(panel_inputs=_full_panel_inputs(cadence=_cadence_populated())))
+    )
+    assert "CADENCE" in text_empty
+    assert "CADENCE" in text_full
+
+
+def test_cadence_renders_no_activity_message():
+    """When zero substantive sessions fell in the window, the panel
+    surfaces the verbatim US-039 message."""
+    panel = CadencePanel(weekday_streak=0, substantive_session_count=0)
+    digest = WeeklyDigest(panel_inputs=_full_panel_inputs(cadence=panel))
+    text = _strip_ansi(render(digest))
+    assert _CADENCE_NO_ACTIVITY in text
+
+
+def test_cadence_omits_high_adopter_label_when_no_activity():
+    """The high-adopter label is undefined without any activity to
+    position; the renderer must not surface 'Low-adopter' as a stand-in
+    (would mislead readers into reading inactivity as low engagement)."""
+    panel = CadencePanel(weekday_streak=0, substantive_session_count=0)
+    digest = WeeklyDigest(panel_inputs=_full_panel_inputs(cadence=panel))
+    text = _strip_ansi(render(digest))
+    assert "Low-adopter" not in text
+    assert "Moderate-adopter" not in text
+    assert "High-adopter" not in text
+
+
+def test_cadence_renders_streak_when_populated():
+    """The streak shows as 'N of 21 days' so the reader can see how
+    much of the window they were active."""
+    digest = WeeklyDigest(
+        panel_inputs=_full_panel_inputs(cadence=_cadence_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "Weekday streak: 4 of 21 days" in text
+
+
+def test_cadence_renders_spectrum_label_when_populated():
+    """The high-adopter position renders as a human-facing label."""
+    digest = WeeklyDigest(
+        panel_inputs=_full_panel_inputs(cadence=_cadence_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "Spectrum: Moderate-adopter" in text
+
+
+def test_cadence_renders_arxiv_citation():
+    """The arXiv 2509.19708 anchor is cited inline (US-039 acceptance)."""
+    digest = WeeklyDigest(
+        panel_inputs=_full_panel_inputs(cadence=_cadence_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "arXiv 2509.19708" in text
+
+
+def test_aug_auto_and_cadence_panels_respect_80_column_budget():
+    """US-066: every line must fit in 79 columns. Both new panels
+    must respect the same budget as the rest of the digest."""
+    digest = WeeklyDigest(
+        panel_inputs=_full_panel_inputs(
+            aug_auto=_aug_auto_populated(),
+            cadence=_cadence_populated(),
+        )
+    )
+    for line in render(digest).split("\n"):
+        assert visible_width(line) <= MAX_LINE_WIDTH, (
+            f"line exceeds {MAX_LINE_WIDTH} cols: {line!r}"
+        )

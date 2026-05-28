@@ -58,7 +58,9 @@ from pathlib import Path
 
 from praxis.redactor import redact_secrets
 from praxis.reports.panel_inputs import (
+    AugAutoBalancePanel,
     BehavioralPatternsPanel,
+    CadencePanel,
     PanelInputs,
 )
 from praxis.storage.profile_store import resolve_home
@@ -1155,6 +1157,96 @@ def _cost_split_bar(model_split: tuple[ModelSpend, ...], total: float) -> str:
 
 _BEHAVIORAL_PATTERNS_EMPTY = "No behavioral patterns captured this week."
 
+# US-039 empty-state copy. Tests assert the exact strings so a future
+# rewording is one audit point per renderer.
+_AUG_AUTO_BALANCE_CLASSIFIER_UNAVAILABLE = "Classifier unavailable for this week."
+_AUG_AUTO_BALANCE_NO_SESSIONS = "No sessions to classify this week."
+_CADENCE_NO_ACTIVITY = "No substantive sessions in the last 21 days."
+
+
+def _aug_auto_balance_section(panel: AugAutoBalancePanel | None) -> str:
+    """Render the augmentation/automation balance panel (US-039).
+
+    The eyebrow always renders so the document shape stays stable. The
+    body falls through three states (same as the terminal renderer):
+    classifier-unavailable, no-sessions, populated. The populated state
+    surfaces the three shares plus the Anthropic Economic Index anchor
+    so the reader can compare their habit against the industry baseline.
+    """
+    if panel is None or panel.classifier_unavailable:
+        return f"""
+  <section class="bal-section" id="aug-auto-balance">
+    <div class="s-eyebrow">Augmentation / Automation</div>
+    <p class="placeholder">{_safe(_AUG_AUTO_BALANCE_CLASSIFIER_UNAVAILABLE)}</p>
+  </section>"""
+    if panel.classified_total == 0:
+        return f"""
+  <section class="bal-section" id="aug-auto-balance">
+    <div class="s-eyebrow">Augmentation / Automation</div>
+    <p class="placeholder">{_safe(_AUG_AUTO_BALANCE_NO_SESSIONS)}</p>
+  </section>"""
+    aug_pct = int(round(panel.augmentation_share * 100))
+    auto_pct = int(round(panel.automation_share * 100))
+    mixed_pct = int(round(panel.mixed_share * 100))
+    industry_aug = int(round(panel.industry_augmentation_share * 100))
+    industry_auto = int(round(panel.industry_automation_share * 100))
+    return f"""
+  <section class="bal-section" id="aug-auto-balance">
+    <div class="s-eyebrow">Augmentation / Automation</div>
+    <div class="bal-row">
+      <span class="bal-label">Augmentation</span>
+      <span class="bal-value">{aug_pct}%</span>
+    </div>
+    <div class="bal-row">
+      <span class="bal-label">Automation</span>
+      <span class="bal-value">{auto_pct}%</span>
+    </div>
+    <div class="bal-row">
+      <span class="bal-label">Mixed</span>
+      <span class="bal-value">{mixed_pct}%</span>
+    </div>
+    <p class="bal-anchor">Industry anchor: {industry_aug}% augmentation / {industry_auto}% automation.</p>
+    <p class="bal-citation">Source: {_safe(panel.industry_anchor_citation)}</p>
+  </section>"""
+
+
+def _cadence_section(panel: CadencePanel | None) -> str:
+    """Render the cadence panel (US-039).
+
+    The eyebrow renders unconditionally so the section's slot in the
+    document doesn't move. When ``panel`` is None or carries zero
+    substantive sessions, the renderer emits the explicit "No
+    substantive sessions in the last 21 days." copy and OMITS the
+    high-adopter label. Otherwise it emits the streak, the
+    high-adopter position (when on file), and the arXiv 2509.19708
+    citation as a footnote.
+    """
+    if panel is None or not panel.has_activity:
+        return f"""
+  <section class="cad-section" id="cadence">
+    <div class="s-eyebrow">Cadence</div>
+    <p class="placeholder">{_safe(_CADENCE_NO_ACTIVITY)}</p>
+  </section>"""
+    position_html = ""
+    label = panel.position_label
+    if label:
+        position_html = (
+            f'<div class="cad-row">'
+            f'<span class="cad-label">Spectrum</span>'
+            f'<span class="cad-value">{_safe(label)}</span>'
+            f'</div>'
+        )
+    return f"""
+  <section class="cad-section" id="cadence">
+    <div class="s-eyebrow">Cadence</div>
+    <div class="cad-row">
+      <span class="cad-label">Weekday streak</span>
+      <span class="cad-value">{panel.weekday_streak} of {panel.window_days} days</span>
+    </div>
+    {position_html}
+    <p class="cad-citation">Source: {_safe(panel.citation)}</p>
+  </section>"""
+
 
 def _behavioral_patterns_section(panel: BehavioralPatternsPanel | None) -> str:
     """Render the behavioral-patterns panel (US-038).
@@ -1257,6 +1349,16 @@ def render(digest: WeeklyDigest) -> str:
         if digest.panel_inputs is not None
         else None
     )
+    aug_auto_panel = (
+        digest.panel_inputs.aug_auto_balance
+        if digest.panel_inputs is not None
+        else None
+    )
+    cadence_panel = (
+        digest.panel_inputs.cadence
+        if digest.panel_inputs is not None
+        else None
+    )
     data_block = (
         '<div class="data-block">'
         '<div class="data-block__rule"></div>'
@@ -1265,6 +1367,8 @@ def render(digest: WeeklyDigest) -> str:
         f'{_task_breakdown_section(digest.task_breakdown)}'
         f'{_dimensions_section(digest.dimensions, digest.behavioral_signals)}'
         f'{_behavioral_patterns_section(behavioral_panel)}'
+        f'{_aug_auto_balance_section(aug_auto_panel)}'
+        f'{_cadence_section(cadence_panel)}'
         f'{_weekly_trajectory_section(digest.weekly_trajectory)}'
         '</div>'
     )
@@ -2204,6 +2308,90 @@ html, body {{
   line-height: 1.1;
 }}
 .bp-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-2);
+}}
+
+/* --- 5c. Augmentation / Automation balance (US-039) ----------------- */
+/* Three rows with a label-and-value pair each, separated by hairlines.
+   Designed to read as a typographic stat list (the numbers carry the
+   weight) rather than a stacked-bar visualization, keeping editorial
+   discipline with the rest of the digest. */
+.bal-section {{
+  margin-bottom: 96px;
+}}
+.bal-row {{
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: var(--space-5) 0;
+  border-top: 1px solid var(--rule);
+}}
+.bal-row:last-of-type {{
+  border-bottom: 1px solid var(--rule);
+}}
+.bal-label {{
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--ink);
+}}
+.bal-value {{
+  font-family: var(--serif);
+  font-size: 22px;
+  color: var(--accent);
+  font-feature-settings: 'lnum';
+  letter-spacing: -0.01em;
+}}
+.bal-anchor {{
+  font-family: var(--serif);
+  font-size: 14px;
+  font-style: italic;
+  color: var(--ink-muted);
+  margin-top: var(--space-5);
+  max-width: 62ch;
+}}
+.bal-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-2);
+}}
+
+/* --- 5d. Cadence (US-039) ------------------------------------------- */
+/* Mirrors the augmentation/automation balance row layout so the two
+   panels read as a pair: streak + spectrum position + citation. */
+.cad-section {{
+  margin-bottom: 96px;
+}}
+.cad-row {{
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: var(--space-5) 0;
+  border-top: 1px solid var(--rule);
+}}
+.cad-row:last-of-type {{
+  border-bottom: 1px solid var(--rule);
+}}
+.cad-label {{
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--ink);
+}}
+.cad-value {{
+  font-family: var(--serif);
+  font-size: 22px;
+  color: var(--accent);
+  font-feature-settings: 'lnum';
+  letter-spacing: -0.01em;
+}}
+.cad-citation {{
   font-family: var(--sans);
   font-size: 10.5px;
   letter-spacing: 0.06em;

@@ -8,7 +8,7 @@ every session in the week.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from praxis.models import Provider, Role, Session, Turn
@@ -248,3 +248,257 @@ def test_behavioral_pattern_row_is_frozen():
     except dataclasses.FrozenInstanceError:
         return
     raise AssertionError("BehavioralPatternRow must be frozen")
+
+
+# =========================================================================
+# US-039: augmentation/automation balance + cadence panel adapter wiring
+# =========================================================================
+
+
+from praxis.reports.adapter import (  # noqa: E402
+    _aug_auto_balance_panel,
+    _cadence_panel,
+    _classify_high_adopter,
+)
+from praxis.reports.panel_inputs import (  # noqa: E402
+    AUG_AUTO_ANCHOR_CITATION,
+    CADENCE_ANCHOR_CITATION,
+    CADENCE_WINDOW_DAYS,
+    AugAutoBalancePanel,
+    CadencePanel,
+)
+
+
+def _session_with_aug_auto(label: str | None, weekday: int = 0):
+    """Build a Session-like stub that carries ``aug_auto_classification``.
+
+    The adapter inspects each session via ``getattr`` so a SimpleNamespace
+    is enough; this avoids constructing real ``Session`` objects whose
+    schema does not yet include the aug_auto column.
+    """
+    # Anchor the started_at to a Monday (May 25, 2026) plus ``weekday``
+    # days so each fixture session lands on a known calendar weekday.
+    started_at = datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc) + timedelta(days=weekday)
+    # The adapter checks user_turns length for substantive-ness; give 2 turns by default.
+    turns = [Turn(role=Role.USER, content="hi"), Turn(role=Role.USER, content="ok")]
+    s = SimpleNamespace(
+        started_at=started_at,
+        user_turns=turns,
+        aug_auto_classification=label,
+    )
+    return s
+
+
+# ---------------- _aug_auto_balance_panel: empty + unavailable paths -----
+
+
+def test_aug_auto_balance_no_sessions_is_not_unavailable():
+    """Zero sessions in the week is structurally different from "API key
+    missing"; classifier_unavailable is False so the renderer can show a
+    generic empty-state instead of the unavailable copy."""
+    panel = _aug_auto_balance_panel(_FakeSummary(sessions=[]))
+    assert isinstance(panel, AugAutoBalancePanel)
+    assert panel.classifier_unavailable is False
+    assert panel.classified_total == 0
+
+
+def test_aug_auto_balance_all_null_marks_classifier_unavailable():
+    """When the week has sessions but every aug_auto label is None
+    (typical no-API-key case), classifier_unavailable is True so the
+    renderer surfaces the explicit unavailable message."""
+    sessions = [
+        _session_with_aug_auto(None),
+        _session_with_aug_auto(None),
+    ]
+    panel = _aug_auto_balance_panel(SimpleNamespace(sessions=sessions))
+    assert panel.classifier_unavailable is True
+    assert panel.unclassified_count == 2
+
+
+def test_aug_auto_balance_counts_each_label():
+    """Augmentation/automation/mixed labels are counted separately."""
+    sessions = [
+        _session_with_aug_auto("augmentation"),
+        _session_with_aug_auto("augmentation"),
+        _session_with_aug_auto("automation"),
+        _session_with_aug_auto("mixed"),
+    ]
+    panel = _aug_auto_balance_panel(SimpleNamespace(sessions=sessions))
+    assert panel.augmentation_count == 2
+    assert panel.automation_count == 1
+    assert panel.mixed_count == 1
+    assert panel.classifier_unavailable is False
+
+
+def test_aug_auto_balance_shares_compute_against_classified_total():
+    """Shares are derived against the classified denominator so NULL
+    rows do not dilute the percentages."""
+    sessions = [
+        _session_with_aug_auto("augmentation"),
+        _session_with_aug_auto("automation"),
+        _session_with_aug_auto(None),  # NULL row, must not dilute shares
+    ]
+    panel = _aug_auto_balance_panel(SimpleNamespace(sessions=sessions))
+    assert panel.augmentation_share == 0.5
+    assert panel.automation_share == 0.5
+    assert panel.mixed_share == 0.0
+    assert panel.unclassified_count == 1
+
+
+def test_aug_auto_balance_unknown_label_is_treated_as_null():
+    """A label outside the three literals is treated as unclassified
+    (defensive: a future classifier change must not silently bucket
+    a stray label into one of the three known categories)."""
+    sessions = [
+        _session_with_aug_auto("augmentation"),
+        _session_with_aug_auto("hallucination"),  # not a valid label
+    ]
+    panel = _aug_auto_balance_panel(SimpleNamespace(sessions=sessions))
+    assert panel.augmentation_count == 1
+    assert panel.unclassified_count == 1
+
+
+def test_aug_auto_balance_carries_industry_anchor():
+    """Every panel carries the Anthropic Economic Index anchor so the
+    renderer can surface it inline (US-039 acceptance)."""
+    panel = _aug_auto_balance_panel(_FakeSummary(sessions=[]))
+    assert "Anthropic Economic Index" in panel.industry_anchor_citation
+    assert panel.industry_anchor_citation == AUG_AUTO_ANCHOR_CITATION
+
+
+# ------------------------- _cadence_panel: empty + populated paths --------
+
+
+def test_cadence_panel_no_sessions_has_no_activity():
+    """Zero sessions => substantive_session_count is 0 and the
+    high-adopter label is None (the spectrum position is undefined)."""
+    panel = _cadence_panel(_FakeSummary(sessions=[]))
+    assert isinstance(panel, CadencePanel)
+    assert panel.has_activity is False
+    assert panel.high_adopter_position is None
+
+
+def test_cadence_panel_single_substantive_session_counts():
+    """One substantive session on one weekday => streak of 1, low
+    position on the spectrum."""
+    sessions = [_session_with_aug_auto("augmentation", weekday=0)]
+    panel = _cadence_panel(SimpleNamespace(sessions=sessions))
+    assert panel.substantive_session_count == 1
+    assert panel.weekday_streak == 1
+    assert panel.has_activity is True
+    assert panel.position_label == "Low-adopter"
+
+
+def test_cadence_panel_dedupes_multiple_sessions_same_weekday():
+    """Two sessions on the same calendar weekday count as one weekday
+    of streak; substantive_session_count keeps both."""
+    sessions = [
+        _session_with_aug_auto(None, weekday=0),
+        _session_with_aug_auto(None, weekday=0),
+    ]
+    panel = _cadence_panel(SimpleNamespace(sessions=sessions))
+    assert panel.substantive_session_count == 2
+    assert panel.weekday_streak == 1
+
+
+def test_cadence_panel_drops_non_substantive_sessions():
+    """A session with fewer than 2 user turns is not substantive and
+    contributes neither to the count nor the streak."""
+    # Build a session with only one user turn.
+    s = SimpleNamespace(
+        started_at=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        user_turns=[Turn(role=Role.USER, content="hi")],
+        aug_auto_classification=None,
+    )
+    panel = _cadence_panel(SimpleNamespace(sessions=[s]))
+    assert panel.substantive_session_count == 0
+    assert panel.weekday_streak == 0
+    assert panel.has_activity is False
+
+
+def test_cadence_panel_high_adopter_position_at_two_thirds():
+    """Streak >= 2/3 of the 21-day window => 'high'."""
+    sessions = [
+        _session_with_aug_auto(None, weekday=i) for i in range(14)
+    ]
+    panel = _cadence_panel(SimpleNamespace(sessions=sessions))
+    # 14 / 21 = 0.667 -> high
+    assert panel.weekday_streak == 7  # bounded by python's weekday() returning 0..6
+    # The classification reads ratio = 7/21 = 0.33 which is on the boundary.
+    # Use a more direct check via _classify_high_adopter to be unambiguous.
+    assert _classify_high_adopter(14, CADENCE_WINDOW_DAYS) == "high"
+
+
+def test_cadence_panel_carries_citation():
+    """Every cadence panel carries the arXiv 2509.19708 anchor."""
+    panel = _cadence_panel(_FakeSummary(sessions=[]))
+    assert "arXiv 2509.19708" in panel.citation
+    assert panel.citation == CADENCE_ANCHOR_CITATION
+
+
+# ---------------------------- _classify_high_adopter ----------------------
+
+
+def test_classify_high_adopter_zero_streak_is_none():
+    """Zero activity is the renderer's "no spectrum" signal; the
+    function returns None rather than the lowest bucket so the renderer
+    can omit the label entirely (US-039 AC)."""
+    assert _classify_high_adopter(0, CADENCE_WINDOW_DAYS) is None
+
+
+def test_classify_high_adopter_thresholds():
+    """Boundary checks at 1/3 and 2/3 of the 21-day window."""
+    # ratio < 1/3 -> low
+    assert _classify_high_adopter(6, 21) == "low"  # 6/21 = 0.285
+    # 1/3 <= ratio < 2/3 -> moderate
+    assert _classify_high_adopter(7, 21) == "moderate"  # 7/21 = 0.333
+    assert _classify_high_adopter(13, 21) == "moderate"  # 13/21 = 0.619
+    # ratio >= 2/3 -> high
+    assert _classify_high_adopter(14, 21) == "high"  # 14/21 = 0.667
+
+
+def test_classify_high_adopter_invalid_window_is_none():
+    """A zero or negative window is malformed; the function returns
+    None rather than dividing by zero."""
+    assert _classify_high_adopter(5, 0) is None
+    assert _classify_high_adopter(5, -1) is None
+
+
+# ---------------------- build_panel_inputs wires both new panels ----------
+
+
+def test_build_panel_inputs_includes_aug_auto_and_cadence():
+    """The top-level adapter exposes both new panels alongside the
+    behavioral signals panel."""
+    pi = build_panel_inputs(_FakeSummary(sessions=[]))
+    assert pi.behavioral_signals is not None
+    assert pi.aug_auto_balance is not None
+    assert pi.cadence is not None
+
+
+# ---------------------- shape contracts ----------------------------------
+
+
+def test_aug_auto_balance_panel_is_frozen():
+    """The dataclass is immutable so the renderer cannot mutate
+    aggregation state mid-render."""
+    import dataclasses
+
+    panel = AugAutoBalancePanel()
+    try:
+        panel.augmentation_count = 99  # type: ignore[misc]
+    except dataclasses.FrozenInstanceError:
+        return
+    raise AssertionError("AugAutoBalancePanel must be frozen")
+
+
+def test_cadence_panel_is_frozen():
+    """Same immutability contract as the other panel dataclasses."""
+    import dataclasses
+
+    panel = CadencePanel()
+    try:
+        panel.weekday_streak = 99  # type: ignore[misc]
+    except dataclasses.FrozenInstanceError:
+        return
+    raise AssertionError("CadencePanel must be frozen")

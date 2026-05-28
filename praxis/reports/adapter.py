@@ -21,12 +21,15 @@ from praxis.behavior.signals import (
 from praxis.reports import digest_html as dh
 from praxis.reports import digest_terminal as dt
 from praxis.reports.panel_inputs import (
+    CADENCE_WINDOW_DAYS,
     EXCERPT_CHAR_LIMIT,
     MAX_EXCERPTS_PER_SIGNAL,
     SIGNAL_CITATIONS,
     SIGNAL_LABELS,
+    AugAutoBalancePanel,
     BehavioralPatternRow,
     BehavioralPatternsPanel,
+    CadencePanel,
     PanelInputs,
     clip_excerpt,
 )
@@ -646,16 +649,132 @@ def _behavioral_patterns_panel(summary) -> BehavioralPatternsPanel:
     return BehavioralPatternsPanel(rows=rows)
 
 
+_AUG_AUTO_LABELS = frozenset({"augmentation", "automation", "mixed"})
+
+
+def _aug_auto_balance_panel(summary) -> AugAutoBalancePanel:
+    """Aggregate per-session aug_auto labels across the week (US-039).
+
+    Reads ``aug_auto_classification`` from each session (set by the
+    augmentation-automation-classifier story's pass-1 wiring). Sessions
+    that carry no label (e.g. because the user had no API key, or the
+    classifier hit ``AugAutoParseError`` and the orchestrator wrote NULL)
+    fall into ``unclassified_count``. When the week has at least one
+    session but no session has a label, ``classifier_unavailable`` is
+    set so the renderer surfaces the explicit "Classifier unavailable"
+    message rather than misleading 0/0/0 percentages (US-039 AC).
+
+    When the week has zero sessions, ``classifier_unavailable`` is
+    False - that case is structurally different from "no API key" and
+    the renderer surfaces a generic zero-sessions empty state instead.
+    """
+    counts: dict[str, int] = {label: 0 for label in _AUG_AUTO_LABELS}
+    unclassified = 0
+    session_count = 0
+    for s in summary.sessions or []:
+        session_count += 1
+        label = getattr(s, "aug_auto_classification", None)
+        if isinstance(label, str) and label in _AUG_AUTO_LABELS:
+            counts[label] += 1
+        else:
+            unclassified += 1
+    classified_total = sum(counts.values())
+    classifier_unavailable = session_count > 0 and classified_total == 0
+    return AugAutoBalancePanel(
+        augmentation_count=counts["augmentation"],
+        automation_count=counts["automation"],
+        mixed_count=counts["mixed"],
+        unclassified_count=unclassified,
+        classifier_unavailable=classifier_unavailable,
+    )
+
+
+# US-039 high-adopter thresholds anchor to arXiv 2509.19708's spectrum
+# over a rolling window. Distinct weekdays active in the window divided
+# by the window length yields a 0..1 share; <1/3 is low, 1/3..2/3 is
+# moderate, >=2/3 is high. The cadence-detector story will harden these
+# thresholds with citations and parameterised tests; this is the panel-
+# layer placeholder so the empty-state path is exercisable today.
+_CADENCE_LOW_THRESHOLD = 1 / 3
+_CADENCE_HIGH_THRESHOLD = 2 / 3
+
+
+def _classify_high_adopter(streak: int, window_days: int) -> str | None:
+    """Resolve a weekday-streak to a high-adopter spectrum position.
+
+    Returns ``None`` when the streak is zero (no activity to position
+    on the spectrum) so the renderer omits the label rather than
+    misclassifying an inactive week as low-adopter. The cadence-detector
+    story owns the canonical thresholds; this placeholder uses 1/3 and
+    2/3 of the window so the function is deterministic and bounded.
+    """
+    if window_days <= 0 or streak <= 0:
+        return None
+    ratio = streak / window_days
+    if ratio < _CADENCE_LOW_THRESHOLD:
+        return "low"
+    if ratio < _CADENCE_HIGH_THRESHOLD:
+        return "moderate"
+    return "high"
+
+
+def _cadence_panel(summary) -> CadencePanel:
+    """Build the cadence panel from the in-flight summary (US-039).
+
+    Uses the summary's sessions list as the rolling window: each
+    session contributes its calendar weekday (Mon..Sun) to a set, and
+    the streak is the size of that set. "Substantive" matches the
+    cadence-detector definition: at least two user turns. When zero
+    substantive sessions fell in the window the renderer surfaces an
+    explicit empty-state message and omits the high-adopter label.
+
+    The window defaults to ``CADENCE_WINDOW_DAYS`` (21 days). When the
+    summary's sessions span less than 21 days (typical for a fresh
+    install), the streak is still measured over the same denominator so
+    the high-adopter position is calibrated against the canonical
+    window length, not against whatever happens to be on file.
+    """
+    weekdays: set[int] = set()
+    substantive = 0
+    for s in summary.sessions or []:
+        user_turns = getattr(s, "user_turns", None) or []
+        if len(user_turns) < 2:
+            continue
+        substantive += 1
+        try:
+            weekdays.add(s.started_at.weekday())
+        except (AttributeError, ValueError):
+            # Defensive: a session with a malformed started_at must not
+            # crash the panel build. The session is still counted as
+            # substantive but contributes no weekday to the streak.
+            continue
+    streak = len(weekdays)
+    position = (
+        _classify_high_adopter(streak, CADENCE_WINDOW_DAYS)
+        if substantive > 0
+        else None
+    )
+    return CadencePanel(
+        weekday_streak=streak,
+        substantive_session_count=substantive,
+        window_days=CADENCE_WINDOW_DAYS,
+        high_adopter_position=position,
+    )
+
+
 def build_panel_inputs(summary) -> PanelInputs:
     """Build the v0.3 expansion-panel inputs from a WeeklyRunSummary.
 
     Each panel is independently optional; this helper populates the
     fields it can build from the in-flight summary. US-038 wires the
-    behavioral-patterns panel; subsequent stories extend the returned
-    ``PanelInputs`` with additional panels.
+    behavioral-patterns panel; US-039 wires the augmentation/automation
+    balance and the cadence panel; subsequent stories extend the
+    returned ``PanelInputs`` with additional panels.
     """
     return PanelInputs(
         behavioral_signals=_behavioral_patterns_panel(summary),
+        aug_auto_balance=_aug_auto_balance_panel(summary),
+        cadence=_cadence_panel(summary),
     )
 
 

@@ -1072,3 +1072,181 @@ def test_behavioral_patterns_html_escapes_excerpts():
     out = render(_bp_digest(panel))
     assert "<script>alert" not in out
     assert "&lt;script&gt;alert" in out
+
+
+# ---------------------- US-039: aug/auto balance + cadence panels (HTML) ----
+
+
+def _aug_auto_html_panel():
+    from praxis.reports.panel_inputs import AugAutoBalancePanel
+    return AugAutoBalancePanel(
+        augmentation_count=3,
+        automation_count=2,
+        mixed_count=1,
+        unclassified_count=0,
+    )
+
+
+def _aug_auto_unavailable_panel():
+    from praxis.reports.panel_inputs import AugAutoBalancePanel
+    return AugAutoBalancePanel(
+        unclassified_count=3,
+        classifier_unavailable=True,
+    )
+
+
+def _cadence_html_panel():
+    from praxis.reports.panel_inputs import CadencePanel
+    return CadencePanel(
+        weekday_streak=5,
+        substantive_session_count=7,
+        high_adopter_position="high",
+    )
+
+
+def _cadence_empty_panel():
+    from praxis.reports.panel_inputs import CadencePanel
+    return CadencePanel(
+        weekday_streak=0,
+        substantive_session_count=0,
+        high_adopter_position=None,
+    )
+
+
+def _us039_digest(*, aug_auto=None, cadence=None):
+    from praxis.reports.panel_inputs import PanelInputs
+    return WeeklyDigest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        panel_inputs=PanelInputs(
+            aug_auto_balance=aug_auto,
+            cadence=cadence,
+        ),
+    )
+
+
+def test_aug_auto_balance_section_always_present():
+    """The section anchor (`id="aug-auto-balance"`) always renders."""
+    out_empty = render(_digest())  # no panel_inputs
+    assert 'id="aug-auto-balance"' in out_empty
+    out_full = render(_us039_digest(aug_auto=_aug_auto_html_panel()))
+    assert 'id="aug-auto-balance"' in out_full
+
+
+def test_aug_auto_balance_renders_classifier_unavailable_message():
+    """When every session in the week is unclassified the panel surfaces
+    the verbatim US-039 unavailable copy."""
+    out = render(_us039_digest(aug_auto=_aug_auto_unavailable_panel()))
+    assert "Classifier unavailable for this week." in out
+
+
+def test_aug_auto_balance_no_panel_renders_unavailable():
+    """A digest with no panel_inputs at all falls back to the
+    unavailable copy rather than 0/0/0."""
+    out = render(_digest())
+    assert "Classifier unavailable for this week." in out
+    # And does NOT show misleading 0% counts inside the panel itself
+    # (CSS uses % values for opacity/lightness, so check only the
+    # aug-auto-balance section's body for misleading zero shares).
+    start = out.find('id="aug-auto-balance"')
+    end = out.find("</section>", start)
+    panel_html = out[start:end]
+    assert "Augmentation</span>" not in panel_html  # no populated row when unavailable
+
+
+def test_aug_auto_balance_renders_shares_when_populated():
+    """When the classifier has data the panel emits the three shares."""
+    out = render(_us039_digest(aug_auto=_aug_auto_html_panel()))
+    # 3/6 = 50% aug; 2/6 = 33% auto; 1/6 = 17% mixed
+    assert "Augmentation" in out
+    assert "Automation" in out
+    assert "Mixed" in out
+    assert "50%" in out
+    assert "33%" in out
+    assert "17%" in out
+
+
+def test_aug_auto_balance_renders_anthropic_anchor():
+    """The Anthropic Economic Index anchor renders inline (US-039)."""
+    out = render(_us039_digest(aug_auto=_aug_auto_html_panel()))
+    assert "Anthropic Economic Index" in out
+    assert "52% augmentation" in out
+    assert "45% automation" in out
+
+
+def test_cadence_section_always_present():
+    """The section anchor (`id="cadence"`) always renders."""
+    out_empty = render(_digest())
+    assert 'id="cadence"' in out_empty
+    out_full = render(_us039_digest(cadence=_cadence_html_panel()))
+    assert 'id="cadence"' in out_full
+
+
+def test_cadence_renders_no_activity_message_when_empty():
+    """When zero substantive sessions fell in the window, the section
+    surfaces the verbatim US-039 message."""
+    out = render(_us039_digest(cadence=_cadence_empty_panel()))
+    assert "No substantive sessions in the last 21 days." in out
+
+
+def test_cadence_omits_high_adopter_label_when_empty():
+    """The renderer must not surface a stand-in label when there is no
+    activity to position on the spectrum."""
+    out = render(_us039_digest(cadence=_cadence_empty_panel()))
+    assert "Low-adopter" not in out
+    assert "Moderate-adopter" not in out
+    assert "High-adopter" not in out
+
+
+def test_cadence_renders_streak_when_populated():
+    """Streak renders as 'N of 21 days'."""
+    out = render(_us039_digest(cadence=_cadence_html_panel()))
+    assert "5 of 21 days" in out
+
+
+def test_cadence_renders_spectrum_label_when_populated():
+    """The high-adopter position renders as a human-facing label."""
+    out = render(_us039_digest(cadence=_cadence_html_panel()))
+    assert "High-adopter" in out
+
+
+def test_cadence_renders_arxiv_citation():
+    """The arXiv 2509.19708 anchor is cited inline (US-039 acceptance)."""
+    out = render(_us039_digest(cadence=_cadence_html_panel()))
+    assert "arXiv 2509.19708" in out
+
+
+def test_us039_panels_self_containment_holds():
+    """The US-061 self-containment contract must hold for the new
+    panels; rendering must not introduce external links, scripts, or
+    images regardless of which state each panel renders in."""
+    out = render(
+        _us039_digest(
+            aug_auto=_aug_auto_html_panel(),
+            cadence=_cadence_html_panel(),
+        )
+    )
+    lower = out.lower()
+    assert "<link" not in lower
+    assert "<script" not in lower
+    assert "<img" not in lower
+    assert "http://" not in out
+    assert "https://" not in out
+    assert "@import" not in out
+    assert "url(" not in out
+
+
+def test_us039_panels_render_in_data_block_after_behavioral_patterns():
+    """The new panels sit inside the data block after behavioral
+    patterns so the editorial cadence keeps 'what kind of user' signals
+    grouped together."""
+    out = render(
+        _us039_digest(
+            aug_auto=_aug_auto_html_panel(),
+            cadence=_cadence_html_panel(),
+        )
+    )
+    bp_pos = out.find('id="behavioral-patterns"')
+    bal_pos = out.find('id="aug-auto-balance"')
+    cad_pos = out.find('id="cadence"')
+    assert 0 <= bp_pos < bal_pos < cad_pos

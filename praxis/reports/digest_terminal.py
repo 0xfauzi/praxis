@@ -24,7 +24,9 @@ from dataclasses import dataclass
 from praxis.reports.baseline_panel import format_baseline_value
 from praxis.reports.gating import format_delta
 from praxis.reports.panel_inputs import (
+    AugAutoBalancePanel,
     BehavioralPatternsPanel,
+    CadencePanel,
     PanelInputs,
 )
 from praxis.scoring.rubric import by_key
@@ -296,6 +298,16 @@ _BASELINE_UNAVAILABLE = "--"
 # acceptance criterion calls for this verbatim string so the renderer
 # never emits an empty table when zero signals fired across the week.
 _BEHAVIORAL_PATTERNS_EMPTY = "No behavioral patterns captured this week."
+
+# US-039: empty-state copy. The "Classifier unavailable" path fires
+# when the aug_auto classifier has no labelled session for the week
+# (typically because the user has no API key); the "no substantive
+# sessions" path fires when cadence's window saw no qualifying activity.
+# Both literals are asserted verbatim by tests so a future copy change
+# is one audit point per renderer.
+_AUG_AUTO_BALANCE_CLASSIFIER_UNAVAILABLE = "Classifier unavailable for this week."
+_AUG_AUTO_BALANCE_NO_SESSIONS = "No sessions to classify this week."
+_CADENCE_NO_ACTIVITY = "No substantive sessions in the last 21 days."
 
 
 def _dim_title(dim_key: str) -> str:
@@ -639,6 +651,76 @@ def _behavioral_patterns(
     return lines
 
 
+def _aug_auto_balance(panel: AugAutoBalancePanel | None) -> list[str]:
+    """Render the augmentation/automation balance panel (US-039).
+
+    Three states:
+      1. ``panel is None`` or ``classifier_unavailable``: emit the
+         "Classifier unavailable" placeholder. This is the no-API-key
+         path; rendering 0/0/0 percentages would be misleading.
+      2. No sessions at all: emit a generic empty-state.
+      3. At least one classified session: emit the three shares plus
+         the Anthropic Economic Index industry anchor as a footnote.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Augmentation/automation"))
+    if panel is None or panel.classifier_unavailable:
+        lines.extend(_placeholder_lines(_AUG_AUTO_BALANCE_CLASSIFIER_UNAVAILABLE))
+        return lines
+    if panel.classified_total == 0:
+        lines.extend(_placeholder_lines(_AUG_AUTO_BALANCE_NO_SESSIONS))
+        return lines
+    aug_pct = int(round(panel.augmentation_share * 100))
+    auto_pct = int(round(panel.automation_share * 100))
+    mixed_pct = int(round(panel.mixed_share * 100))
+    lines.append(_body_line(
+        f"Augmentation: {aug_pct}%  Automation: {auto_pct}%  Mixed: {mixed_pct}%"
+    ))
+    industry = (
+        f"Industry anchor: {int(round(panel.industry_augmentation_share * 100))}% "
+        f"augmentation / {int(round(panel.industry_automation_share * 100))}% "
+        f"automation"
+    )
+    for wrapped in _wrap(industry, width=_BODY_WIDTH):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    for wrapped in _wrap(
+        f"Source: {panel.industry_anchor_citation}", width=_BODY_WIDTH
+    ):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    return lines
+
+
+def _cadence(panel: CadencePanel | None) -> list[str]:
+    """Render the cadence panel (US-039).
+
+    Two states:
+      1. ``panel is None`` or zero substantive sessions: emit the
+         "No substantive sessions in the last 21 days." copy and OMIT
+         the high-adopter label (the spectrum position is undefined
+         without any activity to place on it).
+      2. At least one substantive session: emit the streak (e.g.
+         "Weekday streak: 4 of 21 days") plus the high-adopter label
+         when one is on file, plus the arXiv 2509.19708 citation.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Cadence"))
+    if panel is None or not panel.has_activity:
+        lines.extend(_placeholder_lines(_CADENCE_NO_ACTIVITY))
+        return lines
+    plural = "day" if panel.weekday_streak == 1 else "days"
+    lines.append(_body_line(
+        f"Weekday streak: {panel.weekday_streak} of {panel.window_days} {plural}"
+    ))
+    position_label = panel.position_label
+    if position_label:
+        lines.append(_body_line(f"Spectrum: {position_label}"))
+    for wrapped in _wrap(
+        f"Source: {panel.citation}", width=_BODY_WIDTH
+    ):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    return lines
+
+
 def _six_dim_panel(dimensions: list[DimRowView] | None) -> list[str]:
     """Render the full six-dim panel as the digest's footer (spec 6.2).
 
@@ -702,6 +784,23 @@ def render(digest: WeeklyDigest) -> str:
         else None
     )
     parts.extend(_behavioral_patterns(behavioral_panel))
+    # US-039: aug/auto balance and cadence panels follow the behavioral
+    # patterns block. Both are derived signals about the user's habit
+    # shape this week (how they use the model + how often they show up)
+    # and sit close to the behavioral-patterns evidence so the reader
+    # reads the "what kind of user" story in one editorial run.
+    aug_auto_panel = (
+        digest.panel_inputs.aug_auto_balance
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_aug_auto_balance(aug_auto_panel))
+    cadence_panel = (
+        digest.panel_inputs.cadence
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_cadence(cadence_panel))
     # Trailing newline so terminals that print the next prompt without
     # a leading newline don't clash with the last section's content.
     parts.append("")

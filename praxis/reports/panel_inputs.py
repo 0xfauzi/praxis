@@ -106,6 +106,127 @@ class BehavioralPatternsPanel:
         return any(row.count > 0 for row in self.rows)
 
 
+# US-039 anchors: the industry-share reference for the augmentation /
+# automation balance panel and the high-adopter spectrum citation for
+# the cadence panel. Strings are kept as module-level constants so the
+# adapter, the renderers, and the tests all share one source of truth
+# and a future copy change is one audit point.
+AUG_AUTO_ANCHOR_CITATION = (
+    "Anthropic Economic Index 2025 (~52% augmentation / 45% automation)"
+)
+AUG_AUTO_INDUSTRY_AUG_SHARE = 0.52
+AUG_AUTO_INDUSTRY_AUTO_SHARE = 0.45
+
+CADENCE_ANCHOR_CITATION = "arXiv 2509.19708 (high-adopter spectrum)"
+
+# v0.3 cadence panel: the rolling window the cadence-detector reports
+# against. Surfaces both in the renderer (for the empty-state copy) and
+# in the adapter (so the count of substantive sessions can be sliced
+# uniformly).
+CADENCE_WINDOW_DAYS = 21
+
+
+@dataclass(frozen=True)
+class AugAutoBalancePanel:
+    """Augmentation/automation balance panel input (US-039).
+
+    The three counts are session-level: how many sessions in the week
+    the aug_auto classifier labelled as augmentation, automation, or
+    mixed. ``unclassified_count`` is sessions in the week with no
+    classifier output (e.g. the row predates the classifier shipping).
+
+    ``classifier_unavailable`` is the renderer's gate for the "no API
+    key" path: when every session in the week is unclassified the panel
+    surfaces the explicit unavailable message rather than rendering a
+    misleading 0/0/0 split. The classifier-NULL state is structurally
+    different from "the user ran no sessions this week" (which renders
+    as the zero-sessions empty state).
+    """
+
+    augmentation_count: int = 0
+    automation_count: int = 0
+    mixed_count: int = 0
+    unclassified_count: int = 0
+    classifier_unavailable: bool = False
+    industry_anchor_citation: str = AUG_AUTO_ANCHOR_CITATION
+    industry_augmentation_share: float = AUG_AUTO_INDUSTRY_AUG_SHARE
+    industry_automation_share: float = AUG_AUTO_INDUSTRY_AUTO_SHARE
+
+    @property
+    def classified_total(self) -> int:
+        """Sessions with a non-NULL aug_auto label this week."""
+        return self.augmentation_count + self.automation_count + self.mixed_count
+
+    @property
+    def augmentation_share(self) -> float:
+        """Share of CLASSIFIED sessions labelled augmentation.
+
+        Computed against ``classified_total`` (not session_count) so the
+        share reflects the classifier's vote, not a denominator inflated
+        by NULL rows. Returns 0.0 when no classified sessions exist;
+        callers should check ``classifier_unavailable`` before reading.
+        """
+        total = self.classified_total
+        return self.augmentation_count / total if total else 0.0
+
+    @property
+    def automation_share(self) -> float:
+        total = self.classified_total
+        return self.automation_count / total if total else 0.0
+
+    @property
+    def mixed_share(self) -> float:
+        total = self.classified_total
+        return self.mixed_count / total if total else 0.0
+
+
+# US-039 cadence panel: the three positions on the high-adopter
+# spectrum reported by cadence-detector. Surfaced as a literal so the
+# renderer can resolve a position to a display string without dragging
+# in cadence.py at import time (cadence-detector ships in a sibling
+# story; the renderer here only sees the resolved label).
+CadencePosition = str  # "low" | "moderate" | "high"
+
+
+CADENCE_POSITION_LABELS: dict[str, str] = {
+    "low": "Low-adopter",
+    "moderate": "Moderate-adopter",
+    "high": "High-adopter",
+}
+
+
+@dataclass(frozen=True)
+class CadencePanel:
+    """Cadence panel input (US-039).
+
+    Carries the weekday-active streak in the rolling window (default 21
+    days) plus the resolved high-adopter spectrum position. When
+    ``substantive_session_count`` is zero the renderer surfaces the
+    explicit "no substantive sessions" message and omits the high-
+    adopter label, since the spectrum position is undefined without any
+    activity to place on it.
+    """
+
+    weekday_streak: int = 0
+    substantive_session_count: int = 0
+    window_days: int = CADENCE_WINDOW_DAYS
+    high_adopter_position: CadencePosition | None = None
+    citation: str = CADENCE_ANCHOR_CITATION
+
+    @property
+    def has_activity(self) -> bool:
+        """True when at least one substantive session fell in the window."""
+        return self.substantive_session_count > 0
+
+    @property
+    def position_label(self) -> str:
+        """User-facing label for the high-adopter position, or empty
+        string when the position is undefined."""
+        if self.high_adopter_position is None:
+            return ""
+        return CADENCE_POSITION_LABELS.get(self.high_adopter_position, "")
+
+
 @dataclass(frozen=True)
 class PanelInputs:
     """Container for the v0.3 expansion-panel inputs (US-038..042).
@@ -118,6 +239,8 @@ class PanelInputs:
     """
 
     behavioral_signals: BehavioralPatternsPanel | None = None
+    aug_auto_balance: AugAutoBalancePanel | None = None
+    cadence: CadencePanel | None = None
 
 
 __all__ = [
@@ -126,8 +249,16 @@ __all__ = [
     "SIGNAL_LABELS",
     "SIGNAL_CITATIONS",
     "SIGNAL_KINDS_IN_PANEL_ORDER",
+    "AUG_AUTO_ANCHOR_CITATION",
+    "AUG_AUTO_INDUSTRY_AUG_SHARE",
+    "AUG_AUTO_INDUSTRY_AUTO_SHARE",
+    "CADENCE_ANCHOR_CITATION",
+    "CADENCE_WINDOW_DAYS",
+    "CADENCE_POSITION_LABELS",
     "BehavioralPatternRow",
     "BehavioralPatternsPanel",
+    "AugAutoBalancePanel",
+    "CadencePanel",
     "PanelInputs",
     "clip_excerpt",
 ]
