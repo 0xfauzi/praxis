@@ -3,11 +3,10 @@
 The coaching hooks fire on SessionStart and Stop in the supported AI
 coding tools (Claude Code, Codex, Copilot) so Praxis can surface the
 weekly commitment at the start of work and capture a reflection at the
-end. The installer's first responsibility -- the only one US-028
-covers -- is tool detection and per-tool yes/no prompting. The actual
-hook-writing branches land in US-029 (Claude Code), US-030 (Codex), and
-US-031 (Copilot); each story replaces the matching placeholder branch
-in :func:`install_for_tool`.
+end. US-028 wired detection + per-tool yes/no prompting; US-029 fills
+in the Claude Code branch with a real settings.json merger (atomic
+write, sentinel-tagged blocks). US-030 (Codex) and US-031 (Copilot)
+follow.
 
 Detection criteria (AC US-028):
   - Claude Code: ``~/.claude/settings.json`` OR ``~/.claude/projects/``
@@ -27,12 +26,29 @@ Flag semantics:
 
 Returns CLI exit code 0 for the happy path (including the no-tools-
 detected branch); exit code 1 for an invalid ``--tool`` argument.
+
+Claude Code installer (US-029):
+  - Reads ``~/.claude/settings.json`` (or starts from ``{}``), merges a
+    ``SessionStart`` block (``praxis nudge --format claude-code``) and a
+    ``Stop`` block (``praxis reflect --session-end
+    --non-interactive-fallback``), each tagged with
+    ``_praxisManaged: true``.
+  - Pre-existing user-authored blocks at the same event name are
+    preserved unchanged; only Praxis-managed blocks get replaced.
+  - Unparseable JSON aborts the Claude Code install with
+    :class:`InstallCoachError`; the file on disk is never overwritten.
+  - The merged JSON is validated via ``json.dumps`` then written
+    atomically via ``tempfile.mkstemp`` + ``os.replace``.
 """
 from __future__ import annotations
 
+import json
+import os
 import sys
+import tempfile
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 
 TOOL_CLAUDE_CODE = "claude-code"
@@ -48,6 +64,25 @@ _DISPLAY_NAMES: dict[str, str] = {
     TOOL_CODEX: "Codex",
     TOOL_COPILOT: "Copilot",
 }
+
+
+SENTINEL = "_praxisManaged"
+
+
+CLAUDE_HOOK_COMMANDS: dict[str, str] = {
+    "SessionStart": "praxis nudge --format claude-code",
+    "Stop": "praxis reflect --session-end --non-interactive-fallback",
+}
+
+
+class InstallCoachError(Exception):
+    """Raised when a per-tool installer cannot complete safely.
+
+    The CLI catches this, prints ``str(exc)`` to stderr, and continues
+    with the next tool (a bad Claude Code config should not block a
+    Codex install). The message must be self-contained: it tells the
+    user exactly which file is at fault and how to recover.
+    """
 
 
 def display_name(tool: str) -> str:
@@ -137,17 +172,170 @@ def detect_all(home: Path | None = None) -> list[str]:
     return found
 
 
-def install_for_tool(tool: str) -> None:
-    """Per-tool installer dispatch. Placeholder for US-029/030/031.
+def claude_settings_path(home: Path | None = None) -> Path:
+    """Return the canonical ``~/.claude/settings.json`` path.
 
-    US-028 wires detection + prompts; the actual hook writers (Claude
-    Code settings.json merge, Codex hooks.json append, Copilot file
-    injection) land in later stories which replace the matching branch
-    in this function. The placeholder prints a one-line status so users
-    who run ``install-coach`` today get acknowledgement rather than
-    silence.
+    The ``home`` override mirrors the detector helpers so tests can
+    isolate state without monkeypatching ``Path.home``. Production
+    callers leave it ``None`` and rely on the ``tmp_home`` fixture's
+    ``Path.home`` patch in tests, or the real ``Path.home()`` at
+    runtime.
+    """
+    base = home if home is not None else Path.home()
+    return base / ".claude" / "settings.json"
+
+
+def _build_claude_block(command: str) -> dict[str, Any]:
+    """Build a single Praxis-managed Claude Code hook block.
+
+    The block shape mirrors PLAN.md section "Claude Code": one matcher
+    (``"*"``), the sentinel, and a single command-type hook entry. The
+    sentinel makes uninstall (US-032) able to identify Praxis blocks
+    without touching user-authored hooks at the same event name.
+    """
+    return {
+        "matcher": "*",
+        SENTINEL: True,
+        "hooks": [
+            {"type": "command", "command": command},
+        ],
+    }
+
+
+def _atomic_write_json(path: Path, data: object) -> None:
+    """Validate + atomic-write JSON to ``path``.
+
+    Validation is the ``json.dumps`` call itself: if ``data`` is not
+    JSON-serializable it raises ``TypeError`` before any tempfile is
+    written. The atomic dance is the standard tempfile + ``os.replace``
+    on the same filesystem so a crash mid-write leaves the original
+    file intact.
+    """
+    encoded = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_fd, tmp_str = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    tmp_path = Path(tmp_str)
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+            fh.write(encoded)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def install_claude_code(home: Path | None = None) -> Path:
+    """Install (or refresh) the Praxis Claude Code SessionStart + Stop hooks.
+
+    Reads ``~/.claude/settings.json`` (or starts from ``{}`` when the
+    file is absent or empty), merges Praxis-managed blocks for
+    ``SessionStart`` and ``Stop`` events, then writes the result back
+    atomically. Pre-existing user blocks at the same event name that do
+    NOT carry the :data:`SENTINEL` key are preserved unchanged; any
+    existing Praxis-managed block at those event names is replaced (so
+    re-running the installer is idempotent).
+
+    Returns the path of the written settings file.
+
+    Raises :class:`InstallCoachError` when:
+      - the existing file is unparseable JSON;
+      - the top-level value is not a JSON object;
+      - the existing ``hooks`` key is present but not a JSON object.
+    In every error case the file on disk is left untouched.
+    """
+    settings_path = claude_settings_path(home)
+
+    data: dict[str, Any]
+    if settings_path.exists():
+        raw = settings_path.read_text(encoding="utf-8")
+        if raw.strip() == "":
+            data = {}
+        else:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise InstallCoachError(
+                    f"Cannot install Claude Code hooks: {settings_path} is "
+                    f"not valid JSON ({exc.msg} at line {exc.lineno} "
+                    f"column {exc.colno}). Fix the file manually and "
+                    "re-run `praxis install-coach`."
+                ) from exc
+            if not isinstance(parsed, dict):
+                raise InstallCoachError(
+                    f"Cannot install Claude Code hooks: {settings_path} top "
+                    f"level must be a JSON object, got {type(parsed).__name__}. "
+                    "Fix the file manually and re-run `praxis install-coach`."
+                )
+            data = parsed
+    else:
+        data = {}
+
+    raw_hooks = data.get("hooks")
+    if raw_hooks is None:
+        hooks_obj: dict[str, Any] = {}
+        data["hooks"] = hooks_obj
+    elif isinstance(raw_hooks, dict):
+        hooks_obj = raw_hooks
+    else:
+        raise InstallCoachError(
+            f"Cannot install Claude Code hooks: {settings_path} 'hooks' "
+            f"key must be a JSON object, got {type(raw_hooks).__name__}. "
+            "Fix the file manually and re-run `praxis install-coach`."
+        )
+
+    for event, command in CLAUDE_HOOK_COMMANDS.items():
+        existing = hooks_obj.get(event)
+        entries: list[Any]
+        if isinstance(existing, list):
+            entries = [
+                entry
+                for entry in existing
+                if not (isinstance(entry, dict) and entry.get(SENTINEL) is True)
+            ]
+        else:
+            entries = []
+        entries.append(_build_claude_block(command))
+        hooks_obj[event] = entries
+
+    _atomic_write_json(settings_path, data)
+    return settings_path
+
+
+def install_for_tool(tool: str) -> None:
+    """Per-tool installer dispatch.
+
+    US-029 fills in the Claude Code branch with the real settings.json
+    merger (sentinel + atomic write). US-030 (Codex) and US-031
+    (Copilot) replace their matching branches later. Until then the
+    Codex and Copilot branches print a placeholder so users get
+    acknowledgement rather than silence.
+
+    Errors raised by a per-tool installer are caught here and printed
+    to stderr; we deliberately do NOT abort the whole ``install-coach``
+    run -- a bad Claude Code settings file should not block Codex.
     """
     label = display_name(tool)
+    if tool == TOOL_CLAUDE_CODE:
+        try:
+            path = install_claude_code()
+        except InstallCoachError as exc:
+            print(str(exc), file=sys.stderr)
+            return
+        print(f"Installed {label} coaching hook: {path}")
+        return
+    if tool == TOOL_CODEX:
+        print(f"Installing {label} coaching hook... (not yet implemented)")
+        return
+    if tool == TOOL_COPILOT:
+        print(f"Installing {label} coaching hook... (not yet implemented)")
+        return
     print(f"Installing {label} coaching hook... (not yet implemented)")
 
 
