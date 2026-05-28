@@ -1,8 +1,15 @@
 """CLI entry point.
 
-Commands (v0.2 surface):
-  week             Render this week's digest (the primary verb in v0.2).
-  scan             Scan + score new sessions; no digest rendered (spec 12.1).
+Surface organisation (US-044):
+  Loop verbs (Commit -> Cue -> Reflect -> Review, plus install-coach) are
+  listed first in `praxis --help`; everything else lives under a "More"
+  heading. The four loop verbs other than `review` are stubs today and
+  print a friendly "not wired up yet" message via `cmd_coming_soon`.
+
+Active commands:
+  review           Render this week's digest (the Review step of the loop;
+                   was named `week` in v0.2 and renamed in US-033/US-044).
+  scan             Scan + score new sessions; no digest rendered.
   re-score         Re-run the frontier judge for one session and update its row.
   baseline         Print the current 90-day baseline (read-only).
   follow-up        Print the most recent weekly commitment and its outcome.
@@ -344,8 +351,13 @@ def _handle_week_failure(exc: BaseException) -> None:
     )
 
 
-def cmd_week(args: argparse.Namespace) -> int:
+def cmd_review(args: argparse.Namespace) -> int:
     """Render this week's digest (or a past week with --week <iso>).
+
+    `review` is the Review step of the Commit -> Cue -> Reflect -> Review
+    loop documented in the README masthead. It was named `week` in v0.2;
+    the rename landed in US-033/US-044 alongside the help reorganisation
+    so the CLI vocabulary matches the coaching narrative.
 
     Flag behavior (spec sections 12.1, 13.1-13.3):
       --week <iso>      Render the persisted data for that past ISO week
@@ -394,16 +406,16 @@ def cmd_week(args: argparse.Namespace) -> int:
         # stderr. Direct (non-notify) invocations skip this wrap so
         # debugging stays Pythonic.
         try:
-            return _cmd_week_impl(args)
+            return _cmd_review_impl(args)
         except SystemExit:
             raise
         except BaseException as exc:  # noqa: BLE001
             _handle_week_failure(exc)
             return 4
-    return _cmd_week_impl(args)
+    return _cmd_review_impl(args)
 
 
-def _cmd_week_impl(args: argparse.Namespace) -> int:
+def _cmd_review_impl(args: argparse.Namespace) -> int:
     needs_judge = args.week is None and not args.dry_run
     if needs_judge and not has_api_key_configured():
         print(NO_API_KEY_MESSAGE, file=sys.stderr)
@@ -485,11 +497,11 @@ def _cmd_week_impl(args: argparse.Namespace) -> int:
 def cmd_scan(args: argparse.Namespace) -> int:
     """Scan source files and score newly-discovered sessions.
 
-    Per spec 12.1 the v0.2 ``scan`` verb is intentionally NOT a digest
+    Per spec 12.1 the ``scan`` verb is intentionally NOT a digest
     renderer: it does the work of discovering new sessions and persisting
     judge results, and prints a one-line summary of what changed. The
     digest (terminal masthead, dimensions, coaching, trajectory) is the
-    job of ``praxis week`` and ``praxis show <week_iso>``.
+    job of ``praxis review`` and ``praxis show <week_iso>``.
 
     The output is a compact progress report so the user can confirm the
     scan made progress and, if invoked from a cron job, the log lines
@@ -514,7 +526,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         f"scored {summary.sessions_scored} via judge "
         f"({summary.elapsed_seconds}s)."
     )
-    print("Render the digest with: praxis week")
+    print("Render the digest with: praxis review")
     return 0
 
 
@@ -1107,25 +1119,139 @@ def cmd_models(args: argparse.Namespace) -> int:
     return 0
 
 
+_LOOP_HELP_EPILOG = """\
+Loop:
+  commit                  Pick this week's focus (Commit step).
+  nudge                   Print the active commitment for in-session cueing (Cue step).
+  reflect                 Post-session check-in (Reflect step).
+  review                  Render this week's digest (Review step; was 'week' in v0.2).
+  install-coach           Wire the loop into Claude Code / Codex / Copilot.
+
+More:
+  scan                    Scan + score newly-discovered sessions (no digest render).
+  re-score                Re-run the frontier judge for one session.
+  baseline                Print the current 90-day baseline (read-only).
+  history                 List past weekly digests (read-only).
+  show                    Render a past week's digest from persisted data.
+  report                  Open or print the legacy v0.1 HTML report.
+  open                    Open this week's digest in the browser.
+  last                    Print the latest digest's path / ISO week / trajectory.
+  status                  Show what's been scored, when, and where.
+  rubric                  Print the scoring rubric and weights.
+  follow-up               Show the most recent weekly commitment and its outcome.
+  models                  List or describe the built-in model cards.
+  config                  View / --get / --set ~/.praxis/config.toml.
+  install-weekly          Install the macOS LaunchAgent for `praxis review --notify`.
+  uninstall-weekly        Remove the weekly LaunchAgent.
+  shell-nudge             Print the shell snippet for `eval` in ~/.zshrc / ~/.bashrc.
+  install-shell-nudge     Append the shell-nudge eval line to RC files.
+  uninstall-shell-nudge   Remove the shell-nudge eval line.
+
+Run 'praxis <command> --help' for command-specific options.
+"""
+
+
+class _GroupedSubparsersFormatter(argparse.RawDescriptionHelpFormatter):
+    """Help formatter that hides argparse's auto-generated subparser list.
+
+    Each loop / more subparser is registered with ``help=argparse.SUPPRESS``,
+    but that only blanks the per-row help column; the row itself (and the
+    ``{commit,nudge,...}`` metavar line) still renders. Skipping the
+    ``_SubParsersAction`` here removes the auto-list entirely so the
+    curated ``Loop:`` / ``More:`` epilog is the only canonical listing
+    the user sees in ``praxis --help`` (AC US-044 #1).
+    """
+
+    def _format_action(self, action: argparse.Action) -> str:
+        if isinstance(action, argparse._SubParsersAction):
+            return ""
+        return super()._format_action(action)
+
+
+def cmd_coming_soon(args: argparse.Namespace) -> int:
+    """Stub handler for loop verbs that have not been wired up yet.
+
+    `praxis commit`, `praxis nudge`, `praxis reflect`, and
+    `praxis install-coach` ship as registered subparsers (so they show
+    up in `praxis --help` under the "Loop" heading) but their handlers
+    have not landed yet. Invocations print a friendly note pointing the
+    user at the live `praxis review` verb and exit 0 so scripted users
+    do not see a crash.
+
+    See PLAN.md for the schedule that lands each verb's real handler.
+    """
+    verb = getattr(args, "cmd", "<unknown>")
+    print(
+        f"`praxis {verb}` is part of the Commit -> Cue -> Reflect -> Review "
+        f"loop and is not wired up yet."
+    )
+    print(
+        "Run `praxis review` to render this week's digest; see README.md "
+        "(`## The loop`) for the full plan."
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="praxis",
-        description="Scan your Claude / Codex / Copilot chat history "
-                    "and score your AI usage against research-backed criteria.",
+        description="Your AI usage coach. Commit -> Cue -> Reflect -> Review.",
+        formatter_class=_GroupedSubparsersFormatter,
+        epilog=_LOOP_HELP_EPILOG,
     )
     p.add_argument("--version", action="version", version=f"praxis {__version__}")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    # ``help=argparse.SUPPRESS`` on every subparser hides the auto-generated
+    # "{commit,nudge,...}" list so the curated epilog above is the canonical
+    # listing the user sees. The ordering of ``add_parser`` calls below is
+    # purely cosmetic in that mode, but we keep loop verbs first so any
+    # downstream tooling that introspects ``sub.choices`` sees them in
+    # narrative order too.
+    sub = p.add_subparsers(dest="cmd", required=True, metavar="<command>")
 
-    week = sub.add_parser(
-        "week",
-        help="Render this week's digest (the v0.2 primary verb).",
+    # --- Loop verbs (Commit -> Cue -> Reflect -> Review + install-coach) ---
+
+    commit_p = sub.add_parser(
+        "commit",
+        help=argparse.SUPPRESS,
         description=(
-            "Render the weekly digest from the current data, or render a "
-            "past week with --week <iso>. The terminal output always "
-            "renders; HTML and notifications are opt-in via flags."
+            "Pick this week's focus -- one specific behavior to practise. "
+            "Stub: not wired up yet; see README.md (`## The loop`)."
         ),
     )
-    week.add_argument(
+    commit_p.set_defaults(func=cmd_coming_soon)
+
+    nudge_p = sub.add_parser(
+        "nudge",
+        help=argparse.SUPPRESS,
+        description=(
+            "Print the active commitment for in-session cueing (read by "
+            "Claude Code / Codex SessionStart hooks). Stub: not wired up yet."
+        ),
+    )
+    nudge_p.set_defaults(func=cmd_coming_soon)
+
+    reflect_p = sub.add_parser(
+        "reflect",
+        help=argparse.SUPPRESS,
+        description=(
+            "Post-session check-in (about 30 seconds): did you practise the "
+            "active commitment? Stub: not wired up yet."
+        ),
+    )
+    reflect_p.set_defaults(func=cmd_coming_soon)
+
+    review = sub.add_parser(
+        "review",
+        help=argparse.SUPPRESS,
+        description=(
+            "Render this week's digest -- what changed against last week's "
+            "commitment (the Review step of the Commit -> Cue -> Reflect -> "
+            "Review loop). Was named `week` in v0.2; renamed in US-033/US-044 "
+            "to match the README masthead. The terminal output always renders; "
+            "HTML and notifications are opt-in via flags."
+        ),
+    )
+    review.add_argument(
         "--week",
         type=str,
         default=None,
@@ -1135,7 +1261,7 @@ def build_parser() -> argparse.ArgumentParser:
             "are skipped; the snapshot is rebuilt from the persisted DB rows."
         ),
     )
-    week.add_argument(
+    review.add_argument(
         "--dry-run",
         action="store_true",
         help=(
@@ -1143,7 +1269,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Useful for previewing the digest against current data."
         ),
     )
-    week.add_argument(
+    review.add_argument(
         "--frontier-only",
         action="store_true",
         help=(
@@ -1152,7 +1278,7 @@ def build_parser() -> argparse.ArgumentParser:
             "flag is wired here so the CLI seam stays stable."
         ),
     )
-    week.add_argument(
+    review.add_argument(
         "--explain-judging",
         action="store_true",
         help=(
@@ -1160,7 +1286,7 @@ def build_parser() -> argparse.ArgumentParser:
             "(spec 9.6). Will note when no distribution was recorded."
         ),
     )
-    week.add_argument(
+    review.add_argument(
         "--notify",
         action="store_true",
         help=(
@@ -1169,7 +1295,7 @@ def build_parser() -> argparse.ArgumentParser:
             "--write-html."
         ),
     )
-    week.add_argument(
+    review.add_argument(
         "--write-html",
         action="store_true",
         help=(
@@ -1177,16 +1303,30 @@ def build_parser() -> argparse.ArgumentParser:
             "(spec 13.1). The terminal render is always printed."
         ),
     )
-    week.set_defaults(func=cmd_week)
+    review.set_defaults(func=cmd_review)
+
+    install_coach_p = sub.add_parser(
+        "install-coach",
+        help=argparse.SUPPRESS,
+        description=(
+            "Wire the loop into the AI tools you use: detect Claude Code, "
+            "Codex CLI, and GitHub Copilot, then install hooks / instruction "
+            "files so the active commitment is cued into every session. "
+            "Stub: not wired up yet."
+        ),
+    )
+    install_coach_p.set_defaults(func=cmd_coming_soon)
+
+    # --- More (operational + read-only) ---
 
     scan = sub.add_parser(
         "scan",
-        help="Scan + score newly-discovered sessions (no digest render).",
+        help=argparse.SUPPRESS,
         description=(
             "Discover new sessions and run the judge against them, "
             "persisting results into ~/.praxis/profile.db. Prints a "
             "one-line summary; the digest itself lives behind "
-            "'praxis week' / 'praxis show <iso>'."
+            "'praxis review' / 'praxis show <iso>'."
         ),
     )
     scan.add_argument("--since-days", type=int, default=30,
@@ -1197,7 +1337,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     rescore = sub.add_parser(
         "re-score",
-        help="Re-run the frontier judge for one session and update its row.",
+        help=argparse.SUPPRESS,
         description=(
             "Look up the persisted session by stable_id, re-parse its "
             "source file, run the frontier judge, and overwrite the row "
@@ -1214,7 +1354,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     base = sub.add_parser(
         "baseline",
-        help="Print the current 90-day baseline (read-only).",
+        help=argparse.SUPPRESS,
         description=(
             "Read-only summary of the 90-day rolling baseline that the "
             "weekly digest panel uses. Renders '--' when the user has "
@@ -1225,7 +1365,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     hist = sub.add_parser(
         "history",
-        help="List past weekly digests, newest first (read-only).",
+        help=argparse.SUPPRESS,
         description=(
             "Enumerate the ISO weeks present in session_scores with "
             "their session count and mean overall score. Drill into one "
@@ -1236,7 +1376,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     show = sub.add_parser(
         "show",
-        help="Render a past week's digest from persisted data (read-only).",
+        help=argparse.SUPPRESS,
         description=(
             "Render the persisted snapshot for the given ISO week "
             "(e.g. 2026-W21). No scanning, no scoring, no writes."
@@ -1250,14 +1390,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     show.set_defaults(func=cmd_show)
 
-    rep = sub.add_parser("report", help="Open or print the legacy v0.1 HTML report.")
+    rep = sub.add_parser("report", help=argparse.SUPPRESS)
     rep.add_argument("--print", action="store_true",
                      help="Print HTML to stdout instead of opening browser.")
     rep.set_defaults(func=cmd_report)
 
     opn = sub.add_parser(
         "open",
-        help="Open this week's digest in the default browser.",
+        help=argparse.SUPPRESS,
         description=(
             "Open ~/.praxis/latest.html (the symlink the daemon updates "
             "on every weekly run). Touches ~/.praxis/.last_opened so the "
@@ -1270,7 +1410,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     lst = sub.add_parser(
         "last",
-        help="Print the latest digest's path, ISO week, and trajectory label.",
+        help=argparse.SUPPRESS,
         description=(
             "Read-only metadata about ~/.praxis/latest.html. Does not "
             "open a browser window. Use --path-only for scripting "
@@ -1281,31 +1421,28 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Print only the absolute path (one line, no labels).")
     lst.set_defaults(func=cmd_last)
 
-    sts = sub.add_parser("status", help="Show current scorecard status.")
+    sts = sub.add_parser("status", help=argparse.SUPPRESS)
     sts.set_defaults(func=cmd_status)
 
-    rub = sub.add_parser("rubric", help="Print the scoring rubric.")
+    rub = sub.add_parser("rubric", help=argparse.SUPPRESS)
     rub.set_defaults(func=cmd_rubric)
 
-    fup = sub.add_parser(
-        "follow-up",
-        help="Show the most recent weekly commitment and its outcome.",
-    )
+    fup = sub.add_parser("follow-up", help=argparse.SUPPRESS)
     fup.set_defaults(func=cmd_follow_up)
 
-    mod = sub.add_parser("models",
-                         help="List model cards or show one in detail.")
+    mod = sub.add_parser("models", help=argparse.SUPPRESS)
     mod.add_argument("--show", type=str, default=None,
                      help="Show full details for one model card (by id or alias).")
     mod.set_defaults(func=cmd_models)
 
     iw = sub.add_parser(
         "install-weekly",
-        help="Install the macOS LaunchAgent that runs 'praxis week --notify'.",
+        help=argparse.SUPPRESS,
         description=(
             "Generate ~/Library/LaunchAgents/co.praxis.weekly.plist from "
             "the schedule in ~/.praxis/config.toml and load it via "
-            "launchctl. Idempotent. On non-macOS this command prints the "
+            "launchctl, so `praxis review --notify` runs on schedule. "
+            "Idempotent. On non-macOS this command prints the "
             "equivalent snippet without scheduling anything (spec 12.4)."
         ),
     )
@@ -1322,7 +1459,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     uw = sub.add_parser(
         "uninstall-weekly",
-        help="Unload and remove the macOS LaunchAgent installed by install-weekly.",
+        help=argparse.SUPPRESS,
         description=(
             "Run 'launchctl unload' against "
             "~/Library/LaunchAgents/co.praxis.weekly.plist and delete the "
@@ -1333,7 +1470,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sn = sub.add_parser(
         "shell-nudge",
-        help="Print the shell snippet for `eval` in ~/.zshrc / ~/.bashrc.",
+        help=argparse.SUPPRESS,
         description=(
             "Emit a tiny shell function that prints one reminder line "
             "when ~/.praxis/latest.html is fresh and unread. Designed "
@@ -1345,7 +1482,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     isn = sub.add_parser(
         "install-shell-nudge",
-        help="Append the shell-nudge eval line to ~/.zshrc and ~/.bashrc.",
+        help=argparse.SUPPRESS,
         description=(
             "Idempotent. Adds `eval \"$(praxis shell-nudge)\"` to every "
             "existing RC file (zsh and/or bash). Skips files that "
@@ -1354,14 +1491,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     isn.set_defaults(func=cmd_install_shell_nudge)
 
-    usn = sub.add_parser(
-        "uninstall-shell-nudge",
-        help="Remove the shell-nudge eval line from ~/.zshrc and ~/.bashrc.",
-    )
+    usn = sub.add_parser("uninstall-shell-nudge", help=argparse.SUPPRESS)
     usn.set_defaults(func=cmd_uninstall_shell_nudge)
 
-    cfg = sub.add_parser("config",
-                         help="View, --get, or --set ~/.praxis/config.toml.")
+    cfg = sub.add_parser("config", help=argparse.SUPPRESS)
     cfg_action = cfg.add_mutually_exclusive_group()
     cfg_action.add_argument("--get", type=str, default=None, metavar="KEY",
                             help="Print the value of a dotted key "
