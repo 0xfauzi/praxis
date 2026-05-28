@@ -2,14 +2,16 @@
 
 Covers US-066 (80-column hard cap) and US-067 (the three mandatory
 sections always render, with a clear placeholder when an upstream
-input is missing). Later stories (US-068/069) will add their own
-section-specific tests on top of the contracts locked in here.
+input is missing). US-068 / US-069 added the cost ledger, tasks and
+six-dim footer; US-035 added the masthead's commitment block. Each
+story's tests sit in its own labelled section below.
 """
 from __future__ import annotations
 
 import re
 
 from praxis.reports import digest_terminal
+from praxis.reports.commitment_rollup import CommitmentRollup
 from praxis.reports.digest_terminal import (
     MAX_LINE_WIDTH,
     MAX_TASKS_RENDERED,
@@ -26,7 +28,10 @@ from praxis.reports.digest_terminal import (
     _COST_LEDGER_PLACEHOLDER,
     _DIMENSIONS_PLACEHOLDER,
     _FOLLOW_UP_PLACEHOLDER,
+    _GAP_AGREE_LINE,
+    _GAP_DISAGREE_LINE,
     _HEADLINE_MOMENT_PLACEHOLDER,
+    _NO_SESSIONS_LOGGED,
     _TASKS_PLACEHOLDER,
     _TRAJECTORY_PLACEHOLDER,
 )
@@ -1185,3 +1190,414 @@ def test_six_dim_panel_renders_in_caller_provided_order():
         "renderer must preserve caller's order; "
         f"verification@{verif_pos} should precede planning@{plan_pos}"
     )
+
+
+# ------------------------------------------- US-035 masthead commitment block
+
+
+def _rollup_full(
+    *,
+    display_text: str = (
+        "Before debugging, paste the error + your expected output."
+    ),
+    target_dim_key: str = "verification",
+    sessions_this_week: int = 7,
+    sessions_prior_week: int = 5,
+    self_report_tally: dict[str, int] | None = None,
+    dim_before: dict[str, float] | None = None,
+    dim_after: dict[str, float] | None = None,
+) -> CommitmentRollup:
+    """Fixture: a rollup with every field populated to a plausible week.
+
+    Defaults mirror the spec section 2 example so the masthead
+    assertions below read against the same canonical scenario the spec
+    documents.
+    """
+    return CommitmentRollup(
+        display_text=display_text,
+        target_dim_key=target_dim_key,
+        sessions_this_week=sessions_this_week,
+        sessions_prior_week=sessions_prior_week,
+        self_report_tally=(
+            self_report_tally
+            if self_report_tally is not None
+            else {"yes": 4, "no": 2, "partial": 1, "skip": 0}
+        ),
+        dim_before=dim_before if dim_before is not None else {"verification": 4.8},
+        dim_after=dim_after if dim_after is not None else {"verification": 6.2},
+    )
+
+
+def test_masthead_omits_commitment_block_when_rollup_none():
+    """No active commitment for the week => the block does not render.
+
+    Spec section 2 says the masthead's commitment block is omitted
+    cleanly when there's nothing to roll up; the rest of the digest
+    (trajectory, moment, follow-up, ...) renders unchanged.
+    """
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=None)))
+    assert "Your focus this week:" not in text
+    assert "How it went:" not in text
+    # The masthead title must still render so the digest's structural
+    # shape is preserved.
+    assert "PRAXIS" in text
+
+
+def test_masthead_renders_focus_header_and_quoted_display_text():
+    """The focus block shows the header and the display_text in quotes.
+
+    Spec section 2 lays out the masthead with the focus quote at the
+    top so the reader sees the active commitment immediately.
+    """
+    rollup = _rollup_full()
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "Your focus this week:" in text
+    assert (
+        '"Before debugging, paste the error + your expected output."'
+        in text
+    )
+
+
+def test_masthead_renders_how_it_went_header():
+    """The status block opens with the 'How it went:' header.
+
+    The header is the visual anchor for the four field rows beneath
+    it (Sessions / You said / Data says / Gap).
+    """
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=_rollup_full())))
+    assert "How it went:" in text
+
+
+def test_masthead_sessions_line_includes_this_and_prior_week_counts():
+    """The Sessions row carries both this-week and prior-week counts.
+
+    The '(vs. N last week)' suffix is the direction-of-travel anchor;
+    suppressing either count would leave the reader without context.
+    """
+    rollup = _rollup_full(sessions_this_week=7, sessions_prior_week=5)
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "Sessions:" in text
+    assert "7 (vs. 5 last week)" in text
+
+
+def test_masthead_self_report_tally_lists_nonzero_buckets():
+    """The 'You said' row reads '4 yes / 1 partial / 2 no'.
+
+    Zero-count buckets are dropped to keep the line tight; the spec
+    section 2 example shows only the non-empty buckets ordered
+    yes -> partial -> no.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 4, "partial": 1, "no": 2, "skip": 0}
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "You said:" in text
+    assert "4 yes / 1 partial / 2 no" in text
+
+
+def test_masthead_self_report_tally_drops_zero_buckets():
+    """A single-bucket tally renders just that bucket, not three zeros.
+
+    Avoids the noise of '4 yes / 0 partial / 0 no' when the user has
+    only ticked one box this week.
+    """
+    rollup = _rollup_full(self_report_tally={"yes": 4})
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "4 yes" in text
+    assert "0 partial" not in text
+    assert "0 no" not in text
+
+
+def test_masthead_self_report_tally_empty_shows_no_check_ins_placeholder():
+    """No reflections logged this week => 'no check-ins yet' placeholder.
+
+    A four-zero tally would render as nothing under the bucket-drop
+    rule above; the placeholder keeps the field visible.
+    """
+    rollup = _rollup_full(self_report_tally={"yes": 0, "no": 0, "partial": 0, "skip": 0})
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "no check-ins yet" in text
+
+
+def test_masthead_data_says_includes_dim_title_and_before_after():
+    """The Data says row renders the dim title with X.X -> Y.Y means.
+
+    Resolves the target_dim_key through the rubric so the reader sees
+    'Verification habits' rather than the bare 'verification' key, and
+    pairs the dim_before / dim_after means as a single before -> after
+    transition.
+    """
+    rollup = _rollup_full(
+        dim_before={"verification": 4.8},
+        dim_after={"verification": 6.2},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "Data says:" in text
+    assert "Verification habits" in text
+    assert "4.8 -> 6.2" in text
+
+
+def test_masthead_data_says_annotates_improved_when_delta_significant():
+    """A dim that rose by >= 0.3 reads '(improved)'.
+
+    Locks the significance gate at 0.3 (spec section 8.3) so the
+    masthead annotation matches the six-dim footer's delta arrows.
+    """
+    rollup = _rollup_full(
+        dim_before={"verification": 4.8},
+        dim_after={"verification": 6.2},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "(improved)" in text
+
+
+def test_masthead_data_says_annotates_worse_when_delta_negative():
+    """A dim that fell by >= 0.3 reads '(worse)'."""
+    rollup = _rollup_full(
+        dim_before={"verification": 6.5},
+        dim_after={"verification": 5.0},
+        self_report_tally={"no": 3, "partial": 1},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "(worse)" in text
+
+
+def test_masthead_data_says_annotates_unchanged_inside_noise_band():
+    """A within-noise delta (< 0.3 magnitude) reads '(unchanged)'.
+
+    Mirrors the six-dim footer's behavior of refusing to dress up
+    sub-threshold movement as a real direction.
+    """
+    rollup = _rollup_full(
+        dim_before={"verification": 5.0},
+        dim_after={"verification": 5.1},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "(unchanged)" in text
+
+
+def test_masthead_data_says_baseline_forming_when_no_prior_week():
+    """Without dim_before, the row reads '(baseline forming)'.
+
+    First-week digest has no prior-week mean to compare against; the
+    masthead must surface the current value and explain why no delta
+    is shown rather than inventing one.
+    """
+    rollup = _rollup_full(
+        dim_before={},
+        dim_after={"verification": 6.2},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "6.2" in text
+    assert "baseline forming" in text
+    # No '->' separator when there is no baseline to compare against.
+    masthead_segment = text.split("TRAJECTORY")[0]
+    assert "->" not in masthead_segment
+
+
+def test_masthead_gap_line_agree_when_yes_heavy_and_dim_improved():
+    """Yes-heavy self-report + improved dim => the agree line.
+
+    The user said 'I did it' and the data shows the dim went up; the
+    masthead reports agreement using the verbatim spec-section-2 line.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 4, "no": 1, "partial": 1},
+        dim_before={"verification": 4.5},
+        dim_after={"verification": 6.0},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert _GAP_AGREE_LINE in text
+    assert _GAP_DISAGREE_LINE not in text
+
+
+def test_masthead_gap_line_agree_when_no_heavy_and_dim_unchanged_or_worse():
+    """Honest 'no' tally + no improvement => still agreement.
+
+    The user said 'I didn't do it' and the data confirms no movement;
+    the two signals agree even though neither shows progress.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 1, "no": 4, "partial": 1},
+        dim_before={"verification": 6.0},
+        dim_after={"verification": 4.5},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert _GAP_AGREE_LINE in text
+
+
+def test_masthead_gap_line_disagree_when_yes_heavy_but_dim_worse():
+    """Yes-heavy self-report + dim regressed => the disagree fallback.
+
+    The user claims progress but the data shows the opposite. US-035
+    renders the static neutral phrasing here; US-037 swaps in
+    constrained-judge prose when an API key is available. The literal
+    fallback line wraps across two body rows under the field-label
+    indent, so we assert on the two distinctive substrings rather
+    than the wrap-sensitive full string.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 5, "no": 0, "partial": 0},
+        dim_before={"verification": 6.5},
+        dim_after={"verification": 5.0},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "Self-report and data differ this week." in text
+    assert "curiosity" in text
+    assert _GAP_AGREE_LINE not in text
+
+
+def test_masthead_gap_line_disagree_when_no_heavy_but_dim_improved():
+    """No-heavy self-report + dim improved => the disagree fallback.
+
+    Less common but still a real divergence: the data shows movement
+    the user didn't report. The renderer flags it for curiosity rather
+    than passing it through as 'agreement'.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 0, "no": 4, "partial": 1},
+        dim_before={"verification": 4.0},
+        dim_after={"verification": 6.0},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "Self-report and data differ this week." in text
+    assert "curiosity" in text
+
+
+def test_masthead_gap_line_defaults_to_agree_when_self_report_empty():
+    """Empty tally => default to agreement (no evidence of mismatch).
+
+    Without self-report data we can't claim disagreement honestly. The
+    masthead opts for the neutral 'agree' line rather than the
+    disagreement phrasing.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 0, "no": 0, "partial": 0, "skip": 0},
+        dim_before={"verification": 4.0},
+        dim_after={"verification": 6.0},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert _GAP_AGREE_LINE in text
+
+
+def test_masthead_gap_line_defaults_to_agree_when_dim_baseline_missing():
+    """No prior week => no data signal => default to agreement.
+
+    First-week digest has no comparison; the gap line stays neutral
+    rather than implying a contradiction that cannot be measured.
+    """
+    rollup = _rollup_full(
+        self_report_tally={"yes": 5, "no": 0, "partial": 0},
+        dim_before={},
+        dim_after={"verification": 6.0},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert _GAP_AGREE_LINE in text
+
+
+def test_masthead_sessions_zero_renders_no_sessions_line():
+    """Spec acceptance: sessions=0 prints the empty-state line.
+
+    Avoids the divide-by-zero / confusing-zero numeric line by
+    collapsing the 'How it went' block to one explicit message when
+    no sessions were logged this week.
+    """
+    rollup = _rollup_full(
+        sessions_this_week=0,
+        sessions_prior_week=3,
+        self_report_tally={"yes": 0, "no": 0, "partial": 0, "skip": 0},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert _NO_SESSIONS_LOGGED in text
+    # The numeric Sessions / You said / Data says / Gap rows must NOT
+    # render when we've collapsed to the empty-state line.
+    assert "Sessions:" not in text
+    assert "You said:" not in text
+    assert "Data says:" not in text
+    assert "Gap:" not in text
+
+
+def test_masthead_sessions_zero_still_renders_focus_quote():
+    """The focus quote is independent of session count; it always renders.
+
+    Even when no sessions were logged, the user's active commitment
+    sits at the top of the masthead so they remember what they
+    committed to even on a slow week.
+    """
+    rollup = _rollup_full(
+        sessions_this_week=0,
+        display_text="ask before running migrations",
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "Your focus this week:" in text
+    assert '"ask before running migrations"' in text
+
+
+def test_masthead_commitment_block_appears_before_trajectory():
+    """Spec section 2: the commitment block opens the digest.
+
+    The block sits between the masthead title and the trajectory
+    section so the reader sees the active commitment first, before
+    the multi-week behavioral read. A future refactor that reorders
+    these would silently change the editorial cadence.
+    """
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=_rollup_full())))
+    focus_pos = text.find("Your focus this week:")
+    traj_pos = text.find("TRAJECTORY")
+    assert -1 < focus_pos < traj_pos
+
+
+def test_masthead_commitment_block_lines_under_80():
+    """The masthead's commitment block respects the 79-col budget.
+
+    Uses a realistically long display_text and a long dim title to
+    push the wrap path; every emitted line must still measure under
+    the spec section 6.2 cap.
+    """
+    long_display = (
+        "Before any debugging, paste the actual error message verbatim "
+        "AND state the expected output in writing, every single time, "
+        "no exceptions."
+    )
+    rollup = _rollup_full(display_text=long_display)
+    lines = _all_lines(WeeklyDigest(commitment_rollup=rollup))
+    over = [
+        (i, _strip_ansi(line))
+        for i, line in enumerate(lines)
+        if visible_width(line) > MAX_LINE_WIDTH
+    ]
+    assert not over, f"Lines exceed {MAX_LINE_WIDTH} cols: {over}"
+
+
+def test_masthead_commitment_block_unknown_dim_key_does_not_crash():
+    """An unknown target_dim_key falls through to the raw key.
+
+    Mirrors the _dim_title contract elsewhere in the renderer: rubric
+    drift must not crash the masthead; the bare key renders instead
+    so the line still emits.
+    """
+    rollup = _rollup_full(
+        target_dim_key="not_a_real_dim",
+        dim_before={"not_a_real_dim": 4.0},
+        dim_after={"not_a_real_dim": 6.0},
+    )
+    text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
+    assert "not_a_real_dim" in text
+
+
+def test_masthead_commitment_block_resilient_to_missing_target_dim_key():
+    """target_dim_key absent from dim_after => dim defaults to 0.0.
+
+    Defensive: a target_dim_key set without populated dim_after must
+    not crash; the renderer treats the missing entry as a zero score
+    so the field still emits.
+    """
+    rollup = _rollup_full(
+        target_dim_key="verification",
+        dim_before={},
+        dim_after={},  # target_dim_key not present
+    )
+    digest = WeeklyDigest(commitment_rollup=rollup)
+    text = _strip_ansi(render(digest))
+    assert "Data says:" in text
+    assert "0.0" in text
