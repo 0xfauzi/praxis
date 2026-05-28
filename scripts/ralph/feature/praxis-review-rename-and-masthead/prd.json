@@ -78,6 +78,7 @@
     "praxis/reports/",
     "praxis/follow_up.py",
     "tests/",
-    "scripts/ralph/feature/praxis-review-rename-and-masthead/"
+    "scripts/ralph/feature/praxis-review-rename-and-masthead/",
+    "scripts/ralph/progress.txt"
   ]
 }

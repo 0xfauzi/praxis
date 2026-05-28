@@ -76,6 +76,7 @@
     "praxis/reports/",
     "praxis/behavior/",
     "tests/",
-    "scripts/ralph/feature/report-panels-expansion/"
+    "scripts/ralph/feature/report-panels-expansion/",
+    "scripts/ralph/progress.txt"
   ]
 }

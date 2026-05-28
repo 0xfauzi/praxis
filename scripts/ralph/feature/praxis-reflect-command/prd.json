@@ -62,6 +62,7 @@
     "praxis/cli/",
     "praxis/storage/",
     "tests/",
-    "scripts/ralph/feature/praxis-reflect-command/"
+    "scripts/ralph/feature/praxis-reflect-command/",
+    "scripts/ralph/progress.txt"
   ]
 }

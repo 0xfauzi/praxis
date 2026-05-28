@@ -34,6 +34,7 @@
     "praxis/behavior/",
     "praxis/scoring/clustering.py",
     "tests/",
-    "scripts/ralph/feature/repeat-task-detector/"
+    "scripts/ralph/feature/repeat-task-detector/",
+    "scripts/ralph/progress.txt"
   ]
 }
