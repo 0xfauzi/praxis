@@ -55,9 +55,13 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from praxis.redactor import redact_secrets
 from praxis.storage.profile_store import resolve_home
+
+if TYPE_CHECKING:
+    from praxis.reports.commitment_rollup import CommitmentRollup
 
 
 @dataclass(frozen=True)
@@ -239,6 +243,10 @@ class WeeklyDigest:
     vital_signs: VitalSigns | None = None
     weekly_trajectory: tuple[WeeklyTrajectoryPoint, ...] = ()
     behavioral_signals: tuple[BehavioralRow, ...] = ()
+    # Spec section 2 (coaching-reposition): masthead's commitment block
+    # reads this. None means no follow-up exists for the week so the
+    # masthead omits the block rather than rendering placeholder copy.
+    commitment_rollup: "CommitmentRollup | None" = None
 
 
 # ---------------------------------------------------------------- section text

@@ -604,6 +604,7 @@ def build_terminal_digest(summary, follow_up=None) -> dt.WeeklyDigest:
         cost_ledger=_cost_ledger_terminal(summary),
         tasks=_task_rows_terminal(summary),
         dimensions=_dim_rows_terminal(summary),
+        commitment_rollup=getattr(summary, "commitment_rollup", None),
     )
 
 
@@ -634,4 +635,5 @@ def build_html_digest(summary, follow_up=None) -> dh.WeeklyDigest:
         vital_signs=_vital_signs_html(summary),
         weekly_trajectory=trajectory_points,
         behavioral_signals=_behavioral_signals_html(summary, trajectory_points),
+        commitment_rollup=getattr(summary, "commitment_rollup", None),
     )

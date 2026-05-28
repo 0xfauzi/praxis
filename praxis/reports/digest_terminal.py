@@ -20,10 +20,14 @@ from __future__ import annotations
 import re
 import textwrap
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from praxis.reports.baseline_panel import format_baseline_value
 from praxis.reports.gating import format_delta
 from praxis.scoring.rubric import by_key
+
+if TYPE_CHECKING:
+    from praxis.reports.commitment_rollup import CommitmentRollup
 
 
 # Spec section 6.2: the digest fits in <80 columns. 79 is the hard cap
@@ -188,6 +192,10 @@ class WeeklyDigest:
     cost_ledger: CostLedgerView | None = None
     tasks: list[TaskRowView] | None = None
     dimensions: list[DimRowView] | None = None
+    # Spec section 2 (coaching-reposition): masthead's commitment block
+    # reads this. None means no follow-up exists for the week so the
+    # masthead omits the block rather than rendering placeholder copy.
+    commitment_rollup: "CommitmentRollup | None" = None
 
 
 # -------------------------------------------------------------------- helpers
