@@ -35,8 +35,7 @@ detected branch); exit code 1 for an invalid ``--tool`` argument.
 Claude Code installer (US-029):
   - Reads ``~/.claude/settings.json`` (or starts from ``{}``), merges a
     ``SessionStart`` block (``praxis nudge --format claude-code``) and a
-    ``Stop`` block (``praxis reflect --session-end
-    --non-interactive-fallback``), each tagged with
+    ``Stop`` block (``praxis reflect --session-end``), each tagged with
     ``_praxisManaged: true``.
   - Pre-existing user-authored blocks at the same event name are
     preserved unchanged; only Praxis-managed blocks get replaced.
@@ -116,13 +115,13 @@ SENTINEL = "_praxisManaged"
 
 CLAUDE_HOOK_COMMANDS: dict[str, str] = {
     "SessionStart": "praxis nudge --format claude-code",
-    "Stop": "praxis reflect --session-end --non-interactive-fallback",
+    "Stop": "praxis reflect --session-end",
 }
 
 
 CODEX_HOOK_COMMANDS: dict[str, str] = {
     "SessionStart": "praxis nudge --format codex",
-    "Stop": "praxis reflect --session-end --non-interactive-fallback",
+    "Stop": "praxis reflect --session-end",
 }
 
 
