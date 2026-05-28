@@ -395,7 +395,7 @@ def test_install_claude_code_stop_command(tmp_home):
     install_claude_code()
     data = _read_settings(tmp_home)
     cmd = data["hooks"]["Stop"][0]["hooks"][0]["command"]
-    assert cmd == "praxis reflect --session-end --non-interactive-fallback"
+    assert cmd == "praxis reflect --session-end"
 
 
 def test_install_claude_code_creates_parent_directory(tmp_home):
@@ -691,9 +691,7 @@ def test_install_codex_stop_command(tmp_home):
     install_codex()
     data = _read_codex_hooks(tmp_home)
     cmds = {entry["event"]: entry["command"] for entry in data["hooks"]}
-    assert (
-        cmds["Stop"] == "praxis reflect --session-end --non-interactive-fallback"
-    )
+    assert cmds["Stop"] == "praxis reflect --session-end"
 
 
 def test_install_codex_creates_parent_directory(tmp_home):
