@@ -28,29 +28,69 @@ def test_emit_snippet_contains_function_definition_and_call():
     assert out.rstrip().endswith("__praxis_nudge")
 
 
-def test_emit_snippet_writes_reminder_to_stderr():
-    """The reminder must go to stderr so it doesn't pollute stdout pipes."""
-    assert ">&2" in emit_snippet()
+def test_emit_snippet_delegates_to_praxis_nudge_text(tmp_path: Path):
+    """Per US-019 AC #1, the snippet calls `praxis nudge --format text`.
+
+    The literal command string must appear verbatim so the same throttle
+    file (~/.praxis/.last_nudge) gates both this snippet and the
+    SessionStart hooks documented in PLAN section 5. The unused
+    ``tmp_path`` parameter is here for symmetry with the other tests in
+    this file; the assertion is purely about the emitted string.
+    """
+    del tmp_path
+    assert "praxis nudge --format text" in emit_snippet()
+
+
+def test_emit_snippet_guards_against_missing_praxis():
+    """Per US-019 AC #3, the snippet fails closed when `praxis` is missing.
+
+    A `command -v praxis >/dev/null 2>&1 || return 0` guard means the
+    user never sees ``command not found: praxis`` printed on every shell
+    startup. We assert ``command -v`` specifically (not ``which`` /
+    ``type``) because it is the only POSIX-portable form.
+    """
+    out = emit_snippet()
+    assert "command -v praxis" in out
+    # The guard must short-circuit with `return 0`, not an exit / error.
+    assert "command -v praxis >/dev/null 2>&1 || return 0" in out
+
+
+def test_emit_snippet_swallows_praxis_nudge_errors():
+    """A non-zero exit from `praxis nudge` must not surface to the user.
+
+    AC US-019 #3 ("fails closed") plus general defensive hygiene: an
+    argparse error, a broken install, or the multi-row invariant
+    (`exit 4`) all need to stay invisible. We use ``2>/dev/null`` for
+    stderr suppression plus ``|| return 0`` belt-and-braces.
+    """
+    out = emit_snippet()
+    assert "2>/dev/null" in out
+    # The nudge invocation specifically must have || return 0 guarding
+    # against non-zero exit; not just the command -v guard.
+    assert "praxis nudge --format text 2>/dev/null || return 0" in out
 
 
 def test_emit_snippet_uses_portable_posix_shell():
-    """Use POSIX `[ -f ]` (not bashism `[[ -f ]]`) so dash/sh work too."""
+    """The snippet must work in zsh, bash, and dash without bashisms."""
     snippet = emit_snippet()
-    assert "[[ " not in snippet  # no bashism
-    assert "[ -f" in snippet
+    # No double-brackets (`[[ ... ]]` is bash/zsh-only, not dash/sh).
+    assert "[[ " not in snippet
+    # No `which` (alias-dependent; `command -v` is POSIX).
+    assert "which praxis" not in snippet
 
 
-def test_emit_snippet_references_latest_and_marker_paths():
-    """The freshness check must look at latest.html and .last_opened."""
+def test_emit_snippet_does_not_reference_legacy_digest_paths():
+    """The legacy mtime/marker logic must be gone (US-019).
+
+    The pre-US-019 snippet hard-coded ``$HOME/.praxis/latest.html`` and
+    ``$HOME/.praxis/.last_opened`` checks; that logic now lives inside
+    ``praxis nudge``. Asserting the legacy markers are absent guards
+    against accidental revert during future refactors.
+    """
     out = emit_snippet()
-    assert "latest.html" in out
-    assert ".last_opened" in out
-
-
-def test_emit_snippet_uses_find_mtime_for_freshness():
-    """Use `find -mtime` rather than `stat` so it works on BSD + GNU."""
-    out = emit_snippet()
-    assert "find " in out and "-mtime -5" in out
+    assert "latest.html" not in out
+    assert ".last_opened" not in out
+    assert "-mtime" not in out
 
 
 def test_rc_candidates_returns_zshrc_and_bashrc(tmp_path: Path):
