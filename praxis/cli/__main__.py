@@ -17,6 +17,7 @@ Commands (v0.2 surface):
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -826,13 +827,20 @@ def _resolve_active_commitment(week_iso: str) -> FollowUp | None:
     return commitments[0] if commitments else None
 
 
-def cmd_nudge(args: argparse.Namespace) -> int:  # noqa: ARG001
+def cmd_nudge(args: argparse.Namespace) -> int:
     """Print this week's active commitment, or stay silent.
 
     Resolves the single follow_ups row for the current ISO week that has
     ``outcome='pending'`` (and, once the schema-migrations columns land,
-    ``superseded_by IS NULL``). Output is intentionally single-line so
-    SessionStart hooks can pipe it straight to the user.
+    ``superseded_by IS NULL``). The ``--format`` flag selects the surface:
+
+      text         (default) ``[Praxis] This week: <commitment>`` + newline,
+                   for human-readable shell / terminal surfaces.
+      claude-code  ``{"hookSpecificOutput":{"additionalContext":"[Praxis] ``
+                   ``This week's focus: <commitment>"}}`` (single-line JSON,
+                   for Claude Code SessionStart hooks per spec section 5).
+      codex        Same JSON shape as claude-code (Codex SessionStart hooks
+                   share the additionalContext envelope per spec section 5).
 
     Exit codes:
       0  active commitment printed, or no active commitment (silent).
@@ -846,7 +854,17 @@ def cmd_nudge(args: argparse.Namespace) -> int:  # noqa: ARG001
         return 4
     if active is None:
         return 0
-    print(f"[Praxis] This week: {active.commitment_text}")
+    display_text = active.commitment_text
+    fmt = getattr(args, "format", "text")
+    if fmt == "text":
+        print(f"[Praxis] This week: {display_text}")
+    else:
+        payload = {
+            "hookSpecificOutput": {
+                "additionalContext": f"[Praxis] This week's focus: {display_text}",
+            },
+        }
+        print(json.dumps(payload, separators=(",", ":")))
     return 0
 
 
@@ -1347,6 +1365,17 @@ def build_parser() -> argparse.ArgumentParser:
             "stdout when there is no active commitment so hooks (Claude Code "
             "SessionStart, Codex, shell startup) stay silent until the first "
             "commitment is recorded."
+        ),
+    )
+    nudge.add_argument(
+        "--format",
+        choices=["text", "claude-code", "codex"],
+        default="text",
+        help=(
+            "Output format. 'text' (default) is a single human-readable line. "
+            "'claude-code' and 'codex' emit a single-line JSON envelope "
+            "({\"hookSpecificOutput\":{\"additionalContext\":...}}) for "
+            "SessionStart hooks per spec section 5."
         ),
     )
     nudge.set_defaults(func=cmd_nudge)

@@ -26,8 +26,8 @@
         "Tests pass: uv run pytest"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added `--format {text,claude-code,codex}` to the nudge subparser (default text). text prints `[Praxis] This week: <commitment>\\n`; claude-code and codex emit the same single-line compact JSON envelope `{\"hookSpecificOutput\":{\"additionalContext\":\"[Praxis] This week's focus: <commitment>\"}}`. The display field is `commitment_text` from the FollowUp dataclass; when the schema-migrations `display_text` column lands, swap to it here without touching the CLI surface. argparse's `choices=` rejects `--format html` with exit 2 and a usage-style error naming all three accepted values."
     },
     {
       "id": "US-018",

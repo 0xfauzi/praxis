@@ -1346,3 +1346,157 @@ def test_nudge_exits_nonzero_with_clear_error_on_multiple_active_rows(
     assert "2026-W21" in captured.err
     # Stdout stays clean so hooks consuming stdout don't see a half-message.
     assert captured.out == ""
+
+
+# ---------------------------------------------------------------------------
+# US-017 - `praxis nudge --format` selects between text and JSON envelopes.
+# ---------------------------------------------------------------------------
+
+
+def test_nudge_default_format_is_text(tmp_home, capsys, monkeypatch):
+    """No `--format` flag must behave exactly like `--format text` (US-017 AC #2).
+
+    The default surface is the human-readable line that shell hooks pipe
+    straight to the prompt; introducing a JSON-by-default would break
+    every existing shell-startup wiring.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    _seed_follow_up("2026-W21", commitment_text="explain the failing test first")
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == "[Praxis] This week: explain the failing test first\n"
+
+
+def test_nudge_format_text_prints_single_line_with_newline(
+    tmp_home, capsys, monkeypatch
+):
+    """`--format text` prints exactly `[Praxis] This week: <text>` + newline."""
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    _seed_follow_up(
+        "2026-W21",
+        commitment_text="ask 'what would falsify this answer?' first",
+    )
+    code = main(["nudge", "--format", "text"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert (
+        captured.out
+        == "[Praxis] This week: ask 'what would falsify this answer?' first\n"
+    )
+    assert captured.err == ""
+
+
+def test_nudge_format_claude_code_emits_single_line_json(
+    tmp_home, capsys, monkeypatch
+):
+    """`--format claude-code` prints exactly the spec section 5 JSON envelope.
+
+    The envelope is single-line JSON with no whitespace between tokens so
+    Claude Code's SessionStart hook reader sees one stdin line.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    _seed_follow_up(
+        "2026-W21",
+        commitment_text="run the linter before requesting review",
+    )
+    code = main(["nudge", "--format", "claude-code"])
+    captured = capsys.readouterr()
+    assert code == 0
+    # Single-line stdout: exactly one trailing newline, no internal newlines.
+    assert captured.out.endswith("\n")
+    assert captured.out.count("\n") == 1
+    payload = json.loads(captured.out)
+    assert payload == {
+        "hookSpecificOutput": {
+            "additionalContext": (
+                "[Praxis] This week's focus: run the linter before requesting review"
+            ),
+        },
+    }
+    # Compact form: no spaces inside the envelope.
+    assert " " not in captured.out.split('"additionalContext"')[0]
+
+
+def test_nudge_format_codex_emits_same_envelope_as_claude_code(
+    tmp_home, capsys, monkeypatch
+):
+    """`--format codex` shares the additionalContext shape (spec section 5)."""
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    _seed_follow_up(
+        "2026-W21",
+        commitment_text="state your assumptions before generating code",
+    )
+    code = main(["nudge", "--format", "codex"])
+    captured = capsys.readouterr()
+    assert code == 0
+    payload = json.loads(captured.out)
+    assert payload == {
+        "hookSpecificOutput": {
+            "additionalContext": (
+                "[Praxis] This week's focus: state your assumptions before generating code"
+            ),
+        },
+    }
+
+
+def test_nudge_format_silent_when_no_active_commitment(
+    tmp_home, capsys, monkeypatch
+):
+    """Empty stdout (no JSON envelope at all) when no active commitment exists.
+
+    Hooks must remain silent on a fresh DB regardless of which surface
+    they request; emitting an envelope with an empty additionalContext
+    would surface noise on every shell start.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    for fmt in ("text", "claude-code", "codex"):
+        code = main(["nudge", "--format", fmt])
+        captured = capsys.readouterr()
+        assert code == 0, f"format={fmt!r} must exit 0"
+        assert captured.out == "", f"format={fmt!r} must produce empty stdout"
+        assert captured.err == "", f"format={fmt!r} must produce empty stderr"
+
+
+def test_nudge_format_html_exits_nonzero_and_lists_accepted_values(
+    tmp_home, capsys
+):
+    """Unsupported `--format html` exits non-zero with the choices listed.
+
+    argparse's `choices=` machinery prints a usage-style line plus the
+    "invalid choice" error that names the three accepted values, and
+    exits 2. That satisfies US-017 AC #3 without bespoke code.
+    """
+    with pytest.raises(SystemExit) as excinfo:
+        main(["nudge", "--format", "html"])
+    assert excinfo.value.code != 0
+    err = capsys.readouterr().err
+    # The error must name each accepted value so users know how to fix it.
+    assert "text" in err
+    assert "claude-code" in err
+    assert "codex" in err
+
+
+def test_nudge_format_parses_into_args_namespace():
+    """`build_parser` exposes --format on the nudge subparser.
+
+    Locks in the wiring so a refactor can't quietly drop the flag and
+    let the handler silently fall back to the text branch.
+    """
+    parser = build_parser()
+    args = parser.parse_args(["nudge", "--format", "claude-code"])
+    assert args.cmd == "nudge"
+    assert args.format == "claude-code"
+
+    args_default = parser.parse_args(["nudge"])
+    assert args_default.format == "text"
