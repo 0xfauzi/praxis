@@ -1250,3 +1250,204 @@ def test_us039_panels_render_in_data_block_after_behavioral_patterns():
     bal_pos = out.find('id="aug-auto-balance"')
     cad_pos = out.find('id="cadence"')
     assert 0 <= bp_pos < bal_pos < cad_pos
+
+
+# ---------------------- US-040: repeat-task radar + verification ------------
+
+
+def _repeat_task_html_panel():
+    from praxis.reports.panel_inputs import (
+        RepeatTaskRadarPanel,
+        RepeatTaskRow,
+    )
+    return RepeatTaskRadarPanel(
+        rows=(
+            RepeatTaskRow(
+                canonical_first_sentence="fix the failing auth test",
+                occurrences=3,
+                estimated_minutes_per_occurrence=12.0,
+            ),
+            RepeatTaskRow(
+                canonical_first_sentence="regenerate the changelog entry",
+                occurrences=4,
+                estimated_minutes_per_occurrence=8.5,
+            ),
+        )
+    )
+
+
+def _repeat_task_empty_panel():
+    from praxis.reports.panel_inputs import RepeatTaskRadarPanel
+    return RepeatTaskRadarPanel()
+
+
+def _verification_html_panel():
+    from praxis.reports.panel_inputs import VerificationCalibrationPanel
+    return VerificationCalibrationPanel(
+        source_check_count=2,
+        test_run_count=3,
+        spot_check_count=1,
+        blanket_accept_count=4,
+    )
+
+
+def _verification_empty_panel():
+    from praxis.reports.panel_inputs import VerificationCalibrationPanel
+    return VerificationCalibrationPanel()
+
+
+def _us040_digest(*, repeat_task=None, verification=None):
+    from praxis.reports.panel_inputs import PanelInputs
+    return WeeklyDigest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        panel_inputs=PanelInputs(
+            repeat_task_radar=repeat_task,
+            verification_calibration=verification,
+        ),
+    )
+
+
+def test_repeat_task_radar_section_always_present():
+    """The section anchor (`id="repeat-task-radar"`) always renders."""
+    out_empty = render(_digest())
+    assert 'id="repeat-task-radar"' in out_empty
+    out_full = render(_us040_digest(repeat_task=_repeat_task_html_panel()))
+    assert 'id="repeat-task-radar"' in out_full
+
+
+def test_repeat_task_radar_renders_empty_state_message():
+    """When detect_repeats returned nothing the panel emits the verbatim
+    US-040 empty-state copy instead of an empty list."""
+    out = render(_us040_digest(repeat_task=_repeat_task_empty_panel()))
+    assert "No repeat tasks detected this week." in out
+
+
+def test_repeat_task_radar_no_panel_renders_empty_state():
+    """A digest with no panel_inputs falls back to the verbatim empty
+    state rather than emitting an empty rows section."""
+    out = render(_digest())
+    assert "No repeat tasks detected this week." in out
+
+
+def test_repeat_task_radar_renders_each_row():
+    """Each RepeatTask renders the canonical sentence, occurrence
+    count, per-occurrence minutes, and the skill tag."""
+    out = render(_us040_digest(repeat_task=_repeat_task_html_panel()))
+    assert "fix the failing auth test" in out
+    assert "regenerate the changelog entry" in out
+    assert "3 times" in out
+    assert "4 times" in out
+    assert "12 min" in out
+    assert "8.5 min" in out
+    assert "Could become a skill" in out
+
+
+def test_repeat_task_radar_renders_citation():
+    """The OpenAI + Anthropic Skills citation renders inline."""
+    out = render(_us040_digest(repeat_task=_repeat_task_html_panel()))
+    assert "OpenAI" in out
+    assert "Anthropic Skills" in out
+
+
+def test_repeat_task_radar_html_escapes_canonical_sentence():
+    """Canonical sentences come from user transcripts so they must be
+    HTML-escaped; a stray script tag must not become a real tag."""
+    from praxis.reports.panel_inputs import (
+        RepeatTaskRadarPanel,
+        RepeatTaskRow,
+    )
+    panel = RepeatTaskRadarPanel(
+        rows=(
+            RepeatTaskRow(
+                canonical_first_sentence="<script>alert('xss')</script>",
+                occurrences=3,
+                estimated_minutes_per_occurrence=5.0,
+            ),
+        )
+    )
+    out = render(_us040_digest(repeat_task=panel))
+    assert "<script>alert" not in out
+    assert "&lt;script&gt;alert" in out
+
+
+def test_verification_calibration_section_always_present():
+    """The section anchor (`id="verification-calibration"`) always renders."""
+    out_empty = render(_digest())
+    assert 'id="verification-calibration"' in out_empty
+    out_full = render(_us040_digest(verification=_verification_html_panel()))
+    assert 'id="verification-calibration"' in out_full
+
+
+def test_verification_calibration_renders_no_sessions_message():
+    """When the week has no sessions to categorize the panel emits
+    the explicit empty-state copy."""
+    out = render(_us040_digest(verification=_verification_empty_panel()))
+    assert "No sessions to calibrate verification against this week." in out
+
+
+def test_verification_calibration_renders_all_buckets():
+    """All four buckets render in display order with their counts."""
+    out = render(_us040_digest(verification=_verification_html_panel()))
+    assert "Source-check" in out
+    assert "Test-run" in out
+    assert "Spot-check" in out
+    assert "Blanket-accept" in out
+    # And the counts (2/3/1/4) render somewhere in the section body.
+    start = out.find('id="verification-calibration"')
+    end = out.find("</section>", start)
+    section_html = out[start:end]
+    assert "2 sessions" in section_html
+    assert "3 sessions" in section_html
+    assert "1 session" in section_html
+    assert "4 sessions" in section_html
+
+
+def test_verification_calibration_renders_citation():
+    """The Sonar / Stack Overflow / automation-bias citation renders
+    inline as a small footnote (US-040 AC)."""
+    out = render(_us040_digest(verification=_verification_html_panel()))
+    assert "Sonar" in out
+    assert "Stack Overflow" in out
+    assert "automation-bias" in out
+
+
+def test_us040_panels_self_containment_holds():
+    """The US-061 self-containment contract must hold; rendering must
+    not introduce external links, scripts, or images."""
+    out = render(
+        _us040_digest(
+            repeat_task=_repeat_task_html_panel(),
+            verification=_verification_html_panel(),
+        )
+    )
+    lower = out.lower()
+    assert "<link" not in lower
+    assert "<script" not in lower
+    assert "<img" not in lower
+    assert "http://" not in out
+    assert "https://" not in out
+    assert "@import" not in out
+    assert "url(" not in out
+
+
+def test_us040_panels_render_after_cadence():
+    """The repeat-task radar and verification-calibration panels sit
+    inside the data block after the cadence panel so the editorial
+    cadence stays uniform."""
+    from praxis.reports.panel_inputs import PanelInputs
+    digest = WeeklyDigest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        panel_inputs=PanelInputs(
+            aug_auto_balance=_aug_auto_html_panel(),
+            cadence=_cadence_html_panel(),
+            repeat_task_radar=_repeat_task_html_panel(),
+            verification_calibration=_verification_html_panel(),
+        ),
+    )
+    out = render(digest)
+    cad_pos = out.find('id="cadence"')
+    rt_pos = out.find('id="repeat-task-radar"')
+    vc_pos = out.find('id="verification-calibration"')
+    assert 0 <= cad_pos < rt_pos < vc_pos

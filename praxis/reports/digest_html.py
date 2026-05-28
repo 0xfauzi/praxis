@@ -58,10 +58,14 @@ from pathlib import Path
 
 from praxis.redactor import redact_secrets
 from praxis.reports.panel_inputs import (
+    VERIFICATION_CALIBRATION_KINDS_IN_PANEL_ORDER,
+    VERIFICATION_CALIBRATION_LABELS,
     AugAutoBalancePanel,
     BehavioralPatternsPanel,
     CadencePanel,
     PanelInputs,
+    RepeatTaskRadarPanel,
+    VerificationCalibrationPanel,
 )
 from praxis.storage.profile_store import resolve_home
 
@@ -1306,6 +1310,98 @@ def _next_week_section(sentence: str) -> str:
   </section>"""
 
 
+# US-040: empty-state copy for the repeat-task radar and the
+# verification-calibration panel. Tests assert on the literal text so
+# a future copy change is one audit point per renderer.
+_REPEAT_TASK_EMPTY = "No repeat tasks detected this week."
+_VERIFICATION_CALIBRATION_NO_SESSIONS = (
+    "No sessions to calibrate verification against this week."
+)
+
+
+def _format_minutes_html(minutes: float) -> str:
+    """Match the terminal renderer's minute-formatting policy."""
+    if abs(minutes - round(minutes)) < 0.05:
+        return f"{int(round(minutes))}"
+    return f"{minutes:.1f}"
+
+
+def _repeat_task_radar_section(panel: RepeatTaskRadarPanel | None) -> str:
+    """Render the repeat-task radar panel as one HTML section (US-040).
+
+    The eyebrow renders unconditionally so the document shape is
+    stable. When ``panel`` is None or carries no detected repeats the
+    body falls through to the empty-state copy; otherwise it emits
+    one row per RepeatTask with the canonical first sentence, the
+    occurrence count, the per-occurrence minutes, and the "Could
+    become a skill" tag, plus an inline citation footnote.
+    """
+    if panel is None or not panel.has_repeats:
+        return f"""
+  <section class="rt-section" id="repeat-task-radar">
+    <div class="s-eyebrow">Repeat-Task Radar</div>
+    <p class="placeholder">{_safe(_REPEAT_TASK_EMPTY)}</p>
+  </section>"""
+    rows: list[str] = []
+    for row in panel.rows:
+        minutes = _format_minutes_html(row.estimated_minutes_per_occurrence)
+        plural = "time" if row.occurrences == 1 else "times"
+        rows.append(
+            f'<article class="rt-row">'
+            f'<header class="rt-row-head">'
+            f'<blockquote class="rt-quote">&ldquo;'
+            f'{_safe(row.canonical_first_sentence)}&rdquo;</blockquote>'
+            f'<span class="rt-skill-tag">{_safe(row.skill_tag)}</span>'
+            f'</header>'
+            f'<p class="rt-meta">'
+            f'{row.occurrences} {plural}, ~{minutes} min each'
+            f'</p>'
+            f'</article>'
+        )
+    return f"""
+  <section class="rt-section" id="repeat-task-radar">
+    <div class="s-eyebrow">Repeat-Task Radar</div>
+    <div class="rt-list">{"".join(rows)}</div>
+    <p class="rt-citation">Source: {_safe(panel.citation)}</p>
+  </section>"""
+
+
+def _verification_calibration_section(
+    panel: VerificationCalibrationPanel | None,
+) -> str:
+    """Render the verification-calibration panel (US-040).
+
+    When the week has no sessions to categorize the body collapses to
+    a single placeholder. When at least one session was categorized
+    the renderer emits one row per bucket in display order so the
+    reader sees the absence of rigorous buckets as clearly as their
+    presence. The citation footnote sits beneath the rows.
+    """
+    if panel is None or not panel.has_sessions:
+        return f"""
+  <section class="vc-section" id="verification-calibration">
+    <div class="s-eyebrow">Verification Calibration</div>
+    <p class="placeholder">{_safe(_VERIFICATION_CALIBRATION_NO_SESSIONS)}</p>
+  </section>"""
+    rows: list[str] = []
+    for kind in VERIFICATION_CALIBRATION_KINDS_IN_PANEL_ORDER:
+        label = VERIFICATION_CALIBRATION_LABELS.get(kind, kind.title())
+        count = panel.count_for(kind)
+        plural = "session" if count == 1 else "sessions"
+        rows.append(
+            f'<div class="vc-row">'
+            f'<span class="vc-label">{_safe(label)}</span>'
+            f'<span class="vc-value">{count} {plural}</span>'
+            f'</div>'
+        )
+    return f"""
+  <section class="vc-section" id="verification-calibration">
+    <div class="s-eyebrow">Verification Calibration</div>
+    {"".join(rows)}
+    <p class="vc-citation">Source: {_safe(panel.citation)}</p>
+  </section>"""
+
+
 def render(digest: WeeklyDigest) -> str:
     """Render the weekly digest as a self-contained HTML document.
 
@@ -1359,6 +1455,16 @@ def render(digest: WeeklyDigest) -> str:
         if digest.panel_inputs is not None
         else None
     )
+    repeat_task_panel = (
+        digest.panel_inputs.repeat_task_radar
+        if digest.panel_inputs is not None
+        else None
+    )
+    verification_panel = (
+        digest.panel_inputs.verification_calibration
+        if digest.panel_inputs is not None
+        else None
+    )
     data_block = (
         '<div class="data-block">'
         '<div class="data-block__rule"></div>'
@@ -1369,6 +1475,8 @@ def render(digest: WeeklyDigest) -> str:
         f'{_behavioral_patterns_section(behavioral_panel)}'
         f'{_aug_auto_balance_section(aug_auto_panel)}'
         f'{_cadence_section(cadence_panel)}'
+        f'{_repeat_task_radar_section(repeat_task_panel)}'
+        f'{_verification_calibration_section(verification_panel)}'
         f'{_weekly_trajectory_section(digest.weekly_trajectory)}'
         '</div>'
     )
@@ -2398,6 +2506,109 @@ html, body {{
   color: var(--ink-faded);
   font-style: italic;
   margin-top: var(--space-2);
+}}
+
+/* --- 5e. Repeat-task radar (US-040) --------------------------------- */
+/* Editorial list of recurring task seeds. Each row pairs the quoted
+   first sentence (italic) with a small "Could become a skill" tag and
+   a dim meta row (occurrences + minutes). Layout intentionally mirrors
+   the behavioral-patterns rows so the editorial cadence stays uniform. */
+.rt-section {{
+  margin-bottom: 96px;
+}}
+.rt-list {{
+  display: flex;
+  flex-direction: column;
+}}
+.rt-row {{
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-6) 0;
+  border-top: 1px solid var(--rule);
+}}
+.rt-row:last-child {{
+  border-bottom: 1px solid var(--rule);
+}}
+.rt-row-head {{
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-5);
+  flex-wrap: wrap;
+}}
+.rt-quote {{
+  font-family: var(--serif);
+  font-size: 17px;
+  font-style: italic;
+  color: var(--ink);
+  letter-spacing: -0.005em;
+  max-width: 48ch;
+}}
+.rt-skill-tag {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  padding: 2px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  white-space: nowrap;
+}}
+.rt-meta {{
+  font-family: var(--serif);
+  font-size: 14px;
+  font-style: italic;
+  color: var(--ink-muted);
+  font-feature-settings: 'lnum';
+}}
+.rt-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-5);
+}}
+
+/* --- 5f. Verification calibration (US-040) -------------------------- */
+/* Histogram of how rigorously the user verified AI output this week,
+   bucketed source-check / test-run / spot-check / blanket-accept. The
+   row layout mirrors the augmentation/automation balance panel so the
+   reader can scan both as paired stat lists. */
+.vc-section {{
+  margin-bottom: 96px;
+}}
+.vc-row {{
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: var(--space-5) 0;
+  border-top: 1px solid var(--rule);
+}}
+.vc-row:last-of-type {{
+  border-bottom: 1px solid var(--rule);
+}}
+.vc-label {{
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--ink);
+}}
+.vc-value {{
+  font-family: var(--serif);
+  font-size: 22px;
+  color: var(--accent);
+  font-feature-settings: 'lnum';
+  letter-spacing: -0.01em;
+}}
+.vc-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-5);
 }}
 
 /* --- 6. Follow-up --------------------------------------------------- */

@@ -227,6 +227,154 @@ class CadencePanel:
         return CADENCE_POSITION_LABELS.get(self.high_adopter_position, "")
 
 
+# US-040 anchors: repeat-task radar and verification-calibration panels.
+# The radar surfaces RepeatTask rows from the token-overlap detector
+# alongside two primary sources (OpenAI's ChatGPT usage paper documents
+# the recurring-prompt finding; Anthropic's Skills work motivates the
+# "could become a skill" reframing). The verification-calibration panel
+# breaks the week's sessions into four rigor buckets and anchors against
+# Sonar's AI Code Trust Index, the Stack Overflow 2025 developer survey,
+# and the broader automation-bias literature.
+REPEAT_TASK_CITATION = (
+    "OpenAI 2025 ChatGPT usage paper + Anthropic Skills documentation"
+)
+# Spec section 12: a repeat-task is a candidate for skill extraction. The
+# renderer surfaces this label as a small tag next to each row so the
+# reader can scan the radar for skill candidates.
+REPEAT_TASK_SKILL_TAG = "Could become a skill"
+
+# Default rolling window the radar measures recurrence over. Surfaces
+# both in the adapter (when it calls detect_repeats) and in the renderer
+# (so the empty-state copy can name the window honestly).
+REPEAT_TASK_WINDOW_DAYS = 7
+
+VERIFICATION_CALIBRATION_CITATION = (
+    "Sonar AI Code Trust Index + Stack Overflow Developer Survey 2025 + "
+    "automation-bias literature"
+)
+
+
+# Verification-calibration buckets in display order (highest to lowest
+# rigor). The adapter categorizes each session by its highest-rigor
+# verification activity; the renderer iterates this tuple so the row
+# order is stable across the document.
+VERIFICATION_CALIBRATION_KINDS_IN_PANEL_ORDER: tuple[str, ...] = (
+    "source_check",
+    "test_run",
+    "spot_check",
+    "blanket_accept",
+)
+
+VERIFICATION_CALIBRATION_LABELS: dict[str, str] = {
+    "source_check": "Source-check",
+    "test_run": "Test-run",
+    "spot_check": "Spot-check",
+    "blanket_accept": "Blanket-accept",
+}
+
+
+@dataclass(frozen=True)
+class RepeatTaskRow:
+    """One row of the repeat-task radar panel (US-040).
+
+    Carries the canonical first sentence, the recurrence count, and the
+    estimated minutes per occurrence so the renderer can surface the
+    "a skill could reclaim ~N min" hint. The ``skill_tag`` is the
+    canonical "Could become a skill" string the renderer prints next to
+    every row, kept as a field so a future per-row tag override is one
+    point of change rather than a renderer-side branch.
+    """
+
+    canonical_first_sentence: str
+    occurrences: int
+    estimated_minutes_per_occurrence: float
+    skill_tag: str = REPEAT_TASK_SKILL_TAG
+
+
+@dataclass(frozen=True)
+class RepeatTaskRadarPanel:
+    """Repeat-task radar panel input (US-040).
+
+    ``rows`` is the list of detected repeat tasks for the week. When
+    ``detect_repeats`` returns an empty list the panel renders the
+    explicit "No repeat tasks detected this week." copy instead of an
+    empty table, per US-040 acceptance.
+    """
+
+    rows: tuple[RepeatTaskRow, ...] = ()
+    window_days: int = REPEAT_TASK_WINDOW_DAYS
+    citation: str = REPEAT_TASK_CITATION
+
+    @property
+    def has_repeats(self) -> bool:
+        """True when at least one repeat task was detected this week."""
+        return bool(self.rows)
+
+    @property
+    def total_reclaimable_minutes(self) -> float:
+        """Sum of (occurrences * estimated_minutes_per_occurrence) across
+        rows. Surfaces as the radar's "skills could reclaim ~N min/week"
+        callout in the renderer when at least one row is present.
+        """
+        return sum(
+            row.occurrences * row.estimated_minutes_per_occurrence
+            for row in self.rows
+        )
+
+
+@dataclass(frozen=True)
+class VerificationCalibrationPanel:
+    """Verification-calibration panel input (US-040).
+
+    The four counts represent how many SESSIONS in the week landed in
+    each rigor bucket. Each session is categorized by its highest-rigor
+    verification activity observed across its user turns: a session that
+    both ran tests and source-checked counts in the source-check bucket
+    only, so the panel reads as a histogram of the user's verification
+    ceiling rather than a tally of activities.
+
+    ``blanket_accept_count`` is sessions with no detected verification
+    activity. This is the automation-bias bucket and is the bar the
+    renderer surfaces inline so the reader can see how often the week
+    defaulted to trust.
+    """
+
+    source_check_count: int = 0
+    test_run_count: int = 0
+    spot_check_count: int = 0
+    blanket_accept_count: int = 0
+    citation: str = VERIFICATION_CALIBRATION_CITATION
+
+    @property
+    def total_sessions(self) -> int:
+        """Total sessions placed in any bucket this week."""
+        return (
+            self.source_check_count
+            + self.test_run_count
+            + self.spot_check_count
+            + self.blanket_accept_count
+        )
+
+    @property
+    def has_sessions(self) -> bool:
+        """True when at least one session was categorized this week."""
+        return self.total_sessions > 0
+
+    def count_for(self, kind: str) -> int:
+        """Look up a bucket's count by its display-order key.
+
+        Returns 0 for unknown keys rather than raising, so the renderer
+        can iterate ``VERIFICATION_CALIBRATION_KINDS_IN_PANEL_ORDER``
+        without a try/except.
+        """
+        return {
+            "source_check": self.source_check_count,
+            "test_run": self.test_run_count,
+            "spot_check": self.spot_check_count,
+            "blanket_accept": self.blanket_accept_count,
+        }.get(kind, 0)
+
+
 @dataclass(frozen=True)
 class PanelInputs:
     """Container for the v0.3 expansion-panel inputs (US-038..042).
@@ -241,6 +389,8 @@ class PanelInputs:
     behavioral_signals: BehavioralPatternsPanel | None = None
     aug_auto_balance: AugAutoBalancePanel | None = None
     cadence: CadencePanel | None = None
+    repeat_task_radar: RepeatTaskRadarPanel | None = None
+    verification_calibration: VerificationCalibrationPanel | None = None
 
 
 __all__ = [
@@ -255,10 +405,19 @@ __all__ = [
     "CADENCE_ANCHOR_CITATION",
     "CADENCE_WINDOW_DAYS",
     "CADENCE_POSITION_LABELS",
+    "REPEAT_TASK_CITATION",
+    "REPEAT_TASK_SKILL_TAG",
+    "REPEAT_TASK_WINDOW_DAYS",
+    "VERIFICATION_CALIBRATION_CITATION",
+    "VERIFICATION_CALIBRATION_KINDS_IN_PANEL_ORDER",
+    "VERIFICATION_CALIBRATION_LABELS",
     "BehavioralPatternRow",
     "BehavioralPatternsPanel",
     "AugAutoBalancePanel",
     "CadencePanel",
+    "RepeatTaskRow",
+    "RepeatTaskRadarPanel",
+    "VerificationCalibrationPanel",
     "PanelInputs",
     "clip_excerpt",
 ]

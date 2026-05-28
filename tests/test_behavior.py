@@ -14,7 +14,9 @@ from datetime import datetime, timedelta, timezone
 from praxis.behavior.signals import (
     SIGNAL_KINDS_IN_PANEL_ORDER,
     BehavioralSignals,
+    categorize_session_verification,
     detect_signal_kinds,
+    detect_verification_calibration_kinds,
     extract,
 )
 from praxis.behavior.trajectory import (
@@ -170,6 +172,98 @@ def test_detect_signal_kinds_can_match_multiple_kinds():
     # Both a debug outsourcing pattern AND an explanation request.
     assert "outsourced_debug" in kinds
     assert len(kinds) >= 2
+
+
+# =========================================================================
+# US-040: verification-calibration signal detection
+# =========================================================================
+
+
+def test_detect_verification_calibration_kinds_source_check():
+    """A turn that asks for the source/citation fires source_check."""
+    turn = Turn(
+        role=Role.USER,
+        content="What's the source for this claim? Can you cite a reference?",
+    )
+    kinds = detect_verification_calibration_kinds(turn)
+    assert "source_check" in kinds
+
+
+def test_detect_verification_calibration_kinds_test_run():
+    """A turn that asks to run tests fires test_run."""
+    turn = Turn(
+        role=Role.USER,
+        content="Let me run the tests and see if they pass.",
+    )
+    kinds = detect_verification_calibration_kinds(turn)
+    assert "test_run" in kinds
+
+
+def test_detect_verification_calibration_kinds_spot_check():
+    """A 'let me double-check' turn fires spot_check."""
+    turn = Turn(
+        role=Role.USER,
+        content="That looks right but let me double-check the boundary.",
+    )
+    kinds = detect_verification_calibration_kinds(turn)
+    assert "spot_check" in kinds
+
+
+def test_detect_verification_calibration_kinds_no_verification_returns_empty():
+    """A turn with no verification activity returns an empty set
+    (blanket_accept is the SESSION-level default, never per-turn)."""
+    turn = Turn(role=Role.USER, content="write me a function")
+    kinds = detect_verification_calibration_kinds(turn)
+    assert kinds == set()
+
+
+def test_categorize_session_verification_blanket_accept_default():
+    """A session with no verification activity lands in blanket_accept."""
+    turns = [
+        Turn(role=Role.USER, content="write me a function"),
+        Turn(role=Role.USER, content="make it handle errors"),
+    ]
+    session = _make_session(turns, datetime.now(timezone.utc))
+    assert categorize_session_verification(session) == "blanket_accept"
+
+
+def test_categorize_session_verification_spot_check():
+    """A session that spot-checks but doesn't test or source-check
+    lands in spot_check."""
+    turns = [
+        Turn(role=Role.USER, content="add error handling"),
+        Turn(role=Role.USER, content="that looks right, let me double-check"),
+    ]
+    session = _make_session(turns, datetime.now(timezone.utc))
+    assert categorize_session_verification(session) == "spot_check"
+
+
+def test_categorize_session_verification_test_run_beats_spot_check():
+    """When both test_run and spot_check fire across the session,
+    the highest-rigor kind (test_run) wins."""
+    turns = [
+        Turn(role=Role.USER, content="that looks right"),
+        Turn(role=Role.USER, content="let me run the tests"),
+    ]
+    session = _make_session(turns, datetime.now(timezone.utc))
+    assert categorize_session_verification(session) == "test_run"
+
+
+def test_categorize_session_verification_source_check_beats_test_run():
+    """source_check trumps test_run when both fire across the session."""
+    turns = [
+        Turn(role=Role.USER, content="let me run the tests"),
+        Turn(role=Role.USER, content="what's the source for this approach?"),
+    ]
+    session = _make_session(turns, datetime.now(timezone.utc))
+    assert categorize_session_verification(session) == "source_check"
+
+
+def test_categorize_session_verification_empty_session_blanket_accept():
+    """A session with zero user turns falls into blanket_accept (no
+    activity to derive a verification signal from)."""
+    session = _make_session([], datetime.now(timezone.utc))
+    assert categorize_session_verification(session) == "blanket_accept"
 
 
 def test_llm_trajectory_returns_none_without_keys(tmp_home):

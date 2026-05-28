@@ -200,3 +200,121 @@ def detect_signal_kinds(turn: Turn) -> set[str]:
     if _OWN_ATTEMPT_MARKERS.search(content):
         kinds.add("own_attempt")
     return kinds
+
+
+# --------------------------------------------------------------------
+# US-040 verification-calibration signals.
+#
+# Each pattern fires when a user turn shows the corresponding verification
+# activity. The four kinds form a rigor hierarchy that the
+# verification-calibration panel uses to categorize sessions:
+#   1. source_check  - user verifies the origin/citation/reference of
+#      a claim (highest rigor: checks upstream truth, not just behavior).
+#   2. test_run      - user executes or asks for tests / pytest / npm
+#      test (medium-high rigor: empirical verification of behavior).
+#   3. spot_check    - user inspects output lightly ("looks right",
+#      "double-check") without sourcing or testing (low rigor).
+#   4. blanket_accept- no verification observed in the session (none).
+#
+# Patterns are intentionally conservative (precision > recall): we'd
+# rather under-count rigorous verification than misclassify a delegating
+# session as rigorous. The adapter walks user turns and promotes a
+# session to the highest-rigor bucket any of its turns reached.
+
+_SOURCE_CHECK_MARKERS = re.compile(
+    r"\b("
+    r"source|sources|cite|citation|citations|reference|references|"
+    r"where (does|did) (this|it|that|they) (come|originate)|"
+    r"where'?s (this|that|it) from|"
+    r"what'?s the source|provide a source"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+_TEST_RUN_MARKERS = re.compile(
+    r"\b("
+    r"run (the )?tests?|"
+    r"pytest|jest|npm test|cargo test|go test|"
+    r"unit tests?|"
+    r"did the tests? pass|do the tests? pass|"
+    r"the tests? (passed|fail|failed)|"
+    r"run it|let me run|i'?ll run"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+_SPOT_CHECK_MARKERS = re.compile(
+    r"\b("
+    r"double[- ]?check|spot[- ]?check|"
+    r"let me check|let me look|"
+    r"looks (right|good|fine|correct|ok|okay)|"
+    r"that looks (right|good|fine|correct|ok|okay)|"
+    r"glance|skim|eyeball|sanity check"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+# Kinds in highest-to-lowest rigor order; the adapter picks the FIRST
+# kind that fires for any user turn in a session, so promotion to a
+# higher-rigor bucket beats a lower-rigor match later in the same
+# session. ``blanket_accept`` is the implicit default when no other
+# pattern fires.
+_VERIFICATION_CALIBRATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("source_check", _SOURCE_CHECK_MARKERS),
+    ("test_run", _TEST_RUN_MARKERS),
+    ("spot_check", _SPOT_CHECK_MARKERS),
+)
+
+
+def detect_verification_calibration_kinds(turn: Turn) -> set[str]:
+    """Return the set of verification-calibration kinds for one turn.
+
+    Used by the verification-calibration panel (US-040). A single turn
+    can match multiple kinds (e.g. "let me run the tests and check the
+    source") so the return value is a set; the panel adapter promotes
+    the session to the highest-rigor kind any of its turns reached.
+    Kinds returned are drawn from
+    ``("source_check", "test_run", "spot_check")``; ``blanket_accept``
+    is never returned here because it is the default when no other
+    kind fires (a per-turn detector cannot observe absence of activity
+    across a session).
+    """
+    kinds: set[str] = set()
+    for kind, pattern in _VERIFICATION_CALIBRATION_PATTERNS:
+        if pattern.search(turn.content):
+            kinds.add(kind)
+    return kinds
+
+
+def categorize_session_verification(session: Session) -> str:
+    """Return the highest-rigor verification kind for one session.
+
+    Walks the session's user turns once and returns the highest-rigor
+    kind any turn reached: source_check > test_run > spot_check >
+    blanket_accept. Sessions that produced no verification signal at
+    all (and sessions with zero user turns) land in ``blanket_accept``.
+
+    This is the rigor "ceiling" of the session, not a turn-level count:
+    a session that briefly source-checked once is classified as
+    source-check regardless of how many turns afterward simply accepted
+    output. The panel reads as a histogram of how the user verified at
+    their MOST rigorous moment of each session, which matches the
+    automation-bias literature's framing of verification ceilings as
+    the trust-calibration anchor.
+    """
+    seen: set[str] = set()
+    for turn in session.user_turns:
+        seen.update(detect_verification_calibration_kinds(turn))
+        if "source_check" in seen:
+            # Highest rigor reached; early exit is safe.
+            return "source_check"
+    if "source_check" in seen:
+        return "source_check"
+    if "test_run" in seen:
+        return "test_run"
+    if "spot_check" in seen:
+        return "spot_check"
+    return "blanket_accept"

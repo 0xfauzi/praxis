@@ -24,10 +24,14 @@ from dataclasses import dataclass
 from praxis.reports.baseline_panel import format_baseline_value
 from praxis.reports.gating import format_delta
 from praxis.reports.panel_inputs import (
+    VERIFICATION_CALIBRATION_KINDS_IN_PANEL_ORDER,
+    VERIFICATION_CALIBRATION_LABELS,
     AugAutoBalancePanel,
     BehavioralPatternsPanel,
     CadencePanel,
     PanelInputs,
+    RepeatTaskRadarPanel,
+    VerificationCalibrationPanel,
 )
 from praxis.scoring.rubric import by_key
 
@@ -308,6 +312,15 @@ _BEHAVIORAL_PATTERNS_EMPTY = "No behavioral patterns captured this week."
 _AUG_AUTO_BALANCE_CLASSIFIER_UNAVAILABLE = "Classifier unavailable for this week."
 _AUG_AUTO_BALANCE_NO_SESSIONS = "No sessions to classify this week."
 _CADENCE_NO_ACTIVITY = "No substantive sessions in the last 21 days."
+
+# US-040: empty-state copy for the repeat-task radar (assertable verbatim
+# by tests so an empty detector list never renders as a misleading
+# blank table) and the verification-calibration panel (used when zero
+# sessions categorize into any bucket this week).
+_REPEAT_TASK_EMPTY = "No repeat tasks detected this week."
+_VERIFICATION_CALIBRATION_NO_SESSIONS = (
+    "No sessions to calibrate verification against this week."
+)
 
 
 def _dim_title(dim_key: str) -> str:
@@ -721,6 +734,95 @@ def _cadence(panel: CadencePanel | None) -> list[str]:
     return lines
 
 
+def _format_minutes(minutes: float) -> str:
+    """Render a minutes value without trailing-zero decimals.
+
+    The repeat-task radar shows per-occurrence and total reclaimable
+    minutes; the existing dim-row renderer uses "{value:.1f}" but for
+    minutes that produces "30.0 min" which reads as fake precision.
+    Round to int when the fractional part is below 0.5 minutes (30
+    seconds) so "12.6" still renders, "30.0" renders as "30".
+    """
+    if abs(minutes - round(minutes)) < 0.05:
+        return f"{int(round(minutes))}"
+    return f"{minutes:.1f}"
+
+
+def _repeat_task_radar(panel: RepeatTaskRadarPanel | None) -> list[str]:
+    """Render the repeat-task radar panel (US-040).
+
+    Three states:
+      1. ``panel is None`` or no repeats detected: emit the
+         "No repeat tasks detected this week." copy verbatim and skip
+         the row table entirely.
+      2. At least one repeat: emit each row with the canonical first
+         sentence, the occurrence count, the per-occurrence minutes,
+         and the "Could become a skill" tag. The citation footnote
+         (OpenAI ChatGPT usage paper + Anthropic Skills) sits below
+         the rows so the reader sees the primary source inline.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Repeat-task radar"))
+    if panel is None or not panel.has_repeats:
+        lines.extend(_placeholder_lines(_REPEAT_TASK_EMPTY))
+        return lines
+    first = True
+    for row in panel.rows:
+        if not first:
+            lines.append("")
+        first = False
+        # Header: "<canonical sentence>"  (italic so the reader's eye
+        # tracks the quoted text vs the meta row below it).
+        quoted = f"\"{row.canonical_first_sentence}\""
+        for wrapped in _wrap(quoted, width=_BODY_WIDTH):
+            lines.append(_body_line(wrapped, ansi=ITALIC))
+        meta = (
+            f"{row.occurrences} times, "
+            f"~{_format_minutes(row.estimated_minutes_per_occurrence)} min each "
+            f"[{row.skill_tag}]"
+        )
+        for wrapped in _wrap(meta, width=_BODY_WIDTH):
+            lines.append(_body_line(wrapped, ansi=DIM))
+    for wrapped in _wrap(
+        f"Source: {panel.citation}", width=_BODY_WIDTH
+    ):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    return lines
+
+
+def _verification_calibration(
+    panel: VerificationCalibrationPanel | None,
+) -> list[str]:
+    """Render the verification-calibration panel (US-040).
+
+    Two states:
+      1. ``panel is None`` or no sessions categorized: emit the
+         "No sessions to calibrate verification against this week."
+         copy so the section's slot stays stable but the body doesn't
+         mislead readers with four zero counts.
+      2. At least one session: emit one row per bucket in
+         display-order (source-check, test-run, spot-check,
+         blanket-accept) followed by the citation footnote. Zero rows
+         still render so the reader sees the absence of the rigorous
+         buckets when blanket-accept dominates.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Verification calibration"))
+    if panel is None or not panel.has_sessions:
+        lines.extend(_placeholder_lines(_VERIFICATION_CALIBRATION_NO_SESSIONS))
+        return lines
+    for kind in VERIFICATION_CALIBRATION_KINDS_IN_PANEL_ORDER:
+        label = VERIFICATION_CALIBRATION_LABELS.get(kind, kind.title())
+        count = panel.count_for(kind)
+        plural = "session" if count == 1 else "sessions"
+        lines.append(_body_line(f"{label}: {count} {plural}"))
+    for wrapped in _wrap(
+        f"Source: {panel.citation}", width=_BODY_WIDTH
+    ):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    return lines
+
+
 def _six_dim_panel(dimensions: list[DimRowView] | None) -> list[str]:
     """Render the full six-dim panel as the digest's footer (spec 6.2).
 
@@ -801,6 +903,26 @@ def render(digest: WeeklyDigest) -> str:
         else None
     )
     parts.extend(_cadence(cadence_panel))
+    # US-040: repeat-task radar + verification-calibration panel.
+    # The radar surfaces tasks the user has worked on 3+ times this
+    # week and tags each as a candidate for skill extraction (Anthropic
+    # Skills framing); the verification-calibration panel breaks the
+    # week's sessions into four rigor buckets (Sonar / SO 2025 /
+    # automation-bias literature framing). Both panels sit AFTER the
+    # cadence + aug-auto pair so the document reads habit-shape first
+    # and then drills into repeat work + verification rigor.
+    repeat_task_panel = (
+        digest.panel_inputs.repeat_task_radar
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_repeat_task_radar(repeat_task_panel))
+    verification_panel = (
+        digest.panel_inputs.verification_calibration
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_verification_calibration(verification_panel))
     # Trailing newline so terminals that print the next prompt without
     # a leading newline don't clash with the last section's content.
     parts.append("")

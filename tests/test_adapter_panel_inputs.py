@@ -502,3 +502,295 @@ def test_cadence_panel_is_frozen():
     except dataclasses.FrozenInstanceError:
         return
     raise AssertionError("CadencePanel must be frozen")
+
+
+# =========================================================================
+# US-040: repeat-task radar + verification-calibration panel adapter wiring
+# =========================================================================
+
+
+from praxis.reports.adapter import (  # noqa: E402
+    _repeat_task_radar_panel,
+    _verification_calibration_panel,
+)
+from praxis.reports.panel_inputs import (  # noqa: E402
+    REPEAT_TASK_CITATION,
+    REPEAT_TASK_SKILL_TAG,
+    VERIFICATION_CALIBRATION_CITATION,
+    RepeatTaskRadarPanel,
+    RepeatTaskRow,
+    VerificationCalibrationPanel,
+)
+from praxis.scoring.clustering import Task  # noqa: E402
+
+
+def _session_with_first_turn(
+    text: str,
+    stable_id_seed: str,
+    other_turns: list[str] | None = None,
+) -> Session:
+    """Build a real Session whose first user turn carries ``text``."""
+    turns = [Turn(role=Role.USER, content=text)]
+    for extra in other_turns or []:
+        turns.append(Turn(role=Role.USER, content=extra))
+    return Session(
+        provider=Provider.CLAUDE,
+        session_id=stable_id_seed,
+        started_at=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        turns=turns,
+        source_path="/tmp/test",
+    )
+
+
+def _make_task(label: str, session_ids: list[str]) -> Task:
+    return Task(
+        label=label,
+        task_type="implementation",
+        session_ids=session_ids,
+        rationale="",
+    )
+
+
+# ----------- _repeat_task_radar_panel: empty + populated paths ----------
+
+
+def test_repeat_task_radar_no_tasks_returns_empty_panel():
+    """Zero tasks => empty panel with no rows."""
+    panel = _repeat_task_radar_panel(_FakeSummary())
+    assert isinstance(panel, RepeatTaskRadarPanel)
+    assert panel.has_repeats is False
+    assert panel.rows == ()
+
+
+def test_repeat_task_radar_no_recurring_clusters_returns_empty():
+    """When the user's tasks don't recur 3+ times, the detector emits
+    no RepeatTasks and the panel reads as empty."""
+    sessions = [
+        _session_with_first_turn("refactor the auth module today", "a"),
+        _session_with_first_turn("write the changelog entry", "b"),
+    ]
+    tasks = [
+        _make_task("auth refactor", [sessions[0].stable_id]),
+        _make_task("changelog", [sessions[1].stable_id]),
+    ]
+    summary = SimpleNamespace(sessions=sessions, tasks=tasks)
+    panel = _repeat_task_radar_panel(summary)
+    assert panel.has_repeats is False
+
+
+def test_repeat_task_radar_detects_three_repeats():
+    """Three clusters whose first sentences overlap >= 0.70 should
+    surface one RepeatTask row in the panel."""
+    sessions = [
+        _session_with_first_turn("fix the failing auth test in module", f"s-{i}")
+        for i in range(3)
+    ]
+    tasks = [
+        _make_task(f"auth-test-fix-{i}", [sessions[i].stable_id])
+        for i in range(3)
+    ]
+    summary = SimpleNamespace(sessions=sessions, tasks=tasks)
+    panel = _repeat_task_radar_panel(summary)
+    assert panel.has_repeats is True
+    assert len(panel.rows) == 1
+    row = panel.rows[0]
+    assert row.occurrences == 3
+    assert row.skill_tag == REPEAT_TASK_SKILL_TAG
+
+
+def test_repeat_task_radar_carries_citation():
+    """The panel surfaces the OpenAI + Anthropic Skills citation so the
+    renderer can render the primary source inline (US-040 AC)."""
+    panel = _repeat_task_radar_panel(_FakeSummary())
+    assert panel.citation == REPEAT_TASK_CITATION
+    assert "OpenAI" in panel.citation
+    assert "Anthropic" in panel.citation
+
+
+def test_repeat_task_radar_skips_tasks_with_no_sessions():
+    """A task whose session_ids reference no sessions in summary is
+    skipped (it cannot anchor a cluster) rather than crashing the
+    detector."""
+    sessions = [
+        _session_with_first_turn("real session content", "s-real"),
+    ]
+    tasks = [
+        _make_task("ghost task", ["nonexistent"]),
+        _make_task("real task", [sessions[0].stable_id]),
+    ]
+    summary = SimpleNamespace(sessions=sessions, tasks=tasks)
+    # Single cluster doesn't recur but the call must succeed.
+    panel = _repeat_task_radar_panel(summary)
+    assert isinstance(panel, RepeatTaskRadarPanel)
+
+
+def test_repeat_task_radar_estimates_per_occurrence_minutes():
+    """When the detector returns a repeat, the row carries a positive
+    estimated_minutes_per_occurrence so the renderer can surface the
+    'a skill could reclaim ~N min' hint."""
+    sessions = [
+        _session_with_first_turn(
+            "fix the failing auth integration test today carefully",
+            f"s-{i}",
+            other_turns=["follow-up turn"],
+        )
+        for i in range(3)
+    ]
+    tasks = [
+        _make_task(f"auth-test-{i}", [sessions[i].stable_id]) for i in range(3)
+    ]
+    summary = SimpleNamespace(sessions=sessions, tasks=tasks)
+    panel = _repeat_task_radar_panel(summary)
+    assert panel.has_repeats is True
+    assert panel.rows[0].estimated_minutes_per_occurrence > 0.0
+
+
+# --------- _verification_calibration_panel: empty + populated paths -----
+
+
+def test_verification_calibration_no_sessions_all_zero():
+    """Zero sessions => all four bucket counts are zero, has_sessions
+    is False so the renderer can surface a generic empty-state."""
+    panel = _verification_calibration_panel(_FakeSummary())
+    assert isinstance(panel, VerificationCalibrationPanel)
+    assert panel.has_sessions is False
+    assert panel.total_sessions == 0
+
+
+def test_verification_calibration_blanket_accept_default():
+    """A week of sessions with no verification activity surfaces
+    every session in the blanket_accept bucket."""
+    sessions = [
+        Session(
+            provider=Provider.CLAUDE,
+            session_id=f"s-{i}",
+            started_at=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+            turns=[Turn(role=Role.USER, content="write me a function")],
+            source_path="/tmp/x",
+        )
+        for i in range(3)
+    ]
+    summary = SimpleNamespace(sessions=sessions)
+    panel = _verification_calibration_panel(summary)
+    assert panel.blanket_accept_count == 3
+    assert panel.source_check_count == 0
+    assert panel.test_run_count == 0
+    assert panel.spot_check_count == 0
+
+
+def test_verification_calibration_distributes_across_buckets():
+    """Mixed verification ceilings produce a populated histogram."""
+    sessions = [
+        Session(
+            provider=Provider.CLAUDE,
+            session_id="src",
+            started_at=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+            turns=[Turn(role=Role.USER, content="what's the source for this claim?")],
+            source_path="/tmp/x",
+        ),
+        Session(
+            provider=Provider.CLAUDE,
+            session_id="test",
+            started_at=datetime(2026, 5, 25, 13, 0, tzinfo=timezone.utc),
+            turns=[Turn(role=Role.USER, content="let me run the tests")],
+            source_path="/tmp/x",
+        ),
+        Session(
+            provider=Provider.CLAUDE,
+            session_id="spot",
+            started_at=datetime(2026, 5, 25, 14, 0, tzinfo=timezone.utc),
+            turns=[Turn(role=Role.USER, content="that looks right, let me double-check")],
+            source_path="/tmp/x",
+        ),
+        Session(
+            provider=Provider.CLAUDE,
+            session_id="blanket",
+            started_at=datetime(2026, 5, 25, 15, 0, tzinfo=timezone.utc),
+            turns=[Turn(role=Role.USER, content="write me a function")],
+            source_path="/tmp/x",
+        ),
+    ]
+    summary = SimpleNamespace(sessions=sessions)
+    panel = _verification_calibration_panel(summary)
+    assert panel.source_check_count == 1
+    assert panel.test_run_count == 1
+    assert panel.spot_check_count == 1
+    assert panel.blanket_accept_count == 1
+    assert panel.total_sessions == 4
+    assert panel.has_sessions is True
+
+
+def test_verification_calibration_carries_citation():
+    """Each panel carries the Sonar / Stack Overflow / automation-bias
+    anchor string so the renderer can surface it inline."""
+    panel = _verification_calibration_panel(_FakeSummary())
+    assert panel.citation == VERIFICATION_CALIBRATION_CITATION
+    assert "Sonar" in panel.citation
+    assert "Stack Overflow" in panel.citation
+    assert "automation-bias" in panel.citation
+
+
+def test_verification_calibration_count_for_unknown_key_is_zero():
+    """count_for is the renderer-facing lookup and must not raise on
+    an unknown key; an unknown key returns 0 so the renderer can
+    iterate the kinds-in-order tuple without a try/except."""
+    panel = VerificationCalibrationPanel()
+    assert panel.count_for("nonexistent") == 0
+
+
+# ---------------------- shape contracts -----------------------------------
+
+
+def test_repeat_task_radar_panel_is_frozen():
+    """Immutability matches the other panel dataclasses."""
+    import dataclasses
+
+    panel = RepeatTaskRadarPanel()
+    try:
+        panel.rows = ()  # type: ignore[misc]
+    except dataclasses.FrozenInstanceError:
+        return
+    raise AssertionError("RepeatTaskRadarPanel must be frozen")
+
+
+def test_repeat_task_row_is_frozen():
+    """Immutability for the row dataclass too."""
+    import dataclasses
+
+    row = RepeatTaskRow(
+        canonical_first_sentence="x",
+        occurrences=1,
+        estimated_minutes_per_occurrence=1.0,
+    )
+    try:
+        row.occurrences = 99  # type: ignore[misc]
+    except dataclasses.FrozenInstanceError:
+        return
+    raise AssertionError("RepeatTaskRow must be frozen")
+
+
+def test_verification_calibration_panel_is_frozen():
+    """Same immutability contract as the other panel dataclasses."""
+    import dataclasses
+
+    panel = VerificationCalibrationPanel()
+    try:
+        panel.source_check_count = 99  # type: ignore[misc]
+    except dataclasses.FrozenInstanceError:
+        return
+    raise AssertionError("VerificationCalibrationPanel must be frozen")
+
+
+# ---------- build_panel_inputs wires both new US-040 panels --------------
+
+
+def test_build_panel_inputs_includes_us040_panels():
+    """The top-level adapter exposes the US-040 panels alongside the
+    existing US-038 / US-039 panels so a single call produces every
+    expansion-panel input."""
+    pi = build_panel_inputs(_FakeSummary(sessions=[]))
+    assert pi.behavioral_signals is not None
+    assert pi.aug_auto_balance is not None
+    assert pi.cadence is not None
+    assert pi.repeat_task_radar is not None
+    assert pi.verification_calibration is not None

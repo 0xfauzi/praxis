@@ -1528,3 +1528,186 @@ def test_aug_auto_and_cadence_panels_respect_80_column_budget():
         assert visible_width(line) <= MAX_LINE_WIDTH, (
             f"line exceeds {MAX_LINE_WIDTH} cols: {line!r}"
         )
+
+
+# ---------------- US-040: repeat-task radar + verification calibration -------
+
+
+from praxis.reports.digest_terminal import (  # noqa: E402
+    _REPEAT_TASK_EMPTY,
+    _VERIFICATION_CALIBRATION_NO_SESSIONS,
+)
+from praxis.reports.panel_inputs import (  # noqa: E402
+    REPEAT_TASK_SKILL_TAG,
+    RepeatTaskRadarPanel,
+    RepeatTaskRow,
+    VerificationCalibrationPanel,
+)
+
+
+def _repeat_task_populated() -> RepeatTaskRadarPanel:
+    return RepeatTaskRadarPanel(
+        rows=(
+            RepeatTaskRow(
+                canonical_first_sentence=(
+                    "fix the failing auth test"
+                ),
+                occurrences=3,
+                estimated_minutes_per_occurrence=12.0,
+            ),
+            RepeatTaskRow(
+                canonical_first_sentence=(
+                    "regenerate the changelog entry"
+                ),
+                occurrences=4,
+                estimated_minutes_per_occurrence=8.5,
+            ),
+        )
+    )
+
+
+def _verification_populated() -> VerificationCalibrationPanel:
+    return VerificationCalibrationPanel(
+        source_check_count=2,
+        test_run_count=3,
+        spot_check_count=1,
+        blanket_accept_count=4,
+    )
+
+
+def _us040_panel_inputs(
+    *,
+    repeat_task: RepeatTaskRadarPanel | None = None,
+    verification: VerificationCalibrationPanel | None = None,
+) -> PanelInputs:
+    return PanelInputs(
+        repeat_task_radar=repeat_task,
+        verification_calibration=verification,
+    )
+
+
+def test_repeat_task_radar_eyebrow_always_renders():
+    """The section eyebrow renders regardless of data state so the
+    document shape is stable across empty + populated runs."""
+    text_empty = _strip_ansi(render(WeeklyDigest()))
+    text_full = _strip_ansi(
+        render(
+            WeeklyDigest(panel_inputs=_us040_panel_inputs(repeat_task=_repeat_task_populated()))
+        )
+    )
+    assert "REPEAT-TASK RADAR" in text_empty
+    assert "REPEAT-TASK RADAR" in text_full
+
+
+def test_repeat_task_radar_renders_no_repeats_empty_state():
+    """When detect_repeats returned nothing the panel renders the
+    verbatim US-040 empty-state copy (no misleading header above an
+    empty table)."""
+    panel = RepeatTaskRadarPanel()  # no rows
+    digest = WeeklyDigest(panel_inputs=_us040_panel_inputs(repeat_task=panel))
+    text = _strip_ansi(render(digest))
+    assert _REPEAT_TASK_EMPTY in text
+
+
+def test_repeat_task_radar_no_panel_renders_empty_state():
+    """A digest with no panel_inputs falls back to the verbatim
+    empty-state copy rather than an empty body."""
+    text = _strip_ansi(render(WeeklyDigest()))
+    assert _REPEAT_TASK_EMPTY in text
+
+
+def test_repeat_task_radar_renders_each_row():
+    """Each RepeatTask renders its canonical sentence, occurrence
+    count, per-occurrence minutes, and the 'Could become a skill' tag."""
+    digest = WeeklyDigest(
+        panel_inputs=_us040_panel_inputs(repeat_task=_repeat_task_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "fix the failing auth test" in text
+    assert "regenerate the changelog entry" in text
+    assert "3 times" in text
+    assert "4 times" in text
+    assert REPEAT_TASK_SKILL_TAG in text
+
+
+def test_repeat_task_radar_renders_estimated_minutes():
+    """The per-occurrence minutes show up so the reader knows the
+    rough reclaimable time per occurrence."""
+    digest = WeeklyDigest(
+        panel_inputs=_us040_panel_inputs(repeat_task=_repeat_task_populated())
+    )
+    text = _strip_ansi(render(digest))
+    # 12.0 minutes renders as "12 min"; 8.5 renders as "8.5 min".
+    assert "12 min" in text
+    assert "8.5 min" in text
+
+
+def test_repeat_task_radar_renders_citation():
+    """The OpenAI + Anthropic Skills citation renders inline as a
+    small footnote (US-040 AC)."""
+    digest = WeeklyDigest(
+        panel_inputs=_us040_panel_inputs(repeat_task=_repeat_task_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "OpenAI" in text
+    assert "Anthropic Skills" in text
+
+
+def test_verification_calibration_eyebrow_always_renders():
+    """Same stability contract as the other panels."""
+    text_empty = _strip_ansi(render(WeeklyDigest()))
+    text_full = _strip_ansi(
+        render(
+            WeeklyDigest(panel_inputs=_us040_panel_inputs(verification=_verification_populated()))
+        )
+    )
+    assert "VERIFICATION CALIBRATION" in text_empty
+    assert "VERIFICATION CALIBRATION" in text_full
+
+
+def test_verification_calibration_renders_no_sessions_empty_state():
+    """When the week has no sessions to categorize the panel surfaces
+    the explicit empty-state copy rather than four zeros."""
+    panel = VerificationCalibrationPanel()  # all zeros, has_sessions=False
+    digest = WeeklyDigest(panel_inputs=_us040_panel_inputs(verification=panel))
+    text = _strip_ansi(render(digest))
+    assert _VERIFICATION_CALIBRATION_NO_SESSIONS in text
+
+
+def test_verification_calibration_renders_each_bucket_count():
+    """All four buckets render in display order."""
+    digest = WeeklyDigest(
+        panel_inputs=_us040_panel_inputs(verification=_verification_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "Source-check: 2 sessions" in text
+    assert "Test-run: 3 sessions" in text
+    assert "Spot-check: 1 session" in text
+    assert "Blanket-accept: 4 sessions" in text
+
+
+def test_verification_calibration_renders_citation():
+    """The Sonar / Stack Overflow 2025 / automation-bias citation
+    renders inline (US-040 AC)."""
+    digest = WeeklyDigest(
+        panel_inputs=_us040_panel_inputs(verification=_verification_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "Sonar" in text
+    assert "Stack Overflow" in text
+    assert "automation-bias" in text
+
+
+def test_us040_panels_respect_80_column_budget():
+    """US-066: every line in the rendered digest must fit in 79
+    columns. The two new panels must respect the same budget."""
+    digest = WeeklyDigest(
+        panel_inputs=_us040_panel_inputs(
+            repeat_task=_repeat_task_populated(),
+            verification=_verification_populated(),
+        )
+    )
+    for line in render(digest).split("\n"):
+        assert visible_width(line) <= MAX_LINE_WIDTH, (
+            f"line exceeds {MAX_LINE_WIDTH} cols: {line!r}"
+        )

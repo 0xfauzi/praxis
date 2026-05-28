@@ -14,8 +14,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from praxis.behavior import TrajectoryLabel
+from praxis.behavior.repeat_task import (
+    Cluster,
+    detect_repeats,
+)
 from praxis.behavior.signals import (
     SIGNAL_KINDS_IN_PANEL_ORDER,
+    categorize_session_verification,
     detect_signal_kinds,
 )
 from praxis.reports import digest_html as dh
@@ -24,6 +29,7 @@ from praxis.reports.panel_inputs import (
     CADENCE_WINDOW_DAYS,
     EXCERPT_CHAR_LIMIT,
     MAX_EXCERPTS_PER_SIGNAL,
+    REPEAT_TASK_WINDOW_DAYS,
     SIGNAL_CITATIONS,
     SIGNAL_LABELS,
     AugAutoBalancePanel,
@@ -31,6 +37,9 @@ from praxis.reports.panel_inputs import (
     BehavioralPatternsPanel,
     CadencePanel,
     PanelInputs,
+    RepeatTaskRadarPanel,
+    RepeatTaskRow,
+    VerificationCalibrationPanel,
     clip_excerpt,
 )
 from praxis.scoring.cost_ledger import (
@@ -762,19 +771,175 @@ def _cadence_panel(summary) -> CadencePanel:
     )
 
 
+# US-040 repeat-task radar:
+# When a session has no turn timestamps we estimate its duration from
+# the user-turn count. The factor matches the rough cadence the spec
+# uses for the "skills could reclaim ~N min/week" callout (each user
+# turn ~ 2 minutes of focused work). The value is a renderer-side
+# heuristic; the detector treats whatever the caller hands it as wall
+# clock truth, so calibrating the heuristic here keeps the detector pure.
+_MINUTES_PER_USER_TURN_FALLBACK = 2.0
+
+
+def _session_duration_minutes(session) -> float:
+    """Estimate one session's wall-clock duration in minutes.
+
+    Prefers the timestamp delta between the session's first and last
+    user turns (when both carry ``timestamp``). Falls back to
+    ``len(user_turns) * _MINUTES_PER_USER_TURN_FALLBACK`` otherwise, so
+    a session with no turn-level timestamps still gets a positive
+    estimate and the repeat-task radar still surfaces a meaningful
+    "reclaimable minutes" number.
+
+    Returns 0.0 for a session with no user turns - the caller (the
+    radar adapter) drops such sessions so they cannot inflate the
+    median estimate.
+    """
+    user_turns = getattr(session, "user_turns", None) or []
+    if not user_turns:
+        return 0.0
+    timestamps = [getattr(t, "timestamp", None) for t in user_turns]
+    has_timestamps = [ts for ts in timestamps if ts is not None]
+    if len(has_timestamps) >= 2:
+        try:
+            span_seconds = (
+                max(has_timestamps) - min(has_timestamps)
+            ).total_seconds()
+        except (AttributeError, TypeError):
+            span_seconds = 0.0
+        if span_seconds > 0:
+            return span_seconds / 60.0
+    return len(user_turns) * _MINUTES_PER_USER_TURN_FALLBACK
+
+
+def _first_user_turn_text(session) -> str:
+    """Return the content of the session's first user turn, or empty."""
+    user_turns = getattr(session, "user_turns", None) or []
+    if not user_turns:
+        return ""
+    content = getattr(user_turns[0], "content", "")
+    return content or ""
+
+
+def _repeat_task_radar_panel(summary) -> RepeatTaskRadarPanel:
+    """Aggregate recurring task clusters across the week (US-040).
+
+    Walks ``summary.tasks`` and builds a ``Cluster`` per task, seeding
+    each cluster's first sentence from one of its session's first user
+    turn and its session durations from the per-session estimate
+    above. The clusters feed ``detect_repeats`` which returns
+    ``RepeatTask`` rows for any cluster recurring 3+ times within the
+    window. When the detector returns an empty list the panel surfaces
+    the explicit "No repeat tasks detected this week." copy via
+    ``has_repeats`` rather than rendering an empty table.
+
+    Tasks with no associated sessions are skipped: a cluster with zero
+    sessions cannot anchor a recurrence and would either crash the
+    detector or produce a meaningless RepeatTask. This is structurally
+    different from "task list was empty" - the latter still produces
+    an empty RepeatTaskRadarPanel.
+    """
+    tasks = getattr(summary, "tasks", None) or []
+    sessions = getattr(summary, "sessions", None) or []
+    sessions_by_id = {s.stable_id: s for s in sessions}
+    clusters: list[Cluster] = []
+    for task in tasks:
+        task_sessions = [
+            sessions_by_id[sid]
+            for sid in getattr(task, "session_ids", None) or []
+            if sid in sessions_by_id
+        ]
+        if not task_sessions:
+            continue
+        # Seed the cluster's first sentence from the earliest session's
+        # first user turn so the canonical sentence is reproducible
+        # across runs (sorting by started_at; falls back to the first
+        # iteration order when timestamps tie).
+        try:
+            seed_session = min(
+                task_sessions,
+                key=lambda s: getattr(s, "started_at", None) or 0,
+            )
+        except TypeError:
+            seed_session = task_sessions[0]
+        first_sentence = _first_user_turn_text(seed_session)
+        if not first_sentence:
+            first_sentence = getattr(task, "label", "") or ""
+        durations = [
+            _session_duration_minutes(s) for s in task_sessions
+        ]
+        clusters.append(
+            Cluster(
+                first_sentence=first_sentence,
+                session_ids=[s.stable_id for s in task_sessions],
+                session_durations_minutes=durations,
+            )
+        )
+    if not clusters:
+        return RepeatTaskRadarPanel()
+    repeats = detect_repeats(clusters, REPEAT_TASK_WINDOW_DAYS)
+    rows = tuple(
+        RepeatTaskRow(
+            canonical_first_sentence=repeat.canonical_first_sentence,
+            occurrences=repeat.occurrences,
+            estimated_minutes_per_occurrence=repeat.estimated_minutes_per_occurrence,
+        )
+        for repeat in repeats
+    )
+    return RepeatTaskRadarPanel(rows=rows)
+
+
+def _verification_calibration_panel(
+    summary,
+) -> VerificationCalibrationPanel:
+    """Categorize the week's sessions by verification rigor (US-040).
+
+    Each session is bucketed by its highest-rigor verification activity
+    via ``categorize_session_verification``: source_check (highest) >
+    test_run > spot_check > blanket_accept (default when no signal
+    fires). The panel surfaces the four counts so the renderer can show
+    a histogram. When the week has zero sessions all four counts are
+    zero and ``has_sessions`` is False; the renderer falls through to
+    a generic empty state in that case.
+    """
+    counts = {
+        "source_check": 0,
+        "test_run": 0,
+        "spot_check": 0,
+        "blanket_accept": 0,
+    }
+    for s in getattr(summary, "sessions", None) or []:
+        kind = categorize_session_verification(s)
+        if kind in counts:
+            counts[kind] += 1
+        else:
+            # Defensive: unknown kind defaults to blanket_accept so the
+            # panel never silently drops a session.
+            counts["blanket_accept"] += 1
+    return VerificationCalibrationPanel(
+        source_check_count=counts["source_check"],
+        test_run_count=counts["test_run"],
+        spot_check_count=counts["spot_check"],
+        blanket_accept_count=counts["blanket_accept"],
+    )
+
+
 def build_panel_inputs(summary) -> PanelInputs:
     """Build the v0.3 expansion-panel inputs from a WeeklyRunSummary.
 
     Each panel is independently optional; this helper populates the
     fields it can build from the in-flight summary. US-038 wires the
     behavioral-patterns panel; US-039 wires the augmentation/automation
-    balance and the cadence panel; subsequent stories extend the
-    returned ``PanelInputs`` with additional panels.
+    balance and the cadence panel; US-040 wires the repeat-task radar
+    and the verification-calibration panel; subsequent stories extend
+    the returned ``PanelInputs`` with additional panels.
     """
     return PanelInputs(
         behavioral_signals=_behavioral_patterns_panel(summary),
         aug_auto_balance=_aug_auto_balance_panel(summary),
         cadence=_cadence_panel(summary),
+        repeat_task_radar=_repeat_task_radar_panel(summary),
+        verification_calibration=_verification_calibration_panel(summary),
     )
 
 
