@@ -801,6 +801,20 @@ class ProfileStore:
                 "SELECT COUNT(*) AS c FROM weekly_digests"
             ).fetchone()["c"]
 
+    def latest_weekly_digest_week(self) -> str | None:
+        """Return the most recent ISO week with a weekly_digests row, or None.
+
+        ISO week strings are zero-padded (YYYY-Www), so lexical order matches
+        chronological order; `ORDER BY week_iso DESC LIMIT 1` is correct
+        across year boundaries.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT week_iso FROM weekly_digests "
+                "ORDER BY week_iso DESC LIMIT 1"
+            ).fetchone()
+        return row["week_iso"] if row else None
+
     def weekly_cost_baseline(
         self, before_week_iso: str, lookback_days: int = 90
     ) -> float | None:

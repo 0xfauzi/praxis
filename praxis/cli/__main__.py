@@ -779,6 +779,40 @@ def cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+def cmd_commit(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Print the commit-prompt for this week (US-020).
+
+    Resolves the suggestion list from the latest persisted state:
+      - The current ISO week's headline_moment.suggested_alternative
+        (if a digest has run this week and it has a headline moment).
+      - The first canned drill from each of the two weakest dimensions
+        (sourced from praxis.scoring.coach.FALLBACK_DRILLS via the
+        latest weekly_digests snapshot).
+      - 'Keep last week's commitment', when a still-open prior
+        commitment exists (latest follow-up with ``outcome='pending'``).
+      - 'Write your own', always.
+
+    Free-text capture, persistence, and replace flows land in US-021,
+    US-022, and US-023 respectively. This story only renders the prompt
+    so the next iterations have a stable seam to attach to.
+
+    Exit codes:
+      0  prompt rendered.
+    """
+    from praxis.cli.commit import (
+        build_commit_suggestions,
+        format_commit_prompt,
+        load_commit_context,
+    )
+
+    week_iso = current_iso_week()
+    store = ProfileStore()
+    ctx = load_commit_context(store, week_iso=week_iso)
+    suggestions = build_commit_suggestions(ctx)
+    print(format_commit_prompt(suggestions), end="")
+    return 0
+
+
 def cmd_follow_up(args: argparse.Namespace) -> int:  # noqa: ARG001
     """Print the most recent weekly commitment status.
 
@@ -1292,6 +1326,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show the most recent weekly commitment and its outcome.",
     )
     fup.set_defaults(func=cmd_follow_up)
+
+    cmt = sub.add_parser(
+        "commit",
+        help="Pick a coaching commitment for this ISO week.",
+        description=(
+            "Print the numbered commitment-suggestion prompt for the "
+            "current ISO week. Sources: this week's headline moment, "
+            "drills for the two weakest dimensions, an optional "
+            "'Keep last week' option when a still-open commitment "
+            "exists, and the 'Write your own' fallback."
+        ),
+    )
+    cmt.set_defaults(func=cmd_commit)
 
     mod = sub.add_parser("models",
                          help="List model cards or show one in detail.")
