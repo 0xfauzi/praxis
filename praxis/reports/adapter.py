@@ -683,25 +683,48 @@ _AUG_AUTO_LABELS = frozenset({"augmentation", "automation", "mixed"})
 def _aug_auto_balance_panel(summary) -> AugAutoBalancePanel:
     """Aggregate per-session aug_auto labels across the week (US-039).
 
-    Reads ``aug_auto_classification`` from each session (set by the
-    augmentation-automation-classifier story's pass-1 wiring). Sessions
-    that carry no label (e.g. because the user had no API key, or the
-    classifier hit ``AugAutoParseError`` and the orchestrator wrote NULL)
-    fall into ``unclassified_count``. When the week has at least one
-    session but no session has a label, ``classifier_unavailable`` is
-    set so the renderer surfaces the explicit "Classifier unavailable"
-    message rather than misleading 0/0/0 percentages (US-039 AC).
+    Reads ``aug_auto_classification`` from the session_scores table for
+    each session in ``summary.sessions``. The classifier writes labels
+    to the DB (via ``store.set_session_aug_auto``); ``Session`` objects
+    themselves do NOT carry the label, so looking it up through
+    ``ProfileStore.get_session_aug_auto`` is the only correct source.
+
+    Sessions that carry no label (e.g. because the user had no API key,
+    or the classifier hit ``AugAutoParseError`` and the orchestrator
+    left the columns NULL) fall into ``unclassified_count``. When the
+    week has at least one session but no session has a label,
+    ``classifier_unavailable`` is set so the renderer surfaces the
+    explicit "Classifier unavailable" message rather than misleading
+    0/0/0 percentages (US-039 AC).
 
     When the week has zero sessions, ``classifier_unavailable`` is
     False - that case is structurally different from "no API key" and
     the renderer surfaces a generic zero-sessions empty state instead.
     """
+    from praxis.storage.profile_store import ProfileStore
+
     counts: dict[str, int] = {label: 0 for label in _AUG_AUTO_LABELS}
     unclassified = 0
     session_count = 0
+    store: ProfileStore | None = None
     for s in summary.sessions or []:
         session_count += 1
+        # Prefer an inline `aug_auto_classification` attribute when the
+        # caller injects one (test stubs do this). In production the
+        # classifier writes to session_scores, not the Session object,
+        # so we fall back to the store lookup keyed by stable_id.
+        # Degrades gracefully on any failure (missing attribute,
+        # store-open failure, missing row) -> treated as unclassified.
         label = getattr(s, "aug_auto_classification", None)
+        if label is None:
+            try:
+                if store is None:
+                    store = ProfileStore()
+                stable_id = getattr(s, "stable_id", None)
+                if stable_id:
+                    label, _confidence = store.get_session_aug_auto(stable_id)
+            except Exception:  # noqa: BLE001
+                label = None
         if isinstance(label, str) and label in _AUG_AUTO_LABELS:
             counts[label] += 1
         else:
