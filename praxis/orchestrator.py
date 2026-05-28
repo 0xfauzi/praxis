@@ -1337,7 +1337,11 @@ def run_weekly(
     user_week_total = 0.0
     have_priced_session = False
     for s in sessions:
-        chars = sum(len(t.content) for t in s.user_authored_turns)
+        # Cost = billable bytes the provider charged for, so we sum
+        # every user-role turn including tool-injected preambles
+        # (Codex AGENTS.md, Claude Code system-reminders); switching
+        # to user_authored_turns here would under-report actual spend.
+        chars = sum(len(t.content) for t in s.user_turns)
         c = estimate_session_cost_usd(s.model_hint, chars)
         if c is not None:
             user_week_total += c

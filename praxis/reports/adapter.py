@@ -87,7 +87,14 @@ def _cost_inputs(summary):
     biggest_inputs: list[BiggestLineInputSession] = []
     tier_inputs: list[TierFitInputSession] = []
     for s in summary.sessions or []:
-        total_chars = sum(len(t.content) for t in s.user_authored_turns)
+        # Cost estimation needs every billable byte the provider charged
+        # for, including tool-injected preambles (Codex AGENTS.md, Claude
+        # Code system-reminder blocks); using user_authored_turns would
+        # undercount spend on Codex sessions whose preamble drives a real
+        # fraction of input tokens. The tier-fit threshold separately
+        # divides by user_authored_turn count -- that one is a behavioural
+        # signal (avg prompt size) so it excludes preambles.
+        total_chars = sum(len(t.content) for t in s.user_turns)
         cost = estimate_session_cost_usd(s.model_hint, total_chars)
         biggest_inputs.append(BiggestLineInputSession(
             started_at=s.started_at,
@@ -98,8 +105,11 @@ def _cost_inputs(summary):
         tier_savings = estimate_tier_fit_savings_for_session(
             s.model_hint, total_chars
         )
+        authored_chars = sum(
+            len(t.content) for t in s.user_authored_turns
+        )
         n_user_turns = len(s.user_authored_turns)
-        avg_chars = total_chars / n_user_turns if n_user_turns else 0.0
+        avg_chars = authored_chars / n_user_turns if n_user_turns else 0.0
         tier_inputs.append(TierFitInputSession(
             started_at=s.started_at,
             user_turn_count=n_user_turns,
@@ -275,7 +285,12 @@ def _task_rows_terminal(summary) -> list[dt.TaskRowView] | None:
     # 'WHERE THE WEEK WENT' no longer renders $0.00 next to every row.
     cost_by_sid: dict[str, float] = {}
     for s in summary.sessions or []:
-        total_chars = sum(len(t.content) for t in s.user_authored_turns)
+        # Cost estimation needs every billable byte the provider charged
+        # for, including tool-injected preambles (Codex AGENTS.md, Claude
+        # Code system-reminder blocks). Using user_authored_turns would
+        # silently undercount spend on Codex sessions whose AGENTS.md
+        # preamble drives a real fraction of input tokens.
+        total_chars = sum(len(t.content) for t in s.user_turns)
         cost = estimate_session_cost_usd(s.model_hint, total_chars)
         if cost is not None:
             cost_by_sid[s.stable_id] = cost
@@ -320,7 +335,12 @@ def _task_rows_html(summary) -> tuple[dh.TaskRow, ...]:
         return ()
     cost_by_sid: dict[str, float] = {}
     for s in summary.sessions or []:
-        total_chars = sum(len(t.content) for t in s.user_authored_turns)
+        # Cost estimation needs every billable byte the provider charged
+        # for, including tool-injected preambles (Codex AGENTS.md, Claude
+        # Code system-reminder blocks). Using user_authored_turns would
+        # silently undercount spend on Codex sessions whose AGENTS.md
+        # preamble drives a real fraction of input tokens.
+        total_chars = sum(len(t.content) for t in s.user_turns)
         cost = estimate_session_cost_usd(s.model_hint, total_chars)
         if cost is not None:
             cost_by_sid[s.stable_id] = cost
@@ -605,7 +625,9 @@ def _model_split_html(summary) -> tuple:
         return tuple()
     spend_by_model: dict[str, float] = {}
     for s in summary.sessions:
-        chars = sum(len(t.content) for t in s.user_authored_turns)
+        # Cost panel needs billable bytes (incl. tool-injected preambles);
+        # see the comment in _cost_inputs for the rationale.
+        chars = sum(len(t.content) for t in s.user_turns)
         c = estimate_session_cost_usd(s.model_hint, chars)
         if c is None or c <= 0:
             continue
@@ -788,7 +810,7 @@ def _cadence_panel(summary) -> CadencePanel:
     weekdays: set[int] = set()
     substantive = 0
     for s in summary.sessions or []:
-        user_turns = getattr(s, "user_turns", None) or []
+        user_turns = getattr(s, "user_authored_turns", None) or []
         if len(user_turns) < 2:
             continue
         substantive += 1
@@ -837,7 +859,7 @@ def _session_duration_minutes(session) -> float:
     radar adapter) drops such sessions so they cannot inflate the
     median estimate.
     """
-    user_turns = getattr(session, "user_turns", None) or []
+    user_turns = getattr(session, "user_authored_turns", None) or []
     if not user_turns:
         return 0.0
     timestamps = [getattr(t, "timestamp", None) for t in user_turns]
@@ -855,8 +877,8 @@ def _session_duration_minutes(session) -> float:
 
 
 def _first_user_turn_text(session) -> str:
-    """Return the content of the session's first user turn, or empty."""
-    user_turns = getattr(session, "user_turns", None) or []
+    """Return the content of the session's first user-authored turn, or empty."""
+    user_turns = getattr(session, "user_authored_turns", None) or []
     if not user_turns:
         return ""
     content = getattr(user_turns[0], "content", "")
