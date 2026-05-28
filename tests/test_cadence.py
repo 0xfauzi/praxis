@@ -1,19 +1,25 @@
-"""Tests for praxis.behavior.cadence (US-012).
+"""Tests for praxis.behavior.cadence (US-012, US-013).
 
 Covers:
   - The pure substantive-session predicate plus its threshold constants.
   - compute_weekday_streak over an empty/sparse/dense profile_store.
+  - high_adopter_position thresholds, boundaries, and invariant checks.
 """
 from __future__ import annotations
 
 import json
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
+
 from praxis.behavior.cadence import (
     DEFAULT_STREAK_WINDOW_DAYS,
+    HIGH_STREAK_RATIO,
+    LOW_STREAK_RATIO,
     MIN_ELAPSED_SECONDS,
     MIN_USER_TURNS,
     compute_weekday_streak,
+    high_adopter_position,
     is_substantive_session,
 )
 from praxis.scoring.aggregate import SessionScore
@@ -309,3 +315,103 @@ def test_compute_weekday_streak_inclusive_of_ending_on_date(tmp_home):
     today = datetime.combine(end, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=15)
     _seed(store, when=today, user_turns=3, elapsed_seconds=200, suffix="today")
     assert compute_weekday_streak(store, ending_on_date=end) == 1
+
+
+# ----- high_adopter_position: thresholds + invariants (US-013) --------------
+
+
+def test_high_adopter_position_ratio_constants_match_paper_quartiles():
+    """AC: thresholds are 0.25 / 0.75, matching arXiv 2509.19708 quartile cohorts."""
+    assert LOW_STREAK_RATIO == 0.25
+    assert HIGH_STREAK_RATIO == 0.75
+
+
+# Boundary cases for window_days=20 chosen so the thresholds land on exact integers:
+#   LOW_STREAK_RATIO * 20 = 5   (streak == 5 is moderate, 4 is low)
+#   HIGH_STREAK_RATIO * 20 = 15 (streak == 15 is high, 14 is moderate)
+# Boundary cases for window_days=4 chosen so the thresholds land on exact integers:
+#   LOW_STREAK_RATIO * 4 = 1    (streak == 1 is moderate, 0 is low)
+#   HIGH_STREAK_RATIO * 4 = 3   (streak == 3 is high, 2 is moderate)
+# Additional cases for window_days=21 (the production default) and 7 confirm the
+# ratio-based tiering generalises across window sizes used in coaching.
+@pytest.mark.parametrize(
+    "streak, window_days, expected",
+    [
+        # window=20: exact-integer boundaries.
+        (0, 20, "low"),
+        (4, 20, "low"),                # just below LOW (0.20)
+        (5, 20, "moderate"),           # exactly at LOW (0.25)
+        (14, 20, "moderate"),          # just below HIGH (0.70)
+        (15, 20, "high"),              # exactly at HIGH (0.75)
+        (20, 20, "high"),              # full window
+        # window=4: smallest window where boundaries are exact integers.
+        (0, 4, "low"),
+        (1, 4, "moderate"),            # exactly at LOW (0.25)
+        (2, 4, "moderate"),
+        (3, 4, "high"),                # exactly at HIGH (0.75)
+        (4, 4, "high"),                # full window
+        # window=21 (DEFAULT_STREAK_WINDOW_DAYS): non-integer boundaries.
+        (0, 21, "low"),
+        (5, 21, "low"),                # 5/21 = 0.238 < 0.25
+        (6, 21, "moderate"),           # 6/21 = 0.286 >= 0.25
+        (15, 21, "moderate"),          # 15/21 = 0.714 < 0.75
+        (16, 21, "high"),              # 16/21 = 0.762 >= 0.75
+        (21, 21, "high"),              # full window
+        # window=7 (one-week look-back).
+        (0, 7, "low"),
+        (1, 7, "low"),                 # 1/7 = 0.143 < 0.25
+        (2, 7, "moderate"),            # 2/7 = 0.286 >= 0.25
+        (5, 7, "moderate"),            # 5/7 = 0.714 < 0.75
+        (6, 7, "high"),                # 6/7 = 0.857 >= 0.75
+        (7, 7, "high"),                # full window
+    ],
+)
+def test_high_adopter_position_threshold_boundaries(streak, window_days, expected):
+    """AC: parameterised tests at every threshold boundary."""
+    assert high_adopter_position(streak, window_days) == expected
+
+
+def test_high_adopter_position_window_days_zero_raises_before_work():
+    """AC: window_days <= 0 raises ValueError before any further work."""
+    with pytest.raises(ValueError, match="window_days must be positive"):
+        high_adopter_position(0, 0)
+
+
+def test_high_adopter_position_window_days_negative_raises():
+    """AC: any non-positive window_days is rejected."""
+    with pytest.raises(ValueError, match="window_days must be positive"):
+        high_adopter_position(0, -7)
+
+
+def test_high_adopter_position_streak_exceeds_window_raises():
+    """AC: streak > window_days is an invariant violation."""
+    with pytest.raises(ValueError, match="streak .* cannot exceed window_days"):
+        high_adopter_position(22, 21)
+
+
+def test_high_adopter_position_streak_equal_to_window_does_not_raise():
+    """Invariant guard is strict-greater-than; streak == window_days is the full-week 'high' case."""
+    assert high_adopter_position(21, 21) == "high"
+
+
+def test_high_adopter_position_window_check_runs_before_streak_check():
+    """A non-positive window_days raises even when streak > window_days; the
+    window invariant is checked first so callers see a useful error."""
+    with pytest.raises(ValueError, match="window_days must be positive"):
+        high_adopter_position(5, 0)
+
+
+def test_high_adopter_position_is_deterministic():
+    """AC: deterministic output for fixed inputs (no hidden state, no clock)."""
+    # Calling the function twice with the same arguments returns the same value.
+    for streak, window_days in [(3, 21), (10, 21), (18, 21), (0, 7), (4, 4)]:
+        first = high_adopter_position(streak, window_days)
+        second = high_adopter_position(streak, window_days)
+        assert first == second
+
+
+def test_high_adopter_position_return_value_is_in_literal_set():
+    """AC: returns an enum-like literal in {'low','moderate','high'}."""
+    valid = {"low", "moderate", "high"}
+    for streak in range(0, 22):
+        assert high_adopter_position(streak, 21) in valid

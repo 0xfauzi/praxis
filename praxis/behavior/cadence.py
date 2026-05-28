@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Literal, Mapping
 
 if TYPE_CHECKING:
     from praxis.storage.profile_store import ProfileStore
@@ -36,6 +36,23 @@ MIN_ELAPSED_SECONDS: int = 60
 
 # Default rolling window for the weekday streak.
 DEFAULT_STREAK_WINDOW_DAYS: int = 21
+
+# High-adopter spectrum thresholds, expressed as ``streak / window_days``.
+#
+# Derived from Kumar et al. (2025), "Intuition to Evidence: Measuring AI's
+# True Impact on Developer Productivity" (arXiv 2509.19708), an empirical
+# study of 300 engineers using the DeputyDev enterprise coding assistant
+# over twelve months. The paper defines its "High Adoption Cohort" as
+# the top quartile of users (above the 75th percentile of code-generation
+# requests per month) and its "Low Adoption Cohort" as the bottom quartile
+# (below the 25th percentile). We translate those quartile cutoffs into a
+# streak-to-window ratio so the same trichotomy generalises to any rolling
+# window size used by :func:`compute_weekday_streak`.
+LOW_STREAK_RATIO: float = 0.25
+HIGH_STREAK_RATIO: float = 0.75
+
+# Literal alias for the three possible high-adopter positions.
+HighAdopterPosition = Literal["low", "moderate", "high"]
 
 
 def is_substantive_session(row: Mapping[str, Any] | None) -> bool:
@@ -111,6 +128,58 @@ def compute_weekday_streak(
         substantive_days.add(d)
 
     return len(substantive_days)
+
+
+def high_adopter_position(streak: int, window_days: int) -> HighAdopterPosition:
+    """Classify the user's adoption tier from a weekday streak and its window.
+
+    The streak / window_days ratio is bucketed against quartile-derived
+    cutoffs:
+
+    - ratio < :data:`LOW_STREAK_RATIO` (0.25) -> ``"low"``
+    - :data:`LOW_STREAK_RATIO` <= ratio < :data:`HIGH_STREAK_RATIO` (0.75) -> ``"moderate"``
+    - ratio >= :data:`HIGH_STREAK_RATIO` -> ``"high"``
+
+    Thresholds are sourced from Kumar et al. (2025), "Intuition to
+    Evidence: Measuring AI's True Impact on Developer Productivity"
+    (arXiv 2509.19708), which separates a "High Adoption Cohort" at the
+    top quartile of users (>75th percentile of code-generation requests)
+    from a "Low Adoption Cohort" at the bottom quartile (<25th
+    percentile). Those cohort cutoffs are re-expressed here as a
+    streak/window ratio so the trichotomy scales with any window size.
+
+    Args:
+        streak: The number of distinct weekdays with a substantive
+            session inside the window, as returned by
+            :func:`compute_weekday_streak`. Must be ``<= window_days``.
+        window_days: The rolling window size in days. Must be ``> 0``.
+
+    Returns:
+        One of ``"low"``, ``"moderate"``, or ``"high"``.
+
+    Raises:
+        ValueError: If ``window_days <= 0`` (invariant: a non-positive
+            window has no quartile semantics). Raised before any further
+            work so the function is safe to call before any DB read.
+        ValueError: If ``streak > window_days`` (invariant: a streak
+            cannot count more distinct days than the window itself
+            contains).
+    """
+    if window_days <= 0:
+        raise ValueError(
+            f"window_days must be positive; got {window_days}"
+        )
+    if streak > window_days:
+        raise ValueError(
+            f"streak ({streak}) cannot exceed window_days ({window_days})"
+        )
+
+    ratio = streak / window_days
+    if ratio < LOW_STREAK_RATIO:
+        return "low"
+    if ratio < HIGH_STREAK_RATIO:
+        return "moderate"
+    return "high"
 
 
 def _adapt_score_row(score_row: Mapping[str, Any]) -> dict[str, Any]:
