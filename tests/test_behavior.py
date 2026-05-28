@@ -62,6 +62,35 @@ def test_extract_engaged_session_has_positive_engagement():
     assert sig.is_pure_delegator is False
 
 
+def test_extract_skips_tool_injected_preamble_turns():
+    """Regression for issue #4.
+
+    A turn whose entire content is a tool-injected preamble (Codex
+    AGENTS.md, Claude Code ``<system-reminder>``) was being counted
+    against the user by the regex-based extractors. With the scanner
+    tagging those turns ``tool_injected=True`` and ``extract`` iterating
+    ``session.user_authored_turns``, the preamble must not contribute to
+    any signal count.
+
+    The preamble below contains the strings ``explain`` and ``why``
+    which would otherwise match _EXPLANATION_REQUESTS and _WHY_QUESTIONS.
+    """
+    preamble = (
+        "# AGENTS.md\n\n"
+        "Please explain decisions and follow why-first communication.\n"
+        "<INSTRUCTIONS>be precise</INSTRUCTIONS>"
+    )
+    turns = [
+        Turn(role=Role.USER, content=preamble, tool_injected=True),
+        Turn(role=Role.USER, content="write me a function"),
+    ]
+    sig = extract(_make_session(turns, datetime.now(timezone.utc)))
+    # Only the second turn should count.
+    assert sig.user_turn_count == 1
+    assert sig.why_question_count == 0
+    assert sig.explanation_request_count == 0
+
+
 def test_extract_delegating_session_flags_pure_delegator():
     turns = [
         Turn(role=Role.USER, content="write me a function"),

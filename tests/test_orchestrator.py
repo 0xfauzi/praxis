@@ -1190,3 +1190,66 @@ def test_run_weekly_max_new_none_is_unbounded(tmp_home, monkeypatch):
 
     summary = run_weekly(max_new=None)
     assert len(summary.judge_results) == 15
+
+
+# --- Issue #4 cost-vs-usage split: preamble chars are still billed ------
+
+
+def test_user_week_total_includes_tool_injected_preamble_chars(
+    tmp_home, monkeypatch
+):
+    """Cost reporting (spec section 10.1) is "the user's spend" -- the
+    actual billed amount. Tool-injected preambles (Codex AGENTS.md,
+    Claude Code system-reminders) are sent to the LLM and billed for,
+    so they MUST contribute to ``cost_total_usd``. This regression
+    pins down that narrowing the per-session char sum to
+    ``user_authored_turns`` (issue #4's fix) was reverted for the cost
+    paths in run_weekly / adapter.
+    """
+    from praxis.models import Provider, Role, Session, Turn
+
+    preamble = "# AGENTS.md\n\n" + ("instructions " * 200)
+    real_prompt = "fix this bug"
+    when = datetime.now(timezone.utc) - timedelta(hours=2)
+    session = Session(
+        provider=Provider.CODEX,
+        session_id="cost-preamble-test",
+        started_at=when,
+        turns=[
+            Turn(role=Role.USER, content=preamble, tool_injected=True),
+            Turn(role=Role.USER, content=real_prompt),
+            Turn(role=Role.ASSISTANT, content="ok"),
+        ],
+        source_path="/tmp/cost.jsonl",
+        model_hint="gpt-5",
+    )
+
+    monkeypatch.setattr(orch, "_step_scan", lambda _s: [session])
+    monkeypatch.setattr(orch, "_step_cluster", lambda _s: [])
+    monkeypatch.setattr(orch, "_step_pass1",
+                        lambda *a, **k: Pass1Output(results={}, low_confidence_session_ids=[]))
+    monkeypatch.setattr(orch, "_step_pass2", lambda *a, **k: {})
+    monkeypatch.setattr(orch, "_step_validate_moments", lambda *a, **k: [])
+    monkeypatch.setattr(orch, "_step_select_moments", lambda *a, **k: None)
+    monkeypatch.setattr(orch, "_step_follow_up", lambda *a, **k: None)
+    monkeypatch.setattr(orch, "_step_render", lambda *a, **k: ("", ""))
+
+    # Reference cost: estimator over BILLABLE chars (all user-role turns).
+    from praxis.scoring.cost_ledger import estimate_session_cost_usd
+    billable_chars = len(preamble) + len(real_prompt)
+    expected = estimate_session_cost_usd("gpt-5", billable_chars)
+    # If the cost path narrowed back to authored-only, we'd get the much
+    # smaller real_prompt-only estimate; assert we did NOT.
+    authored_only = estimate_session_cost_usd("gpt-5", len(real_prompt))
+    # The estimator may return None for unknown models; guard the test
+    # against that by skipping when no cost can be priced.
+    if expected is None:
+        pytest.skip("gpt-5 model card has no pricing in this env")
+
+    summary = run_weekly()
+    assert summary.cost_total_usd == pytest.approx(expected)
+    if authored_only is not None and authored_only > 0:
+        assert summary.cost_total_usd > authored_only, (
+            "cost_total_usd narrowed to authored-only chars; preamble bytes"
+            " sent to the LLM must still count toward billed spend."
+        )

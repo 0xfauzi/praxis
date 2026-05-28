@@ -24,6 +24,7 @@ from pathlib import Path
 
 from praxis.models import Provider, Role, Session, Turn
 from praxis.scanners.base import BaseScanner
+from praxis.scanners.preamble import is_tool_injected_content
 
 
 def _vscode_user_paths() -> list[Path]:
@@ -94,7 +95,13 @@ class CopilotScanner(BaseScanner):
                     continue
                 user_msg = self._extract_message(req.get("message"))
                 if user_msg:
-                    turns.append(Turn(role=Role.USER, content=user_msg))
+                    turns.append(
+                        Turn(
+                            role=Role.USER,
+                            content=user_msg,
+                            tool_injected=is_tool_injected_content(user_msg),
+                        )
+                    )
                 response = req.get("response")
                 resp_text = self._extract_response(response)
                 if resp_text:
@@ -157,7 +164,15 @@ class CopilotScanner(BaseScanner):
             role = blob.get("role")
             content = blob.get("content") or blob.get("text") or blob.get("value")
             if role in {"user", "assistant"} and isinstance(content, str) and content.strip():
-                out.append(Turn(role=Role(role), content=content))
+                out.append(
+                    Turn(
+                        role=Role(role),
+                        content=content,
+                        tool_injected=(
+                            role == "user" and is_tool_injected_content(content)
+                        ),
+                    )
+                )
             for v in blob.values():
                 out.extend(self._mine_turns(v))
         elif isinstance(blob, list):

@@ -38,6 +38,15 @@ class Turn:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     # Provider-specific extras (model name, token counts, etc.) live here.
     meta: dict[str, Any] = field(default_factory=dict)
+    # True when this Role.USER turn's content is entirely synthesised by
+    # the AI tool (Codex's AGENTS.md preamble, Claude Code's
+    # `<system-reminder>` / `<command-name>` wrappers, slash-command
+    # caveats, etc.) rather than authored by the human. Scanners set
+    # this at parse time; behavioural-signal extractors iterate
+    # ``session.user_authored_turns`` (which filters tool_injected=True
+    # out) so the false-positive on a tool preamble doesn't inflate
+    # engagement / atrophy counts. See issue #4.
+    tool_injected: bool = False
 
 
 @dataclass
@@ -62,7 +71,26 @@ class Session:
 
     @property
     def user_turns(self) -> list[Turn]:
+        """Every ``Role.USER`` turn, including tool-injected preambles.
+
+        Kept for explicit "literal raw user-role turns" callers; most code
+        should iterate :attr:`user_authored_turns` instead (which drops
+        AGENTS.md / system-reminder wrappers).
+        """
         return [t for t in self.turns if t.role == Role.USER]
+
+    @property
+    def user_authored_turns(self) -> list[Turn]:
+        """``Role.USER`` turns the human actually wrote.
+
+        Filters out turns that scanners marked ``tool_injected=True`` --
+        Codex AGENTS.md preambles, Claude Code system-reminder wrappers,
+        slash-command caveat blocks, etc. -- so regex-based signal
+        extractors don't count the tool's content against the user.
+        """
+        return [
+            t for t in self.turns if t.role == Role.USER and not t.tool_injected
+        ]
 
     @property
     def assistant_turns(self) -> list[Turn]:

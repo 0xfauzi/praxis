@@ -279,11 +279,14 @@ def _session_with_aug_auto(label: str | None, weekday: int = 0):
     # Anchor the started_at to a Monday (May 25, 2026) plus ``weekday``
     # days so each fixture session lands on a known calendar weekday.
     started_at = datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc) + timedelta(days=weekday)
-    # The adapter checks user_turns length for substantive-ness; give 2 turns by default.
+    # The adapter checks user_authored_turns length for substantive-ness
+    # (issue #4); the same list also stands in for the legacy user_turns
+    # property so older code paths that fall back to it still see it.
     turns = [Turn(role=Role.USER, content="hi"), Turn(role=Role.USER, content="ok")]
     s = SimpleNamespace(
         started_at=started_at,
         user_turns=turns,
+        user_authored_turns=turns,
         aug_auto_classification=label,
     )
     return s

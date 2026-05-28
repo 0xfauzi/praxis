@@ -16,6 +16,7 @@ from pathlib import Path
 
 from praxis.models import Provider, Role, Session, Turn
 from praxis.scanners.base import BaseScanner
+from praxis.scanners.preamble import is_tool_injected_content
 
 
 def _parse_ts(value: str | None) -> datetime | None:
@@ -152,6 +153,10 @@ class ClaudeScanner(BaseScanner):
                             timestamp=ts,
                             tool_calls=tool_calls,
                             meta={"model": message.get("model")},
+                            tool_injected=(
+                                role == Role.USER
+                                and is_tool_injected_content(text)
+                            ),
                         )
                     )
         except OSError:
