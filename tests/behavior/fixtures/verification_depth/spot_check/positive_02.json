@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Eyeballed the diff and nothing weird stood out."},
+  {"role": "assistant", "content": "OK."}
+]

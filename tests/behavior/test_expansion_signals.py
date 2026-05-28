@@ -1,11 +1,15 @@
-"""Fixture-driven tests for the US-005, US-006, and US-007 expansion signals.
+"""Fixture-driven tests for the US-005 .. US-008 expansion signals.
 
-Each scalar signal (US-005 and US-007) has 5 positive and 5 negative
-session fixtures under tests/behavior/fixtures/<signal_name>/. Each
-US-006 knowledge-gap subtype has 5 positive and 5 negative fixtures
-under tests/behavior/fixtures/knowledge_gaps/<subtype>/, plus a single
-precedence-ambiguous fixture at
-tests/behavior/fixtures/knowledge_gaps/precedence_ambiguous_01.json.
+Each scalar signal (US-005, US-007, US-008 code_comprehension) has 5
+positive and 5 negative session fixtures under
+tests/behavior/fixtures/<signal_name>/. Each US-006 knowledge-gap
+subtype has 5 positive and 5 negative fixtures under
+tests/behavior/fixtures/knowledge_gaps/<subtype>/, plus a single
+precedence-ambiguous fixture. Each US-008 verification_depth subtype
+has 5 positive and 5 negative fixtures under
+tests/behavior/fixtures/verification_depth/<subtype>/. US-008's
+tool_ladder_level is an ordinal int 0..4 and is tested directly with
+constructed Sessions (no fixture grid).
 
 Positive fixtures must produce count >= 1; negative fixtures must
 produce count == 0 *for that signal* (other gap subtypes may still
@@ -20,12 +24,17 @@ from pathlib import Path
 
 import pytest
 
-from praxis.behavior.signals import KNOWLEDGE_GAP_KEYS, extract
+from praxis.behavior.signals import (
+    KNOWLEDGE_GAP_KEYS,
+    VERIFICATION_DEPTH_KEYS,
+    extract,
+)
 from praxis.models import Provider, Role, Session, Turn
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 KNOWLEDGE_GAPS_DIR = FIXTURES_DIR / "knowledge_gaps"
+VERIFICATION_DEPTH_DIR = FIXTURES_DIR / "verification_depth"
 
 
 def _load_session(fixture_path: Path) -> Session:
@@ -62,6 +71,8 @@ _SCALAR_SIGNAL_PAIRS: tuple[tuple[str, str], ...] = (
     ("tdd_marker", "tdd_marker_count"),
     ("recipe_pattern", "recipe_pattern_count"),
     ("context_instructions", "context_instructions_count"),
+    # US-008
+    ("code_comprehension", "code_comprehension_count"),
 )
 
 
@@ -98,6 +109,8 @@ def test_empty_session_has_zero_new_counts() -> None:
     sig = extract(session)
     for _, attribute in _SCALAR_SIGNAL_PAIRS:
         assert getattr(sig, attribute) == 0, attribute
+    assert all(v == 0 for v in sig.verification_depth.values())
+    assert sig.tool_ladder_level == 0
 
 
 def test_whitespace_only_session_has_zero_new_counts() -> None:
@@ -111,6 +124,8 @@ def test_whitespace_only_session_has_zero_new_counts() -> None:
     sig = extract(session)
     for _, attribute in _SCALAR_SIGNAL_PAIRS:
         assert getattr(sig, attribute) == 0, attribute
+    assert all(v == 0 for v in sig.verification_depth.values())
+    assert sig.tool_ladder_level == 0
 
 
 # --- US-006: Knowledge-gap four-subtype classifier ---------------------------
@@ -219,3 +234,130 @@ def test_knowledge_gaps_precedence_no_double_count() -> None:
     # Per-precedence: exactly one gap counted across all subtypes for the
     # single user turn in this fixture, not two.
     assert sum(sig.knowledge_gaps.values()) == 1
+
+
+# --- US-008: Verification depth + code comprehension + tool ladder ------------
+
+
+def _verification_depth_fixture_paths(subtype: str, polarity: str) -> list[Path]:
+    paths = sorted((VERIFICATION_DEPTH_DIR / subtype).glob(f"{polarity}_*.json"))
+    assert len(paths) == 5, (
+        f"Expected 5 {polarity} fixtures for verification_depth subtype "
+        f"{subtype}, found {len(paths)}"
+    )
+    return paths
+
+
+@pytest.mark.parametrize("subtype", VERIFICATION_DEPTH_KEYS)
+def test_verification_depth_positive_fixtures_fire(subtype: str) -> None:
+    for path in _verification_depth_fixture_paths(subtype, "positive"):
+        session = _load_session(path)
+        sig = extract(session)
+        count = sig.verification_depth[subtype]
+        assert count >= 1, (
+            f"Positive fixture {path.name} for verification_depth[{subtype}] "
+            f"produced {count}"
+        )
+
+
+@pytest.mark.parametrize("subtype", VERIFICATION_DEPTH_KEYS)
+def test_verification_depth_negative_fixtures_silent(subtype: str) -> None:
+    for path in _verification_depth_fixture_paths(subtype, "negative"):
+        session = _load_session(path)
+        sig = extract(session)
+        count = sig.verification_depth[subtype]
+        assert count == 0, (
+            f"Negative fixture {path.name} for verification_depth[{subtype}] "
+            f"produced {count}"
+        )
+
+
+def test_verification_depth_all_keys_present_on_empty_session() -> None:
+    session = Session(
+        provider=Provider.CLAUDE,
+        session_id="empty-verif",
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        turns=[],
+        source_path="/tmp/empty",
+    )
+    sig = extract(session)
+    assert set(sig.verification_depth.keys()) == set(VERIFICATION_DEPTH_KEYS)
+    assert all(v == 0 for v in sig.verification_depth.values())
+
+
+def _ladder_session(turns: list[Turn]) -> Session:
+    return Session(
+        provider=Provider.CLAUDE,
+        session_id="ladder",
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        turns=turns,
+        source_path="/tmp/ladder",
+    )
+
+
+def test_tool_ladder_empty_session_is_zero() -> None:
+    sig = extract(_ladder_session([]))
+    assert sig.tool_ladder_level == 0
+
+
+def test_tool_ladder_prompt_only_is_zero() -> None:
+    turns = [Turn(role=Role.USER, content="Write a function to parse JSON.")]
+    sig = extract(_ladder_session(turns))
+    assert sig.tool_ladder_level == 0
+
+
+def test_tool_ladder_tools_on_text_is_one() -> None:
+    turns = [Turn(role=Role.USER, content="Run this with tools enabled, please.")]
+    sig = extract(_ladder_session(turns))
+    assert sig.tool_ladder_level == 1
+
+
+def test_tool_ladder_tool_call_text_is_two() -> None:
+    turns = [Turn(role=Role.USER, content="I made a tool call to read the file.")]
+    sig = extract(_ladder_session(turns))
+    assert sig.tool_ladder_level == 2
+
+
+def test_tool_ladder_structural_tool_calls_attribute_is_two() -> None:
+    """Turn.tool_calls truthy (populated by the scanners on assistant turns)
+    elevates a session to rung 2 even without any "tool call" text."""
+    turns = [
+        Turn(role=Role.USER, content="Read the auth module."),
+        Turn(
+            role=Role.ASSISTANT,
+            content="Reading.",
+            tool_calls=[{"name": "Read", "arguments": "/path/to/auth.py"}],
+        ),
+    ]
+    sig = extract(_ladder_session(turns))
+    assert sig.tool_ladder_level == 2
+
+
+def test_tool_ladder_hook_reference_is_three() -> None:
+    turns = [
+        Turn(role=Role.USER, content="I added a PreToolUse hook to check the format.")
+    ]
+    sig = extract(_ladder_session(turns))
+    assert sig.tool_ladder_level == 3
+
+
+def test_tool_ladder_subagent_reference_is_four() -> None:
+    turns = [
+        Turn(role=Role.USER, content="Spawn a subagent to handle the long-running search.")
+    ]
+    sig = extract(_ladder_session(turns))
+    assert sig.tool_ladder_level == 4
+
+
+def test_tool_ladder_mix_tool_and_hook_resolves_to_three_not_sum() -> None:
+    """The explicit US-008 AC: a session mixing a tool call AND a hook
+    reference resolves to ladder_level = max(2, 3) = 3, not the sum 5.
+    """
+    turns = [
+        Turn(role=Role.USER, content="I made a tool call to read the file."),
+        Turn(role=Role.USER, content="I added a PreToolUse hook to check the format."),
+    ]
+    sig = extract(_ladder_session(turns))
+    assert sig.tool_ladder_level == 3
+    # And NOT the sum:
+    assert sig.tool_ladder_level != 5

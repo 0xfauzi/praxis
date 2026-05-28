@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Ah, so it yields one tuple per match and the caller materialises them into a list."},
+  {"role": "assistant", "content": "Exactly."}
+]

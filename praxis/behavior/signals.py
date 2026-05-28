@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from praxis.models import Session
+from praxis.models import Role, Session, Turn
 
 
 # Engagement signals — user is staying cognitively in the loop
@@ -418,6 +418,263 @@ _CONTEXT_INSTRUCTIONS = re.compile(
 )
 
 
+# --- Expansion signals (US-008) ------------------------------------------------
+# Verification depth, code comprehension, and the agent-capability ladder.
+# Primary sources:
+#   - Anthropic Claude Code best practices: "read the code before changing it",
+#     "run the tests yourself", "report what you actually verified". The four
+#     verification_depth subtypes mirror Anthropic's documented practice
+#     ladder: source_check > test_run > spot_check > blanket_accept.
+#   - OpenAI Codex / Responses docs on tools, skills, hooks, and subagents.
+#     The tool_ladder_level rungs (0..4) mirror the shared "agent capability
+#     ladder" -- prompt-only, then tools, then skills, then hooks, then
+#     subagents -- in order of increasing automation leverage.
+#   - Shen & Tamkin (2026), "How AI Impacts Skill Formation" (arXiv 2601.20245):
+#     source_check maps onto their generation-then-comprehension finding;
+#     spot_check vs blanket_accept maps onto the verification-vs-pure-
+#     delegation split that drove their 17pp comprehension gap in debugging.
+
+VERIFICATION_DEPTH_KEYS: tuple[str, ...] = (
+    "source_check",
+    "test_run",
+    "spot_check",
+    "blanket_accept",
+)
+
+
+def _zero_verification_depth() -> dict[str, int]:
+    """Return a fresh dict with all verification_depth subtype keys set to 0."""
+    return {key: 0 for key in VERIFICATION_DEPTH_KEYS}
+
+
+# source_check -- the user reports actually reading the code, docs, or
+# implementation rather than trusting an assistant summary.
+_SOURCE_CHECK = re.compile(
+    r"\b("
+    r"i\s+(read|skimmed|browsed|inspected|reviewed)\s+(through\s+)?"
+    r"(the\s+|some\s+)?(source|code|implementation|impl|module|file|lines?|"
+    r"repo|library|docs?|documentation)|"
+    r"looked\s+(at|into|through)\s+(the\s+)?(source|code|implementation|impl|"
+    r"module|file|docs?|documentation|repo|library|definition|signature)|"
+    r"checked\s+(the\s+)?(source|code|implementation|impl|docs?|documentation|"
+    r"signature|definition)|"
+    r"read\s+(through\s+)?(the\s+)?(source|code|impl(ementation)?|"
+    r"docs?|documentation|definition|signature|file|module|library)|"
+    r"i\s+grepped|grepped\s+(for|the|through)|"
+    r"git\s+(log|blame|show)|"
+    r"reading\s+(the\s+)?(source|code|docs?|implementation|impl|file|module)|"
+    r"after\s+(reading|checking|inspecting)\s+(the\s+)?(code|source|docs?|"
+    r"implementation|impl|file|module)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# test_run -- the user reports running tests (or seeing tests pass) as
+# verification, rather than just asking for tests to be written.
+_TEST_RUN = re.compile(
+    r"\b("
+    r"i\s+ran\s+(the\s+|some\s+|all\s+)?(unit\s+|integration\s+|e2e\s+|smoke\s+)?tests?\b|"
+    r"i\s+ran\s+(uv\s+run\s+)?(pytest|mypy|pyright|jest|vitest|cargo\s+test|"
+    r"go\s+test|npm\s+(run\s+)?test)|"
+    r"running\s+(the\s+|all\s+)?tests?\s+(now|first|locally|to\s+(check|verify))|"
+    r"all\s+tests?\s+(pass(ed|ing)?|are\s+green)|"
+    r"tests?\s+pass(ed|ing)?\s+(locally|now|cleanly)|"
+    r"test\s+suite\s+(pass(ed|es)?|is\s+green|ran\s+green)|"
+    r"after\s+running\s+(the\s+|all\s+)?tests?|"
+    r"the\s+tests?\s+(pass(ed|es)?|are\s+green|came\s+back\s+green)|"
+    r"uv\s+run\s+pytest|"
+    r"all\s+green\b|"
+    r"green\s+locally|"
+    r"smoke[\s\-]?test\s+(pass(ed|es)?|ran|works)"
+    r")",
+    re.IGNORECASE,
+)
+
+# spot_check -- the user reports verifying a small sample rather than a
+# full test run; weaker than test_run but stronger than blanket_accept.
+_SPOT_CHECK = re.compile(
+    r"\b("
+    r"spot[\s\-]?check(ed|ing|s)?|"
+    r"smoke[\s\-]?test(ed|ing)?|"
+    r"sanity[\s\-]?check(ed|ing|s)?|"
+    r"eyeball(ed|ing|s)?|"
+    r"skim(med)?\s+(through|over|the)|"
+    r"(quick(ly)?|briefly)\s+(check(ed)?|scan(ned)?|look(ed)?|glance|browse(d)?|"
+    r"review(ed)?|verif(ied|y))|"
+    r"i\s+(just\s+)?checked\s+(a\s+(few|couple|sample|handful)|one|two|three)|"
+    r"checked\s+a\s+(few|couple|sample|handful)|"
+    r"quick\s+glance|"
+    r"at\s+a\s+glance|"
+    r"hand[\s\-]checked\s+(one|two|three|a\s+(few|couple))"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# blanket_accept -- the user accepts output without any verification.
+# This is the atrophy end of the ladder (mirrors Shen & Tamkin's "pure
+# delegation" pattern).
+_BLANKET_ACCEPT = re.compile(
+    r"\b("
+    r"lgtm|"
+    r"looks\s+(good|great|fine|right|correct|ok|okay)|"
+    r"looks?\s+good\s+to\s+me|"
+    r"ship\s+it\b|"
+    r"let'?s\s+ship\b|"
+    r"merge\s+it\b|"
+    r"good\s+to\s+(merge|go|ship)|"
+    r"go\s+ahead\s+(and\s+(merge|ship)|with\s+(it|that))|"
+    r"i'?ll\s+take\s+(it|that)|"
+    r"i'?m\s+(good|happy)\s+with\s+(it|this|that)|"
+    r"that\s+works\s+for\s+me|"
+    r"sounds\s+good\b|"
+    r"approved\b"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+# code_comprehension -- the user demonstrates understanding by paraphrasing
+# what the code does, rather than asking what it does. Distinct from
+# `comprehension_check_count` (which captures verification *questions* like
+# "am I right that..."): this captures *statements* of understanding ("the
+# function takes X and returns Y", "this loop iterates over...").
+_CODE_COMPREHENSION = re.compile(
+    r"\b("
+    r"(the|this)\s+(function|method|class|module|loop|code|block|line|file|"
+    r"snippet|helper|callback|generator|coroutine|handler|decorator|"
+    r"dataclass|fixture)\s+"
+    r"(takes|returns|does|handles|iterates|implements|computes|reads|writes|"
+    r"loops|runs|executes|calls|invokes|maps|filters|sorts|reduces|"
+    r"checks|verifies|validates|parses|builds|constructs|emits|yields|"
+    r"raises|wraps)|"
+    r"(this|it)\s+is\s+(iterating|looping|reading|writing|mapping|filtering|"
+    r"sorting|reducing|computing|implementing|handling|parsing|building|"
+    r"calling|invoking|emitting|yielding|raising|wrapping)|"
+    r"i\s+see\s+(that|how|why|what)\s+(it|this|the\s+[a-z_]+)\s+"
+    r"(does|takes|returns|handles|iterates|implements|reads|writes|calls|"
+    r"yields|raises|wraps|maps|filters|parses)|"
+    r"ah,?\s+so\s+(it|this|that)\s+(does|takes|returns|handles|loops|iterates|"
+    r"yields|raises|wraps|reads|writes)|"
+    r"now\s+i\s+(see|understand|get\s+it)\b|"
+    r"so\s+(the|this)\s+(function|method|code|loop|module|class|decorator|"
+    r"generator|handler)\s+(does|takes|returns|handles|iterates|reads|"
+    r"writes|yields|raises|wraps)|"
+    r"i\s+(see|understand)\s+now\s+(that|how|why)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+# --- tool_ladder_level rungs (US-008) -----------------------------------------
+# Per the agent-capability ladder shared between Anthropic Claude Code and
+# OpenAI Codex docs, ordered by increasing automation leverage:
+#   0 = prompt-only      -- the user types text, the agent answers in text.
+#   1 = tools-on         -- the session has generic tools enabled but no
+#                            specific tool/skill invocation visible.
+#   2 = skills           -- explicit tool/skill calls (Turn.tool_calls
+#                            truthy, "tool call", "Skill tool", "/skill X").
+#                            Per the US-008 AC, "tool call" maps to this
+#                            rung (not rung 1) -- skills are the surface
+#                            through which tool calls happen in Claude Code.
+#   3 = hooks            -- the session references hook scripts (Claude Code
+#                            hooks, PreToolUse, settings.json hooks).
+#   4 = subagents        -- the session references subagent dispatch (Task
+#                            tool, "spawn a subagent", "delegate to a
+#                            subagent").
+#
+# tool_ladder_level for a session is `max(rung-per-turn over all turns,
+# default 0)`. It is NOT a sum: a session that mixes a tool call AND a hook
+# reference resolves to max(2, 3) = 3, not 5. The ladder is scanned across
+# the whole transcript (every Turn role), since tool_calls appear on
+# assistant turns while hook/subagent references can appear in either user
+# or assistant text.
+TOOL_LADDER_PROMPT_ONLY: int = 0
+TOOL_LADDER_TOOLS_ON: int = 1
+TOOL_LADDER_SKILLS: int = 2
+TOOL_LADDER_HOOKS: int = 3
+TOOL_LADDER_SUBAGENTS: int = 4
+
+_TOOL_LADDER_SUBAGENT = re.compile(
+    r"\b("
+    r"sub[\s\-]?agents?|"
+    r"task\s+tool|"
+    r"spawn(ing|s|ed)?\s+(a|an|the|sub|multiple|parallel)\s+(sub|agent)|"
+    r"delegate\s+(this|that|it|the\s+\w+)?\s*to\s+(a|an|the)?\s*sub[\s\-]?agent|"
+    r"orchestrate\s+(agents?|sub|multiple\s+agents?)|"
+    r"parallel\s+sub[\s\-]?agents?|"
+    r"agent\s+sdk"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_TOOL_LADDER_HOOK = re.compile(
+    r"\b("
+    r"claude\s+code\s+hooks?|"
+    r"settings\.json\s+hooks?|"
+    r"(pre|post)[\s\-]?tool[\s\-]?use[\s\-]?hooks?|"
+    r"pretooluse|posttooluse|"
+    r"user[\s\-]?prompt[\s\-]?submit[\s\-]?hooks?|"
+    r"userpromptsubmit|"
+    r"stop\s+hooks?|"
+    r"session[\s\-]?(start|end)[\s\-]?hooks?|"
+    r"git\s+hooks?|"
+    r"pre[\s\-]?commit\s+hooks?|"
+    r"lifecycle\s+hooks?|"
+    r"hook\s+(configuration|script|command|fires|runs|executes|that)|"
+    r"configure\s+(a\s+|the\s+)?hooks?|"
+    r"hooks?\s+(fire|run|execute|trigger|configured|set\s+up)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_TOOL_LADDER_SKILL = re.compile(
+    r"\b("
+    r"tool\s+calls?|"
+    r"function\s+calls?|"
+    r"call(ed|ing)?\s+the\s+\w+\s+tool|"
+    r"the\s+\w+\s+tool\s+(call|invocation|return|result)|"
+    r"skill\s+tool|"
+    r"/skill\b|"
+    r"skill\s+invocation|"
+    r"invok(e|ed|ing|es)\s+(a|the)?\s*(tool|skill)|"
+    r"using\s+the\s+\w+\s+tool|"
+    r"via\s+the\s+\w+\s+tool"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_TOOL_LADDER_TOOLS_ON = re.compile(
+    r"\b("
+    r"tools?\s+(are\s+)?(on|enabled|available)|"
+    r"enable\s+(the\s+)?tools?|"
+    r"tools[\s\-]on|"
+    r"with\s+tools?\s+enabled|"
+    r"tool[\s\-]use\s+(turned\s+)?on|"
+    r"agent\s+(with|has)\s+tools?|"
+    r"turn\s+on\s+tools?"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _tool_ladder_rung_for_turn(turn: Turn) -> int:
+    """Return the highest ladder rung observed in a single turn.
+
+    Order of precedence (highest match wins): subagent > hook > skill (incl.
+    Turn.tool_calls truthy) > tools-on > prompt-only. Returns an int in 0..4.
+    """
+    text = turn.content
+    if _TOOL_LADDER_SUBAGENT.search(text):
+        return TOOL_LADDER_SUBAGENTS
+    if _TOOL_LADDER_HOOK.search(text):
+        return TOOL_LADDER_HOOKS
+    if turn.tool_calls or _TOOL_LADDER_SKILL.search(text):
+        return TOOL_LADDER_SKILLS
+    if _TOOL_LADDER_TOOLS_ON.search(text):
+        return TOOL_LADDER_TOOLS_ON
+    return TOOL_LADDER_PROMPT_ONLY
+
+
 @dataclass
 class BehavioralSignals:
     """Per-session behavioral features. All counts are over USER turns."""
@@ -468,10 +725,33 @@ class BehavioralSignals:
     recipe_pattern_count: int = 0
     context_instructions_count: int = 0
 
+    # --- Expansion (US-008). verification_depth is dict-valued (same shape
+    # as knowledge_gaps so asdict + json.dumps round-trip cleanly). All four
+    # keys are always present; an empty session yields all-zero values.
+    # A single user turn can increment multiple subtypes (no precedence rule
+    # -- the lenses are orthogonal, e.g., "I ran the tests, LGTM" counts as
+    # both test_run and blanket_accept).
+    verification_depth: dict[str, int] = field(default_factory=_zero_verification_depth)
+    # code_comprehension_count is a flat per-user-turn count of *statements*
+    # of understanding (distinct from comprehension_check_count, which counts
+    # verification *questions*).
+    code_comprehension_count: int = 0
+    # tool_ladder_level is a single ordinal 0..4 -- the max rung observed
+    # across the WHOLE transcript (all turn roles, not just user turns).
+    # See the rung definitions and the AC's max(2, 3) = 3 example.
+    tool_ladder_level: int = 0
+
 
 def extract(session: Session) -> BehavioralSignals:
     user_turns = session.user_turns
     if not user_turns:
+        # tool_ladder_level is still scanned over the whole transcript even
+        # if there are no user turns, since assistant turns can carry
+        # tool_calls or hook/subagent references.
+        tool_ladder_level = max(
+            (_tool_ladder_rung_for_turn(t) for t in session.turns),
+            default=TOOL_LADDER_PROMPT_ONLY,
+        )
         return BehavioralSignals(
             user_turn_count=0,
             why_question_count=0,
@@ -494,6 +774,9 @@ def extract(session: Session) -> BehavioralSignals:
             tdd_marker_count=0,
             recipe_pattern_count=0,
             context_instructions_count=0,
+            verification_depth=_zero_verification_depth(),
+            code_comprehension_count=0,
+            tool_ladder_level=tool_ladder_level,
         )
 
     n = len(user_turns)
@@ -519,6 +802,26 @@ def extract(session: Session) -> BehavioralSignals:
     tdd_hits = sum(1 for t in user_turns if _TDD_MARKER.search(t.content))
     recipe_hits = sum(1 for t in user_turns if _RECIPE_PATTERN.search(t.content))
     ctx_hits = sum(1 for t in user_turns if _CONTEXT_INSTRUCTIONS.search(t.content))
+
+    verification_depth = _zero_verification_depth()
+    for t in user_turns:
+        if _SOURCE_CHECK.search(t.content):
+            verification_depth["source_check"] += 1
+        if _TEST_RUN.search(t.content):
+            verification_depth["test_run"] += 1
+        if _SPOT_CHECK.search(t.content):
+            verification_depth["spot_check"] += 1
+        if _BLANKET_ACCEPT.search(t.content):
+            verification_depth["blanket_accept"] += 1
+    comprehension_hits = sum(
+        1 for t in user_turns if _CODE_COMPREHENSION.search(t.content)
+    )
+    # tool_ladder_level scans the WHOLE transcript (not just user turns), per
+    # the AC: max-rung-observed; tool_calls live on assistant turns.
+    tool_ladder_level = max(
+        (_tool_ladder_rung_for_turn(t) for t in session.turns),
+        default=TOOL_LADDER_PROMPT_ONLY,
+    )
 
     engagement_signals = why_hits + comp_hits + expl_hits
     atrophy_signals = del_hits + out_hits + tel_hits
@@ -549,4 +852,7 @@ def extract(session: Session) -> BehavioralSignals:
         tdd_marker_count=tdd_hits,
         recipe_pattern_count=recipe_hits,
         context_instructions_count=ctx_hits,
+        verification_depth=verification_depth,
+        code_comprehension_count=comprehension_hits,
+        tool_ladder_level=tool_ladder_level,
     )

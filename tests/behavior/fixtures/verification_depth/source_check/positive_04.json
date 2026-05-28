@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "I grepped for _post_notify across the repo and only one callsite uses it."},
+  {"role": "assistant", "content": "Good -- safe to refactor in place."}
+]

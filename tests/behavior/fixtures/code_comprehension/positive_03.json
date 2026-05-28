@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "So this function does pattern matching across user turns and returns a BehavioralSignals instance."},
+  {"role": "assistant", "content": "Correct."}
+]

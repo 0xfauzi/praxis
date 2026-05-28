@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Looked at the implementation in praxis/scoring/judge.py and confirmed it uses tenacity for retries."},
+  {"role": "assistant", "content": "Right -- tenacity wraps the OpenAI call."}
+]

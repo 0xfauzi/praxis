@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Add a new endpoint for the dashboard summary."},
+  {"role": "assistant", "content": "Sure."}
+]

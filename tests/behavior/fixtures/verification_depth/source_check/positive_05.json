@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "After reading the implementation, Turn.tool_calls defaults to an empty list per the dataclass field."},
+  {"role": "assistant", "content": "Yes, default_factory=list keeps it explicit."}
+]

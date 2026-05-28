@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Build a user model with email and password fields."},
+  {"role": "assistant", "content": "Drafting it now."}
+]

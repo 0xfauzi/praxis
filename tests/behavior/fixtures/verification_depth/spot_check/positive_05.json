@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Smoke-tested the new endpoint with curl and the response shape is right."},
+  {"role": "assistant", "content": "OK."}
+]
