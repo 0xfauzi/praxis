@@ -25,6 +25,11 @@ def _utcnow() -> datetime:
     """Tz-aware UTC now. Wraps datetime.now(timezone.utc) for terseness."""
     return datetime.now(timezone.utc)
 
+
+def _sqlite_literal(s: str) -> str:
+    """Escape ``s`` for use inside a SQLite single-quoted string literal."""
+    return s.replace("'", "''")
+
 from praxis.follow_up import FollowUp, Outcome
 from praxis.models import Moment, compute_moment_id
 from praxis.redactor import redact_secrets
@@ -162,6 +167,7 @@ class ProfileStore:
                     # in-place so older v3 DBs gain new optional columns
                     # (signals_json) without a full table rebuild.
                     self._ensure_session_scores_columns(conn)
+                    self._run_sql_migrations()
                     return
 
         # Migration needed (fresh DB, v0.1, or v0.2 DB without the v3 marker).
@@ -178,6 +184,7 @@ class ProfileStore:
             raise MigrationError(
                 self._migration_failure_message(backup_path, exc)
             ) from exc
+        self._run_sql_migrations()
 
     @staticmethod
     def _ensure_session_scores_columns(conn: sqlite3.Connection) -> None:
@@ -309,6 +316,84 @@ class ProfileStore:
             "VALUES (?, ?, ?, ?, ?)",
             (_utcnow().isoformat(), "schema_version", 0, 0, "3"),
         )
+
+    # ---- sql-file migration runner (US-001) -----------------------------
+
+    @classmethod
+    def _migrations_dir(cls) -> Path:
+        """Directory holding numbered ``*.sql`` migration files.
+
+        Overridable in tests via ``monkeypatch.setattr(ProfileStore,
+        "_migrations_dir", classmethod(lambda cls: tmp_path))``.
+        """
+        return Path(__file__).parent / "migrations"
+
+    def _run_sql_migrations(self) -> None:
+        """Apply any pending ``*.sql`` migrations in lexical order.
+
+        ``schema_migrations(version, applied_at)`` is created on first run.
+        Each pending migration runs wrapped in a ``BEGIN; ... COMMIT;``
+        transaction together with the row that records the version, so on
+        ``sqlite3.OperationalError`` we rollback and re-raise. ``version``
+        stays absent from ``schema_migrations`` for failed migrations, so
+        the next invocation re-attempts the same file.
+        """
+        self._ensure_schema_migrations_table()
+        migrations_dir = self._migrations_dir()
+        if not migrations_dir.is_dir():
+            return
+        applied = self._applied_migration_versions()
+        for sql_path in sorted(migrations_dir.glob("*.sql")):
+            if sql_path.name in applied:
+                continue
+            self._apply_sql_migration(sql_path.name, sql_path.read_text())
+
+    def _ensure_schema_migrations_table(self) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS schema_migrations ("
+                "  version TEXT PRIMARY KEY,"
+                "  applied_at TEXT NOT NULL"
+                ")"
+            )
+
+    def _applied_migration_versions(self) -> set[str]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT version FROM schema_migrations"
+            ).fetchall()
+        return {row["version"] for row in rows}
+
+    def _apply_sql_migration(self, version: str, body_sql: str) -> None:
+        """Run one migration's SQL + the marker insert in one transaction.
+
+        Uses ``executescript`` with the ``BEGIN; ... COMMIT;`` boundaries
+        inside the script string so a partial failure rolls back the body
+        and leaves no marker row behind. Outside that script, ``conn`` runs
+        with default sqlite3 transaction handling.
+        """
+        applied_at = _utcnow().isoformat()
+        script = (
+            "BEGIN;\n"
+            + body_sql.rstrip(" \t\r\n;") + ";\n"
+            + "INSERT INTO schema_migrations (version, applied_at) VALUES ("
+            + f"'{_sqlite_literal(version)}', '{_sqlite_literal(applied_at)}'"
+            + ");\n"
+            + "COMMIT;\n"
+        )
+        conn = sqlite3.connect(self.db_path)
+        try:
+            try:
+                conn.executescript(script)
+            except sqlite3.OperationalError:
+                if conn.in_transaction:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass
+                raise
+        finally:
+            conn.close()
 
     @contextmanager
     def _conn(self):

@@ -35,7 +35,7 @@ praxis = "praxis.cli.__main__:main"
 include = ["praxis*"]
 
 [tool.setuptools.package-data]
-praxis = ["data/builtin_cards/*.json"]
+praxis = ["data/builtin_cards/*.json", "storage/migrations/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
