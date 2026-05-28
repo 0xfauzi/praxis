@@ -64,6 +64,7 @@
     "praxis/scoring/coach.py",
     "praxis/storage/",
     "tests/",
-    "scripts/ralph/feature/praxis-commit-command/"
+    "scripts/ralph/feature/praxis-commit-command/",
+    "scripts/ralph/progress.txt"
   ]
 }
