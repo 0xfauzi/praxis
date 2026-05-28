@@ -273,7 +273,7 @@ def assess_trajectory_with_llm(
     # are included so the LLM can name all 4 signals in its headline.
     timeline = []
     for i, (sess, sig) in enumerate(sorted_pairs[-20:]):
-        first_prompt = sess.user_turns[0].content if sess.user_turns else ""
+        first_prompt = sess.user_authored_turns[0].content if sess.user_authored_turns else ""
         if len(first_prompt) > 300:
             first_prompt = first_prompt[:300] + "..."
         # Index into the full verification list: the last 20-slice starts

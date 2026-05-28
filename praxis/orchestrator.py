@@ -235,7 +235,7 @@ def run(
     sessions = _gather_sessions(since_days=since_days)
     # Filter out sessions with no user turns (system-only / tool-only files).
     # This is a structural filter (nothing to judge), not a heuristic skip.
-    sessions = [s for s in sessions if s.user_turns]
+    sessions = [s for s in sessions if s.user_authored_turns]
     new_sessions = [s for s in sessions if not store.has_session(s.stable_id)]
 
     # Sort newest first so if a caller overrides the cap, the most recent
@@ -469,7 +469,7 @@ def _step_scan(since_days: int) -> list[Session]:
     Output feeds: cluster (step 2), pass1 (step 3).
     """
     sessions = _gather_sessions(since_days=since_days)
-    return [s for s in sessions if s.user_turns]
+    return [s for s in sessions if s.user_authored_turns]
 
 
 def _step_cluster(sessions: list[Session]) -> list[Task]:
@@ -920,7 +920,7 @@ def _compute_week_rates(sessions: list[Session]) -> tuple[float, float]:
     delegation_rates: list[float] = []
     for s in sessions:
         f = extract_features(s)
-        ut = len(s.user_turns)
+        ut = len(s.user_authored_turns)
         if ut:
             total_user_turns += ut
             total_verify_hits += f.marker_hit_counts.get("verification", 0)
@@ -1337,6 +1337,10 @@ def run_weekly(
     user_week_total = 0.0
     have_priced_session = False
     for s in sessions:
+        # Cost = billable bytes the provider charged for, so we sum
+        # every user-role turn including tool-injected preambles
+        # (Codex AGENTS.md, Claude Code system-reminders); switching
+        # to user_authored_turns here would under-report actual spend.
         chars = sum(len(t.content) for t in s.user_turns)
         c = estimate_session_cost_usd(s.model_hint, chars)
         if c is not None:

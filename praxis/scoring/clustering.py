@@ -101,7 +101,7 @@ class Task:
 
 def _first_user_turn_truncated(session: Session) -> str:
     """Return the first user turn's content, truncated to FIRST_TURN_MAX_CHARS."""
-    user_turns = session.user_turns
+    user_turns = session.user_authored_turns
     if not user_turns:
         return ""
     content = user_turns[0].content
@@ -330,7 +330,7 @@ def _singleton_fallback_label(session: Session) -> str:
     Returns "" if the session has no user turn (defensive; the parser already
     filters non-USER turns when building sessions).
     """
-    user_turns = session.user_turns
+    user_turns = session.user_authored_turns
     if not user_turns:
         return ""
     return " ".join(user_turns[0].content.split()[:SINGLETON_FALLBACK_LABEL_WORDS])
