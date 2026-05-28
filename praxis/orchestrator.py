@@ -1510,10 +1510,16 @@ def _snapshot_from_rows(rows: list[dict]) -> ProfileSnapshot:
 
     # SessionFeatures was renamed/reshaped in the features-module component
     # (heuristics.py -> features.py); pre-rename rows carry extra/legacy
-    # keys in features_json. Filter to current fields so a v0.1/v0.2 mixed
-    # DB still loads, instead of crashing with TypeError on unknown kwargs.
-    from dataclasses import fields as _dc_fields
+    # keys in features_json. Filter to current fields AND back-fill any
+    # required fields that older snapshots did not record so a v0.1/v0.2
+    # mixed DB still loads instead of crashing with TypeError.
+    from dataclasses import MISSING, fields as _dc_fields
     _CURRENT_FEATURE_FIELDS = {f.name for f in _dc_fields(SessionFeatures)}
+    _REQUIRED_FEATURE_DEFAULTS = {
+        f.name: 0 if f.type is int else 0.0
+        for f in _dc_fields(SessionFeatures)
+        if f.default is MISSING and f.default_factory is MISSING  # type: ignore[misc]
+    }
     for row in rows:
         if not row["judge_result"]:
             # Sessions can only be persisted via the judge path; rows missing
@@ -1521,6 +1527,8 @@ def _snapshot_from_rows(rows: list[dict]) -> ProfileSnapshot:
             continue
         raw_features = row["features"] or {}
         filtered = {k: v for k, v in raw_features.items() if k in _CURRENT_FEATURE_FIELDS}
+        for k, default in _REQUIRED_FEATURE_DEFAULTS.items():
+            filtered.setdefault(k, default)
         features = SessionFeatures(**filtered)
         jr = row["judge_result"]
         judge = JudgeResult(
