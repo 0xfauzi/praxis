@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Refactor this for-loop into a list comprehension and make the variable names shorter."},
+  {"role": "assistant", "content": "Here you go..."}
+]

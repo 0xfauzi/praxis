@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Mirror the structure of routes/users.py for the new orders route. Use the same decorator order and error-handling wrapper."},
+  {"role": "assistant", "content": "Mirroring..."}
+]

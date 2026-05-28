@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Use plan mode for this one. Outline a 4-step plan to refactor the auth module before changing any files."},
+  {"role": "assistant", "content": "Here is the proposed plan..."}
+]

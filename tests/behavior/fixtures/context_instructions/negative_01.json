@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Write a sort function for a list of integers that beats the default sorted() on partially sorted inputs."},
+  {"role": "assistant", "content": "Here is timsort-aware code..."}
+]

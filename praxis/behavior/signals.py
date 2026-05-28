@@ -303,6 +303,121 @@ def _classify_knowledge_gap(text: str) -> str | None:
     return None
 
 
+# --- Expansion signals (US-007) ------------------------------------------------
+# Five flat counters covering practices that primary sources call out as
+# raising the quality of AI-assisted development:
+#   - Anthropic Claude Code best practices: "plan before code" (plan mode,
+#     shift-tab in the CLI), "scaffold the project skeleton up front", "follow
+#     the patterns in this repo", and "give the model context via CLAUDE.md".
+#   - OpenAI Codex / Responses docs: AGENTS.md and the "give the model an
+#     instructions file" pattern; structured handoffs between user and tool.
+#   - arXiv 2506.01604 (AI-assisted software development practices): the
+#     test-driven and recipe / pattern-reuse practices separating skilled
+#     from unskilled use; specifically the test-first habit and the
+#     follow-the-prior-pattern habit. (Cite kept general -- the paper id
+#     itself is the canonical reference.)
+
+# Plan mode -- user explicitly asks for / invokes plan mode, or asks for a
+# written plan before any code. Anthropic Claude Code surfaces "plan mode"
+# via shift-tab and the EnterPlanMode tool; the practice is to plan before
+# implementing on non-trivial work.
+_PLAN_MODE = re.compile(
+    r"\b("
+    r"plan\s+mode|"
+    r"/plan\b|"
+    r"enterplanmode|exitplanmode|"
+    r"draft\s+(a|the)\s+plan|"
+    r"outline\s+(a|the|your)\s+plan|"
+    r"sketch\s+(a|the)\s+plan|"
+    r"make\s+(a|the)\s+plan|"
+    r"propose\s+(a|the|your)\s+plan|"
+    r"let'?s\s+plan\b|"
+    r"plan\s+(this|it|that|first|before)\b|"
+    r"plan\s+it\s+out|"
+    r"walk\s+me\s+through\s+(the|your|a)\s+plan|"
+    r"don'?t\s+(write|implement|code).{0,40}until.{0,20}plan|"
+    r"before\s+(you\s+)?(writing|implementing|coding|building).{0,40}\bplan\b"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Scaffolding artifact -- user asks for or supplies a project skeleton,
+# boilerplate, or starter layout. Anthropic Claude Code best practice is to
+# scaffold the directory layout and boilerplate before iterating on logic.
+_SCAFFOLDING_ARTIFACT = re.compile(
+    r"\b("
+    r"scaffold(ing|s|ed)?|"
+    r"skeleton|"
+    r"boilerplate|"
+    r"starter\s+(kit|code|project|template|files?|repo)|"
+    r"bootstrap\s+(a|the|this|that|us|me|new|fresh|empty|the\s+project|a\s+new)|"
+    r"project\s+(structure|layout|skeleton|template|scaffold)|"
+    r"(directory|folder|file)\s+(structure|layout|tree)|"
+    r"set\s+up\s+the\s+(project|directory|folder|repo)\s+(structure|layout|tree|skeleton)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# TDD marker -- user explicitly invokes test-driven development practice.
+# Cite: arXiv 2506.01604 on practice patterns and the long-standing TDD
+# canon (Beck, 2002); the "write a failing test first" cue is the most
+# robust textual marker.
+_TDD_MARKER = re.compile(
+    r"\b("
+    r"tdd\b|"
+    r"test[\s\-]driven|"
+    r"test[\s\-]first|"
+    r"write\s+(a\s+|the\s+)?failing\s+tests?|"
+    r"start\s+with\s+(a\s+|the\s+)?failing\s+tests?|"
+    r"red[\s\-]green[\s\-]refactor|"
+    r"(red|green|refactor)\s+phase|"
+    r"tests?\s+before\s+(implementation|the\s+code|you\s+(write|implement)|writing|implementing)|"
+    r"write\s+(the\s+)?tests?\s+first|"
+    r"fail(ing)?\s+tests?\s+first"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Recipe pattern -- user invokes an existing pattern in the codebase rather
+# than asking for ad-hoc code. Anthropic Claude Code best practice is "follow
+# the patterns in this repo"; arXiv 2506.01604 frames pattern-reuse as a
+# practice that separates skilled from unskilled use of AI assistants.
+_RECIPE_PATTERN = re.compile(
+    r"\b("
+    r"follow\s+the\s+(same\s+)?(pattern|approach|recipe|convention|style|format)|"
+    r"mirror(s|ing)?\s+(the|that|this)\s+(pattern|approach|structure|format|layout)|"
+    r"use\s+the\s+(same\s+)?(pattern|approach|recipe|convention|format)|"
+    r"same\s+(pattern|approach|recipe|convention|format)\s+as|"
+    r"(just\s+)?(like|as)\s+(we\s+)?(did|do|have|already\s+did)\s+(in|for|with|when|here)|"
+    r"similar\s+to\s+(how|the\s+way|what)|"
+    r"match(ing|es)?\s+the\s+(pattern|style|convention|format|shape)|"
+    r"copy\s+(the\s+)?(pattern|approach|style|convention|format|recipe)\s+(from|of)|"
+    r"follow\s+the\s+recipe"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Context-and-instructions -- user references a project-level instructions
+# file (CLAUDE.md, AGENTS.md, .cursorrules, copilot-instructions) or supplies
+# an explicit context block. Anthropic and OpenAI both document this as the
+# top-leverage move for steering coding agents.
+_CONTEXT_INSTRUCTIONS = re.compile(
+    r"("
+    r"\bclaude\.md\b|"
+    r"\bagents?\.md\b|"
+    r"\b\.?cursor[\-_\.]?rules?\b|"
+    r"\bcopilot[\-_]instructions(\.md)?\b|"
+    r"\b(per|see|read|check|consult|reference|following|according\s+to|in)\s+"
+    r"(the\s+)?(claude\.md|agents?\.md|readme|context\s+(file|doc|block|section)|instructions\s+(file|doc|block|section))\b|"
+    r"\b(for|here'?s|here\s+is)\s+(the\s+|some\s+)?context\b|"
+    r"\bcontext\s+(block|file|doc(ument)?|section)\b|"
+    r"\binstructions?\s+(file|doc(ument)?|block|section)\b|"
+    r"\bsystem\s+prompt\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
 @dataclass
 class BehavioralSignals:
     """Per-session behavioral features. All counts are over USER turns."""
@@ -343,6 +458,16 @@ class BehavioralSignals:
     # present; an empty session yields all-zero values, not an empty dict.
     knowledge_gaps: dict[str, int] = field(default_factory=_zero_knowledge_gaps)
 
+    # --- Expansion (US-007). Five flat per-user-turn counters covering
+    # practices from Anthropic Claude Code best practices, OpenAI Codex docs,
+    # and arXiv 2506.01604. Defaults preserve backward compatibility with
+    # positional constructors in existing tests.
+    plan_mode_count: int = 0
+    scaffolding_artifact_count: int = 0
+    tdd_marker_count: int = 0
+    recipe_pattern_count: int = 0
+    context_instructions_count: int = 0
+
 
 def extract(session: Session) -> BehavioralSignals:
     user_turns = session.user_turns
@@ -364,6 +489,11 @@ def extract(session: Session) -> BehavioralSignals:
             error_naming_count=0,
             iterative_refinement_count=0,
             knowledge_gaps=_zero_knowledge_gaps(),
+            plan_mode_count=0,
+            scaffolding_artifact_count=0,
+            tdd_marker_count=0,
+            recipe_pattern_count=0,
+            context_instructions_count=0,
         )
 
     n = len(user_turns)
@@ -383,6 +513,12 @@ def extract(session: Session) -> BehavioralSignals:
         gap = _classify_knowledge_gap(t.content)
         if gap is not None:
             knowledge_gaps[gap] += 1
+
+    plan_hits = sum(1 for t in user_turns if _PLAN_MODE.search(t.content))
+    scaf_hits = sum(1 for t in user_turns if _SCAFFOLDING_ARTIFACT.search(t.content))
+    tdd_hits = sum(1 for t in user_turns if _TDD_MARKER.search(t.content))
+    recipe_hits = sum(1 for t in user_turns if _RECIPE_PATTERN.search(t.content))
+    ctx_hits = sum(1 for t in user_turns if _CONTEXT_INSTRUCTIONS.search(t.content))
 
     engagement_signals = why_hits + comp_hits + expl_hits
     atrophy_signals = del_hits + out_hits + tel_hits
@@ -408,4 +544,9 @@ def extract(session: Session) -> BehavioralSignals:
         error_naming_count=err_hits,
         iterative_refinement_count=iter_hits,
         knowledge_gaps=knowledge_gaps,
+        plan_mode_count=plan_hits,
+        scaffolding_artifact_count=scaf_hits,
+        tdd_marker_count=tdd_hits,
+        recipe_pattern_count=recipe_hits,
+        context_instructions_count=ctx_hits,
     )

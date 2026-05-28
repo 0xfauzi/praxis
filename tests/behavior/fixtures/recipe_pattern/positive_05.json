@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Make this match the pattern used in api/v1/orders.py - DTO, service, repository layers, in that order."},
+  {"role": "assistant", "content": "Matching the pattern..."}
+]

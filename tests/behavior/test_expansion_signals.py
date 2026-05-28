@@ -1,9 +1,9 @@
-"""Fixture-driven tests for the US-005 and US-006 expansion signals.
+"""Fixture-driven tests for the US-005, US-006, and US-007 expansion signals.
 
-Each US-005 signal has 5 positive and 5 negative session fixtures under
-tests/behavior/fixtures/<signal_name>/. Each US-006 knowledge-gap subtype
-has 5 positive and 5 negative fixtures under
-tests/behavior/fixtures/knowledge_gaps/<subtype>/, plus a single
+Each scalar signal (US-005 and US-007) has 5 positive and 5 negative
+session fixtures under tests/behavior/fixtures/<signal_name>/. Each
+US-006 knowledge-gap subtype has 5 positive and 5 negative fixtures
+under tests/behavior/fixtures/knowledge_gaps/<subtype>/, plus a single
 precedence-ambiguous fixture at
 tests/behavior/fixtures/knowledge_gaps/precedence_ambiguous_01.json.
 
@@ -51,14 +51,21 @@ def _fixture_paths(signal: str, polarity: str) -> list[Path]:
     return paths
 
 
-@pytest.mark.parametrize(
-    "signal,attribute",
-    [
-        ("specification_artifact", "specification_artifact_count"),
-        ("error_naming", "error_naming_count"),
-        ("iterative_refinement", "iterative_refinement_count"),
-    ],
+_SCALAR_SIGNAL_PAIRS: tuple[tuple[str, str], ...] = (
+    # US-005
+    ("specification_artifact", "specification_artifact_count"),
+    ("error_naming", "error_naming_count"),
+    ("iterative_refinement", "iterative_refinement_count"),
+    # US-007
+    ("plan_mode", "plan_mode_count"),
+    ("scaffolding_artifact", "scaffolding_artifact_count"),
+    ("tdd_marker", "tdd_marker_count"),
+    ("recipe_pattern", "recipe_pattern_count"),
+    ("context_instructions", "context_instructions_count"),
 )
+
+
+@pytest.mark.parametrize("signal,attribute", _SCALAR_SIGNAL_PAIRS)
 def test_positive_fixtures_fire(signal: str, attribute: str) -> None:
     for path in _fixture_paths(signal, "positive"):
         session = _load_session(path)
@@ -69,14 +76,7 @@ def test_positive_fixtures_fire(signal: str, attribute: str) -> None:
         )
 
 
-@pytest.mark.parametrize(
-    "signal,attribute",
-    [
-        ("specification_artifact", "specification_artifact_count"),
-        ("error_naming", "error_naming_count"),
-        ("iterative_refinement", "iterative_refinement_count"),
-    ],
-)
+@pytest.mark.parametrize("signal,attribute", _SCALAR_SIGNAL_PAIRS)
 def test_negative_fixtures_silent(signal: str, attribute: str) -> None:
     for path in _fixture_paths(signal, "negative"):
         session = _load_session(path)
@@ -96,9 +96,8 @@ def test_empty_session_has_zero_new_counts() -> None:
         source_path="/tmp/empty",
     )
     sig = extract(session)
-    assert sig.specification_artifact_count == 0
-    assert sig.error_naming_count == 0
-    assert sig.iterative_refinement_count == 0
+    for _, attribute in _SCALAR_SIGNAL_PAIRS:
+        assert getattr(sig, attribute) == 0, attribute
 
 
 def test_whitespace_only_session_has_zero_new_counts() -> None:
@@ -110,9 +109,8 @@ def test_whitespace_only_session_has_zero_new_counts() -> None:
         source_path="/tmp/ws",
     )
     sig = extract(session)
-    assert sig.specification_artifact_count == 0
-    assert sig.error_naming_count == 0
-    assert sig.iterative_refinement_count == 0
+    for _, attribute in _SCALAR_SIGNAL_PAIRS:
+        assert getattr(sig, attribute) == 0, attribute
 
 
 # --- US-006: Knowledge-gap four-subtype classifier ---------------------------

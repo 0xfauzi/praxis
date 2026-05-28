@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "What testing framework would you recommend for a small FastAPI project? Just curious about tradeoffs."},
+  {"role": "assistant", "content": "pytest is the default..."}
+]

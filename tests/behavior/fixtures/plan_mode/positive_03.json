@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Let's plan first. Draft a plan that covers schema migration, code changes, tests, and rollback."},
+  {"role": "assistant", "content": "Plan:\n1. ..."}
+]

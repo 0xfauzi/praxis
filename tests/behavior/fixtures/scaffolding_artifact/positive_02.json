@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "I need a starter template for a TypeScript CLI tool using commander and vitest. Skeleton only - no business logic."},
+  {"role": "assistant", "content": "Here is the starter template..."}
+]

@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Scaffold a FastAPI project with /health and /users endpoints plus a tests/ directory and a pyproject.toml."},
+  {"role": "assistant", "content": "Created the scaffold..."}
+]

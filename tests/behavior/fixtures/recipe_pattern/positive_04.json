@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Same approach as we did for the export module: a Builder class plus a static factory and a sealed config dataclass."},
+  {"role": "assistant", "content": "Sure, same approach..."}
+]

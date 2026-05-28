@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Write the tests first before any implementation. I want pytest cases for edge inputs: empty list, None, single element, very large list."},
+  {"role": "assistant", "content": "Drafting the tests..."}
+]

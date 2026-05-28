@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Red phase first: write a failing test asserting parse('') raises ValueError with a clear message. Then I will tell you to do the green phase."},
+  {"role": "assistant", "content": "Failing test added..."}
+]
