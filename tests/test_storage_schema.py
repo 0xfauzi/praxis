@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from praxis.follow_up import FollowUp
 from praxis.storage import profile_store as profile_store_mod
 from praxis.storage.profile_store import MigrationError, ProfileStore, resolve_home
 
@@ -498,6 +499,137 @@ def test_cold_open_of_v0_2_db_with_legacy_follow_ups_upgrades_cleanly(tmp_home):
     assert seeded["user_chosen"] == 0
     assert seeded["display_text"] is None
     assert seeded["superseded_by"] is None
+
+
+def test_v4_columns_with_narrow_outcome_check_is_widened_on_open(tmp_home):
+    """An early-draft DB that has the v4 columns (id PK, user_chosen,
+    display_text, superseded_by) but a *narrow* outcome CHECK lacking
+    'superseded' must be rebuilt on open so the [r]eplace path works.
+
+    Regression: _ensure_follow_ups_v4 used to early-return whenever
+    user_chosen existed, leaving the narrow CHECK in place. The replace
+    flow's UPDATE ... SET outcome='superseded' then failed with an
+    IntegrityError (CHECK constraint), which the commit CLI mis-reported
+    as "you already have an active commitment" -- an infinite retry loop.
+    """
+    home = tmp_home / ".praxis"
+    home.mkdir(parents=True, exist_ok=True)
+    db_path = home / "profile.db"
+
+    conn = sqlite3.connect(db_path)
+    try:
+        # Reproduce the real-world path: a v3-marked DB (run_log row) that
+        # already recorded migration 001 as applied -- so the migration
+        # runner SKIPS the (now-wide) 001 and _ensure_follow_ups_v4 is what
+        # must widen the lingering narrow CHECK while preserving ids.
+        conn.executescript(
+            """
+            CREATE TABLE run_log (
+              run_id INTEGER PRIMARY KEY AUTOINCREMENT, run_at TEXT NOT NULL,
+              kind TEXT NOT NULL, sessions_seen INTEGER NOT NULL,
+              sessions_new INTEGER NOT NULL, notes TEXT
+            );
+            INSERT INTO run_log (run_at, kind, sessions_seen, sessions_new, notes)
+              VALUES ('2026-05-01T00:00:00+00:00', 'schema_version', 0, 0, '3');
+
+            CREATE TABLE session_scores (
+              stable_id TEXT NOT NULL, provider TEXT NOT NULL,
+              started_at TEXT NOT NULL, scored_at TEXT NOT NULL,
+              overall REAL NOT NULL,
+              dimension_scores_json TEXT NOT NULL, judge_result_json TEXT,
+              features_json TEXT NOT NULL, source_path TEXT NOT NULL,
+              judge_model TEXT, judge_pass INTEGER NOT NULL DEFAULT 1,
+              signals_json TEXT,
+              PRIMARY KEY (stable_id, judge_pass)
+            );
+
+            CREATE TABLE schema_migrations (
+              version TEXT PRIMARY KEY, applied_at TEXT NOT NULL
+            );
+            INSERT INTO schema_migrations (version, applied_at) VALUES
+              ('001_follow_ups_active_commitment.sql', '2026-05-01T00:00:00+00:00'),
+              ('002_session_reflections.sql', '2026-05-01T00:00:00+00:00'),
+              ('003_session_scores_aug_auto.sql', '2026-05-01T00:00:00+00:00');
+
+            -- Early-draft v4 shape: all the new columns BUT the narrow CHECK
+            -- (this is exactly what an old 001 baked in before 'superseded').
+            CREATE TABLE follow_ups (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              week_iso TEXT NOT NULL, dim_key TEXT NOT NULL,
+              commitment_text TEXT NOT NULL, target_metric TEXT NOT NULL,
+              baseline_value REAL NOT NULL, measured_value REAL,
+              outcome TEXT NOT NULL
+                CHECK (outcome IN ('improved','unchanged','worse','pending')),
+              user_chosen INTEGER NOT NULL DEFAULT 0,
+              display_text TEXT,
+              superseded_by INTEGER REFERENCES follow_ups(id)
+            );
+            CREATE UNIQUE INDEX idx_follow_ups_one_active_per_week
+              ON follow_ups(week_iso)
+              WHERE outcome = 'pending' AND superseded_by IS NULL;
+            """
+        )
+        conn.execute(
+            "INSERT INTO follow_ups "
+            "(id, week_iso, dim_key, commitment_text, target_metric, "
+            " baseline_value, measured_value, outcome, user_chosen, display_text) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (7, "2026-W22", "verification", "run the tests",
+             "verification_rate", 0.5, None, "pending", 1, "run the tests"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Opening the store must widen the CHECK without losing data or ids.
+    store = ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        table_sql = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='table' AND name='follow_ups'"
+        ).fetchone()["sql"]
+        row = conn.execute(
+            "SELECT id, outcome, display_text FROM follow_ups "
+            "WHERE week_iso='2026-W22'"
+        ).fetchone()
+
+    assert "superseded" in table_sql, "outcome CHECK must now allow 'superseded'"
+    # id preserved (superseded_by / session_reflections FK into follow_ups.id).
+    assert row["id"] == 7
+    assert row["outcome"] == "pending"
+    assert row["display_text"] == "run the tests"
+
+    # The replace path must now succeed end-to-end.
+    new_id = store.supersede_and_insert_follow_up(
+        prior_id=7,
+        new_follow_up=FollowUp(
+            week_iso="2026-W22",
+            dim_key="verification",
+            commitment_text="a new focus",
+            target_metric="verification_rate",
+            baseline_value=0.5,
+            measured_value=None,
+            outcome="pending",
+            user_chosen=1,
+            display_text="a new focus",
+        ),
+    )
+    with _open_db() as conn:
+        rows = conn.execute(
+            "SELECT id, outcome, superseded_by FROM follow_ups "
+            "WHERE week_iso='2026-W22' ORDER BY id"
+        ).fetchall()
+        active = conn.execute(
+            "SELECT COUNT(*) AS c FROM follow_ups "
+            "WHERE week_iso='2026-W22' AND outcome='pending' "
+            "AND superseded_by IS NULL"
+        ).fetchone()["c"]
+
+    assert [(r["id"], r["outcome"], r["superseded_by"]) for r in rows] == [
+        (7, "superseded", new_id),
+        (new_id, "pending", None),
+    ]
+    assert active == 1
 
 
 def test_existing_follow_ups_rows_preserved_through_migration(tmp_home):
