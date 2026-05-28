@@ -1,7 +1,7 @@
 """CLI entry point.
 
 Commands (v0.2 surface):
-  week             Render this week's digest (the primary verb in v0.2).
+  review           Render this week's digest (the primary verb in v0.2).
   scan             Scan + score new sessions; no digest rendered (spec 12.1).
   re-score         Re-run the frontier judge for one session and update its row.
   baseline         Print the current 90-day baseline (read-only).
@@ -316,8 +316,8 @@ def _weekly_error_log_path() -> Path:
     return log_dir / "weekly.err.log"
 
 
-def _handle_week_failure(exc: BaseException) -> None:
-    """Surface an unhandled `cmd_week --notify` crash.
+def _handle_review_failure(exc: BaseException) -> None:
+    """Surface an unhandled `cmd_review --notify` crash.
 
     Two effects: append a timestamped traceback to
     `~/.praxis/logs/weekly.err.log`, and post a distinct failure
@@ -328,7 +328,7 @@ def _handle_week_failure(exc: BaseException) -> None:
     log_path = _weekly_error_log_path()
     stamp = datetime.now(timezone.utc).isoformat()
     tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-    entry = f"\n[{stamp}] praxis week --notify failed\n{tb}\n"
+    entry = f"\n[{stamp}] praxis review --notify failed\n{tb}\n"
     try:
         with log_path.open("a", encoding="utf-8") as f:
             f.write(entry)
@@ -344,7 +344,7 @@ def _handle_week_failure(exc: BaseException) -> None:
     )
 
 
-def cmd_week(args: argparse.Namespace) -> int:
+def cmd_review(args: argparse.Namespace) -> int:
     """Render this week's digest (or a past week with --week <iso>).
 
     Flag behavior (spec sections 12.1, 13.1-13.3):
@@ -394,16 +394,16 @@ def cmd_week(args: argparse.Namespace) -> int:
         # stderr. Direct (non-notify) invocations skip this wrap so
         # debugging stays Pythonic.
         try:
-            return _cmd_week_impl(args)
+            return _cmd_review_impl(args)
         except SystemExit:
             raise
         except BaseException as exc:  # noqa: BLE001
-            _handle_week_failure(exc)
+            _handle_review_failure(exc)
             return 4
-    return _cmd_week_impl(args)
+    return _cmd_review_impl(args)
 
 
-def _cmd_week_impl(args: argparse.Namespace) -> int:
+def _cmd_review_impl(args: argparse.Namespace) -> int:
     needs_judge = args.week is None and not args.dry_run
     if needs_judge and not has_api_key_configured():
         print(NO_API_KEY_MESSAGE, file=sys.stderr)
@@ -489,7 +489,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     renderer: it does the work of discovering new sessions and persisting
     judge results, and prints a one-line summary of what changed. The
     digest (terminal masthead, dimensions, coaching, trajectory) is the
-    job of ``praxis week`` and ``praxis show <week_iso>``.
+    job of ``praxis review`` and ``praxis show <week_iso>``.
 
     The output is a compact progress report so the user can confirm the
     scan made progress and, if invoked from a cron job, the log lines
@@ -514,7 +514,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         f"scored {summary.sessions_scored} via judge "
         f"({summary.elapsed_seconds}s)."
     )
-    print("Render the digest with: praxis week")
+    print("Render the digest with: praxis review")
     return 0
 
 
@@ -600,7 +600,7 @@ def cmd_history(args: argparse.Namespace) -> int:  # noqa: ARG001
     """
     weeks = list_persisted_weeks()
     if not weeks:
-        print("No history yet. Run: praxis scan, then praxis week.")
+        print("No history yet. Run: praxis scan, then praxis review.")
         return 0
     print("\nPRAXIS - WEEKLY HISTORY\n")
     print(f"  {'Week'.ljust(12)} {'Sessions'.rjust(8)}   Overall  HTML")
@@ -626,7 +626,7 @@ def cmd_history(args: argparse.Namespace) -> int:  # noqa: ARG001
 def cmd_show(args: argparse.Namespace) -> int:
     """Render a past week's digest from persisted data.
 
-    Read-only: equivalent to ``praxis week --week <iso>`` but skips the
+    Read-only: equivalent to ``praxis review --week <iso>`` but skips the
     HTML/notify side-effect flags.
 
     Exit codes (spec 12.3):
@@ -710,7 +710,7 @@ def cmd_open(args: argparse.Namespace) -> int:
     html = _latest_html_path()
     if not html.exists():
         print(
-            "No weekly digest yet. Run `praxis week --write-html` or "
+            "No weekly digest yet. Run `praxis review --write-html` or "
             "install the daemon with `praxis install-weekly`.",
             file=sys.stderr,
         )
@@ -734,7 +734,7 @@ def cmd_last(args: argparse.Namespace) -> int:  # noqa: ARG001
     html = _latest_html_path()
     if not html.exists():
         print(
-            "No weekly digest yet. Run `praxis week --write-html` or "
+            "No weekly digest yet. Run `praxis review --write-html` or "
             "install the daemon with `praxis install-weekly`.",
             file=sys.stderr,
         )
@@ -816,7 +816,7 @@ def cmd_rubric(args: argparse.Namespace) -> int:  # noqa: ARG001
 
 
 def cmd_install_weekly(args: argparse.Namespace) -> int:  # noqa: ARG001
-    """Generate and load the macOS LaunchAgent for ``praxis week --notify``.
+    """Generate and load the macOS LaunchAgent for ``praxis review --notify``.
 
     On macOS, writes ``~/Library/LaunchAgents/co.praxis.weekly.plist``
     with the day/time from ``~/.praxis/config.toml`` and loads it via
@@ -1116,8 +1116,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"praxis {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    week = sub.add_parser(
-        "week",
+    review = sub.add_parser(
+        "review",
         help="Render this week's digest (the v0.2 primary verb).",
         description=(
             "Render the weekly digest from the current data, or render a "
@@ -1125,7 +1125,7 @@ def build_parser() -> argparse.ArgumentParser:
             "renders; HTML and notifications are opt-in via flags."
         ),
     )
-    week.add_argument(
+    review.add_argument(
         "--week",
         type=str,
         default=None,
@@ -1135,7 +1135,7 @@ def build_parser() -> argparse.ArgumentParser:
             "are skipped; the snapshot is rebuilt from the persisted DB rows."
         ),
     )
-    week.add_argument(
+    review.add_argument(
         "--dry-run",
         action="store_true",
         help=(
@@ -1143,7 +1143,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Useful for previewing the digest against current data."
         ),
     )
-    week.add_argument(
+    review.add_argument(
         "--frontier-only",
         action="store_true",
         help=(
@@ -1152,7 +1152,7 @@ def build_parser() -> argparse.ArgumentParser:
             "flag is wired here so the CLI seam stays stable."
         ),
     )
-    week.add_argument(
+    review.add_argument(
         "--explain-judging",
         action="store_true",
         help=(
@@ -1160,7 +1160,7 @@ def build_parser() -> argparse.ArgumentParser:
             "(spec 9.6). Will note when no distribution was recorded."
         ),
     )
-    week.add_argument(
+    review.add_argument(
         "--notify",
         action="store_true",
         help=(
@@ -1169,7 +1169,7 @@ def build_parser() -> argparse.ArgumentParser:
             "--write-html."
         ),
     )
-    week.add_argument(
+    review.add_argument(
         "--write-html",
         action="store_true",
         help=(
@@ -1177,7 +1177,7 @@ def build_parser() -> argparse.ArgumentParser:
             "(spec 13.1). The terminal render is always printed."
         ),
     )
-    week.set_defaults(func=cmd_week)
+    review.set_defaults(func=cmd_review)
 
     scan = sub.add_parser(
         "scan",
@@ -1186,7 +1186,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Discover new sessions and run the judge against them, "
             "persisting results into ~/.praxis/profile.db. Prints a "
             "one-line summary; the digest itself lives behind "
-            "'praxis week' / 'praxis show <iso>'."
+            "'praxis review' / 'praxis show <iso>'."
         ),
     )
     scan.add_argument("--since-days", type=int, default=30,
@@ -1301,7 +1301,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     iw = sub.add_parser(
         "install-weekly",
-        help="Install the macOS LaunchAgent that runs 'praxis week --notify'.",
+        help="Install the macOS LaunchAgent that runs 'praxis review --notify'.",
         description=(
             "Generate ~/Library/LaunchAgents/co.praxis.weekly.plist from "
             "the schedule in ~/.praxis/config.toml and load it via "

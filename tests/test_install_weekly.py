@@ -3,7 +3,7 @@
 Acceptance criteria covered:
   - ``praxis install-weekly`` writes ~/Library/LaunchAgents/co.praxis.weekly.plist
     with the day/time from ~/.praxis/config.toml.
-  - The plist's ProgramArguments invoke ``praxis week --notify``.
+  - The plist's ProgramArguments invoke ``praxis review --notify``.
   - Re-running install-weekly is idempotent (existing job is unloaded,
     the plist is overwritten, and the new job is loaded again).
   - launchctl failure surfaces as CLI exit code 4 with a clear message.
@@ -52,7 +52,7 @@ def test_build_plist_encodes_weekday_hour_minute():
     """The StartCalendarInterval block reflects the dataclass fields verbatim."""
     text = build_plist(
         PlistContext(
-            program_arguments=["/usr/local/bin/praxis", "week", "--notify"],
+            program_arguments=["/usr/local/bin/praxis", "review", "--notify"],
             weekday=0,
             hour=18,
             minute=0,
@@ -70,7 +70,7 @@ def test_build_plist_lists_program_arguments_in_order():
     """ProgramArguments survives in its input order, one <string> per arg."""
     text = build_plist(
         PlistContext(
-            program_arguments=["/usr/local/bin/praxis", "week", "--notify"],
+            program_arguments=["/usr/local/bin/praxis", "review", "--notify"],
             weekday=1,
             hour=9,
             minute=30,
@@ -78,16 +78,16 @@ def test_build_plist_lists_program_arguments_in_order():
         )
     )
     bin_idx = text.index("/usr/local/bin/praxis")
-    week_idx = text.index("<string>week</string>")
+    review_idx = text.index("<string>review</string>")
     notify_idx = text.index("<string>--notify</string>")
-    assert bin_idx < week_idx < notify_idx
+    assert bin_idx < review_idx < notify_idx
 
 
 def test_build_plist_includes_label():
     """The Label key matches the install-weekly module's canonical label."""
     text = build_plist(
         PlistContext(
-            program_arguments=["praxis", "week", "--notify"],
+            program_arguments=["praxis", "review", "--notify"],
             weekday=2,
             hour=8,
             minute=45,
@@ -153,15 +153,15 @@ def test_install_weekly_uses_config_day_and_time(tmp_home, fake_launchctl, monke
     assert "<integer>30</integer>" in plist_text
 
 
-def test_install_weekly_program_arguments_run_praxis_week_notify(tmp_home, fake_launchctl):
-    """The launchd ProgramArguments include 'week' and '--notify' in order."""
+def test_install_weekly_program_arguments_run_praxis_review_notify(tmp_home, fake_launchctl):
+    """The launchd ProgramArguments include 'review' and '--notify' in order."""
     path = install_weekly_macos()
     text = path.read_text()
-    assert "<string>week</string>" in text
+    assert "<string>review</string>" in text
     assert "<string>--notify</string>" in text
-    # `week` MUST come before `--notify` so the launchd invocation
-    # parses identically to a hand-typed `praxis week --notify`.
-    assert text.index("<string>week</string>") < text.index("<string>--notify</string>")
+    # `review` MUST come before `--notify` so the launchd invocation
+    # parses identically to a hand-typed `praxis review --notify`.
+    assert text.index("<string>review</string>") < text.index("<string>--notify</string>")
 
 
 def test_install_weekly_calls_launchctl_load(tmp_home, fake_launchctl):
@@ -393,13 +393,13 @@ def test_build_systemd_snippet_uses_day_and_time():
     assert "OnCalendar=Wed *-*-* 09:30:00" in text
 
 
-def test_build_systemd_snippet_invokes_praxis_week_notify():
-    """The ExecStart line ends with ``week --notify`` for the configured argv."""
+def test_build_systemd_snippet_invokes_praxis_review_notify():
+    """The ExecStart line ends with ``review --notify`` for the configured argv."""
     text = build_systemd_snippet(
         ScheduleConfig(),
         ["/usr/local/bin/praxis"],
     )
-    assert "ExecStart=/usr/local/bin/praxis week --notify" in text
+    assert "ExecStart=/usr/local/bin/praxis review --notify" in text
 
 
 def test_build_systemd_snippet_rejects_invalid_day():
@@ -435,14 +435,14 @@ def test_build_task_scheduler_snippet_uses_day_and_time():
     assert "<StartBoundary>2020-01-01T07:15:00</StartBoundary>" in text
 
 
-def test_build_task_scheduler_snippet_runs_praxis_week_notify():
-    """Command + Arguments split praxis_argv[0] from the trailing 'week --notify'."""
+def test_build_task_scheduler_snippet_runs_praxis_review_notify():
+    """Command + Arguments split praxis_argv[0] from the trailing 'review --notify'."""
     text = build_task_scheduler_snippet(
         ScheduleConfig(),
         ["praxis.exe"],
     )
     assert "<Command>praxis.exe</Command>" in text
-    assert "<Arguments>week --notify</Arguments>" in text
+    assert "<Arguments>review --notify</Arguments>" in text
 
 
 def test_build_task_scheduler_snippet_rejects_invalid_day():
