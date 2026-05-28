@@ -727,7 +727,7 @@ def _digest_with_secrets() -> WeeklyDigest:
         ),
         task_breakdown=(
             TaskRow(
-                label=f"refactoring <synthetic>",
+                label="refactoring <synthetic>",
                 session_count=3,
                 dollars=5.40,
                 worst_score=4.2,
