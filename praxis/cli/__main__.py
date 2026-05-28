@@ -17,7 +17,9 @@ Commands (v0.2 surface):
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import select
 import shutil
 import subprocess
 import sys
@@ -829,6 +831,14 @@ _REFLECT_NO_COMMITMENT_MSG = (
     "No active commitment this week. Run `praxis commit` to start."
 )
 
+# US-025 (--session-end with stdin payload). The 100ms timeout matches
+# the AC: AI tools post the Stop-hook JSON payload immediately on
+# session end and we must not block them. Notes are user-readable so
+# the digest panel can explain why an opt-out row landed.
+_HOOK_TIMEOUT_SECONDS = 0.1
+_HOOK_PAYLOAD_MISSING_NOTE = "hook payload missing or unparseable"
+_HOOK_PAYLOAD_NO_SESSION_NOTE = "hook payload missing session_id"
+
 _SELF_REPORT_BY_CHOICE: dict[str, SelfReport] = {
     "y": "yes",
     "yes": "yes",
@@ -870,19 +880,106 @@ def _read_optional_note(stream: Any) -> str | None:
     return stripped or None
 
 
-def cmd_reflect(args: argparse.Namespace) -> int:  # noqa: ARG001
-    """Interactively reflect on this week's active commitment.
+def _read_hook_payload(
+    stream: Any,
+    timeout_seconds: float = _HOOK_TIMEOUT_SECONDS,
+) -> str | None:
+    """Read a Stop-hook JSON payload from ``stream`` within ``timeout_seconds``.
 
-    Prompts for [y]es / [n]o / [p]artial / [s]kip, then accepts an
-    optional one-line note. Inserts one row into ``session_reflections``
-    so opt-outs are still counted.
+    Returns the raw text (caller parses JSON) or None on timeout / EOF /
+    error. The 100ms default timeout matches the US-025 AC: AI tools
+    post the hook payload immediately on session end and we must not
+    block them. On POSIX the timeout is enforced via ``select.select``;
+    on Windows or on streams without a real file descriptor (test
+    StringIOs), the read is unconditional and returns whatever is
+    available -- in practice the hook closes stdin right after writing
+    so EOF arrives quickly anyway.
+    """
+    fileno: int | None = None
+    try:
+        fileno = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        fileno = None
 
-    Exit codes:
+    if fileno is not None and sys.platform != "win32":
+        try:
+            ready, _, _ = select.select([fileno], [], [], timeout_seconds)
+        except (OSError, ValueError):
+            return None
+        if not ready:
+            return None
+
+    try:
+        data = stream.read()
+    except (OSError, ValueError):
+        return None
+    if not data:
+        return None
+    if isinstance(data, bytes):
+        try:
+            data = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    return data
+
+
+def _parse_hook_payload(raw: str | None) -> dict[str, Any] | None:
+    """Parse a hook payload string. None on missing / malformed.
+
+    Duck-typed: we accept any top-level JSON object regardless of which
+    keys are present. The caller decides whether the required fields
+    for Claude Code (session_id, transcript_path, cwd, hook_event_name)
+    or Codex (session_id, cwd, hook_event_name) are satisfied.
+    """
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    try:
+        payload = json.loads(stripped)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _extract_session_id(payload: dict[str, Any]) -> str | None:
+    """Pluck ``session_id`` from a hook payload if it's a non-empty string.
+
+    Both Claude Code and Codex shapes name this field identically, so
+    the duck-typed check on ``session_id`` covers both providers
+    without per-shape branching.
+    """
+    sid = payload.get("session_id")
+    if isinstance(sid, str) and sid.strip():
+        return sid
+    return None
+
+
+def cmd_reflect(args: argparse.Namespace) -> int:
+    """Reflect on this week's active commitment.
+
+    Two modes:
+      * Interactive (default, US-024): prompt [y]es / [n]o / [p]artial /
+        [s]kip on stdin, then accept an optional one-line note. Inserts
+        one row into ``session_reflections`` so opt-outs are still
+        counted.
+      * --session-end (US-025): read a JSON Stop-hook payload from
+        stdin (Claude Code or Codex shape) within a 100ms timeout and
+        persist a reflection row. Never blocks the AI tool; every code
+        path exits 0.
+
+    Exit codes (interactive mode):
       0 -- a reflection row was inserted, or no active commitment
            exists for the current week (silent no-op with a hint).
       1 -- input parsing gave up (>3 invalid choices) or the
            commitment invariant was violated.
     """
+    if getattr(args, "session_end", False):
+        return _cmd_reflect_session_end(sys.stdin)
+
     store = ProfileStore()
     week_iso = current_iso_week()
     try:
@@ -896,6 +993,67 @@ def cmd_reflect(args: argparse.Namespace) -> int:  # noqa: ARG001
         return 0
 
     return _run_interactive_reflect(store, active, sys.stdin, sys.stdout)
+
+
+def _cmd_reflect_session_end(stdin: Any) -> int:
+    """Handle ``praxis reflect --session-end``: parse a Stop-hook JSON
+    payload from stdin and persist a reflection row.
+
+    Never blocks the AI tool: every code path exits 0. When the payload
+    is missing, malformed, or has no session_id, a skip row is still
+    written with a descriptive note so opt-outs / hook failures are
+    counted in the digest panel. The happy path (valid payload with
+    session_id) writes a placeholder skip row attributed to the real
+    session id; US-026 will swap the note to 'session too short' when
+    the transcript falls below the configured turn/elapsed thresholds,
+    and US-027 will replace this branch with a detached child that
+    opens /dev/tty for the interactive prompt.
+    """
+    store = ProfileStore()
+    week_iso = current_iso_week()
+    try:
+        active = store.load_active_commitment(week_iso)
+    except MultipleActiveCommitmentsError:
+        # Can't pick a follow_up_id without violating the invariant.
+        # Silent exit 0 -- printing to stderr here would pollute the
+        # AI tool's session log.
+        return 0
+    if active is None:
+        # Nothing to reflect on this week. Silent exit 0.
+        return 0
+
+    raw = _read_hook_payload(stdin)
+    payload = _parse_hook_payload(raw)
+    fallback_stable_id = f"session-end:{week_iso}"
+    if payload is None:
+        store.insert_session_reflection(
+            session_stable_id=fallback_stable_id,
+            follow_up_id=active.follow_up_id,
+            self_report="skip",
+            note=_HOOK_PAYLOAD_MISSING_NOTE,
+        )
+        return 0
+
+    session_id = _extract_session_id(payload)
+    if session_id is None:
+        store.insert_session_reflection(
+            session_stable_id=fallback_stable_id,
+            follow_up_id=active.follow_up_id,
+            self_report="skip",
+            note=_HOOK_PAYLOAD_NO_SESSION_NOTE,
+        )
+        return 0
+
+    # Happy path: valid payload with a session_id. Write a placeholder
+    # skip row so the invocation is observable; US-026 / US-027 will
+    # rebuild this branch once threshold gating and TTY detection land.
+    store.insert_session_reflection(
+        session_stable_id=session_id,
+        follow_up_id=active.follow_up_id,
+        self_report="skip",
+        note=None,
+    )
+    return 0
 
 
 def _run_interactive_reflect(
@@ -1450,6 +1608,18 @@ def build_parser() -> argparse.ArgumentParser:
             "partial / skip plus an optional one-line note). When no "
             "active commitment exists for this week, exits 0 with a "
             "hint to run `praxis commit` first."
+        ),
+    )
+    rfl.add_argument(
+        "--session-end",
+        action="store_true",
+        dest="session_end",
+        help=(
+            "Read a Stop-hook JSON payload from stdin (Claude Code or "
+            "Codex shape) instead of running the interactive prompt. "
+            "Used by editor hooks; never blocks the AI tool. Writes a "
+            "skip row with a descriptive note when the payload is "
+            "missing / malformed / has no session_id, and always exits 0."
         ),
     )
     rfl.set_defaults(func=cmd_reflect)

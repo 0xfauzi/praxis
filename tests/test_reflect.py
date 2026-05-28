@@ -1,4 +1,4 @@
-"""Tests for ``praxis reflect`` (interactive 2-question prompt).
+"""Tests for ``praxis reflect`` (interactive 2-question prompt + --session-end).
 
 US-024 acceptance criteria covered here:
   - `praxis reflect` (no flags, TTY) renders the active commitment with
@@ -8,6 +8,15 @@ US-024 acceptance criteria covered here:
     hint pointing at `praxis commit`.
   - Selecting [s]kip writes a row with self_report='skip' and
     note=NULL; the row is still inserted (we count opt-outs).
+
+US-025 acceptance criteria covered here:
+  - `--session-end` reads JSON from stdin and accepts both Claude Code
+    and Codex payload shapes via duck-typing on present keys.
+  - Missing / malformed payloads write a skip row with note
+    'hook payload missing or unparseable' and exit 0.
+  - A payload with no session_id still inserts a descriptive skip row
+    (we never silently drop a hook invocation when an active
+    commitment exists).
 
 The tests drive the CLI through the argparse entry point
 (``praxis.cli.__main__.main``) so subparser registration is exercised
@@ -20,12 +29,19 @@ exact bytes. The actual TTY-detection logic is exercised by US-027.
 from __future__ import annotations
 
 import io
+import json
 import sys
 
 import pytest
 
 from praxis.cli.__main__ import (
+    _HOOK_PAYLOAD_MISSING_NOTE,
+    _HOOK_PAYLOAD_NO_SESSION_NOTE,
     _REFLECT_NO_COMMITMENT_MSG,
+    _cmd_reflect_session_end,
+    _extract_session_id,
+    _parse_hook_payload,
+    _read_hook_payload,
     _read_optional_note,
     _read_self_report_choice,
     _run_interactive_reflect,
@@ -322,3 +338,278 @@ def test_cli_reflect_skip_inserts_row_through_argparse(
     assert len(rows) == 1
     assert rows[0]["self_report"] == "skip"
     assert rows[0]["note"] is None
+
+
+# ---- US-025: --session-end stdin payload parsing ----------------------
+
+
+def _claude_code_payload(
+    session_id: str = "claude-sess-1",
+    transcript_path: str = "/tmp/transcript.jsonl",
+    cwd: str = "/tmp/project",
+) -> str:
+    """Build a JSON string in Claude Code Stop-hook shape."""
+    return json.dumps(
+        {
+            "session_id": session_id,
+            "transcript_path": transcript_path,
+            "cwd": cwd,
+            "hook_event_name": "Stop",
+        }
+    )
+
+
+def _codex_payload(
+    session_id: str = "codex-sess-1",
+    cwd: str = "/tmp/project",
+) -> str:
+    """Build a JSON string in Codex Stop-hook shape (no transcript_path)."""
+    return json.dumps(
+        {
+            "session_id": session_id,
+            "cwd": cwd,
+            "hook_event_name": "Stop",
+        }
+    )
+
+
+# ---- _read_hook_payload / _parse_hook_payload / _extract_session_id ---
+
+
+def test_read_hook_payload_returns_text_for_stringio():
+    raw = '{"session_id": "abc"}'
+    assert _read_hook_payload(io.StringIO(raw)) == raw
+
+
+def test_read_hook_payload_returns_none_on_empty_stream():
+    assert _read_hook_payload(io.StringIO("")) is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"session_id": "abc"}',
+        _claude_code_payload(),
+        _codex_payload(),
+    ],
+)
+def test_parse_hook_payload_accepts_dict_objects(raw):
+    payload = _parse_hook_payload(raw)
+    assert isinstance(payload, dict)
+    assert payload["session_id"] != ""
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        "",
+        "   \n  ",
+        "not-json",
+        "{bad json",
+        "123",          # JSON number, not dict
+        "[1, 2, 3]",    # JSON list, not dict
+        '"a string"',   # JSON string, not dict
+    ],
+)
+def test_parse_hook_payload_rejects_non_dict_or_malformed(raw):
+    assert _parse_hook_payload(raw) is None
+
+
+def test_extract_session_id_returns_string_when_present():
+    assert _extract_session_id({"session_id": "abc-123"}) == "abc-123"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"session_id": ""},
+        {"session_id": "   "},
+        {"session_id": None},
+        {"session_id": 42},
+        {"cwd": "/tmp"},  # Codex-shape minus session_id
+    ],
+)
+def test_extract_session_id_returns_none_when_missing_or_bad_type(payload):
+    assert _extract_session_id(payload) is None
+
+
+# ---- _cmd_reflect_session_end (programmatic) --------------------------
+
+
+def test_session_end_no_active_commitment_is_silent_noop(tmp_home, capsys):
+    """No follow-up -> no row, exit 0, nothing printed (hook output is
+    visible to the AI tool; we must not pollute it)."""
+    stdin = io.StringIO(_claude_code_payload())
+    code = _cmd_reflect_session_end(stdin)
+
+    assert code == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_session_end_claude_code_shape_inserts_row_with_session_id(tmp_home):
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+
+    stdin = io.StringIO(_claude_code_payload(session_id="claude-abc-1"))
+    code = _cmd_reflect_session_end(stdin)
+
+    assert code == 0
+    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
+    assert len(rows) == 1
+    assert rows[0]["session_stable_id"] == "claude-abc-1"
+    assert rows[0]["self_report"] == "skip"
+    assert rows[0]["note"] is None
+
+
+def test_session_end_codex_shape_inserts_row_with_session_id(tmp_home):
+    """Codex payload omits transcript_path; the duck-typed parse must
+    still recognize it because session_id is present."""
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+
+    stdin = io.StringIO(_codex_payload(session_id="codex-xyz-2"))
+    code = _cmd_reflect_session_end(stdin)
+
+    assert code == 0
+    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
+    assert len(rows) == 1
+    assert rows[0]["session_stable_id"] == "codex-xyz-2"
+    assert rows[0]["self_report"] == "skip"
+    assert rows[0]["note"] is None
+
+
+def test_session_end_empty_stdin_writes_missing_payload_skip(tmp_home):
+    """AC: missing payload -> skip row with the exact AC note."""
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+
+    stdin = io.StringIO("")
+    code = _cmd_reflect_session_end(stdin)
+
+    assert code == 0
+    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
+    assert len(rows) == 1
+    assert rows[0]["self_report"] == "skip"
+    assert rows[0]["note"] == _HOOK_PAYLOAD_MISSING_NOTE
+    assert rows[0]["session_stable_id"] == "session-end:2026-W22"
+
+
+def test_session_end_malformed_json_writes_skip_with_payload_note(tmp_home):
+    """AC: malformed JSON -> same skip path as missing payload."""
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+
+    stdin = io.StringIO("{not-valid-json")
+    code = _cmd_reflect_session_end(stdin)
+
+    assert code == 0
+    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
+    assert len(rows) == 1
+    assert rows[0]["self_report"] == "skip"
+    assert rows[0]["note"] == _HOOK_PAYLOAD_MISSING_NOTE
+
+
+def test_session_end_json_not_object_writes_skip_with_payload_note(tmp_home):
+    """A JSON literal (number, list, string) is unparseable as a payload."""
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+
+    stdin = io.StringIO("[]")
+    code = _cmd_reflect_session_end(stdin)
+
+    assert code == 0
+    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
+    assert len(rows) == 1
+    assert rows[0]["note"] == _HOOK_PAYLOAD_MISSING_NOTE
+
+
+def test_session_end_payload_without_session_id_writes_descriptive_skip(tmp_home):
+    """AC: 'no session_id at all' still inserts a skip row instead of
+    inserting nothing."""
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+
+    payload = json.dumps({"cwd": "/tmp", "hook_event_name": "Stop"})
+    stdin = io.StringIO(payload)
+    code = _cmd_reflect_session_end(stdin)
+
+    assert code == 0
+    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
+    assert len(rows) == 1
+    assert rows[0]["self_report"] == "skip"
+    assert rows[0]["note"] == _HOOK_PAYLOAD_NO_SESSION_NOTE
+    assert rows[0]["session_stable_id"] == "session-end:2026-W22"
+
+
+def test_session_end_empty_session_id_is_treated_as_missing(tmp_home):
+    """An empty-string session_id is just as bad as no session_id."""
+    store = ProfileStore()
+    active = _seed_active(store, "2026-W22")
+
+    payload = json.dumps({"session_id": "", "cwd": "/tmp"})
+    stdin = io.StringIO(payload)
+    code = _cmd_reflect_session_end(stdin)
+
+    assert code == 0
+    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
+    assert len(rows) == 1
+    assert rows[0]["note"] == _HOOK_PAYLOAD_NO_SESSION_NOTE
+
+
+# ---- end-to-end via argparse main() (--session-end branch) ------------
+
+
+def test_cli_reflect_session_end_dispatches_to_session_end_branch(
+    monkeypatch, tmp_home, capsys
+):
+    """Argparse wiring: ``--session-end`` reaches ``_cmd_reflect_session_end``
+    rather than the interactive prompt."""
+    store = ProfileStore()
+    from praxis.cli import __main__ as cli_main
+
+    monkeypatch.setattr(cli_main, "current_iso_week", lambda: "2026-W22")
+    _seed_active(store, "2026-W22")
+
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(_claude_code_payload(session_id="hook-id-9"))
+    )
+    code = main(["reflect", "--session-end"])
+
+    assert code == 0
+    captured = capsys.readouterr()
+    # Session-end mode is silent on stdout/stderr -- the AI tool sees
+    # the hook's output, so any chatter would pollute its session log.
+    assert "Did you focus on" not in captured.out
+    assert "Recorded reflection" not in captured.out
+
+    active = store.load_active_commitment("2026-W22")
+    assert active is not None
+    rows = store.load_session_reflections(follow_up_id=active.follow_up_id)
+    assert len(rows) == 1
+    assert rows[0]["session_stable_id"] == "hook-id-9"
+    assert rows[0]["self_report"] == "skip"
+
+
+def test_cli_reflect_session_end_exit_0_when_no_active_commitment(
+    monkeypatch, tmp_home, capsys
+):
+    """With no active commitment, --session-end exits 0 silently (no
+    row to write, no AI-tool blocking)."""
+    from praxis.cli import __main__ as cli_main
+
+    monkeypatch.setattr(cli_main, "current_iso_week", lambda: "2026-W22")
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(_claude_code_payload())
+    )
+    code = main(["reflect", "--session-end"])
+
+    assert code == 0
+    captured = capsys.readouterr()
+    # The interactive 'No active commitment' hint must NOT print: the
+    # hook payload from Claude Code expects silent success on the
+    # parent process.
+    assert _REFLECT_NO_COMMITMENT_MSG not in captured.out
