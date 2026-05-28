@@ -1,7 +1,7 @@
 """``praxis install-weekly`` -- macOS launchd integration (spec 12.4, 13).
 
 The weekly digest cadence is the core delivery surface in v0.2: a
-LaunchAgent fires ``praxis week --notify`` on the user-configured day
+LaunchAgent fires ``praxis review --notify`` on the user-configured day
 and time, which writes the HTML digest under ``~/.praxis/weeks/`` and
 posts a macOS notification. ``install_weekly_macos`` generates and
 loads the launchd plist; ``uninstall_weekly_macos`` reverses it.
@@ -133,7 +133,7 @@ class PlistContext:
 def build_plist(ctx: PlistContext) -> str:
     """Render the LaunchAgent XML for ``co.praxis.weekly``.
 
-    The plist runs ``praxis week --notify`` on the configured day/time
+    The plist runs ``praxis review --notify`` on the configured day/time
     in local time, writes stdout/stderr to ``~/.praxis/logs/`` so the
     job is debuggable (Appendix A item 4), and uses
     ``StartCalendarInterval`` so launchd handles missed runs
@@ -180,7 +180,7 @@ def _build_context(
     log_dir: Path,
 ) -> PlistContext:
     return PlistContext(
-        program_arguments=[*praxis_argv, "week", "--notify"],
+        program_arguments=[*praxis_argv, "review", "--notify"],
         weekday=_normalize_day(schedule.day),
         hour=_normalize_hour(schedule.hour),
         minute=_normalize_minute(schedule.minute),
@@ -333,8 +333,8 @@ def _normalize_taskscheduler_day(day: str) -> str:
 
 
 def _format_praxis_exec(praxis_argv: Sequence[str]) -> str:
-    """Shell-quote the argv that runs ``praxis week --notify`` end to end."""
-    parts = [*praxis_argv, "week", "--notify"]
+    """Shell-quote the argv that runs ``praxis review --notify`` end to end."""
+    parts = [*praxis_argv, "review", "--notify"]
     return " ".join(shlex.quote(p) for p in parts)
 
 
@@ -413,7 +413,7 @@ def build_task_scheduler_snippet(
     if not praxis_argv:
         raise InstallWeeklyError("praxis_argv must contain at least the command.")
     command = praxis_argv[0]
-    arg_parts = [*praxis_argv[1:], "week", "--notify"]
+    arg_parts = [*praxis_argv[1:], "review", "--notify"]
     arguments = " ".join(arg_parts)
     return (
         f'<?xml version="1.0" encoding="UTF-16"?>\n'

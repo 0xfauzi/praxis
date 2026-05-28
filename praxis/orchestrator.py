@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from praxis.follow_up import FollowUp
+    from praxis.reports.commitment_rollup import CommitmentRollup
 
 
 def _utcnow() -> datetime:
@@ -41,6 +42,11 @@ from praxis.behavior.aug_auto import (
     AugAutoUnavailableError,
     classify_session,
 )
+from praxis.reports.commitment_rollup import (
+    build_commitment_rollup,
+    fetch_self_report_tally,
+)
+from praxis.reports.gap_judge import apply_gap_prose
 from pathlib import Path
 
 from praxis.models import Moment as JudgeMoment, Session
@@ -186,6 +192,7 @@ class _SummaryView:
     cost_total_usd: float | None
     cost_baseline_usd: float | None
     last_week_means: dict[str, float] | None
+    commitment_rollup: "CommitmentRollup | None" = None
 
 
 def _gather_sessions(since_days: int | None = None) -> list[Session]:
@@ -449,6 +456,11 @@ class WeeklyRunSummary:
     # week. None when the precondition (2+ weeks of data) is not met
     # so the renderer omits the faded last-week annotation.
     last_week_means: dict[str, float] | None = None
+    # Spec section 2 (coaching-reposition): rollup of the active
+    # commitment's status for the masthead. None when no follow-up
+    # exists for the rendered week so the masthead's commitment block
+    # is omitted rather than rendered with empty data.
+    commitment_rollup: "CommitmentRollup | None" = None
 
 
 def _step_scan(since_days: int) -> list[Session]:
@@ -923,6 +935,27 @@ def _compute_week_rates(sessions: list[Session]) -> tuple[float, float]:
     return verification_rate, delegation_rate
 
 
+def _count_sessions_in_iso_week(store: ProfileStore, week_iso: str) -> int:
+    """Count persisted session_scores rows whose started_at falls in the ISO week.
+
+    Used by the commitment rollup so the masthead can show
+    "sessions this week vs last week" without making the renderer
+    issue its own SQL. Pass-2 rows override pass-1, so we dedupe via
+    `load_session_scores`'s default behavior.
+    """
+    try:
+        week_start, week_end = parse_iso_week(week_iso)
+    except InvalidWeekError:
+        return 0
+    since_dt = datetime.combine(week_start, datetime.min.time(), tzinfo=timezone.utc)
+    until_dt = datetime.combine(week_end, datetime.min.time(), tzinfo=timezone.utc)
+    rows = store.load_session_scores(since=since_dt)
+    return sum(
+        1 for row in rows
+        if datetime.fromisoformat(row["started_at"]) < until_dt
+    )
+
+
 def _close_prior_follow_up(
     store: ProfileStore,
     current_week_iso: str,
@@ -966,6 +999,7 @@ def _step_render(
     judge_results: dict[str, JudgeResult] | None = None,
     moments: list[JudgeMoment] | None = None,
     last_week_means: dict[str, float] | None = None,
+    commitment_rollup: "CommitmentRollup | None" = None,
 ) -> tuple[str, str]:
     """Step 8: produce HTML + terminal renderings of the digest.
 
@@ -981,6 +1015,7 @@ def _step_render(
     from praxis.reports import digest_terminal as _dt
     from praxis.reports.adapter import build_html_digest, build_terminal_digest
 
+    _ = dry_run  # currently informational; renderer write-paths read it via summary
     view = _SummaryView(
         week_iso=week_iso,
         sessions=sessions,
@@ -993,6 +1028,7 @@ def _step_render(
         cost_total_usd=cost_total_usd,
         cost_baseline_usd=cost_baseline_usd,
         last_week_means=last_week_means,
+        commitment_rollup=commitment_rollup,
     )
     rendered_html = _dh.render(build_html_digest(view, follow_up))
     rendered_terminal = _dt.render(build_terminal_digest(view, follow_up))
@@ -1120,6 +1156,33 @@ def run_weekly(
         past_cost_total = past_digest.get("cost_total_usd") if past_digest else None
         past_cost_baseline = past_digest.get("cost_baseline_usd") if past_digest else None
 
+        # Spec section 2 (coaching-reposition): masthead rollup. Pull the
+        # prior week's dim means from its persisted digest snapshot,
+        # count sessions in this and the immediately prior ISO week, and
+        # build the rollup once. None when no follow-up is on file.
+        past_prior_iso = _prior_iso_week(week_iso)
+        past_prior_means: dict[str, float] | None = None
+        past_prior_digest = store.load_weekly_digest(past_prior_iso)
+        if past_prior_digest and past_prior_digest.get("snapshot"):
+            prior_snap = past_prior_digest["snapshot"]
+            prior_dim_means = prior_snap.get("dimension_means") or {}
+            if prior_dim_means:
+                past_prior_means = {k: float(v) for k, v in prior_dim_means.items()}
+        past_prior_sessions = _count_sessions_in_iso_week(store, past_prior_iso)
+        past_rollup = build_commitment_rollup(
+            follow_up=past_follow_up,
+            snapshot=snapshot,
+            prior_week_means=past_prior_means,
+            sessions_this_week=len(rows),
+            sessions_prior_week=past_prior_sessions,
+            self_report_tally=fetch_self_report_tally(store, week_iso),
+        )
+        # US-037: attach constrained-judge prose when the self-report
+        # and dim data disagree. The helper is a no-op on agreement
+        # and silently returns the input rollup when no API key is
+        # configured or the judge call fails.
+        past_rollup = apply_gap_prose(past_rollup)
+
         rendered_html, rendered_terminal = _step_render(
             [], past_tasks, past_selection, past_follow_up, snapshot,
             dry_run=True,
@@ -1129,6 +1192,7 @@ def run_weekly(
             cost_baseline_usd=past_cost_baseline,
             judge_results={},
             moments=past_moments,
+            commitment_rollup=past_rollup,
         )
         return WeeklyRunSummary(
             week_iso=week_iso,
@@ -1148,6 +1212,8 @@ def run_weekly(
             steps_executed=[],
             judging_confidence={} if explain_judging else None,
             forced_frontier=frontier_only,
+            last_week_means=past_prior_means,
+            commitment_rollup=past_rollup,
         )
 
     sessions = _step_scan(since_days)
@@ -1348,6 +1414,36 @@ def run_weekly(
             if prior_dim_means:
                 last_week_means = {k: float(v) for k, v in prior_dim_means.items()}
 
+    # Spec section 2 (coaching-reposition): commitment rollup for the
+    # masthead. Built from already-computed state (follow_up, snapshot,
+    # last_week_means, session counts) so no fresh I/O is needed beyond
+    # the optional session_reflections tally. None when no commitment
+    # exists for the week so the masthead's block is omitted.
+    rollup_store: ProfileStore | None = (
+        store if store is not None else snapshot_store
+    )
+    if rollup_store is None and not dry_run:
+        rollup_store = ProfileStore()
+    sessions_prior_week = 0
+    if rollup_store is not None:
+        sessions_prior_week = _count_sessions_in_iso_week(
+            rollup_store, _prior_iso_week(week_iso)
+        )
+    self_report_tally = fetch_self_report_tally(rollup_store, week_iso)
+    commitment_rollup = build_commitment_rollup(
+        follow_up=follow_up,
+        snapshot=snapshot,
+        prior_week_means=last_week_means,
+        sessions_this_week=len(sessions),
+        sessions_prior_week=sessions_prior_week,
+        self_report_tally=self_report_tally,
+    )
+    # US-037: attach constrained-judge prose when self-report and
+    # dim data disagree. No-op when there's nothing to compare or
+    # when no API key / judge failure means the renderer should fall
+    # back to the static phrasing.
+    commitment_rollup = apply_gap_prose(commitment_rollup)
+
     # Render last - now that trajectory, cost, and persistence are settled.
     rendered_html, rendered_terminal = _step_render(
         sessions, tasks, selection, follow_up, snapshot,
@@ -1359,6 +1455,7 @@ def run_weekly(
         judge_results=final_results,
         moments=moments,
         last_week_means=last_week_means,
+        commitment_rollup=commitment_rollup,
     )
     steps.append("render")
 
@@ -1398,6 +1495,7 @@ def run_weekly(
         judging_confidence=confidence_dist,
         forced_frontier=frontier_only,
         last_week_means=last_week_means,
+        commitment_rollup=commitment_rollup,
     )
 
 

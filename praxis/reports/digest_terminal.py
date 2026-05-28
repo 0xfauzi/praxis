@@ -20,10 +20,14 @@ from __future__ import annotations
 import re
 import textwrap
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from praxis.reports.baseline_panel import format_baseline_value
 from praxis.reports.gating import format_delta
 from praxis.scoring.rubric import by_key
+
+if TYPE_CHECKING:
+    from praxis.reports.commitment_rollup import CommitmentRollup
 
 
 # Spec section 6.2: the digest fits in <80 columns. 79 is the hard cap
@@ -188,6 +192,10 @@ class WeeklyDigest:
     cost_ledger: CostLedgerView | None = None
     tasks: list[TaskRowView] | None = None
     dimensions: list[DimRowView] | None = None
+    # Spec section 2 (coaching-reposition): masthead's commitment block
+    # reads this. None means no follow-up exists for the week so the
+    # masthead omits the block rather than rendering placeholder copy.
+    commitment_rollup: "CommitmentRollup | None" = None
 
 
 # -------------------------------------------------------------------- helpers
@@ -235,7 +243,9 @@ def _masthead(week_label: str) -> list[str]:
 
     Spec section 6.1 anchors the digest on the trajectory headline,
     not the overall /10. The masthead intentionally only carries the
-    product name and the week label.
+    product name and the week label; the commitment block (spec
+    section 2 coaching-reposition) is appended by ``_commitment_block``
+    when the digest carries a rollup.
     """
     lines: list[str] = [""]
     title = "PRAXIS"
@@ -247,6 +257,230 @@ def _masthead(week_label: str) -> list[str]:
     lines.append(header)
     rule = f"{INDENT}{DIM}{'─' * (MAX_LINE_WIDTH - len(INDENT))}{RESET}"
     lines.append(rule)
+    return lines
+
+
+def _self_report_signals_progress(tally: dict[str, int]) -> bool | None:
+    """Read the user's self-report tally as a single yes/no signal.
+
+    Returns True when 'yes' outweighs 'no'+'partial', False when the
+    reverse, and None when the tally is empty or perfectly balanced
+    (no signal either way). 'skip' is intentionally ignored: a skip
+    is "no answer given", not a claim of progress in either direction.
+    """
+    yes = int(tally.get("yes", 0))
+    no_partial = int(tally.get("no", 0)) + int(tally.get("partial", 0))
+    if yes == 0 and no_partial == 0:
+        return None
+    if yes > no_partial:
+        return True
+    if no_partial > yes:
+        return False
+    return None
+
+
+def _dim_movement_signal(
+    dim_before: float | None, dim_after: float
+) -> bool | None:
+    """Classify the dim's week-over-week movement against the noise band.
+
+    Returns True when the dim improved by at least
+    ``_GAP_DIM_DELTA_THRESHOLD`` points, False when it regressed by at
+    least that much, and None when the move is within the noise band
+    or no baseline exists (so we can't compute a delta).
+    """
+    if dim_before is None:
+        return None
+    delta = dim_after - dim_before
+    if delta >= _GAP_DIM_DELTA_THRESHOLD:
+        return True
+    if delta <= -_GAP_DIM_DELTA_THRESHOLD:
+        return False
+    return None
+
+
+def _gap_summary_line(
+    self_report_tally: dict[str, int],
+    dim_before: float | None,
+    dim_after: float,
+    *,
+    gap_prose: str | None = None,
+) -> str:
+    """Pick the gap-summary line for the masthead's "Gap:" field.
+
+    Agreement when the self-report and the dim movement point the same
+    way, OR when either signal is None (no evidence of contradiction --
+    we don't accuse the user of mismatch when the data is silent). The
+    agree path always returns the static neutral phrasing.
+
+    Disagreement uses ``gap_prose`` when one was attached upstream by
+    the constrained cheap-judge call (US-037). The prose is run through
+    ``truncate_to_two_sentences`` here so a runaway response is bounded
+    at the renderer boundary rather than relying solely on the prompt's
+    "<= 2 sentences" rule. When ``gap_prose`` is None or empty (no API
+    key, the judge call failed, or no upstream wiring) the renderer
+    falls back to the static disagree line so the field never goes
+    blank.
+    """
+    self_signal = _self_report_signals_progress(self_report_tally)
+    data_signal = _dim_movement_signal(dim_before, dim_after)
+    if self_signal is None or data_signal is None:
+        return _GAP_AGREE_LINE
+    if self_signal == data_signal:
+        return _GAP_AGREE_LINE
+    if gap_prose:
+        # Late import keeps the renderer free of the optional Anthropic /
+        # OpenAI SDKs that ``gap_judge`` is allowed to touch. Only the
+        # pure truncation helper is reached from here.
+        from praxis.reports.gap_judge import truncate_to_two_sentences
+
+        truncated = truncate_to_two_sentences(gap_prose)
+        if truncated:
+            return truncated
+    return _GAP_DISAGREE_LINE
+
+
+def _format_self_report_tally(tally: dict[str, int]) -> str:
+    """Render the four-bucket tally as '4 yes / 1 partial / 2 no'.
+
+    Skips zero-count buckets so the line stays tight when only one or
+    two buckets fired. When every bucket is zero (no reflections this
+    week) returns the explicit 'no check-ins yet' placeholder rather
+    than a confusing blank line.
+    """
+    parts: list[str] = []
+    # Spec section 2 example orders yes -> partial -> no in the rendered
+    # tally; 'skip' is shown last since it carries the least signal.
+    for key in ("yes", "partial", "no", "skip"):
+        count = int(tally.get(key, 0))
+        if count > 0:
+            parts.append(f"{count} {key}")
+    if not parts:
+        return "no check-ins yet"
+    return " / ".join(parts)
+
+
+def _format_data_says_line(
+    target_dim_key: str,
+    dim_before: float | None,
+    dim_after: float,
+) -> str:
+    """Render the 'Data says' field value for the targeted dimension.
+
+    With a baseline on file:  '<Dim title>  X.X -> Y.Y  (annotation)'.
+    Without a baseline:        '<Dim title>  Y.Y (baseline forming)'.
+    The annotation reuses the same significance gate as the gap-summary
+    so the two lines never contradict each other.
+    """
+    dim_title = _dim_title(target_dim_key)
+    if dim_before is None:
+        return f"{dim_title}  {dim_after:.1f} (baseline forming)"
+    delta = dim_after - dim_before
+    if delta >= _GAP_DIM_DELTA_THRESHOLD:
+        annotation = "improved"
+    elif delta <= -_GAP_DIM_DELTA_THRESHOLD:
+        annotation = "worse"
+    else:
+        annotation = "unchanged"
+    return (
+        f"{dim_title}  {dim_before:.1f} -> {dim_after:.1f}  ({annotation})"
+    )
+
+
+def _format_sessions_line(this_week: int, prior_week: int) -> str:
+    """Render the 'Sessions' field value with the prior-week anchor.
+
+    Always includes the '(vs. N last week)' suffix so the reader sees
+    the direction-of-travel without having to remember last week's
+    count. Both counts are non-negative ints by construction (the
+    rollup builder coerces them).
+    """
+    return f"{this_week} (vs. {prior_week} last week)"
+
+
+def _field_line(label: str, value: str) -> str:
+    """One labelled field row inside the 'How it went' block.
+
+    Label is left-justified to ``_FIELD_LABEL_WIDTH`` then followed by
+    a single space and the value, so the values line up under each
+    other regardless of which label is on the row.
+    """
+    return f"{label:<{_FIELD_LABEL_WIDTH}} {value}"
+
+
+def _commitment_block(rollup: "CommitmentRollup | None") -> list[str]:
+    """Render the masthead's commitment block (spec section 2).
+
+    When ``rollup`` is None there is no active commitment for the week
+    and the block is omitted entirely (no header, no lines). When a
+    rollup is present we render:
+
+        Your focus this week:
+          "<display_text>"
+
+        How it went:
+          Sessions:    N (vs. M last week)
+          You said:    A yes / B partial / C no
+          Data says:   <Dim title>  X.X -> Y.Y  (improved)
+          Gap:         your self-report and the data agree this week.
+
+    The 'How it went' block degrades to a single 'No sessions logged
+    this week.' line when ``sessions_this_week == 0`` so the masthead
+    doesn't render confusing zero-comparison numbers.
+    """
+    if rollup is None:
+        return []
+
+    lines: list[str] = [""]
+    # Focus quote section ----------------------------------------------
+    lines.append(f"{INDENT}{_FOCUS_HEADER}")
+    quote = f"\"{rollup.display_text}\""
+    for wrapped in _wrap(quote, width=_BODY_WIDTH):
+        lines.append(_body_line(wrapped, ansi=ITALIC))
+    lines.append("")
+    # How it went status block -----------------------------------------
+    lines.append(f"{INDENT}{_HOW_IT_WENT_HEADER}")
+    if rollup.sessions_this_week <= 0:
+        # Spec acceptance: with no sessions there is no per-dim or
+        # self-report content worth rendering; the explicit empty-state
+        # line keeps the masthead readable without a divide-by-zero.
+        lines.append(_body_line(_NO_SESSIONS_LOGGED, ansi=DIM))
+        return lines
+    sessions_line = _format_sessions_line(
+        rollup.sessions_this_week, rollup.sessions_prior_week
+    )
+    lines.append(_body_line(_field_line("Sessions:", sessions_line)))
+    you_said_line = _format_self_report_tally(rollup.self_report_tally)
+    lines.append(_body_line(_field_line("You said:", you_said_line)))
+    target_key = rollup.target_dim_key
+    dim_after = float(rollup.dim_after.get(target_key, 0.0))
+    dim_before_raw = rollup.dim_before.get(target_key)
+    dim_before = float(dim_before_raw) if dim_before_raw is not None else None
+    data_says = _format_data_says_line(target_key, dim_before, dim_after)
+    # The full "Data says:" row can exceed the body width with a long
+    # dim title; wrap onto continuation rows aligned with the field
+    # value column so a multi-line value still reads as one field.
+    data_line = _field_line("Data says:", data_says)
+    wrapped_data = _wrap(data_line, width=_BODY_WIDTH)
+    if not wrapped_data:
+        wrapped_data = [data_line]
+    lines.append(_body_line(wrapped_data[0]))
+    cont_indent = " " * (_FIELD_LABEL_WIDTH + 1)
+    for cont in wrapped_data[1:]:
+        lines.append(_body_line(cont_indent + cont))
+    gap_text = _gap_summary_line(
+        rollup.self_report_tally,
+        dim_before,
+        dim_after,
+        gap_prose=rollup.gap_prose,
+    )
+    gap_line = _field_line("Gap:", gap_text)
+    wrapped_gap = _wrap(gap_line, width=_BODY_WIDTH)
+    if not wrapped_gap:
+        wrapped_gap = [gap_line]
+    lines.append(_body_line(wrapped_gap[0]))
+    for cont in wrapped_gap[1:]:
+        lines.append(_body_line(cont_indent + cont))
     return lines
 
 
@@ -284,6 +518,36 @@ _DIMENSIONS_PLACEHOLDER = (
 # case at section 7); keeping the placeholder as a single token keeps
 # the column alignment in the "vs baseline X" phrasing.
 _BASELINE_UNAVAILABLE = "--"
+
+
+# Spec section 2 (coaching-reposition): the masthead's commitment block
+# carries the focus quote, the "how it went" status, and the gap-summary
+# closing line. These constants pin the exact label strings so tests can
+# assert on them verbatim and a future copy change is one audit point.
+_FOCUS_HEADER = "Your focus this week:"
+_HOW_IT_WENT_HEADER = "How it went:"
+_NO_SESSIONS_LOGGED = "No sessions logged this week."
+_GAP_AGREE_LINE = "your self-report and the data agree this week."
+# Static fallback for the disagreement path. US-037 swaps this for
+# constrained-judge prose when an API key is available; here we ship
+# the documented neutral phrasing so the renderer never emits an empty
+# gap line and never crashes when the judge is unreachable.
+_GAP_DISAGREE_LINE = (
+    "Self-report and data differ this week. Worth a moment of curiosity."
+)
+
+# Width of the "Sessions:" / "You said:" / "Data says:" / "Gap:" label
+# column so the four field values left-align under each other inside
+# the "How it went" block.
+_FIELD_LABEL_WIDTH = 12
+
+# Significance gate on the /10 scale for deciding whether the dim mean
+# moved enough to count as agreement / disagreement with the self-report
+# tally. Reuses spec section 8.3's 0.3-per-dim-point noise band (the
+# same threshold the six-dim footer uses for delta arrows) so the
+# masthead's "Data says" annotation reads on the same scale as the rest
+# of the digest.
+_GAP_DIM_DELTA_THRESHOLD = 0.3
 
 
 def _dim_title(dim_key: str) -> str:
@@ -628,6 +892,13 @@ def render(digest: WeeklyDigest) -> str:
     """
     parts: list[str] = []
     parts.extend(_masthead(digest.week_label))
+    # Spec section 2 (coaching-reposition): the commitment block sits
+    # immediately under the masthead so the digest opens with the
+    # active commitment status. When the digest carries no rollup
+    # (no active commitment for the week, or an older summary built
+    # before US-034) the helper returns an empty list and the block
+    # is omitted entirely.
+    parts.extend(_commitment_block(digest.commitment_rollup))
     # Spec section 6.2: the trajectory headline, headline moment, and
     # follow-up panel are the three sections that MUST render. They
     # appear first so the digest opens with the multi-week behavioral
