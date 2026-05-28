@@ -49,6 +49,17 @@ from praxis.behavior.weekly import (
     iso_week_start,
     iso_week_tag,
 )
+from praxis.behavior.repeat_task import (
+    MIN_OTHER_CLUSTERS_FOR_REPEAT,
+    MIN_TOKENS_FOR_COMPARISON,
+    OVERLAP_THRESHOLD,
+    STOPWORDS,
+    Cluster,
+    RepeatTask,
+    detect_repeats,
+    overlap_ratio,
+    tokenize,
+)
 
 __all__ = [
     "BehavioralSignals",
@@ -89,4 +100,13 @@ __all__ = [
     "HEADLINE_MAX_CHARS",
     "fallback_headline",
     "generate_headline",
+    "MIN_OTHER_CLUSTERS_FOR_REPEAT",
+    "MIN_TOKENS_FOR_COMPARISON",
+    "OVERLAP_THRESHOLD",
+    "STOPWORDS",
+    "Cluster",
+    "RepeatTask",
+    "detect_repeats",
+    "overlap_ratio",
+    "tokenize",
 ]

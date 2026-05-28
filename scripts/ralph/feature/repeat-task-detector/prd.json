@@ -12,7 +12,7 @@
         "Tests pass: uv run pytest"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -26,7 +26,7 @@
         "Tests pass: uv run pytest"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": ""
     }
   ],
@@ -34,7 +34,7 @@
     "praxis/behavior/",
     "praxis/scoring/clustering.py",
     "tests/",
-    "scripts/ralph/feature/repeat-task-detector/",
+    "scripts/ralph/feature/",
     "scripts/ralph/progress.txt"
   ]
 }
