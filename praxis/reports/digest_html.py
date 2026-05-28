@@ -303,6 +303,99 @@ def _ordinal(n: int) -> str:
     return f"{n}{suffix}"
 
 
+# ----------------------------------------------------- commitment masthead
+#
+# Spec section 2 (coaching-reposition): the masthead's commitment block
+# mirrors the terminal renderer's "Your focus this week" / "How it went"
+# pair. We reuse the pure helpers from ``digest_terminal`` so the field
+# strings (sessions tally, self-report bucket order, data-says
+# annotation, and the agree/disagree gap line) match across both surfaces
+# without duplicating the noise-band threshold or the rubric lookup.
+
+from praxis.reports.digest_terminal import (  # noqa: E402
+    _GAP_DISAGREE_LINE as _MASTHEAD_GAP_DISAGREE,
+    _NO_SESSIONS_LOGGED as _MASTHEAD_NO_SESSIONS,
+    _format_data_says_line as _masthead_data_says,
+    _format_self_report_tally as _masthead_self_report,
+    _format_sessions_line as _masthead_sessions,
+    _gap_summary_line as _masthead_gap_summary,
+)
+
+
+def _commitment_section(rollup: "CommitmentRollup | None") -> str:
+    """Render the masthead's commitment block (spec section 2).
+
+    Omitted entirely when ``rollup`` is None (no active commitment for
+    the rendered week). When sessions=0 the block collapses to a single
+    "No sessions logged this week." line so the masthead doesn't render
+    confusing zero-comparison numbers.
+
+    Field labels and ordering mirror the terminal renderer's commitment
+    block (Sessions / You said / Data says / Gap) per US-036 AC #1.
+    """
+    if rollup is None:
+        return ""
+    focus_block = (
+        '<div class="cb-focus">'
+        '<div class="cb-eyebrow">Your focus this week</div>'
+        f'<blockquote class="cb-quote">{_safe(rollup.display_text)}</blockquote>'
+        '</div>'
+    )
+    if rollup.sessions_this_week <= 0:
+        status_block = (
+            '<div class="cb-status">'
+            '<div class="cb-eyebrow">How it went</div>'
+            f'<p class="cb-no-sessions">{_safe(_MASTHEAD_NO_SESSIONS)}</p>'
+            '</div>'
+        )
+    else:
+        sessions_value = _masthead_sessions(
+            rollup.sessions_this_week, rollup.sessions_prior_week
+        )
+        you_said_value = _masthead_self_report(rollup.self_report_tally)
+        target_key = rollup.target_dim_key
+        dim_after = float(rollup.dim_after.get(target_key, 0.0))
+        dim_before_raw = rollup.dim_before.get(target_key)
+        dim_before = (
+            float(dim_before_raw) if dim_before_raw is not None else None
+        )
+        data_says_value = _masthead_data_says(target_key, dim_before, dim_after)
+        gap_value = _masthead_gap_summary(
+            rollup.self_report_tally, dim_before, dim_after
+        )
+        # The four-field status block: ordering matches the terminal
+        # renderer's _commitment_block exactly (Sessions, You said, Data
+        # says, Gap). The gap value's class flips on agree/disagree so
+        # the disagree line picks up the same warning accent the rest of
+        # the digest reserves for noticed-and-named gaps.
+        gap_modifier = (
+            "cb-gap--disagree"
+            if gap_value == _MASTHEAD_GAP_DISAGREE
+            else "cb-gap--agree"
+        )
+        status_block = (
+            '<div class="cb-status">'
+            '<div class="cb-eyebrow">How it went</div>'
+            '<dl class="cb-fields">'
+            '<dt>Sessions</dt>'
+            f'<dd>{_safe(sessions_value)}</dd>'
+            '<dt>You said</dt>'
+            f'<dd>{_safe(you_said_value)}</dd>'
+            '<dt>Data says</dt>'
+            f'<dd>{_safe(data_says_value)}</dd>'
+            '<dt>Gap</dt>'
+            f'<dd class="{gap_modifier}">{_safe(gap_value)}</dd>'
+            '</dl>'
+            '</div>'
+        )
+    return (
+        '\n  <section class="cb-section" id="commitment-block">'
+        f'{focus_block}'
+        f'{status_block}'
+        '</section>'
+    )
+
+
 def _format_week_label(iso: str) -> str:
     """Render '2026-W22' as 'Week 22 · May 25 – May 31, 2026'."""
     try:
@@ -1216,8 +1309,13 @@ def render(digest: WeeklyDigest) -> str:
         f'{_weekly_trajectory_section(digest.weekly_trajectory)}'
         '</div>'
     )
+    # Spec section 2 (coaching-reposition): the masthead's commitment
+    # block sits ABOVE the trajectory hero so the digest opens with the
+    # active commitment status. When the digest carries no rollup the
+    # helper returns an empty string and the block is omitted entirely.
     body_sections = (
-        _trajectory_section(
+        _commitment_section(digest.commitment_rollup)
+        + _trajectory_section(
             digest.trajectory, digest.week_iso, vital_signs=digest.vital_signs,
         )
         + coaching_block
@@ -1317,6 +1415,92 @@ html, body {{
   letter-spacing: 0.18em;
   text-transform: uppercase;
   color: var(--ink-faded);
+}}
+
+/* --- Commitment block (spec section 2) ------------------------------
+   The masthead's commitment block opens the digest with the active
+   commitment status (focus quote + how-it-went status). Field labels
+   and ordering mirror the terminal renderer's _commitment_block so
+   the two surfaces read as one product. The block is omitted when
+   no follow-up exists for the week, so this CSS is dormant on
+   first-run digests. */
+.cb-section {{
+  margin: 0 0 64px;
+  padding-bottom: 40px;
+  border-bottom: 1px solid var(--rule);
+}}
+.cb-eyebrow {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 500;
+  margin-bottom: 14px;
+}}
+.cb-focus {{
+  margin-bottom: 32px;
+}}
+.cb-quote {{
+  font-family: var(--serif);
+  font-size: 22px;
+  line-height: 1.45;
+  color: var(--ink);
+  font-style: italic;
+  max-width: 560px;
+  margin: 0;
+  padding: 0;
+}}
+.cb-quote::before {{
+  content: "\201C";
+  color: var(--accent);
+  font-style: normal;
+  margin-right: 2px;
+}}
+.cb-quote::after {{
+  content: "\201D";
+  color: var(--accent);
+  font-style: normal;
+  margin-left: 2px;
+}}
+.cb-status {{
+  margin-top: 0;
+}}
+.cb-no-sessions {{
+  font-family: var(--serif);
+  font-size: 16px;
+  font-style: italic;
+  color: var(--ink-muted);
+  margin: 0;
+}}
+.cb-fields {{
+  display: grid;
+  grid-template-columns: minmax(96px, max-content) 1fr;
+  gap: 8px 18px;
+  margin: 0;
+}}
+.cb-fields dt {{
+  font-family: var(--sans);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  font-weight: 500;
+  margin: 0;
+  align-self: baseline;
+}}
+.cb-fields dd {{
+  font-family: var(--serif);
+  font-size: 16px;
+  line-height: 1.45;
+  color: var(--ink);
+  margin: 0;
+}}
+.cb-gap--agree {{
+  color: var(--ink-muted);
+}}
+.cb-gap--disagree {{
+  color: var(--accent-deep);
 }}
 
 /* --- Section eyebrow (used throughout) ------------------------------ */

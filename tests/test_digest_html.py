@@ -893,3 +893,194 @@ def test_render_filled_digest_with_secrets_keeps_self_containment_contract():
     assert "https://" not in out
     assert "@import" not in out
     assert "url(" not in out
+
+
+# ---------------------------------------------------------------------------
+# US-036: HTML masthead commitment block mirrors the terminal renderer
+# ---------------------------------------------------------------------------
+
+from praxis.reports.commitment_rollup import CommitmentRollup  # noqa: E402
+
+
+def _rollup(
+    *,
+    display_text: str = "Ask 'list every table this migration writes' before running.",
+    target_dim_key: str = "verification",
+    sessions_this_week: int = 4,
+    sessions_prior_week: int = 2,
+    self_report_tally: dict[str, int] | None = None,
+    dim_before: dict[str, float] | None = None,
+    dim_after: dict[str, float] | None = None,
+) -> CommitmentRollup:
+    return CommitmentRollup(
+        display_text=display_text,
+        target_dim_key=target_dim_key,
+        sessions_this_week=sessions_this_week,
+        sessions_prior_week=sessions_prior_week,
+        self_report_tally=self_report_tally or {"yes": 3, "partial": 1, "no": 0, "skip": 0},
+        dim_before=dim_before or {"verification": 4.8},
+        dim_after=dim_after or {"verification": 6.2},
+    )
+
+
+def test_html_masthead_omits_commitment_section_when_rollup_is_none():
+    """No rollup => the commitment-block section ID is absent.
+
+    The masthead's commitment block is the FIRST section in the digest
+    body, so omitting it keeps the document opening with the trajectory
+    hero (the v0.1 default) rather than dropping an empty card.
+    """
+    out = render(_digest())
+    assert 'id="commitment-block"' not in out
+
+
+def test_html_masthead_renders_commitment_section_when_rollup_present():
+    """Rollup carried through => the commitment-block section renders."""
+    digest = dataclasses.replace(_digest(), commitment_rollup=_rollup())
+    out = render(digest)
+    assert 'id="commitment-block"' in out
+
+
+def test_html_masthead_renders_focus_quote_from_display_text():
+    digest = dataclasses.replace(
+        _digest(),
+        commitment_rollup=_rollup(display_text="state the goal before prompting"),
+    )
+    out = render(digest)
+    assert "Your focus this week" in out
+    assert "state the goal before prompting" in out
+
+
+def test_html_masthead_renders_how_it_went_heading_when_sessions_present():
+    digest = dataclasses.replace(_digest(), commitment_rollup=_rollup())
+    out = render(digest)
+    assert "How it went" in out
+
+
+def test_html_masthead_renders_session_count_field():
+    """Sessions field shows the count vs prior week so the reader sees
+    direction of travel without recalling last week's number."""
+    digest = dataclasses.replace(
+        _digest(),
+        commitment_rollup=_rollup(sessions_this_week=4, sessions_prior_week=2),
+    )
+    out = render(digest)
+    assert "Sessions" in out
+    assert "4 (vs. 2 last week)" in out
+
+
+def test_html_masthead_renders_self_report_tally_field():
+    """The 'You said' field surfaces the aggregated reflection buckets
+    in yes -> partial -> no -> skip order (matching the terminal
+    renderer's _format_self_report_tally)."""
+    digest = dataclasses.replace(
+        _digest(),
+        commitment_rollup=_rollup(
+            self_report_tally={"yes": 3, "partial": 1, "no": 0, "skip": 0}
+        ),
+    )
+    out = render(digest)
+    assert "You said" in out
+    assert "3 yes" in out
+    assert "1 partial" in out
+
+
+def test_html_masthead_renders_data_says_with_dim_title():
+    """The 'Data says' field carries the targeted dim's human-facing
+    title plus the before -> after annotation."""
+    digest = dataclasses.replace(
+        _digest(),
+        commitment_rollup=_rollup(
+            target_dim_key="verification",
+            dim_before={"verification": 4.8},
+            dim_after={"verification": 6.2},
+        ),
+    )
+    out = render(digest)
+    assert "Data says" in out
+    # Annotation matches the terminal renderer's noise-band classification.
+    assert "improved" in out
+    # Before/after values are rendered to one decimal.
+    assert "4.8" in out
+    assert "6.2" in out
+
+
+def test_html_masthead_renders_gap_agree_when_signals_align():
+    """When self-report and dim movement point the same way, the Gap
+    field reads the agree line (the digest never accuses the user of
+    mismatch when the data agrees with the self-report)."""
+    digest = dataclasses.replace(
+        _digest(),
+        commitment_rollup=_rollup(
+            self_report_tally={"yes": 3, "no": 0, "partial": 0, "skip": 0},
+            dim_before={"verification": 4.8},
+            dim_after={"verification": 6.2},  # delta +1.4 -> improved
+        ),
+    )
+    out = render(digest)
+    assert "agree this week" in out
+
+
+def test_html_masthead_renders_gap_disagree_with_neutral_fallback():
+    """When self-report claims yes but the dim regressed, render the
+    static neutral disagreement phrase (US-035 contract). US-037 swaps
+    in constrained-judge prose at this seam; here we only assert the
+    documented fallback ships when the judge is not wired."""
+    digest = dataclasses.replace(
+        _digest(),
+        commitment_rollup=_rollup(
+            self_report_tally={"yes": 3, "no": 0, "partial": 0, "skip": 0},
+            dim_before={"verification": 6.0},
+            dim_after={"verification": 4.5},  # delta -1.5 -> worse
+        ),
+    )
+    out = render(digest)
+    assert "Self-report and data differ this week" in out
+
+
+def test_html_masthead_no_sessions_collapses_status_block():
+    """sessions_this_week == 0 -> the status block renders only the
+    'No sessions logged this week.' line, not the four-field row.
+    Prevents divide-by-zero / empty-tally renders when the user opens
+    the digest before any sessions have been judged this week."""
+    digest = dataclasses.replace(
+        _digest(),
+        commitment_rollup=_rollup(
+            sessions_this_week=0,
+            sessions_prior_week=2,
+            self_report_tally={"yes": 0, "no": 0, "partial": 0, "skip": 0},
+        ),
+    )
+    out = render(digest)
+    assert "No sessions logged this week." in out
+    # The four field labels do NOT render when the no-sessions branch fires.
+    assert "Data says" not in out
+
+
+def test_html_masthead_commitment_section_precedes_trajectory_hero():
+    """Spec section 2: the commitment masthead opens the digest, the
+    trajectory hero sits underneath it. Asserts on string ordering so
+    a future refactor cannot quietly reverse the two sections."""
+    digest = dataclasses.replace(_digest(), commitment_rollup=_rollup())
+    out = render(digest)
+    cb_idx = out.find('id="commitment-block"')
+    traj_idx = out.find('id="trajectory"')
+    assert cb_idx >= 0
+    assert traj_idx >= 0
+    assert cb_idx < traj_idx
+
+
+def test_html_masthead_escapes_user_provided_display_text():
+    """The display_text is user content and must be HTML-escaped before
+    landing in the document. Locks in the US-065 self-containment
+    contract for the new field."""
+    digest = dataclasses.replace(
+        _digest(),
+        commitment_rollup=_rollup(
+            display_text='ask "list every <table> this writes"'
+        ),
+    )
+    out = render(digest)
+    # The literal <table> must not appear as a tag - it must be escaped.
+    assert "<table>" not in out
+    assert "&lt;table&gt;" in out

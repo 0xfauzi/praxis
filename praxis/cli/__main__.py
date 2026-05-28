@@ -23,11 +23,12 @@ import subprocess
 import sys
 import traceback
 import webbrowser
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from praxis import __version__
 from praxis.config import ensure_config_file
+from praxis.follow_up import FollowUp
 from praxis.orchestrator import (
     NO_API_KEY_MESSAGE,
     InvalidWeekError,
@@ -36,6 +37,7 @@ from praxis.orchestrator import (
     has_api_key_configured,
     list_persisted_weeks,
     no_sessions_message,
+    parse_iso_week,
     re_score_session,
     run,
     run_weekly,
@@ -344,6 +346,174 @@ def _handle_review_failure(exc: BaseException) -> None:
     )
 
 
+# Spec section 2 (coaching-reposition): the masthead's follow-up prompt
+# offers three choices. The single-letter responses are the contract the
+# test suite asserts on, so a copy change here must update the prompt
+# test in tests/test_cli.py.
+_FOLLOWUP_PROMPT_TEXT = (
+    "Choose:  [k]eep this commitment / [n]ew commitment / [d]igest only > "
+)
+_FOLLOWUP_CHOICE_KEEP = "k"
+_FOLLOWUP_CHOICE_NEW = "n"
+_FOLLOWUP_CHOICE_DIGEST = "d"
+_VALID_FOLLOWUP_CHOICES = (
+    _FOLLOWUP_CHOICE_KEEP,
+    _FOLLOWUP_CHOICE_NEW,
+    _FOLLOWUP_CHOICE_DIGEST,
+)
+
+
+def _next_iso_week(week_iso: str) -> str:
+    """Return the ISO-week tag for the week immediately after ``week_iso``.
+
+    Used by the [k]eep / [n]ew prompt paths so a chosen commitment lands
+    in the next week's row regardless of which week was rendered. Raises
+    ``InvalidWeekError`` for malformed input, mirroring the orchestrator's
+    contract on its sibling ``_prior_iso_week`` helper.
+    """
+    week_start, _ = parse_iso_week(week_iso)
+    nxt = week_start + timedelta(days=7)
+    year, week, _ = nxt.isocalendar()
+    return f"{year:04d}-W{week:02d}"
+
+
+def _should_prompt_for_followup_choice(args: argparse.Namespace) -> bool:
+    """Gate the [k]/[n]/[d] prompt on stdin TTY + the opt-out flags.
+
+    Per spec section 2 / US-036 AC #2: the prompt only renders when the
+    user is at an interactive terminal AND the run was not invoked
+    through the scheduled daemon path (--notify) AND the user did not
+    explicitly opt out (--non-interactive). The three predicates compose
+    so the launchd-fired `praxis review --notify --non-interactive` path
+    never blocks waiting on input.
+    """
+    if getattr(args, "notify", False):
+        return False
+    if getattr(args, "non_interactive", False):
+        return False
+    if not sys.stdin.isatty():
+        return False
+    return True
+
+
+def _read_followup_choice() -> str:
+    """Prompt the user for [k]/[n]/[d] and return the normalized choice.
+
+    Repeatedly reads from stdin until the user enters one of the three
+    valid letters (case-insensitive). EOF (Ctrl-D) is treated as 'd'
+    (digest only) so a pipe-closed shell does not hang the run.
+    """
+    while True:
+        try:
+            raw = input(_FOLLOWUP_PROMPT_TEXT)
+        except EOFError:
+            return _FOLLOWUP_CHOICE_DIGEST
+        choice = raw.strip().lower()[:1]
+        if choice in _VALID_FOLLOWUP_CHOICES:
+            return choice
+        print("  Please enter k, n, or d.")
+
+
+def _keep_commitment_for_next_week(
+    store: ProfileStore, current: FollowUp
+) -> str:
+    """Insert a follow_ups row for next week carrying the same commitment.
+
+    The new row mirrors the current commitment's dim_key, target_metric,
+    and baseline_value so next week's review can close the loop on the
+    same metric. measured_value/outcome reset to None/'pending' since the
+    new week has not been measured yet. Returns the new row's week_iso so
+    the caller can confirm the dispatch.
+    """
+    next_week = _next_iso_week(current.week_iso)
+    new_row = FollowUp(
+        week_iso=next_week,
+        dim_key=current.dim_key,
+        commitment_text=current.commitment_text,
+        target_metric=current.target_metric,
+        baseline_value=current.baseline_value,
+        measured_value=None,
+        outcome="pending",
+    )
+    store.save_follow_up(new_row)
+    return next_week
+
+
+def cmd_commit(args: argparse.Namespace | None = None) -> int:
+    """Open a new commitment for next week (spec section 2).
+
+    Prompts the user for a single sentence describing what they want to
+    practice next week, then saves a follow_ups row keyed to that week.
+    Reuses the most recent commitment's dim_key / target_metric /
+    baseline_value when one is on file so next week's review can close
+    the loop; otherwise picks the user's weakest dim from the latest
+    snapshot. Designed to be invoked inline by `cmd_review`'s [n]ew
+    prompt branch (US-036 AC #2) and also runnable directly so a future
+    `praxis commit` subparser can route here without a refactor.
+    """
+    _ = args  # Reserved for future subparser flags.
+    store = ProfileStore()
+    latest = store.latest_follow_up()
+    if latest is None:
+        print(
+            "  No prior commitment on file. Run `praxis review` once to "
+            "open the first commitment.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        text = input(
+            "  What do you want to practice next week? > "
+        ).strip()
+    except EOFError:
+        return 1
+    if not text:
+        print("  No commitment recorded (empty input).", file=sys.stderr)
+        return 1
+    next_week = _next_iso_week(latest.week_iso)
+    new_row = FollowUp(
+        week_iso=next_week,
+        dim_key=latest.dim_key,
+        commitment_text=text,
+        target_metric=latest.target_metric,
+        baseline_value=latest.baseline_value,
+        measured_value=None,
+        outcome="pending",
+    )
+    store.save_follow_up(new_row)
+    print(f"  New commitment opened for {next_week}.")
+    return 0
+
+
+def _handle_followup_prompt(summary_week_iso: str | None) -> None:
+    """Render the masthead's follow-up prompt and dispatch on the answer.
+
+    Caller has already confirmed the prompt should render (see
+    ``_should_prompt_for_followup_choice``) and that the rendered digest
+    carried a commitment rollup, so a follow_up row for the targeted
+    week must exist. The dispatch is a side effect only: the function
+    returns nothing because the digest has already been printed and the
+    review verb's exit code is decided in ``_cmd_review_impl``.
+    """
+    store = ProfileStore()
+    target_week = summary_week_iso or current_iso_week()
+    current = store.load_follow_up(target_week)
+    if current is None:
+        # Defensive: rollup was present at render time but the row
+        # disappeared between then and now. Skip the prompt rather than
+        # raise; the user can still re-run.
+        return
+    choice = _read_followup_choice()
+    if choice == _FOLLOWUP_CHOICE_DIGEST:
+        return
+    if choice == _FOLLOWUP_CHOICE_KEEP:
+        next_week = _keep_commitment_for_next_week(store, current)
+        print(f"  Kept commitment for {next_week}.")
+        return
+    if choice == _FOLLOWUP_CHOICE_NEW:
+        cmd_commit(None)
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     """Render this week's digest (or a past week with --week <iso>).
 
@@ -478,6 +648,19 @@ def _cmd_review_impl(args: argparse.Namespace) -> int:
             raw = summary.trajectory.label.value
             traj_label = _TRAJECTORY_LABEL_DISPLAY.get(raw, raw.title())
         _post_notify(trajectory_label=traj_label)
+
+    # Spec section 2 (coaching-reposition): after the terminal masthead
+    # prints, the interactive review offers the [k]eep / [n]ew / [d]igest
+    # choice. The prompt only fires when an active commitment exists
+    # (rollup is not None) AND the caller is at an interactive TTY AND
+    # neither --notify nor --non-interactive was passed. The launchd
+    # daemon path satisfies the --notify suppression; scripted runs that
+    # want the rendered output without the prompt pass --non-interactive.
+    if (
+        summary.commitment_rollup is not None
+        and _should_prompt_for_followup_choice(args)
+    ):
+        _handle_followup_prompt(summary.week_iso)
 
     return 0
 
@@ -1175,6 +1358,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Write the HTML digest to ~/.praxis/weeks/<iso>.html "
             "(spec 13.1). The terminal render is always printed."
+        ),
+    )
+    review.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help=(
+            "Skip the [k]eep / [n]ew / [d]igest prompt that follows the "
+            "terminal masthead (spec section 2). Always implied by the "
+            "scheduled --notify path; pass this flag for scripted runs "
+            "that should never block on stdin."
         ),
     )
     review.set_defaults(func=cmd_review)

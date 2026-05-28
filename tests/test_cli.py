@@ -1200,3 +1200,328 @@ def test_notify_survives_unexpected_exception(
     captured = capsys.readouterr()
     assert code == 0
     assert "osascript notification failed" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# US-036: HTML masthead + interactive prompt gating
+# ---------------------------------------------------------------------------
+
+
+def _seed_commitment(week_iso: str, *, dim_key: str = "verification",
+                     commitment_text: str = "ask 'list the tables this writes' before running",
+                     ) -> FollowUp:
+    """Seed one follow_ups row so the rollup builder finds an active commitment.
+
+    Returns the FollowUp the helper saved so the test can assert against
+    the same shape. The orchestrator carries this row through to the
+    rollup via load_follow_up(week_iso); see praxis/orchestrator.py.
+    """
+    store = ProfileStore()
+    row = FollowUp(
+        week_iso=week_iso,
+        dim_key=dim_key,
+        commitment_text=commitment_text,
+        target_metric="verification_rate",
+        baseline_value=0.4,
+        measured_value=None,
+        outcome="pending",
+    )
+    store.save_follow_up(row)
+    return row
+
+
+def _stub_run_weekly_with_rollup(
+    monkeypatch, *, week_iso: str | None = None,
+    commitment_text: str = "ask 'list the tables this writes' before running",
+    dim_key: str = "verification",
+) -> str:
+    """Stub run_weekly to return a summary with a non-None commitment_rollup.
+
+    The orchestrator's _step_follow_up only builds a follow_up when a
+    moments selection fires; CLI tests don't have moments to feed it.
+    This helper sidesteps the orchestrator entirely and returns a
+    summary whose ``commitment_rollup`` is populated, so the prompt
+    gating in ``_cmd_review_impl`` can be exercised in isolation.
+    Returns the week_iso the stub uses so callers can reference it.
+    """
+    from praxis.cli import __main__ as cli_main
+    from praxis.orchestrator import WeeklyRunSummary, current_iso_week
+    from praxis.reports.commitment_rollup import CommitmentRollup
+    from praxis.scoring.aggregate import ProfileSnapshot
+
+    target_week = week_iso or current_iso_week()
+    snapshot = ProfileSnapshot(
+        overall=6.0,
+        dimension_means={d.key: 6.0 for d in RUBRIC},
+        session_count=1,
+        provider_breakdown={"claude": 1},
+        strongest_dimension=RUBRIC[0].key,
+        weakest_dimension=RUBRIC[-1].key,
+    )
+    rollup = CommitmentRollup(
+        display_text=commitment_text,
+        target_dim_key=dim_key,
+        sessions_this_week=4,
+        sessions_prior_week=2,
+        self_report_tally={"yes": 0, "no": 0, "partial": 0, "skip": 0},
+        dim_before={dim_key: 4.8},
+        dim_after={dim_key: 6.2},
+    )
+    fake_summary = WeeklyRunSummary(
+        week_iso=target_week,
+        sessions=[],
+        tasks=[],
+        judge_results={},
+        moments=[],
+        selection=None,
+        snapshot=snapshot,
+        rendered_html="<html></html>",
+        rendered_terminal="PRAXIS - Weekly read",
+        elapsed_seconds=0.0,
+        commitment_rollup=rollup,
+    )
+    monkeypatch.setattr(cli_main, "run_weekly", lambda **kw: fake_summary)
+    return target_week
+
+
+def test_review_subparser_accepts_non_interactive_flag():
+    """`--non-interactive` is wired to the review subparser (AC US-036 #2)."""
+    parser = build_parser()
+    args = parser.parse_args(["review", "--non-interactive"])
+    assert args.non_interactive is True
+    # Default is False when the flag is omitted.
+    args = parser.parse_args(["review"])
+    assert args.non_interactive is False
+
+
+def test_review_notify_non_interactive_renders_without_prompt(
+    tmp_home, capsys, monkeypatch, fake_api_key, fake_osascript
+):
+    """`praxis review --notify --non-interactive` (the LaunchAgent path)
+    renders the masthead and exits 0 WITHOUT printing the prompt
+    (AC US-036 #3). Seeds a commitment so the rollup is non-None;
+    the prompt must still stay quiet under the combined flag pair.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _seed_score("sess-notify-noprompt", datetime.now(timezone.utc))
+    _seed_commitment(_current_week_iso())
+    _stub_run_weekly_with_rollup(monkeypatch)
+
+    code = main(["review", "--notify", "--non-interactive"])
+    captured = capsys.readouterr()
+    assert code == 0
+    # The prompt text is the contract; it must not appear anywhere in stdout.
+    combined = captured.out + captured.err
+    assert "[k]eep" not in combined
+    assert "[n]ew" not in combined
+    assert "[d]igest" not in combined
+
+
+def test_review_notify_alone_suppresses_prompt_even_at_tty(
+    tmp_home, capsys, monkeypatch, fake_api_key, fake_osascript
+):
+    """--notify alone is enough to skip the prompt: the LaunchAgent
+    path passes --non-interactive too, but humans running --notify
+    interactively from a TTY shouldn't be blocked either."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    # Force stdin.isatty() True so the only gate that should fire is --notify.
+    monkeypatch.setattr("praxis.cli.__main__.sys.stdin.isatty", lambda: True)
+    _seed_score("sess-notify-tty", datetime.now(timezone.utc))
+    _seed_commitment(_current_week_iso())
+    _stub_run_weekly_with_rollup(monkeypatch)
+
+    code = main(["review", "--notify"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "[k]eep" not in captured.out
+    assert "[n]ew" not in captured.out
+    assert "[d]igest" not in captured.out
+
+
+def test_review_skips_prompt_when_stdin_not_a_tty(
+    tmp_home, capsys, monkeypatch, fake_api_key
+):
+    """No TTY -> no prompt (scripted runs through pipes / docker / CI).
+
+    Even with a commitment on file, the prompt only fires when the
+    user is actually sitting at an interactive terminal. Asserts on the
+    captured stdout to prove the prompt prefix never lands.
+    """
+    monkeypatch.setattr("praxis.cli.__main__.sys.stdin.isatty", lambda: False)
+    _seed_score("sess-pipe", datetime.now(timezone.utc))
+    _seed_commitment(_current_week_iso())
+    _stub_run_weekly_with_rollup(monkeypatch)
+
+    code = main(["review"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "[k]eep" not in captured.out
+
+
+def test_review_skips_prompt_when_no_commitment_rollup(
+    tmp_home, capsys, monkeypatch, fake_api_key
+):
+    """No rollup -> no commitment to keep/new, so the prompt is
+    suppressed entirely. The masthead's commitment block is the
+    precondition for the prompt; renderer omits the block when the
+    rollup is None and the CLI does the same.
+    """
+    monkeypatch.setattr("praxis.cli.__main__.sys.stdin.isatty", lambda: True)
+    _seed_score("sess-no-commitment", datetime.now(timezone.utc))
+    # Note: no _stub_run_weekly_with_rollup call; the real run_weekly
+    # leaves commitment_rollup=None when no follow_up was built.
+    fake_calls: list[str] = []
+
+    def _fake_input(prompt: str) -> str:  # noqa: ARG001
+        fake_calls.append(prompt)
+        return "d"
+
+    monkeypatch.setattr("builtins.input", _fake_input)
+
+    code = main(["review"])
+    captured = capsys.readouterr()
+    assert code == 0
+    # input() must not have been called - no rollup, no prompt.
+    assert fake_calls == []
+    assert "[k]eep" not in captured.out
+
+
+def test_review_prompt_keep_inserts_followup_for_next_week(
+    tmp_home, capsys, monkeypatch, fake_api_key
+):
+    """[k]eep saves a follow_ups row for next week with the same
+    commitment_text. The new row keeps dim_key/target_metric/baseline_value
+    so next week's review can close the loop on the same metric.
+    """
+    monkeypatch.setattr("praxis.cli.__main__.sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "k")
+    _seed_score("sess-keep", datetime.now(timezone.utc))
+    current_week = _current_week_iso()
+    seeded = _seed_commitment(
+        current_week, commitment_text="state the goal before prompting"
+    )
+    _stub_run_weekly_with_rollup(
+        monkeypatch, week_iso=current_week,
+        commitment_text=seeded.commitment_text,
+        dim_key=seeded.dim_key,
+    )
+
+    code = main(["review"])
+    captured = capsys.readouterr()
+    assert code == 0
+
+    # Compute the next ISO week the same way the CLI does.
+    from praxis.cli.__main__ import _next_iso_week
+    next_week = _next_iso_week(current_week)
+    store = ProfileStore()
+    next_row = store.load_follow_up(next_week)
+    assert next_row is not None
+    assert next_row.commitment_text == seeded.commitment_text
+    assert next_row.dim_key == seeded.dim_key
+    assert next_row.target_metric == seeded.target_metric
+    assert next_row.outcome == "pending"
+    # Caller-visible confirmation lands in stdout.
+    assert "Kept commitment" in captured.out
+    assert next_week in captured.out
+
+
+def test_review_prompt_digest_branch_is_a_noop(
+    tmp_home, capsys, monkeypatch, fake_api_key
+):
+    """[d]igest exits 0 without inserting a follow-up row for next week."""
+    monkeypatch.setattr("praxis.cli.__main__.sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "d")
+    _seed_score("sess-digest", datetime.now(timezone.utc))
+    current_week = _current_week_iso()
+    _seed_commitment(current_week)
+    _stub_run_weekly_with_rollup(monkeypatch, week_iso=current_week)
+
+    code = main(["review"])
+    capsys.readouterr()
+    assert code == 0
+
+    from praxis.cli.__main__ import _next_iso_week
+    next_week = _next_iso_week(current_week)
+    store = ProfileStore()
+    assert store.load_follow_up(next_week) is None
+
+
+def test_review_prompt_new_branch_dispatches_to_cmd_commit(
+    tmp_home, capsys, monkeypatch, fake_api_key
+):
+    """[n]ew dispatches to cmd_commit inline; cmd_commit prompts for the
+    new commitment text and saves a row for next week with that text.
+    """
+    monkeypatch.setattr("praxis.cli.__main__.sys.stdin.isatty", lambda: True)
+    # Two input() calls: first picks 'n', second is cmd_commit's prompt.
+    responses = iter(["n", "ship one experiment per week without polishing"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(responses))
+
+    _seed_score("sess-new", datetime.now(timezone.utc))
+    current_week = _current_week_iso()
+    seeded = _seed_commitment(
+        current_week, commitment_text="old commitment to replace"
+    )
+    _stub_run_weekly_with_rollup(monkeypatch, week_iso=current_week)
+
+    code = main(["review"])
+    capsys.readouterr()
+    assert code == 0
+
+    from praxis.cli.__main__ import _next_iso_week
+    next_week = _next_iso_week(current_week)
+    store = ProfileStore()
+    next_row = store.load_follow_up(next_week)
+    assert next_row is not None
+    assert (
+        next_row.commitment_text == "ship one experiment per week without polishing"
+    )
+    # The seed text must NOT appear on the next-week row (a regression
+    # guard against accidentally reusing the keep-branch path).
+    assert next_row.commitment_text != seeded.commitment_text
+
+
+def test_cmd_commit_returns_1_when_no_prior_commitment(
+    tmp_home, capsys, monkeypatch
+):
+    """cmd_commit needs the latest follow-up's dim/target_metric to build
+    the next-week row. With no prior commitment on file it errors out
+    rather than guessing a dim."""
+    monkeypatch.setattr("builtins.input", lambda prompt="": "anything")
+    from praxis.cli.__main__ import cmd_commit
+
+    code = cmd_commit(None)
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "No prior commitment" in err
+
+
+def test_cmd_commit_returns_1_on_empty_input(tmp_home, capsys, monkeypatch):
+    """An empty commitment is not a useful commitment - cmd_commit
+    refuses to save it and returns 1 with a clear message."""
+    _seed_commitment(_current_week_iso())
+    monkeypatch.setattr("builtins.input", lambda prompt="": "   ")
+    from praxis.cli.__main__ import cmd_commit
+
+    code = cmd_commit(None)
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "No commitment recorded" in err
+
+
+def test_next_iso_week_handles_year_boundary():
+    """ISO weeks wrap at year boundaries: 2025-W52 -> 2026-W01."""
+    from praxis.cli.__main__ import _next_iso_week
+    assert _next_iso_week("2025-W52") == "2026-W01"
+
+
+def test_next_iso_week_increments_within_year():
+    """Within a year the next week is +1 in ISO numbering."""
+    from praxis.cli.__main__ import _next_iso_week
+    assert _next_iso_week("2026-W21") == "2026-W22"
+
+
+def _current_week_iso() -> str:
+    """Return the current ISO-week tag (matches what run_weekly sees)."""
+    from praxis.orchestrator import current_iso_week
+    return current_iso_week()
