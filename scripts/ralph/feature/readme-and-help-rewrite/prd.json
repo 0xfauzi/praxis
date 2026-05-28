@@ -12,7 +12,7 @@
         "Tests pass: uv run pytest"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -26,13 +26,14 @@
         "Tests pass: uv run pytest"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": ""
     }
   ],
   "allowedPaths": [
     "README.md",
     "praxis/cli/",
+    "tests/",
     "scripts/ralph/feature/readme-and-help-rewrite/",
     "scripts/ralph/progress.txt"
   ]

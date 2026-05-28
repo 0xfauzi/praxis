@@ -7,14 +7,14 @@ US-047 acceptance criteria (`praxis follow-up`):
   - Exits 0 when a follow-up exists, exits 3 with a clear message when none
     exist yet
 
-US-033 acceptance criteria (`praxis review`):
+US-033 / US-044 acceptance criteria (`praxis review`):
   - `praxis review` is the public verb; `praxis week` is removed entirely
     (no deprecation alias). Invoking `praxis week` exits non-zero with
     argparse's unknown-command error.
   - The internal function is `cmd_review` (renamed from cmd_week);
     internal names `run_weekly` and `WeeklyRunSummary` are unchanged.
 
-US-074 acceptance criteria (`praxis review`, originally `praxis week`):
+US-074 acceptance criteria (`praxis review`, was `praxis week` pre-US-044):
   - `praxis review`, `--week <iso>`, `--dry-run`, `--frontier-only`,
     `--explain-judging`, `--notify`, and `--write-html` are wired to
     the orchestrator with documented behavior
@@ -45,7 +45,7 @@ US-077 acceptance criteria (exit code 3 when no sessions in the window):
 US-078 acceptance criteria (removed commands and flags are gone):
   - `praxis install-daemon` (the v0.1 daily one) is not a registered
     subparser and its handler function is no longer exported
-  - The `--no-judge` flag is not accepted by `scan` or `week`
+  - The `--no-judge` flag is not accepted by `scan` or `review`
   - The v0.1 daily orchestrator entry point (`praxis.orchestrator.run`)
     is not registered as a subcommand's `func` default
 
