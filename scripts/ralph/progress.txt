@@ -158,3 +158,13 @@
     * The `_wed_in_week(week_iso)` test helper picks Wednesday noon of the target week so off-by-one ISO-week boundary issues (the Monday boundary) can't accidentally land a row in the prior or following week. If future tests need to exercise the actual Monday/Sunday boundaries, write dedicated boundary tests rather than parameterizing `_wed_in_week`.
 ---
 
+## Iteration 9 - lint cleanup (post-PRD verification fix)
+- What I did: Fixed 4 pre-existing ruff errors that were blocking ralph's `linter` verification gate even though all 3 PRD stories already passed in iteration 8. Errors were: 3x F541 (f-string without placeholders) in tests/make_synthetic_data.py:239,246 and tests/test_digest_html.py:730, plus 1x F401 (unused `Role` import) in tests/test_scanners.py:12. None of these files were touched by US-009/US-010/US-011; they were pre-existing noise in the working tree that ruff started flagging.
+- Files changed: tests/make_synthetic_data.py (2 f-strings -> plain strings), tests/test_digest_html.py (1 f-string -> plain string), tests/test_scanners.py (dropped unused Role import), scripts/ralph/progress.txt (this entry).
+- Verification: `uv run ruff check .` -> exit 0 (was: 4 errors). `uv run mypy praxis` -> Success: no issues found in 50 source files. `uv run pytest` -> 1105 passed (same count as iteration 8). prd.json unchanged - all 3 stories already passes=true.
+- What the next iteration should know:
+  - All 3 PRD stories for augmentation-automation-classifier still pass. This iteration was purely a verification-gate fix; ralph should detect <promise>COMPLETE</promise> on the next iteration.
+  - Pattern: when ralph's `linter` gate fails on pre-existing issues outside the iteration's changes, fix them in-place rather than ignoring -- the gate runs ruff over the whole repo, not just the diff. The `tests/` directory is in this PRD's allowedPaths so touching those files was permitted.
+  - The unused-fixture pyright warnings on tests/test_scanners.py (tmp_home, synthetic_*) that surfaced after removing the Role import are pre-existing pytest fixture warnings (pyright doesn't recognize the conftest injection) and were already present before this iteration. They are not ruff errors and do not block any verification gate.
+---
+
