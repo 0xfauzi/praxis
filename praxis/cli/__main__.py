@@ -2005,6 +2005,53 @@ def cmd_uninstall_weekly(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+def cmd_install_coach(args: argparse.Namespace) -> int:
+    """Detect supported AI coding tools and install the coaching hooks.
+
+    Per AC US-028: prompts ``Found <Tool>. Install the Praxis coaching
+    hook? [Y/n]:`` for each detected tool. ``--yes`` skips prompting;
+    ``--tool NAME`` restricts to a single tool (still prompts unless
+    paired with ``--yes``); ``--all`` proceeds regardless of detection
+    (and is mutually exclusive with ``--tool``).
+
+    Exit codes:
+      0  -- happy path, including the "no tools detected" branch.
+      1  -- invalid ``--tool`` argument.
+    """
+    from praxis.cli.install_coach import run_install_coach
+
+    return run_install_coach(
+        assume_yes=getattr(args, "yes", False),
+        tool=getattr(args, "tool", None),
+        all_tools=getattr(args, "all", False),
+    )
+
+
+def cmd_uninstall_coach(args: argparse.Namespace) -> int:
+    """Symmetric teardown of the coaching hooks installed by ``install-coach``.
+
+    Per AC US-032: removes only blocks/entries carrying
+    ``_praxisManaged: true`` (Claude Code, Codex) or bounded by the
+    ``praxisManaged`` markdown markers (Copilot); user-authored content
+    at the same event names is preserved. ``--yes`` skips prompts;
+    ``--tool NAME`` restricts to one tool; ``--all`` iterates every
+    known tool regardless of detection. On a system where Praxis was
+    never installed (no managed content anywhere) the command prints
+    ``Nothing to uninstall.`` and exits 0 without any file writes.
+
+    Exit codes:
+      0  -- happy path (including the "nothing to uninstall" branch).
+      1  -- invalid ``--tool`` argument.
+    """
+    from praxis.cli.install_coach import run_uninstall_coach
+
+    return run_uninstall_coach(
+        assume_yes=getattr(args, "yes", False),
+        tool=getattr(args, "tool", None),
+        all_tools=getattr(args, "all", False),
+    )
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     from praxis.config_cli import (
         ConfigCLIError,
@@ -2466,6 +2513,66 @@ def build_parser() -> argparse.ArgumentParser:
         help="Remove the shell-nudge eval line from ~/.zshrc and ~/.bashrc.",
     )
     usn.set_defaults(func=cmd_uninstall_shell_nudge)
+
+    ic = sub.add_parser(
+        "install-coach",
+        help="Install the Praxis coaching hooks into your AI coding tools.",
+        description=(
+            "Detect Claude Code / Codex / Copilot and prompt to install "
+            "the SessionStart + Stop coaching hooks for each one. The "
+            "detection criteria are ~/.claude/settings.json or "
+            "~/.claude/projects/ (Claude Code), ~/.codex/ (Codex), and "
+            "any VS Code workspace storage with Copilot chat artifacts "
+            "(Copilot)."
+        ),
+    )
+    ic.add_argument(
+        "--yes", action="store_true",
+        help="Assume yes for every prompt (useful in scripted installs).",
+    )
+    ic_scope = ic.add_mutually_exclusive_group()
+    ic_scope.add_argument(
+        "--tool", type=str, default=None, metavar="NAME",
+        help=(
+            "Restrict to a single tool (claude-code, codex, copilot). "
+            "Still prompts unless --yes is also set."
+        ),
+    )
+    ic_scope.add_argument(
+        "--all", action="store_true",
+        help="Iterate every known tool regardless of detection.",
+    )
+    ic.set_defaults(func=cmd_install_coach)
+
+    uc = sub.add_parser(
+        "uninstall-coach",
+        help="Remove the Praxis coaching hooks from your AI coding tools.",
+        description=(
+            "Remove only blocks/entries carrying the _praxisManaged "
+            "sentinel (Claude Code, Codex) or bounded by the "
+            "praxisManaged markdown markers (Copilot). User-authored "
+            "content at the same event names is preserved. On a system "
+            "where Praxis was never installed, prints 'Nothing to "
+            "uninstall.' and exits 0 without any file writes."
+        ),
+    )
+    uc.add_argument(
+        "--yes", action="store_true",
+        help="Assume yes for every prompt (useful in scripted uninstalls).",
+    )
+    uc_scope = uc.add_mutually_exclusive_group()
+    uc_scope.add_argument(
+        "--tool", type=str, default=None, metavar="NAME",
+        help=(
+            "Restrict to a single tool (claude-code, codex, copilot). "
+            "Still prompts unless --yes is also set."
+        ),
+    )
+    uc_scope.add_argument(
+        "--all", action="store_true",
+        help="Iterate every known tool regardless of detection.",
+    )
+    uc.set_defaults(func=cmd_uninstall_coach)
 
     cfg = sub.add_parser("config",
                          help="View, --get, or --set ~/.praxis/config.toml.")
