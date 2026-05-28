@@ -87,7 +87,7 @@ def _cost_inputs(summary):
     biggest_inputs: list[BiggestLineInputSession] = []
     tier_inputs: list[TierFitInputSession] = []
     for s in summary.sessions or []:
-        total_chars = sum(len(t.content) for t in s.user_turns)
+        total_chars = sum(len(t.content) for t in s.user_authored_turns)
         cost = estimate_session_cost_usd(s.model_hint, total_chars)
         biggest_inputs.append(BiggestLineInputSession(
             started_at=s.started_at,
@@ -98,7 +98,7 @@ def _cost_inputs(summary):
         tier_savings = estimate_tier_fit_savings_for_session(
             s.model_hint, total_chars
         )
-        n_user_turns = len(s.user_turns)
+        n_user_turns = len(s.user_authored_turns)
         avg_chars = total_chars / n_user_turns if n_user_turns else 0.0
         tier_inputs.append(TierFitInputSession(
             started_at=s.started_at,
@@ -275,7 +275,7 @@ def _task_rows_terminal(summary) -> list[dt.TaskRowView] | None:
     # 'WHERE THE WEEK WENT' no longer renders $0.00 next to every row.
     cost_by_sid: dict[str, float] = {}
     for s in summary.sessions or []:
-        total_chars = sum(len(t.content) for t in s.user_turns)
+        total_chars = sum(len(t.content) for t in s.user_authored_turns)
         cost = estimate_session_cost_usd(s.model_hint, total_chars)
         if cost is not None:
             cost_by_sid[s.stable_id] = cost
@@ -320,7 +320,7 @@ def _task_rows_html(summary) -> tuple[dh.TaskRow, ...]:
         return ()
     cost_by_sid: dict[str, float] = {}
     for s in summary.sessions or []:
-        total_chars = sum(len(t.content) for t in s.user_turns)
+        total_chars = sum(len(t.content) for t in s.user_authored_turns)
         cost = estimate_session_cost_usd(s.model_hint, total_chars)
         if cost is not None:
             cost_by_sid[s.stable_id] = cost
@@ -605,7 +605,7 @@ def _model_split_html(summary) -> tuple:
         return tuple()
     spend_by_model: dict[str, float] = {}
     for s in summary.sessions:
-        chars = sum(len(t.content) for t in s.user_turns)
+        chars = sum(len(t.content) for t in s.user_authored_turns)
         c = estimate_session_cost_usd(s.model_hint, chars)
         if c is None or c <= 0:
             continue
@@ -656,7 +656,7 @@ def _behavioral_patterns_panel(summary) -> BehavioralPatternsPanel:
         k: [] for k in SIGNAL_KINDS_IN_PANEL_ORDER
     }
     for s in summary.sessions or []:
-        for turn in s.user_turns:
+        for turn in s.user_authored_turns:
             kinds = detect_signal_kinds(turn)
             for kind in kinds:
                 counts[kind] += 1

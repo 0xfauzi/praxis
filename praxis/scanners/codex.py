@@ -16,6 +16,7 @@ from pathlib import Path
 
 from praxis.models import Provider, Role, Session, Turn
 from praxis.scanners.base import BaseScanner
+from praxis.scanners.preamble import is_tool_injected_content
 
 
 def _real_model(value):
@@ -119,7 +120,16 @@ class CodexScanner(BaseScanner):
                         if not text.strip():
                             continue
                         turns.append(
-                            Turn(role=role, content=text, timestamp=ts, meta={"model": model_hint})
+                            Turn(
+                                role=role,
+                                content=text,
+                                timestamp=ts,
+                                meta={"model": model_hint},
+                                tool_injected=(
+                                    role == Role.USER
+                                    and is_tool_injected_content(text)
+                                ),
+                            )
                         )
 
                     elif entry_type in {

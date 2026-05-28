@@ -135,7 +135,7 @@ def compute_counterfactual_overspend(
       2. The family ships a fast-tier sibling with per-token pricing
          (looked up via ``_fast_tier_sibling``; deterministic by card id
          tiebreak).
-      3. ``len(s.user_turns) <= COUNTERFACTUAL_MAX_USER_TURNS``.
+      3. ``len(s.user_authored_turns) <= COUNTERFACTUAL_MAX_USER_TURNS``.
       4. The session's average prompt char volume is at most
          ``COUNTERFACTUAL_MAX_AVG_PROMPT_CHARS``.
 
@@ -172,7 +172,7 @@ def compute_counterfactual_overspend(
         # Compute frontier cost for this session against ITS card; this
         # is how we detect "had cost data" - any session whose card has
         # pricing and a positive cost counts.
-        user_turns = session.user_turns
+        user_turns = session.user_authored_turns
         total_chars = sum(len(t.content) for t in user_turns)
         cost = _counterfactual_costs(card, total_chars)
         if cost is None:
@@ -293,9 +293,9 @@ def _summarize_tasks(sessions: list[Session]) -> list[str]:
     """Crude task classification from the first user prompt of each session."""
     tasks: Counter[str] = Counter()
     for session in sessions:
-        if not session.user_turns:
+        if not session.user_authored_turns:
             continue
-        first = session.user_turns[0].content.lower()[:300]
+        first = session.user_authored_turns[0].content.lower()[:300]
         if any(k in first for k in ["bug", "error", "fail", "broken", "debug", "trace"]):
             tasks["debugging"] += 1
         elif any(k in first for k in ["refactor", "rewrite", "clean up", "simplify"]):
@@ -593,10 +593,10 @@ def build_profiles(
         all_prompt_chars: list[int] = []
         recent_prompts: list[str] = []
         for s in sessions:
-            for t in s.user_turns:
+            for t in s.user_authored_turns:
                 all_prompt_chars.append(len(t.content))
-            if s.user_turns:
-                recent_prompts.append(s.user_turns[0].content)
+            if s.user_authored_turns:
+                recent_prompts.append(s.user_authored_turns[0].content)
 
         avg_prompt_chars = mean(all_prompt_chars) if all_prompt_chars else 0.0
         avg_engagement = mean(sig.engagement_rate for sig in signals) if signals else 0.0

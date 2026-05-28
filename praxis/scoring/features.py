@@ -72,7 +72,7 @@ class SessionFeatures:
 
 
 def extract(session: Session) -> SessionFeatures:
-    user_turns = session.user_turns
+    user_turns = session.user_authored_turns
 
     if not user_turns:
         return SessionFeatures(

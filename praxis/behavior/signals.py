@@ -764,7 +764,7 @@ class BehavioralSignals:
 
 
 def extract(session: Session) -> BehavioralSignals:
-    user_turns = session.user_turns
+    user_turns = session.user_authored_turns
     if not user_turns:
         # tool_ladder_level is still scanned over the whole transcript even
         # if there are no user turns, since assistant turns can carry
@@ -1015,7 +1015,7 @@ def categorize_session_verification(session: Session) -> str:
     the trust-calibration anchor.
     """
     seen: set[str] = set()
-    for turn in session.user_turns:
+    for turn in session.user_authored_turns:
         seen.update(detect_verification_calibration_kinds(turn))
         if "source_check" in seen:
             # Highest rigor reached; early exit is safe.
@@ -1077,7 +1077,7 @@ def detect_spec_block(session: Session) -> bool:
     a different way (course correction, not adoption), and the
     specification-adoption panel measures session OPENINGS specifically.
     """
-    user_turns = session.user_turns
+    user_turns = session.user_authored_turns
     if not user_turns:
         return False
     content = user_turns[0].content
@@ -1139,7 +1139,7 @@ def detect_scaffolding_kinds(session: Session) -> set[str]:
     Kinds returned are members of ``SCAFFOLDING_KINDS_IN_PANEL_ORDER``.
     """
     seen: set[str] = set()
-    for turn in session.user_turns:
+    for turn in session.user_authored_turns:
         content = turn.content
         for kind, pattern in _SCAFFOLDING_PATTERNS.items():
             if kind in seen:
@@ -1282,7 +1282,7 @@ def count_session_knowledge_gaps(session: Session) -> dict[str, int]:
     explicit zero to each category (US-041 acceptance: no silent drops).
     """
     counts: dict[str, int] = {kind: 0 for kind in KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER}
-    for turn in session.user_turns:
+    for turn in session.user_authored_turns:
         for kind in detect_knowledge_gap_kinds(turn):
             counts[kind] += 1
     return counts
