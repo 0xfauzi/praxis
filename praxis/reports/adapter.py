@@ -19,9 +19,15 @@ from praxis.behavior.repeat_task import (
     detect_repeats,
 )
 from praxis.behavior.signals import (
+    KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER,
+    KNOWLEDGE_GAP_LABELS,
+    SCAFFOLDING_KINDS_IN_PANEL_ORDER,
     SIGNAL_KINDS_IN_PANEL_ORDER,
     categorize_session_verification,
+    count_session_knowledge_gaps,
+    detect_scaffolding_kinds,
     detect_signal_kinds,
+    detect_spec_block,
 )
 from praxis.reports import digest_html as dh
 from praxis.reports import digest_terminal as dt
@@ -30,15 +36,21 @@ from praxis.reports.panel_inputs import (
     EXCERPT_CHAR_LIMIT,
     MAX_EXCERPTS_PER_SIGNAL,
     REPEAT_TASK_WINDOW_DAYS,
+    SCAFFOLDING_LABELS,
     SIGNAL_CITATIONS,
     SIGNAL_LABELS,
     AugAutoBalancePanel,
     BehavioralPatternRow,
     BehavioralPatternsPanel,
     CadencePanel,
+    ContextEngineeringDepthPanel,
+    ContextEngineeringRow,
+    KnowledgeGapDistributionPanel,
+    KnowledgeGapRow,
     PanelInputs,
     RepeatTaskRadarPanel,
     RepeatTaskRow,
+    SpecificationAdoptionPanel,
     VerificationCalibrationPanel,
     clip_excerpt,
 )
@@ -924,6 +936,101 @@ def _verification_calibration_panel(
     )
 
 
+def _specification_adoption_panel(summary) -> SpecificationAdoptionPanel:
+    """Count sessions opening with a structured spec block (US-041).
+
+    Walks every session in the summary and counts how many opened with
+    a Markdown spec heading or label-colon form per
+    ``detect_spec_block``. The renderer surfaces the adoption SHARE so
+    the count is paired with a denominator (total sessions in the week)
+    to keep the share interpretable.
+    """
+    total_sessions = 0
+    sessions_with_spec = 0
+    for s in getattr(summary, "sessions", None) or []:
+        total_sessions += 1
+        try:
+            if detect_spec_block(s):
+                sessions_with_spec += 1
+        except (AttributeError, TypeError):
+            # Defensive: a session with a malformed user_turns must not
+            # crash the panel build. Treat as no-signal and continue.
+            continue
+    return SpecificationAdoptionPanel(
+        sessions_with_spec=sessions_with_spec,
+        total_sessions=total_sessions,
+    )
+
+
+def _context_engineering_panel(summary) -> ContextEngineeringDepthPanel:
+    """Count sessions referencing scaffolding artifacts (US-041).
+
+    Walks every session in the summary, asks
+    ``detect_scaffolding_kinds`` which scaffolding artifacts (CLAUDE.md,
+    AGENTS.md, copilot-instructions.md, Projects, Skills) were named,
+    and accumulates a per-kind session count. A row is always present
+    for every kind in panel-display order so the renderer can
+    distinguish "no scaffolding at all this week" from "scaffolding for
+    some kinds, none for others".
+    """
+    counts: dict[str, int] = {kind: 0 for kind in SCAFFOLDING_KINDS_IN_PANEL_ORDER}
+    total_sessions = 0
+    for s in getattr(summary, "sessions", None) or []:
+        total_sessions += 1
+        try:
+            kinds = detect_scaffolding_kinds(s)
+        except (AttributeError, TypeError):
+            continue
+        for kind in kinds:
+            if kind in counts:
+                counts[kind] += 1
+    rows = tuple(
+        ContextEngineeringRow(
+            kind=kind,
+            label=SCAFFOLDING_LABELS.get(kind, kind),
+            sessions_with_artifact=counts[kind],
+        )
+        for kind in SCAFFOLDING_KINDS_IN_PANEL_ORDER
+    )
+    return ContextEngineeringDepthPanel(
+        rows=rows,
+        total_sessions=total_sessions,
+    )
+
+
+def _knowledge_gap_distribution_panel(
+    summary,
+) -> KnowledgeGapDistributionPanel:
+    """Aggregate per-turn knowledge gaps across the week (US-041).
+
+    For every session, accumulates the per-kind knowledge-gap counts
+    from ``count_session_knowledge_gaps``. The four arXiv 2501.11709
+    categories are always present in the returned rows even when their
+    counts are zero (US-041 acceptance: no silent drops); the renderer
+    surfaces the empty-state copy only when every category is zero.
+    """
+    counts: dict[str, int] = {
+        kind: 0 for kind in KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER
+    }
+    for s in getattr(summary, "sessions", None) or []:
+        try:
+            per_session = count_session_knowledge_gaps(s)
+        except (AttributeError, TypeError):
+            continue
+        for kind, value in per_session.items():
+            if kind in counts:
+                counts[kind] += value
+    rows = tuple(
+        KnowledgeGapRow(
+            kind=kind,
+            label=KNOWLEDGE_GAP_LABELS.get(kind, kind),
+            count=counts[kind],
+        )
+        for kind in KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER
+    )
+    return KnowledgeGapDistributionPanel(rows=rows)
+
+
 def build_panel_inputs(summary) -> PanelInputs:
     """Build the v0.3 expansion-panel inputs from a WeeklyRunSummary.
 
@@ -931,8 +1038,10 @@ def build_panel_inputs(summary) -> PanelInputs:
     fields it can build from the in-flight summary. US-038 wires the
     behavioral-patterns panel; US-039 wires the augmentation/automation
     balance and the cadence panel; US-040 wires the repeat-task radar
-    and the verification-calibration panel; subsequent stories extend
-    the returned ``PanelInputs`` with additional panels.
+    and the verification-calibration panel; US-041 wires the
+    specification-adoption, context-engineering-depth, and
+    knowledge-gap distribution panels; subsequent stories extend the
+    returned ``PanelInputs`` with additional panels.
     """
     return PanelInputs(
         behavioral_signals=_behavioral_patterns_panel(summary),
@@ -940,6 +1049,9 @@ def build_panel_inputs(summary) -> PanelInputs:
         cadence=_cadence_panel(summary),
         repeat_task_radar=_repeat_task_radar_panel(summary),
         verification_calibration=_verification_calibration_panel(summary),
+        specification_adoption=_specification_adoption_panel(summary),
+        context_engineering=_context_engineering_panel(summary),
+        knowledge_gap_distribution=_knowledge_gap_distribution_panel(summary),
     )
 
 

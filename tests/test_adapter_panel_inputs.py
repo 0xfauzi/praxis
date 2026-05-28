@@ -794,3 +794,252 @@ def test_build_panel_inputs_includes_us040_panels():
     assert pi.cadence is not None
     assert pi.repeat_task_radar is not None
     assert pi.verification_calibration is not None
+
+
+# =========================================================================
+# US-041: specification adoption + context engineering + knowledge gaps
+# =========================================================================
+
+
+from praxis.reports.adapter import (  # noqa: E402
+    _context_engineering_panel,
+    _knowledge_gap_distribution_panel,
+    _specification_adoption_panel,
+)
+from praxis.reports.panel_inputs import (  # noqa: E402
+    CONTEXT_ENGINEERING_CITATION,
+    KNOWLEDGE_GAP_CITATION,
+    KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER,
+    SCAFFOLDING_KINDS_IN_PANEL_ORDER,
+    SPECIFICATION_ADOPTION_CITATION,
+    ContextEngineeringDepthPanel,
+    KnowledgeGapDistributionPanel,
+    SpecificationAdoptionPanel,
+)
+
+
+def _spec_session(open_text: str) -> Session:
+    """A real Session whose first user turn carries ``open_text``."""
+    return Session(
+        provider=Provider.CLAUDE,
+        session_id=f"s-{hash(open_text) & 0xffffffff}",
+        started_at=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        turns=[Turn(role=Role.USER, content=open_text)],
+        source_path="/tmp/test",
+    )
+
+
+# --------- _specification_adoption_panel: empty + populated paths -----
+
+
+def test_specification_adoption_no_sessions_is_unmeasured():
+    """Zero sessions => has_sessions is False so the renderer can
+    surface a no-data placeholder rather than a misleading 0%."""
+    panel = _specification_adoption_panel(_FakeSummary())
+    assert isinstance(panel, SpecificationAdoptionPanel)
+    assert panel.has_sessions is False
+    assert panel.total_sessions == 0
+    assert panel.sessions_with_spec == 0
+
+
+def test_specification_adoption_counts_spec_block_openings():
+    """Sessions opening with a Markdown spec heading count toward
+    adoption; freeform implementation prompts do not."""
+    sessions = [
+        _spec_session("## Goal\nRefactor the auth flow."),
+        _spec_session("write me a sorter"),
+        _spec_session("Goal: ship safely. Acceptance criteria: zero downtime."),
+    ]
+    panel = _specification_adoption_panel(SimpleNamespace(sessions=sessions))
+    assert panel.total_sessions == 3
+    assert panel.sessions_with_spec == 2
+    # 2 of 3 sessions opened with a spec block.
+    assert abs(panel.adoption_share - 2 / 3) < 1e-6
+
+
+def test_specification_adoption_carries_citation():
+    """The panel carries the Woodward / SpecKit / Sean Grove citation
+    so the renderer can surface it inline (US-041 AC)."""
+    panel = _specification_adoption_panel(_FakeSummary())
+    assert panel.citation == SPECIFICATION_ADOPTION_CITATION
+    assert "Woodward" in panel.citation
+    assert "SpecKit" in panel.citation
+    assert "Sean Grove" in panel.citation
+
+
+def test_specification_adoption_share_zero_when_no_sessions():
+    """``adoption_share`` returns 0.0 cleanly when no sessions exist
+    (callers should guard on has_sessions first)."""
+    panel = _specification_adoption_panel(_FakeSummary())
+    assert panel.adoption_share == 0.0
+
+
+# --------- _context_engineering_panel: empty + populated paths --------
+
+
+def test_context_engineering_no_sessions_returns_zero_rows():
+    """Zero sessions => every scaffolding kind has zero count and
+    has_any_artifact is False."""
+    panel = _context_engineering_panel(_FakeSummary())
+    assert isinstance(panel, ContextEngineeringDepthPanel)
+    assert panel.has_any_artifact is False
+    # Every kind is still represented (one row per kind).
+    assert len(panel.rows) == len(SCAFFOLDING_KINDS_IN_PANEL_ORDER)
+
+
+def test_context_engineering_counts_per_kind():
+    """A week with sessions referencing multiple scaffolding kinds
+    surfaces per-kind session counts."""
+    sessions = [
+        _spec_session("update CLAUDE.md and add tests"),
+        _spec_session("modify AGENTS.md to mention the rubric"),
+        _spec_session("write a skills/code-review skill"),
+        _spec_session("refactor without scaffolding"),
+    ]
+    panel = _context_engineering_panel(SimpleNamespace(sessions=sessions))
+    by_kind = {row.kind: row.sessions_with_artifact for row in panel.rows}
+    assert by_kind["claude_md"] == 1
+    assert by_kind["agents_md"] == 1
+    assert by_kind["skills"] == 1
+
+
+def test_context_engineering_carries_citation():
+    """The panel carries the DORA 2025 + Anthropic Skills citation."""
+    panel = _context_engineering_panel(_FakeSummary())
+    assert panel.citation == CONTEXT_ENGINEERING_CITATION
+    assert "DORA 2025" in panel.citation
+    assert "Anthropic" in panel.citation
+
+
+def test_context_engineering_rows_in_panel_order():
+    """The rows must appear in SCAFFOLDING_KINDS_IN_PANEL_ORDER so the
+    renderer can iterate that tuple safely."""
+    panel = _context_engineering_panel(_FakeSummary())
+    kinds = tuple(row.kind for row in panel.rows)
+    assert kinds == SCAFFOLDING_KINDS_IN_PANEL_ORDER
+
+
+# --------- _knowledge_gap_distribution_panel: empty + populated paths --
+
+
+def test_knowledge_gap_no_sessions_returns_zero_rows():
+    """Zero sessions => four rows with zero counts. has_gaps is False
+    so the renderer falls through to the empty-state copy."""
+    panel = _knowledge_gap_distribution_panel(_FakeSummary())
+    assert isinstance(panel, KnowledgeGapDistributionPanel)
+    assert panel.has_gaps is False
+    assert panel.total_gaps == 0
+    # Each of the four arXiv 2501.11709 categories is still represented
+    # so the renderer never silently drops a category (US-041 AC).
+    assert len(panel.rows) == len(KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER)
+
+
+def test_knowledge_gap_zero_session_contributes_zero_to_each_category():
+    """A session with no detected gaps still contributes a zero to
+    each category (US-041 acceptance: 'no silent drops')."""
+    sessions = [
+        _spec_session("What does the LRU eviction policy do?"),
+    ]
+    panel = _knowledge_gap_distribution_panel(SimpleNamespace(sessions=sessions))
+    for row in panel.rows:
+        assert row.count == 0
+    assert panel.has_gaps is False
+
+
+def test_knowledge_gap_accumulates_across_sessions():
+    """Per-turn counts across multiple sessions sum into per-kind row
+    counts."""
+    sessions = [
+        Session(
+            provider=Provider.CLAUDE,
+            session_id="s-1",
+            started_at=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+            turns=[
+                Turn(role=Role.USER, content="write me a sorter"),
+                Turn(role=Role.USER, content="fix the failing auth test"),
+            ],
+            source_path="/tmp/x",
+        ),
+        Session(
+            provider=Provider.CLAUDE,
+            session_id="s-2",
+            started_at=datetime(2026, 5, 26, 12, 0, tzinfo=timezone.utc),
+            turns=[
+                Turn(role=Role.USER, content="do something with this codebase"),
+            ],
+            source_path="/tmp/x",
+        ),
+    ]
+    panel = _knowledge_gap_distribution_panel(SimpleNamespace(sessions=sessions))
+    by_kind = {row.kind: row.count for row in panel.rows}
+    # 2 build-imperatives without specs in s-1 (both turns); s-2 is
+    # vague rather than a build-imperative -> missing_specs >= 2.
+    assert by_kind["missing_specs"] >= 2
+    assert by_kind["unclear_instructions"] >= 1
+    assert panel.has_gaps is True
+
+
+def test_knowledge_gap_carries_citation():
+    """The panel carries the arXiv 2501.11709 citation."""
+    panel = _knowledge_gap_distribution_panel(_FakeSummary())
+    assert panel.citation == KNOWLEDGE_GAP_CITATION
+    assert "2501.11709" in panel.citation
+
+
+def test_knowledge_gap_rows_in_panel_order():
+    """The four rows must appear in KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER
+    so the renderer iterates a stable order."""
+    panel = _knowledge_gap_distribution_panel(_FakeSummary())
+    kinds = tuple(row.kind for row in panel.rows)
+    assert kinds == KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER
+
+
+# ---------- shape contracts ---------------------------------------------
+
+
+def test_specification_adoption_panel_is_frozen():
+    """Immutability matches the other panel dataclasses."""
+    import dataclasses
+
+    panel = SpecificationAdoptionPanel()
+    try:
+        panel.sessions_with_spec = 99  # type: ignore[misc]
+    except dataclasses.FrozenInstanceError:
+        return
+    raise AssertionError("SpecificationAdoptionPanel must be frozen")
+
+
+def test_context_engineering_panel_is_frozen():
+    """Immutability matches the other panel dataclasses."""
+    import dataclasses
+
+    panel = ContextEngineeringDepthPanel()
+    try:
+        panel.rows = ()  # type: ignore[misc]
+    except dataclasses.FrozenInstanceError:
+        return
+    raise AssertionError("ContextEngineeringDepthPanel must be frozen")
+
+
+def test_knowledge_gap_distribution_panel_is_frozen():
+    """Immutability matches the other panel dataclasses."""
+    import dataclasses
+
+    panel = KnowledgeGapDistributionPanel()
+    try:
+        panel.rows = ()  # type: ignore[misc]
+    except dataclasses.FrozenInstanceError:
+        return
+    raise AssertionError("KnowledgeGapDistributionPanel must be frozen")
+
+
+# ---------- build_panel_inputs wires every US-041 panel -----------------
+
+
+def test_build_panel_inputs_includes_us041_panels():
+    """The top-level adapter exposes the US-041 panels so a single
+    call produces every expansion-panel input."""
+    pi = build_panel_inputs(_FakeSummary(sessions=[]))
+    assert pi.specification_adoption is not None
+    assert pi.context_engineering is not None
+    assert pi.knowledge_gap_distribution is not None

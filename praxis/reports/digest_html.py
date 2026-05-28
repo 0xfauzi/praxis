@@ -63,8 +63,11 @@ from praxis.reports.panel_inputs import (
     AugAutoBalancePanel,
     BehavioralPatternsPanel,
     CadencePanel,
+    ContextEngineeringDepthPanel,
+    KnowledgeGapDistributionPanel,
     PanelInputs,
     RepeatTaskRadarPanel,
+    SpecificationAdoptionPanel,
     VerificationCalibrationPanel,
 )
 from praxis.storage.profile_store import resolve_home
@@ -1366,6 +1369,123 @@ def _repeat_task_radar_section(panel: RepeatTaskRadarPanel | None) -> str:
   </section>"""
 
 
+# US-041: empty-state copy for the specification-adoption, context-
+# engineering-depth, and knowledge-gap distribution panels. Tests
+# assert verbatim so a copy change is one audit point per renderer.
+_SPECIFICATION_ADOPTION_NO_SESSIONS = (
+    "No sessions to measure specification adoption this week."
+)
+_CONTEXT_ENGINEERING_NO_ARTIFACTS = (
+    "No scaffolding artifacts referenced this week."
+)
+_KNOWLEDGE_GAP_EMPTY = "No knowledge gaps detected this week."
+
+
+def _specification_adoption_section(
+    panel: SpecificationAdoptionPanel | None,
+) -> str:
+    """Render the specification-adoption panel (US-041).
+
+    The eyebrow renders unconditionally so the document shape is
+    stable. When ``panel`` is None or carries zero sessions, the body
+    falls through to the empty-state copy; otherwise it emits the
+    share of sessions that opened with a spec block plus the Woodward
+    / SpecKit / Sean Grove citation as a footnote.
+    """
+    if panel is None or not panel.has_sessions:
+        return f"""
+  <section class="sa-section" id="specification-adoption">
+    <div class="s-eyebrow">Specification Adoption</div>
+    <p class="placeholder">{_safe(_SPECIFICATION_ADOPTION_NO_SESSIONS)}</p>
+  </section>"""
+    pct = int(round(panel.adoption_share * 100))
+    session_word = "session" if panel.total_sessions == 1 else "sessions"
+    return f"""
+  <section class="sa-section" id="specification-adoption">
+    <div class="s-eyebrow">Specification Adoption</div>
+    <div class="sa-row">
+      <span class="sa-label">Opened with a spec block</span>
+      <span class="sa-value">{pct}%</span>
+    </div>
+    <p class="sa-meta">{panel.sessions_with_spec} of {panel.total_sessions} {session_word} this week.</p>
+    <p class="sa-citation">Source: {_safe(panel.citation)}</p>
+  </section>"""
+
+
+def _context_engineering_section(
+    panel: ContextEngineeringDepthPanel | None,
+) -> str:
+    """Render the context-engineering-depth panel (US-041).
+
+    When no scaffolding kinds fired across the week, the body
+    collapses to the placeholder. Otherwise the renderer emits one row
+    per kind that fired (skipping zero-count rows so the reader's eye
+    is drawn to what they actually engage with), followed by the DORA
+    2025 + Anthropic Skills citation.
+    """
+    if panel is None or not panel.has_any_artifact:
+        return f"""
+  <section class="ce-section" id="context-engineering-depth">
+    <div class="s-eyebrow">Context Engineering Depth</div>
+    <p class="placeholder">{_safe(_CONTEXT_ENGINEERING_NO_ARTIFACTS)}</p>
+  </section>"""
+    rows: list[str] = []
+    for row in panel.rows:
+        if row.sessions_with_artifact <= 0:
+            continue
+        session_word = (
+            "session" if row.sessions_with_artifact == 1 else "sessions"
+        )
+        rows.append(
+            f'<div class="ce-row">'
+            f'<span class="ce-label">{_safe(row.label)}</span>'
+            f'<span class="ce-value">{row.sessions_with_artifact} {session_word}</span>'
+            f'</div>'
+        )
+    return f"""
+  <section class="ce-section" id="context-engineering-depth">
+    <div class="s-eyebrow">Context Engineering Depth</div>
+    {"".join(rows)}
+    <p class="ce-citation">Source: {_safe(panel.citation)}</p>
+  </section>"""
+
+
+def _knowledge_gap_distribution_section(
+    panel: KnowledgeGapDistributionPanel | None,
+) -> str:
+    """Render the knowledge-gap distribution panel (US-041).
+
+    Two states:
+      1. ``panel is None`` or every category has zero count: emit the
+         verbatim "No knowledge gaps detected this week." copy.
+      2. At least one category is positive: emit one row per category
+         in display order, including explicit zeros so the reader sees
+         the absence of categories that did not fire. The citation
+         footnote sits beneath the rows.
+    """
+    if panel is None or not panel.has_gaps:
+        return f"""
+  <section class="kg-section" id="knowledge-gap-distribution">
+    <div class="s-eyebrow">Knowledge Gaps</div>
+    <p class="placeholder">{_safe(_KNOWLEDGE_GAP_EMPTY)}</p>
+  </section>"""
+    rows: list[str] = []
+    for row in panel.rows:
+        turn_word = "turn" if row.count == 1 else "turns"
+        rows.append(
+            f'<div class="kg-row">'
+            f'<span class="kg-label">{_safe(row.label)}</span>'
+            f'<span class="kg-value">{row.count} {turn_word}</span>'
+            f'</div>'
+        )
+    return f"""
+  <section class="kg-section" id="knowledge-gap-distribution">
+    <div class="s-eyebrow">Knowledge Gaps</div>
+    {"".join(rows)}
+    <p class="kg-citation">Source: {_safe(panel.citation)}</p>
+  </section>"""
+
+
 def _verification_calibration_section(
     panel: VerificationCalibrationPanel | None,
 ) -> str:
@@ -1465,6 +1585,21 @@ def render(digest: WeeklyDigest) -> str:
         if digest.panel_inputs is not None
         else None
     )
+    specification_panel = (
+        digest.panel_inputs.specification_adoption
+        if digest.panel_inputs is not None
+        else None
+    )
+    context_engineering_panel = (
+        digest.panel_inputs.context_engineering
+        if digest.panel_inputs is not None
+        else None
+    )
+    knowledge_gap_panel = (
+        digest.panel_inputs.knowledge_gap_distribution
+        if digest.panel_inputs is not None
+        else None
+    )
     data_block = (
         '<div class="data-block">'
         '<div class="data-block__rule"></div>'
@@ -1477,6 +1612,9 @@ def render(digest: WeeklyDigest) -> str:
         f'{_cadence_section(cadence_panel)}'
         f'{_repeat_task_radar_section(repeat_task_panel)}'
         f'{_verification_calibration_section(verification_panel)}'
+        f'{_specification_adoption_section(specification_panel)}'
+        f'{_context_engineering_section(context_engineering_panel)}'
+        f'{_knowledge_gap_distribution_section(knowledge_gap_panel)}'
         f'{_weekly_trajectory_section(digest.weekly_trajectory)}'
         '</div>'
     )
@@ -2603,6 +2741,115 @@ html, body {{
   letter-spacing: -0.01em;
 }}
 .vc-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-5);
+}}
+
+/* --- US-041 specification adoption ---------------------------------- */
+.sa-section {{
+  margin-bottom: 96px;
+}}
+.sa-row {{
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: var(--space-5) 0;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+}}
+.sa-label {{
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--ink);
+}}
+.sa-value {{
+  font-family: var(--serif);
+  font-size: 26px;
+  color: var(--accent);
+  font-feature-settings: 'lnum';
+  letter-spacing: -0.01em;
+}}
+.sa-meta {{
+  font-family: var(--serif);
+  font-size: 14px;
+  color: var(--ink-muted);
+  margin-top: var(--space-4);
+}}
+.sa-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-5);
+}}
+
+/* --- US-041 context engineering ------------------------------------- */
+.ce-section {{
+  margin-bottom: 96px;
+}}
+.ce-row {{
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: var(--space-5) 0;
+  border-top: 1px solid var(--rule);
+}}
+.ce-row:last-of-type {{
+  border-bottom: 1px solid var(--rule);
+}}
+.ce-label {{
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--ink);
+}}
+.ce-value {{
+  font-family: var(--serif);
+  font-size: 18px;
+  color: var(--accent);
+  font-feature-settings: 'lnum';
+  letter-spacing: -0.01em;
+}}
+.ce-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-5);
+}}
+
+/* --- US-041 knowledge-gap distribution ------------------------------ */
+.kg-section {{
+  margin-bottom: 96px;
+}}
+.kg-row {{
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: var(--space-5) 0;
+  border-top: 1px solid var(--rule);
+}}
+.kg-row:last-of-type {{
+  border-bottom: 1px solid var(--rule);
+}}
+.kg-label {{
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--ink);
+}}
+.kg-value {{
+  font-family: var(--serif);
+  font-size: 18px;
+  color: var(--accent);
+  font-feature-settings: 'lnum';
+  letter-spacing: -0.01em;
+}}
+.kg-citation {{
   font-family: var(--sans);
   font-size: 10.5px;
   letter-spacing: 0.06em;

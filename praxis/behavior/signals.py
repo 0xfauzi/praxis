@@ -318,3 +318,274 @@ def categorize_session_verification(session: Session) -> str:
     if "spot_check" in seen:
         return "spot_check"
     return "blanket_accept"
+
+
+# --------------------------------------------------------------------
+# US-041 signals: specification adoption, context engineering depth,
+# knowledge-gap distribution.
+#
+# These are all session-opening (spec block) or session-wide (scaffolding
+# artifacts, knowledge gaps) detectors. The detectors are conservative
+# regexes: precision-first, so a session that does not match is reported
+# as "no signal" rather than risking a false positive that would mask a
+# coachable moment.
+
+
+# Spec-block markers per spec section 11 ("Specification artifact"). The
+# first user turn is the open of the session; we look for structured
+# spec headings (Markdown ## or labelled inline forms) so a freeform
+# prompt that happens to contain the word "goal" does not falsely fire.
+# Anchoring on `## ` (or a label-colon at line start) keeps the bar at
+# "user wrote a structured spec block" rather than "user mentioned a
+# spec word in passing".
+_SPEC_BLOCK_HEADING_MARKERS = re.compile(
+    r"(?im)^\s*#{2,}\s*"
+    r"(goal|constraints|approach|acceptance criteria|done when|"
+    r"success criteria|requirements|specification|context|out of scope)"
+    r"\b",
+)
+
+
+_SPEC_BLOCK_INLINE_MARKERS = re.compile(
+    r"(?im)^\s*"
+    r"(goal|constraints|approach|acceptance criteria|done when|"
+    r"success criteria|requirements|out of scope)"
+    r"\s*:",
+)
+
+
+def detect_spec_block(session: Session) -> bool:
+    """Return True when this session opens with a structured spec block.
+
+    Per spec section 11 ("Specification artifact"), the signal fires when
+    the FIRST user turn carries a Markdown spec heading (e.g. ``## Goal``
+    / ``## Constraints``) or a label-colon form (e.g. ``Goal:`` /
+    ``Done when:``) at line start. Sessions with no user turns return
+    False - there is no session-opening turn to evaluate.
+
+    The detector looks only at the first user turn rather than the
+    entire session: a spec block written mid-session is interesting in
+    a different way (course correction, not adoption), and the
+    specification-adoption panel measures session OPENINGS specifically.
+    """
+    user_turns = session.user_turns
+    if not user_turns:
+        return False
+    content = user_turns[0].content
+    if not content:
+        return False
+    if _SPEC_BLOCK_HEADING_MARKERS.search(content):
+        return True
+    if _SPEC_BLOCK_INLINE_MARKERS.search(content):
+        return True
+    return False
+
+
+# Context-engineering scaffolding artifacts per spec section 11. Each
+# kind matches a single AI-coding-tool convention; the detector emits
+# the set of kinds whose markers appear ANYWHERE in the session (any
+# user turn). The five kinds are tracked separately so the panel can
+# show which scaffolding surfaces the user actually engages with.
+SCAFFOLDING_KINDS_IN_PANEL_ORDER: tuple[str, ...] = (
+    "claude_md",
+    "agents_md",
+    "copilot_instructions",
+    "projects",
+    "skills",
+)
+
+
+_SCAFFOLDING_PATTERNS: dict[str, re.Pattern[str]] = {
+    "claude_md": re.compile(r"\bCLAUDE\.md\b", re.IGNORECASE),
+    "agents_md": re.compile(r"\bAGENTS\.md\b", re.IGNORECASE),
+    "copilot_instructions": re.compile(
+        r"\bcopilot[-_]?instructions(?:\.md)?\b", re.IGNORECASE
+    ),
+    # ChatGPT "Projects" feature (OpenAI 2024) - the leading uppercase
+    # marker keeps the pattern from firing on generic uses of "project"
+    # (e.g. "this project's auth module"). The user explicitly names
+    # the surface or describes it as a Custom GPT.
+    "projects": re.compile(
+        r"\b(ChatGPT Projects?|Custom GPT|custom instructions for ChatGPT)\b"
+    ),
+    # Anthropic Skills + the broader "skill file" idiom. The .skill
+    # extension is the canonical artifact; the "subagent" / "agent
+    # skill" / "Skills/<name>" forms cover the spelled-out variants.
+    "skills": re.compile(
+        r"(?:\.skill\b|"
+        r"\b(?:agent skill|skills?/[A-Za-z0-9_\-]+|"
+        r"sub[- ]?agents?|hooks?/[A-Za-z0-9_\-]+))",
+        re.IGNORECASE,
+    ),
+}
+
+
+def detect_scaffolding_kinds(session: Session) -> set[str]:
+    """Return the scaffolding artifact kinds present in this session.
+
+    Walks every user turn and accumulates the set of kinds whose pattern
+    fires. The return is a set rather than a list because a kind that
+    fires twice in a session is no more meaningful than a kind that
+    fires once - the panel measures presence, not frequency.
+    Kinds returned are members of ``SCAFFOLDING_KINDS_IN_PANEL_ORDER``.
+    """
+    seen: set[str] = set()
+    for turn in session.user_turns:
+        content = turn.content
+        for kind, pattern in _SCAFFOLDING_PATTERNS.items():
+            if kind in seen:
+                continue
+            if pattern.search(content):
+                seen.add(kind)
+        if len(seen) == len(_SCAFFOLDING_PATTERNS):
+            break
+    return seen
+
+
+# Knowledge-gap kinds per arXiv 2501.11709 ("Towards Detecting Prompt
+# Knowledge Gaps for Improved LLM-guided Issue Resolution"). The four
+# categories below match the spec section 11 cut: each is a per-USER-TURN
+# count, and the panel shows the four-category distribution across the
+# week. Patterns are precision-first so a clear prompt is never
+# misclassified as a knowledge gap.
+KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER: tuple[str, ...] = (
+    "missing_context",
+    "missing_specs",
+    "multiple_context",
+    "unclear_instructions",
+)
+
+
+KNOWLEDGE_GAP_LABELS: dict[str, str] = {
+    "missing_context": "Missing context",
+    "missing_specs": "Missing specifications",
+    "multiple_context": "Multiple contexts",
+    "unclear_instructions": "Unclear instructions",
+}
+
+
+# "Missing context" cue: prompt asks about a specific identifier
+# (function / class / file / variable) WITHOUT providing the code
+# block. We approximate by looking for "this function" / "this class" /
+# "the function I wrote" patterns in turns that carry no code fence.
+_MISSING_CONTEXT_REFERENCES = re.compile(
+    r"\b(this (function|class|method|module|file|code|script|test|loop)|"
+    r"my (function|class|method|module|file|code|script)|"
+    r"the (function|class|method|module|file|code) (i|we) (wrote|made|"
+    r"have|am working on))\b",
+    re.IGNORECASE,
+)
+
+
+# Acceptance-criteria / done-when markers. When PRESENT, the turn does
+# NOT fire missing_specs (the user spelled out the criteria). When
+# ABSENT, the imperative-only prompt fires missing_specs.
+_SPECS_PRESENT_MARKERS = re.compile(
+    r"(?im)\b(acceptance criteria|done when|success criteria|"
+    r"should (return|produce|handle|raise|emit|accept)|"
+    r"must (return|produce|handle|raise|emit|accept)|"
+    r"expected (output|result|behavior)|"
+    r"the goal is|when (it|this) is done)\b",
+)
+
+
+# Imperative opener that indicates a build-something prompt. Used as a
+# precondition for "missing_specs": only build-something prompts that
+# lack spec markers are gaps. A question-form prompt without spec
+# markers (e.g. "why does X happen?") is not a missing-specs gap.
+_BUILD_IMPERATIVE = re.compile(
+    r"^\s*(write|make|create|build|generate|implement|add|"
+    r"refactor|fix|update|change|extend|design)\b",
+    re.IGNORECASE,
+)
+
+
+# "Multiple context" cue: the turn lists multiple unrelated TODO items.
+# Conservative heuristic: 2+ "and also" / numbered-list / "plus" /
+# semicolon-separated request structures push the turn into the
+# multi-context bucket.
+_MULTIPLE_CONTEXT_MARKERS = re.compile(
+    r"(\band also\b|\balso (write|make|create|build|add|fix)|"
+    r"^\s*\d+[.)]\s+.+\n\s*\d+[.)]\s+|"
+    r";\s*(then|also|and)\s+(write|make|create|build|add|fix)|"
+    r"\bplus\b.*(\bwrite|\bmake|\bcreate|\bbuild|\badd|\bfix))",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+# "Unclear instructions" cue: vague verb-object phrasing where the
+# object is a pronoun without antecedent or "something". Conservative:
+# requires a "do something with"/"handle this somehow"/etc. shape so a
+# normal short prompt does not falsely fire.
+_UNCLEAR_INSTRUCTION_MARKERS = re.compile(
+    r"\b("
+    r"do something (with|to|about)|"
+    r"handle (this|it|that) (somehow|properly|right|correctly)|"
+    r"make (this|it|that) (work|better|good|right)|"
+    r"figure (this|it|that) out|"
+    r"clean (this|it|that) up|"
+    r"deal with (this|it|that)|"
+    r"sort (this|it|that) out|"
+    r"can you (just|maybe) (help|look)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def detect_knowledge_gap_kinds(turn: Turn) -> set[str]:
+    """Return the knowledge-gap kinds that fire for this user turn.
+
+    Implements the arXiv 2501.11709 four-category cut: missing_context,
+    missing_specs, multiple_context, unclear_instructions. A single turn
+    can match multiple kinds (e.g. a vague imperative that also lists
+    several unrelated tasks). Kinds returned are members of
+    ``KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER``.
+
+    The detector is precision-first: a clearly-scoped prompt with a code
+    block and acceptance criteria returns an empty set even if it
+    contains pronouns or imperatives in passing.
+    """
+    kinds: set[str] = set()
+    content = turn.content
+    if not content:
+        return kinds
+
+    # Missing context: references a specific identifier without including
+    # the code. We use a fenced-code-block heuristic: a turn that
+    # carries a fenced block (```) or an indented code block (4+ spaces)
+    # is treated as having the code present.
+    references_identifier = bool(_MISSING_CONTEXT_REFERENCES.search(content))
+    has_code_block = "```" in content or "    " in content
+    if references_identifier and not has_code_block:
+        kinds.add("missing_context")
+
+    # Missing specs: build-something imperative with no acceptance
+    # criteria / done-when / expected-output markers.
+    if _BUILD_IMPERATIVE.search(content) and not _SPECS_PRESENT_MARKERS.search(
+        content
+    ):
+        kinds.add("missing_specs")
+
+    if _MULTIPLE_CONTEXT_MARKERS.search(content):
+        kinds.add("multiple_context")
+
+    if _UNCLEAR_INSTRUCTION_MARKERS.search(content):
+        kinds.add("unclear_instructions")
+
+    return kinds
+
+
+def count_session_knowledge_gaps(session: Session) -> dict[str, int]:
+    """Return the per-kind knowledge-gap counts for this session.
+
+    Walks every user turn in the session and accumulates one count per
+    kind. The four keys in the returned dict are exactly
+    ``KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER``, with each entry initialised
+    to zero so a session with no detected gaps still contributes an
+    explicit zero to each category (US-041 acceptance: no silent drops).
+    """
+    counts: dict[str, int] = {kind: 0 for kind in KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER}
+    for turn in session.user_turns:
+        for kind in detect_knowledge_gap_kinds(turn):
+            counts[kind] += 1
+    return counts

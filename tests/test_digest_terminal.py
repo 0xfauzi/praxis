@@ -1711,3 +1711,278 @@ def test_us040_panels_respect_80_column_budget():
         assert visible_width(line) <= MAX_LINE_WIDTH, (
             f"line exceeds {MAX_LINE_WIDTH} cols: {line!r}"
         )
+
+
+# ---------------- US-041: spec adoption + context engineering + gaps ---------
+
+
+from praxis.reports.digest_terminal import (  # noqa: E402
+    _CONTEXT_ENGINEERING_NO_ARTIFACTS,
+    _KNOWLEDGE_GAP_EMPTY,
+    _SPECIFICATION_ADOPTION_NO_SESSIONS,
+)
+from praxis.reports.panel_inputs import (  # noqa: E402
+    ContextEngineeringDepthPanel,
+    ContextEngineeringRow,
+    KnowledgeGapDistributionPanel,
+    KnowledgeGapRow,
+    SpecificationAdoptionPanel,
+)
+
+
+def _specification_populated() -> SpecificationAdoptionPanel:
+    return SpecificationAdoptionPanel(
+        sessions_with_spec=3,
+        total_sessions=5,
+    )
+
+
+def _context_engineering_populated() -> ContextEngineeringDepthPanel:
+    return ContextEngineeringDepthPanel(
+        rows=(
+            ContextEngineeringRow(
+                kind="claude_md",
+                label="CLAUDE.md",
+                sessions_with_artifact=2,
+            ),
+            ContextEngineeringRow(
+                kind="agents_md",
+                label="AGENTS.md",
+                sessions_with_artifact=1,
+            ),
+            ContextEngineeringRow(
+                kind="copilot_instructions",
+                label="copilot-instructions.md",
+                sessions_with_artifact=0,
+            ),
+            ContextEngineeringRow(
+                kind="projects",
+                label="Projects / Custom GPT",
+                sessions_with_artifact=0,
+            ),
+            ContextEngineeringRow(
+                kind="skills",
+                label="Skills / subagents / hooks",
+                sessions_with_artifact=3,
+            ),
+        ),
+        total_sessions=6,
+    )
+
+
+def _knowledge_gap_populated() -> KnowledgeGapDistributionPanel:
+    return KnowledgeGapDistributionPanel(
+        rows=(
+            KnowledgeGapRow(
+                kind="missing_context",
+                label="Missing context",
+                count=4,
+            ),
+            KnowledgeGapRow(
+                kind="missing_specs",
+                label="Missing specifications",
+                count=7,
+            ),
+            KnowledgeGapRow(
+                kind="multiple_context",
+                label="Multiple contexts",
+                count=1,
+            ),
+            KnowledgeGapRow(
+                kind="unclear_instructions",
+                label="Unclear instructions",
+                count=2,
+            ),
+        )
+    )
+
+
+def _us041_panel_inputs(
+    *,
+    specification: SpecificationAdoptionPanel | None = None,
+    context_engineering: ContextEngineeringDepthPanel | None = None,
+    knowledge_gap: KnowledgeGapDistributionPanel | None = None,
+) -> PanelInputs:
+    return PanelInputs(
+        specification_adoption=specification,
+        context_engineering=context_engineering,
+        knowledge_gap_distribution=knowledge_gap,
+    )
+
+
+def test_specification_adoption_eyebrow_always_renders():
+    """The eyebrow renders regardless of data state."""
+    text_empty = _strip_ansi(render(WeeklyDigest()))
+    text_full = _strip_ansi(
+        render(
+            WeeklyDigest(
+                panel_inputs=_us041_panel_inputs(specification=_specification_populated())
+            )
+        )
+    )
+    assert "SPECIFICATION ADOPTION" in text_empty
+    assert "SPECIFICATION ADOPTION" in text_full
+
+
+def test_specification_adoption_renders_no_sessions_message():
+    """When no sessions exist the panel surfaces the verbatim
+    no-sessions copy."""
+    panel = SpecificationAdoptionPanel()  # zero sessions
+    digest = WeeklyDigest(panel_inputs=_us041_panel_inputs(specification=panel))
+    text = _strip_ansi(render(digest))
+    assert _SPECIFICATION_ADOPTION_NO_SESSIONS in text
+
+
+def test_specification_adoption_renders_share_when_populated():
+    """The share renders as 'N% (X of Y sessions)' so the reader sees
+    both the rate and the denominator."""
+    digest = WeeklyDigest(
+        panel_inputs=_us041_panel_inputs(specification=_specification_populated())
+    )
+    text = _strip_ansi(render(digest))
+    # 3/5 = 60%
+    assert "60%" in text
+    assert "3 of 5" in text
+
+
+def test_specification_adoption_renders_citations():
+    """The Woodward + SpecKit + Sean Grove citation renders inline."""
+    digest = WeeklyDigest(
+        panel_inputs=_us041_panel_inputs(specification=_specification_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "Woodward" in text
+    assert "SpecKit" in text
+    assert "Sean Grove" in text
+
+
+def test_context_engineering_eyebrow_always_renders():
+    """Same stability contract as the other panels."""
+    text_empty = _strip_ansi(render(WeeklyDigest()))
+    text_full = _strip_ansi(
+        render(
+            WeeklyDigest(
+                panel_inputs=_us041_panel_inputs(
+                    context_engineering=_context_engineering_populated()
+                )
+            )
+        )
+    )
+    assert "CONTEXT ENGINEERING" in text_empty
+    assert "CONTEXT ENGINEERING" in text_full
+
+
+def test_context_engineering_renders_no_artifacts_message():
+    """When no scaffolding kinds fired, the panel emits the verbatim
+    no-artifacts message."""
+    panel = ContextEngineeringDepthPanel()
+    digest = WeeklyDigest(
+        panel_inputs=_us041_panel_inputs(context_engineering=panel)
+    )
+    text = _strip_ansi(render(digest))
+    assert _CONTEXT_ENGINEERING_NO_ARTIFACTS in text
+
+
+def test_context_engineering_renders_present_kinds_only():
+    """Rows with zero count are skipped so the reader sees only what
+    fired this week."""
+    digest = WeeklyDigest(
+        panel_inputs=_us041_panel_inputs(
+            context_engineering=_context_engineering_populated()
+        )
+    )
+    text = _strip_ansi(render(digest))
+    assert "CLAUDE.md: 2 sessions" in text
+    assert "AGENTS.md: 1 session" in text
+    assert "Skills / subagents / hooks: 3 sessions" in text
+    # Kinds with zero count are not rendered.
+    assert "copilot-instructions.md: 0 sessions" not in text
+
+
+def test_context_engineering_renders_citation():
+    """The DORA 2025 + Anthropic Skills citation renders inline."""
+    digest = WeeklyDigest(
+        panel_inputs=_us041_panel_inputs(
+            context_engineering=_context_engineering_populated()
+        )
+    )
+    text = _strip_ansi(render(digest))
+    assert "DORA 2025" in text
+    assert "Anthropic" in text
+
+
+def test_knowledge_gap_eyebrow_always_renders():
+    """Same stability contract."""
+    text_empty = _strip_ansi(render(WeeklyDigest()))
+    text_full = _strip_ansi(
+        render(
+            WeeklyDigest(
+                panel_inputs=_us041_panel_inputs(
+                    knowledge_gap=_knowledge_gap_populated()
+                )
+            )
+        )
+    )
+    assert "KNOWLEDGE GAPS" in text_empty
+    assert "KNOWLEDGE GAPS" in text_full
+
+
+def test_knowledge_gap_renders_empty_state_when_every_category_zero():
+    """US-041 AC: the panel renders the verbatim 'No knowledge gaps
+    detected this week.' copy ONLY when every category is zero."""
+    panel = KnowledgeGapDistributionPanel(
+        rows=(
+            KnowledgeGapRow(kind="missing_context", label="Missing context", count=0),
+            KnowledgeGapRow(kind="missing_specs", label="Missing specifications", count=0),
+            KnowledgeGapRow(kind="multiple_context", label="Multiple contexts", count=0),
+            KnowledgeGapRow(kind="unclear_instructions", label="Unclear instructions", count=0),
+        )
+    )
+    digest = WeeklyDigest(panel_inputs=_us041_panel_inputs(knowledge_gap=panel))
+    text = _strip_ansi(render(digest))
+    assert _KNOWLEDGE_GAP_EMPTY in text
+
+
+def test_knowledge_gap_renders_all_four_categories_when_populated():
+    """When any category has a positive count, all four categories
+    render (including explicit zeros) so the histogram reads as
+    honest. US-041 AC: 'a session with zero detected gaps still
+    contributes a zero to each category (no silent drops)'."""
+    panel = KnowledgeGapDistributionPanel(
+        rows=(
+            KnowledgeGapRow(kind="missing_context", label="Missing context", count=0),
+            KnowledgeGapRow(kind="missing_specs", label="Missing specifications", count=3),
+            KnowledgeGapRow(kind="multiple_context", label="Multiple contexts", count=0),
+            KnowledgeGapRow(kind="unclear_instructions", label="Unclear instructions", count=1),
+        )
+    )
+    digest = WeeklyDigest(panel_inputs=_us041_panel_inputs(knowledge_gap=panel))
+    text = _strip_ansi(render(digest))
+    assert "Missing context: 0 turns" in text
+    assert "Missing specifications: 3 turns" in text
+    assert "Multiple contexts: 0 turns" in text
+    assert "Unclear instructions: 1 turn" in text
+
+
+def test_knowledge_gap_renders_citation():
+    """The arXiv 2501.11709 citation renders inline."""
+    digest = WeeklyDigest(
+        panel_inputs=_us041_panel_inputs(knowledge_gap=_knowledge_gap_populated())
+    )
+    text = _strip_ansi(render(digest))
+    assert "2501.11709" in text
+
+
+def test_us041_panels_respect_80_column_budget():
+    """US-066: the three new panels respect the 79-column hard cap."""
+    digest = WeeklyDigest(
+        panel_inputs=_us041_panel_inputs(
+            specification=_specification_populated(),
+            context_engineering=_context_engineering_populated(),
+            knowledge_gap=_knowledge_gap_populated(),
+        )
+    )
+    for line in render(digest).split("\n"):
+        assert visible_width(line) <= MAX_LINE_WIDTH, (
+            f"line exceeds {MAX_LINE_WIDTH} cols: {line!r}"
+        )

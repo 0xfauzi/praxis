@@ -1451,3 +1451,269 @@ def test_us040_panels_render_after_cadence():
     rt_pos = out.find('id="repeat-task-radar"')
     vc_pos = out.find('id="verification-calibration"')
     assert 0 <= cad_pos < rt_pos < vc_pos
+
+
+# ---------------------- US-041: spec adoption + context engineering + gaps --
+
+
+def _specification_html_panel():
+    from praxis.reports.panel_inputs import SpecificationAdoptionPanel
+    return SpecificationAdoptionPanel(
+        sessions_with_spec=3,
+        total_sessions=5,
+    )
+
+
+def _context_engineering_html_panel():
+    from praxis.reports.panel_inputs import (
+        ContextEngineeringDepthPanel,
+        ContextEngineeringRow,
+    )
+    return ContextEngineeringDepthPanel(
+        rows=(
+            ContextEngineeringRow(
+                kind="claude_md",
+                label="CLAUDE.md",
+                sessions_with_artifact=2,
+            ),
+            ContextEngineeringRow(
+                kind="agents_md",
+                label="AGENTS.md",
+                sessions_with_artifact=1,
+            ),
+            ContextEngineeringRow(
+                kind="copilot_instructions",
+                label="copilot-instructions.md",
+                sessions_with_artifact=0,
+            ),
+            ContextEngineeringRow(
+                kind="projects",
+                label="Projects / Custom GPT",
+                sessions_with_artifact=0,
+            ),
+            ContextEngineeringRow(
+                kind="skills",
+                label="Skills / subagents / hooks",
+                sessions_with_artifact=3,
+            ),
+        ),
+        total_sessions=6,
+    )
+
+
+def _knowledge_gap_html_panel():
+    from praxis.reports.panel_inputs import (
+        KnowledgeGapDistributionPanel,
+        KnowledgeGapRow,
+    )
+    return KnowledgeGapDistributionPanel(
+        rows=(
+            KnowledgeGapRow(kind="missing_context", label="Missing context", count=4),
+            KnowledgeGapRow(kind="missing_specs", label="Missing specifications", count=7),
+            KnowledgeGapRow(kind="multiple_context", label="Multiple contexts", count=1),
+            KnowledgeGapRow(kind="unclear_instructions", label="Unclear instructions", count=2),
+        )
+    )
+
+
+def _us041_digest(
+    *,
+    specification=None,
+    context_engineering=None,
+    knowledge_gap=None,
+):
+    from praxis.reports.panel_inputs import PanelInputs
+    return WeeklyDigest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        panel_inputs=PanelInputs(
+            specification_adoption=specification,
+            context_engineering=context_engineering,
+            knowledge_gap_distribution=knowledge_gap,
+        ),
+    )
+
+
+def test_specification_adoption_section_always_present():
+    """The section anchor (id='specification-adoption') always renders."""
+    out_empty = render(_digest())
+    assert 'id="specification-adoption"' in out_empty
+    out_full = render(_us041_digest(specification=_specification_html_panel()))
+    assert 'id="specification-adoption"' in out_full
+
+
+def test_specification_adoption_renders_no_sessions_placeholder():
+    """When no sessions exist the body falls through to the verbatim
+    US-041 placeholder."""
+    from praxis.reports.panel_inputs import SpecificationAdoptionPanel
+    out = render(_us041_digest(specification=SpecificationAdoptionPanel()))
+    assert "No sessions to measure specification adoption this week." in out
+
+
+def test_specification_adoption_renders_share():
+    """The share renders as a percentage; the denominator renders too
+    so the reader sees the rate AND the count."""
+    out = render(_us041_digest(specification=_specification_html_panel()))
+    # 3/5 = 60%
+    start = out.find('id="specification-adoption"')
+    end = out.find("</section>", start)
+    section = out[start:end]
+    assert "60%" in section
+    assert "3 of 5" in section
+
+
+def test_specification_adoption_renders_citation():
+    """The Woodward + SpecKit + Sean Grove citation renders inline."""
+    out = render(_us041_digest(specification=_specification_html_panel()))
+    assert "Woodward" in out
+    assert "SpecKit" in out
+    assert "Sean Grove" in out
+
+
+def test_context_engineering_section_always_present():
+    """The section anchor always renders."""
+    out_empty = render(_digest())
+    assert 'id="context-engineering-depth"' in out_empty
+    out_full = render(
+        _us041_digest(context_engineering=_context_engineering_html_panel())
+    )
+    assert 'id="context-engineering-depth"' in out_full
+
+
+def test_context_engineering_renders_no_artifacts_placeholder():
+    """An empty panel surfaces the verbatim no-artifacts placeholder."""
+    from praxis.reports.panel_inputs import ContextEngineeringDepthPanel
+    out = render(_us041_digest(context_engineering=ContextEngineeringDepthPanel()))
+    assert "No scaffolding artifacts referenced this week." in out
+
+
+def test_context_engineering_renders_kinds_with_positive_count():
+    """Kinds with positive counts render; zero-count kinds are
+    skipped so the reader's eye is drawn to what fired."""
+    out = render(
+        _us041_digest(context_engineering=_context_engineering_html_panel())
+    )
+    start = out.find('id="context-engineering-depth"')
+    end = out.find("</section>", start)
+    section = out[start:end]
+    assert "CLAUDE.md" in section
+    assert "AGENTS.md" in section
+    assert "Skills / subagents / hooks" in section
+    assert "2 sessions" in section
+    assert "1 session" in section
+    assert "3 sessions" in section
+    # Kinds with zero count are not rendered.
+    assert "Projects / Custom GPT" not in section
+
+
+def test_context_engineering_renders_citation():
+    """The DORA 2025 + Anthropic Skills citation renders inline."""
+    out = render(
+        _us041_digest(context_engineering=_context_engineering_html_panel())
+    )
+    assert "DORA 2025" in out
+
+
+def test_knowledge_gap_section_always_present():
+    """The section anchor always renders."""
+    out_empty = render(_digest())
+    assert 'id="knowledge-gap-distribution"' in out_empty
+    out_full = render(
+        _us041_digest(knowledge_gap=_knowledge_gap_html_panel())
+    )
+    assert 'id="knowledge-gap-distribution"' in out_full
+
+
+def test_knowledge_gap_renders_empty_state_when_all_zero():
+    """US-041 AC: render verbatim 'No knowledge gaps detected this
+    week.' ONLY when every category is zero."""
+    from praxis.reports.panel_inputs import (
+        KnowledgeGapDistributionPanel,
+        KnowledgeGapRow,
+    )
+    panel = KnowledgeGapDistributionPanel(
+        rows=tuple(
+            KnowledgeGapRow(kind=k, label=k, count=0)
+            for k in ("missing_context", "missing_specs", "multiple_context", "unclear_instructions")
+        )
+    )
+    out = render(_us041_digest(knowledge_gap=panel))
+    assert "No knowledge gaps detected this week." in out
+
+
+def test_knowledge_gap_renders_all_four_categories_when_populated():
+    """US-041 AC: 'a session with zero detected gaps still contributes
+    a zero to each category (no silent drops)'. When at least one
+    category is positive, all four render (including explicit zeros)."""
+    from praxis.reports.panel_inputs import (
+        KnowledgeGapDistributionPanel,
+        KnowledgeGapRow,
+    )
+    panel = KnowledgeGapDistributionPanel(
+        rows=(
+            KnowledgeGapRow(kind="missing_context", label="Missing context", count=0),
+            KnowledgeGapRow(kind="missing_specs", label="Missing specifications", count=4),
+            KnowledgeGapRow(kind="multiple_context", label="Multiple contexts", count=0),
+            KnowledgeGapRow(kind="unclear_instructions", label="Unclear instructions", count=1),
+        )
+    )
+    out = render(_us041_digest(knowledge_gap=panel))
+    start = out.find('id="knowledge-gap-distribution"')
+    end = out.find("</section>", start)
+    section = out[start:end]
+    assert "Missing context" in section
+    assert "Missing specifications" in section
+    assert "Multiple contexts" in section
+    assert "Unclear instructions" in section
+    # Explicit zeros render alongside positive counts.
+    assert "0 turns" in section
+    assert "4 turns" in section
+
+
+def test_knowledge_gap_renders_citation():
+    """The arXiv 2501.11709 citation renders inline."""
+    out = render(_us041_digest(knowledge_gap=_knowledge_gap_html_panel()))
+    assert "2501.11709" in out
+
+
+def test_us041_panels_self_containment_holds():
+    """The US-061 self-containment contract must hold; rendering the
+    new panels must not introduce external links, scripts, or images."""
+    out = render(
+        _us041_digest(
+            specification=_specification_html_panel(),
+            context_engineering=_context_engineering_html_panel(),
+            knowledge_gap=_knowledge_gap_html_panel(),
+        )
+    )
+    lower = out.lower()
+    assert "<link" not in lower
+    assert "<script" not in lower
+    assert "<img" not in lower
+    assert "http://" not in out
+    assert "https://" not in out
+    assert "@import" not in out
+    assert "url(" not in out
+
+
+def test_us041_panels_render_after_verification_calibration():
+    """The three US-041 panels sit inside the data block AFTER
+    verification calibration so the document reads habit -> verify ->
+    craft."""
+    from praxis.reports.panel_inputs import PanelInputs
+    digest = WeeklyDigest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        panel_inputs=PanelInputs(
+            verification_calibration=_verification_html_panel(),
+            specification_adoption=_specification_html_panel(),
+            context_engineering=_context_engineering_html_panel(),
+            knowledge_gap_distribution=_knowledge_gap_html_panel(),
+        ),
+    )
+    out = render(digest)
+    vc_pos = out.find('id="verification-calibration"')
+    sa_pos = out.find('id="specification-adoption"')
+    ce_pos = out.find('id="context-engineering-depth"')
+    kg_pos = out.find('id="knowledge-gap-distribution"')
+    assert 0 <= vc_pos < sa_pos < ce_pos < kg_pos

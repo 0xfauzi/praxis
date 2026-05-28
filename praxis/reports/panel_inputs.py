@@ -14,7 +14,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from praxis.behavior.signals import SIGNAL_KINDS_IN_PANEL_ORDER
+from praxis.behavior.signals import (
+    KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER,
+    KNOWLEDGE_GAP_LABELS,
+    SCAFFOLDING_KINDS_IN_PANEL_ORDER,
+    SIGNAL_KINDS_IN_PANEL_ORDER,
+)
 
 
 # Spec section 12 ("Behavioral patterns" panel): "up to two concrete
@@ -375,6 +380,141 @@ class VerificationCalibrationPanel:
         }.get(kind, 0)
 
 
+# US-041 anchors: specification adoption, context engineering depth,
+# knowledge-gap distribution. Each citation is a module-level constant
+# so the adapter, renderers, and tests share one source of truth.
+SPECIFICATION_ADOPTION_CITATION = (
+    "Woodward (Google I/O 2026 Dialogues) + SpecKit + Sean Grove "
+    "\"The New Code\""
+)
+
+CONTEXT_ENGINEERING_CITATION = (
+    "DORA 2025 (top-7 AI capability) + Anthropic Agent Skills"
+)
+
+KNOWLEDGE_GAP_CITATION = (
+    "arXiv 2501.11709 (44.6% vs 12.6% gap rate)"
+)
+
+
+# Display labels for the scaffolding kinds shipped in signals.py. Keys
+# mirror SCAFFOLDING_KINDS_IN_PANEL_ORDER so the renderer can iterate
+# that tuple safely.
+SCAFFOLDING_LABELS: dict[str, str] = {
+    "claude_md": "CLAUDE.md",
+    "agents_md": "AGENTS.md",
+    "copilot_instructions": "copilot-instructions.md",
+    "projects": "Projects / Custom GPT",
+    "skills": "Skills / subagents / hooks",
+}
+
+
+@dataclass(frozen=True)
+class SpecificationAdoptionPanel:
+    """Specification-adoption panel input (US-041).
+
+    Counts how many sessions in the week OPENED with a structured spec
+    block (Markdown headings or label-colon form) per the spec section
+    11 signal. ``adoption_share`` is the ratio of sessions that opened
+    with a spec block to the total session count; the renderer surfaces
+    this share as a percentage with the Woodward / SpecKit / Sean Grove
+    citation inline.
+    """
+
+    sessions_with_spec: int = 0
+    total_sessions: int = 0
+    citation: str = SPECIFICATION_ADOPTION_CITATION
+
+    @property
+    def has_sessions(self) -> bool:
+        """True when at least one session was observed this week."""
+        return self.total_sessions > 0
+
+    @property
+    def adoption_share(self) -> float:
+        """Share of sessions that opened with a spec block.
+
+        Returns 0.0 when no sessions exist so the renderer can guard on
+        ``has_sessions`` to decide between empty-state and populated
+        paths; consumers should not interpret 0.0 directly without that
+        check.
+        """
+        if self.total_sessions <= 0:
+            return 0.0
+        return self.sessions_with_spec / self.total_sessions
+
+
+@dataclass(frozen=True)
+class ContextEngineeringRow:
+    """One row of the context-engineering-depth panel (US-041).
+
+    Carries the count of sessions in the week that referenced this
+    scaffolding kind (e.g. CLAUDE.md, AGENTS.md, Projects, Skills).
+    """
+
+    kind: str
+    label: str
+    sessions_with_artifact: int
+
+
+@dataclass(frozen=True)
+class ContextEngineeringDepthPanel:
+    """Context-engineering-depth panel input (US-041).
+
+    ``rows`` is the ordered list of rows in panel-display order. The
+    renderer surfaces the count per scaffolding kind plus the DORA 2025
+    + Anthropic Skills citation inline.
+    """
+
+    rows: tuple[ContextEngineeringRow, ...] = ()
+    total_sessions: int = 0
+    citation: str = CONTEXT_ENGINEERING_CITATION
+
+    @property
+    def has_any_artifact(self) -> bool:
+        """True when at least one scaffolding kind fired this week."""
+        return any(row.sessions_with_artifact > 0 for row in self.rows)
+
+
+@dataclass(frozen=True)
+class KnowledgeGapRow:
+    """One row of the knowledge-gap distribution panel (US-041).
+
+    Carries the count of USER TURNS in the week classified into this
+    knowledge-gap category. Always present in panel-display order, even
+    when ``count`` is zero (US-041 acceptance: no silent drops).
+    """
+
+    kind: str
+    label: str
+    count: int
+
+
+@dataclass(frozen=True)
+class KnowledgeGapDistributionPanel:
+    """Knowledge-gap distribution panel input (US-041).
+
+    ``rows`` lists the four arXiv 2501.11709 categories in display
+    order. Every row is present even when its count is zero so the
+    panel reads as an honest histogram; the renderer surfaces the
+    explicit empty-state copy ("No knowledge gaps detected this week.")
+    only when every category is zero.
+    """
+
+    rows: tuple[KnowledgeGapRow, ...] = ()
+    citation: str = KNOWLEDGE_GAP_CITATION
+
+    @property
+    def has_gaps(self) -> bool:
+        """True when at least one category has a positive count."""
+        return any(row.count > 0 for row in self.rows)
+
+    @property
+    def total_gaps(self) -> int:
+        """Sum of all per-category counts across the week."""
+        return sum(row.count for row in self.rows)
+
+
 @dataclass(frozen=True)
 class PanelInputs:
     """Container for the v0.3 expansion-panel inputs (US-038..042).
@@ -391,6 +531,9 @@ class PanelInputs:
     cadence: CadencePanel | None = None
     repeat_task_radar: RepeatTaskRadarPanel | None = None
     verification_calibration: VerificationCalibrationPanel | None = None
+    specification_adoption: SpecificationAdoptionPanel | None = None
+    context_engineering: ContextEngineeringDepthPanel | None = None
+    knowledge_gap_distribution: KnowledgeGapDistributionPanel | None = None
 
 
 __all__ = [
@@ -411,6 +554,13 @@ __all__ = [
     "VERIFICATION_CALIBRATION_CITATION",
     "VERIFICATION_CALIBRATION_KINDS_IN_PANEL_ORDER",
     "VERIFICATION_CALIBRATION_LABELS",
+    "SPECIFICATION_ADOPTION_CITATION",
+    "CONTEXT_ENGINEERING_CITATION",
+    "KNOWLEDGE_GAP_CITATION",
+    "SCAFFOLDING_KINDS_IN_PANEL_ORDER",
+    "SCAFFOLDING_LABELS",
+    "KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER",
+    "KNOWLEDGE_GAP_LABELS",
     "BehavioralPatternRow",
     "BehavioralPatternsPanel",
     "AugAutoBalancePanel",
@@ -418,6 +568,11 @@ __all__ = [
     "RepeatTaskRow",
     "RepeatTaskRadarPanel",
     "VerificationCalibrationPanel",
+    "SpecificationAdoptionPanel",
+    "ContextEngineeringRow",
+    "ContextEngineeringDepthPanel",
+    "KnowledgeGapRow",
+    "KnowledgeGapDistributionPanel",
     "PanelInputs",
     "clip_excerpt",
 ]

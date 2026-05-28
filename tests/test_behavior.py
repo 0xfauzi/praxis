@@ -12,10 +12,16 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from praxis.behavior.signals import (
+    KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER,
+    SCAFFOLDING_KINDS_IN_PANEL_ORDER,
     SIGNAL_KINDS_IN_PANEL_ORDER,
     BehavioralSignals,
     categorize_session_verification,
+    count_session_knowledge_gaps,
+    detect_knowledge_gap_kinds,
+    detect_scaffolding_kinds,
     detect_signal_kinds,
+    detect_spec_block,
     detect_verification_calibration_kinds,
     extract,
 )
@@ -264,6 +270,258 @@ def test_categorize_session_verification_empty_session_blanket_accept():
     activity to derive a verification signal from)."""
     session = _make_session([], datetime.now(timezone.utc))
     assert categorize_session_verification(session) == "blanket_accept"
+
+
+# =========================================================================
+# US-041: specification adoption, context engineering, knowledge gaps
+# =========================================================================
+
+
+def test_detect_spec_block_markdown_heading():
+    """A session whose first user turn opens with a Markdown ## Goal
+    heading fires the spec-block signal."""
+    turns = [
+        Turn(
+            role=Role.USER,
+            content=(
+                "## Goal\n"
+                "Refactor the auth middleware to use bearer tokens.\n"
+                "## Constraints\n"
+                "Must not break the existing session API."
+            ),
+        ),
+    ]
+    session = _make_session(turns, datetime.now(timezone.utc))
+    assert detect_spec_block(session) is True
+
+
+def test_detect_spec_block_label_colon_form():
+    """An inline ``Goal:`` / ``Acceptance criteria:`` label-colon form
+    at line start also fires the spec-block signal."""
+    turns = [
+        Turn(
+            role=Role.USER,
+            content=(
+                "Goal: ship the migration without downtime.\n"
+                "Acceptance criteria: zero failed requests in the read replica."
+            ),
+        ),
+    ]
+    session = _make_session(turns, datetime.now(timezone.utc))
+    assert detect_spec_block(session) is True
+
+
+def test_detect_spec_block_freeform_prompt_negative():
+    """A short freeform implementation prompt does NOT fire even when it
+    mentions a goal word in passing."""
+    turns = [
+        Turn(
+            role=Role.USER,
+            content="my goal is to be faster, just write me the function",
+        ),
+    ]
+    session = _make_session(turns, datetime.now(timezone.utc))
+    assert detect_spec_block(session) is False
+
+
+def test_detect_spec_block_only_first_turn_evaluated():
+    """A spec block written mid-session (turn 2+) does not fire the
+    signal; the panel measures session OPENINGS specifically."""
+    turns = [
+        Turn(role=Role.USER, content="write a function that sorts a list"),
+        Turn(
+            role=Role.USER,
+            content=(
+                "## Goal\nLet me try again with a structured spec.\n"
+                "## Constraints\n- O(n log n)."
+            ),
+        ),
+    ]
+    session = _make_session(turns, datetime.now(timezone.utc))
+    assert detect_spec_block(session) is False
+
+
+def test_detect_spec_block_empty_session():
+    """A session with no user turns returns False - no opening to
+    measure."""
+    session = _make_session([], datetime.now(timezone.utc))
+    assert detect_spec_block(session) is False
+
+
+def test_detect_scaffolding_kinds_claude_md():
+    """Mentioning CLAUDE.md anywhere in the session fires the
+    claude_md kind."""
+    turns = [
+        Turn(role=Role.USER, content="update CLAUDE.md to mention the new feature"),
+    ]
+    session = _make_session(turns, datetime.now(timezone.utc))
+    kinds = detect_scaffolding_kinds(session)
+    assert "claude_md" in kinds
+
+
+def test_detect_scaffolding_kinds_agents_md_and_skills():
+    """Multiple scaffolding kinds across multiple turns surface as a
+    set; the detector reports presence, not frequency."""
+    turns = [
+        Turn(role=Role.USER, content="add a section in AGENTS.md about the rubric"),
+        Turn(role=Role.USER, content="and a skills/code-review skill for the team"),
+    ]
+    session = _make_session(turns, datetime.now(timezone.utc))
+    kinds = detect_scaffolding_kinds(session)
+    assert "agents_md" in kinds
+    assert "skills" in kinds
+
+
+def test_detect_scaffolding_kinds_no_artifacts_returns_empty():
+    """A session with no scaffolding references returns an empty set."""
+    turns = [
+        Turn(role=Role.USER, content="fix the failing test in module X"),
+    ]
+    session = _make_session(turns, datetime.now(timezone.utc))
+    assert detect_scaffolding_kinds(session) == set()
+
+
+def test_detect_scaffolding_kinds_returns_subset_of_panel_order():
+    """Every kind returned must be a member of the panel-order tuple
+    so the adapter and renderer can iterate it safely."""
+    turns = [
+        Turn(role=Role.USER, content="check CLAUDE.md and copilot-instructions.md"),
+    ]
+    session = _make_session(turns, datetime.now(timezone.utc))
+    for kind in detect_scaffolding_kinds(session):
+        assert kind in set(SCAFFOLDING_KINDS_IN_PANEL_ORDER)
+
+
+def test_detect_knowledge_gap_kinds_missing_context():
+    """A turn that references 'this function' without a code block
+    fires missing_context."""
+    turn = Turn(
+        role=Role.USER,
+        content="why is this function so slow? It used to be fast.",
+    )
+    kinds = detect_knowledge_gap_kinds(turn)
+    assert "missing_context" in kinds
+
+
+def test_detect_knowledge_gap_kinds_missing_context_negative_with_code():
+    """A turn that references 'this function' AND includes a code
+    block does NOT fire missing_context (the user supplied the code)."""
+    turn = Turn(
+        role=Role.USER,
+        content=(
+            "why is this function so slow?\n\n"
+            "```python\n"
+            "def slow():\n"
+            "    return sum(range(10**6))\n"
+            "```"
+        ),
+    )
+    kinds = detect_knowledge_gap_kinds(turn)
+    assert "missing_context" not in kinds
+
+
+def test_detect_knowledge_gap_kinds_missing_specs():
+    """An imperative build-something prompt with no acceptance
+    criteria / done-when markers fires missing_specs."""
+    turn = Turn(role=Role.USER, content="write me a function that handles auth")
+    kinds = detect_knowledge_gap_kinds(turn)
+    assert "missing_specs" in kinds
+
+
+def test_detect_knowledge_gap_kinds_missing_specs_negative_with_criteria():
+    """An imperative prompt that DOES carry acceptance criteria does
+    NOT fire missing_specs."""
+    turn = Turn(
+        role=Role.USER,
+        content=(
+            "write me a sorter. acceptance criteria: stable, O(n log n), "
+            "handles empty lists."
+        ),
+    )
+    kinds = detect_knowledge_gap_kinds(turn)
+    assert "missing_specs" not in kinds
+
+
+def test_detect_knowledge_gap_kinds_multiple_context():
+    """A turn that strings together multiple unrelated tasks via 'and
+    also' fires multiple_context."""
+    turn = Turn(
+        role=Role.USER,
+        content="write me the function, and also fix the failing test",
+    )
+    kinds = detect_knowledge_gap_kinds(turn)
+    assert "multiple_context" in kinds
+
+
+def test_detect_knowledge_gap_kinds_unclear_instructions():
+    """A turn with vague verb-object phrasing fires
+    unclear_instructions."""
+    turn = Turn(
+        role=Role.USER,
+        content="do something with this codebase to make it better",
+    )
+    kinds = detect_knowledge_gap_kinds(turn)
+    assert "unclear_instructions" in kinds
+
+
+def test_detect_knowledge_gap_kinds_clear_prompt_no_gap():
+    """A clear, well-scoped question with no gap markers returns an
+    empty set."""
+    turn = Turn(
+        role=Role.USER,
+        content="What does the LRU eviction policy do under thread contention?",
+    )
+    kinds = detect_knowledge_gap_kinds(turn)
+    assert kinds == set()
+
+
+def test_detect_knowledge_gap_kinds_returns_subset_of_panel_order():
+    """Every key returned must be a member of the panel-order tuple."""
+    turn = Turn(
+        role=Role.USER,
+        content="just write me something that handles this somehow",
+    )
+    for kind in detect_knowledge_gap_kinds(turn):
+        assert kind in set(KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER)
+
+
+def test_count_session_knowledge_gaps_always_includes_all_kinds():
+    """The returned dict always has all four kinds as keys (US-041
+    acceptance: no silent drops) even when a session has zero gaps."""
+    turns = [
+        Turn(
+            role=Role.USER,
+            content="What does the LRU eviction policy do under contention?",
+        ),
+    ]
+    session = _make_session(turns, datetime.now(timezone.utc))
+    counts = count_session_knowledge_gaps(session)
+    for kind in KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER:
+        assert kind in counts
+        assert counts[kind] == 0
+
+
+def test_count_session_knowledge_gaps_accumulates_per_turn():
+    """A session with multiple gap turns sums per-kind counts."""
+    turns = [
+        Turn(role=Role.USER, content="write me a function that handles auth"),
+        Turn(role=Role.USER, content="build a token rotation cron"),
+        Turn(role=Role.USER, content="do something with this codebase"),
+    ]
+    session = _make_session(turns, datetime.now(timezone.utc))
+    counts = count_session_knowledge_gaps(session)
+    # Turns 1 + 2 are build-imperatives with no spec markers; turn 3
+    # is vague-imperative.
+    assert counts["missing_specs"] >= 2
+    # Third turn fires unclear_instructions.
+    assert counts["unclear_instructions"] >= 1
+
+
+def test_count_session_knowledge_gaps_empty_session():
+    """A session with no user turns returns zeros for every category."""
+    session = _make_session([], datetime.now(timezone.utc))
+    counts = count_session_knowledge_gaps(session)
+    assert counts == {kind: 0 for kind in KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER}
 
 
 def test_llm_trajectory_returns_none_without_keys(tmp_home):

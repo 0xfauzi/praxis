@@ -29,8 +29,11 @@ from praxis.reports.panel_inputs import (
     AugAutoBalancePanel,
     BehavioralPatternsPanel,
     CadencePanel,
+    ContextEngineeringDepthPanel,
+    KnowledgeGapDistributionPanel,
     PanelInputs,
     RepeatTaskRadarPanel,
+    SpecificationAdoptionPanel,
     VerificationCalibrationPanel,
 )
 from praxis.scoring.rubric import by_key
@@ -321,6 +324,20 @@ _REPEAT_TASK_EMPTY = "No repeat tasks detected this week."
 _VERIFICATION_CALIBRATION_NO_SESSIONS = (
     "No sessions to calibrate verification against this week."
 )
+
+# US-041: empty-state copy for the specification-adoption panel (when
+# the week had no sessions to measure), the context-engineering-depth
+# panel (when no scaffolding artifacts were referenced anywhere), and
+# the knowledge-gap distribution panel (when every category is zero).
+# All three literals are asserted verbatim by tests; copy changes are
+# one audit point per renderer.
+_SPECIFICATION_ADOPTION_NO_SESSIONS = (
+    "No sessions to measure specification adoption this week."
+)
+_CONTEXT_ENGINEERING_NO_ARTIFACTS = (
+    "No scaffolding artifacts referenced this week."
+)
+_KNOWLEDGE_GAP_EMPTY = "No knowledge gaps detected this week."
 
 
 def _dim_title(dim_key: str) -> str:
@@ -823,6 +840,102 @@ def _verification_calibration(
     return lines
 
 
+def _specification_adoption(
+    panel: SpecificationAdoptionPanel | None,
+) -> list[str]:
+    """Render the specification-adoption panel (US-041).
+
+    Two states:
+      1. ``panel is None`` or zero sessions observed: emit the
+         "No sessions to measure specification adoption this week."
+         placeholder.
+      2. At least one session: emit the share of sessions that opened
+         with a spec block (X% of N sessions) plus the Woodward /
+         SpecKit / Sean Grove citation as an inline footnote.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Specification adoption"))
+    if panel is None or not panel.has_sessions:
+        lines.extend(_placeholder_lines(_SPECIFICATION_ADOPTION_NO_SESSIONS))
+        return lines
+    pct = int(round(panel.adoption_share * 100))
+    session_word = "session" if panel.total_sessions == 1 else "sessions"
+    lines.append(_body_line(
+        f"Opened with a spec block: {pct}% "
+        f"({panel.sessions_with_spec} of {panel.total_sessions} {session_word})"
+    ))
+    for wrapped in _wrap(
+        f"Source: {panel.citation}", width=_BODY_WIDTH
+    ):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    return lines
+
+
+def _context_engineering(
+    panel: ContextEngineeringDepthPanel | None,
+) -> list[str]:
+    """Render the context-engineering-depth panel (US-041).
+
+    Two states:
+      1. ``panel is None`` or no scaffolding kinds fired: emit the
+         "No scaffolding artifacts referenced this week." placeholder.
+      2. At least one scaffolding kind fired: emit one row per kind
+         that fired (label + count) and skip rows with zero count so
+         the reader's eye is drawn to what they actually engage with.
+         The citation footnote sits beneath the rows.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Context engineering"))
+    if panel is None or not panel.has_any_artifact:
+        lines.extend(_placeholder_lines(_CONTEXT_ENGINEERING_NO_ARTIFACTS))
+        return lines
+    for row in panel.rows:
+        if row.sessions_with_artifact <= 0:
+            continue
+        session_word = (
+            "session" if row.sessions_with_artifact == 1 else "sessions"
+        )
+        lines.append(_body_line(
+            f"{row.label}: {row.sessions_with_artifact} {session_word}"
+        ))
+    for wrapped in _wrap(
+        f"Source: {panel.citation}", width=_BODY_WIDTH
+    ):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    return lines
+
+
+def _knowledge_gap_distribution(
+    panel: KnowledgeGapDistributionPanel | None,
+) -> list[str]:
+    """Render the knowledge-gap distribution panel (US-041).
+
+    Two states:
+      1. ``panel is None`` or every category has zero count: emit the
+         "No knowledge gaps detected this week." placeholder per US-041
+         acceptance.
+      2. At least one category has a positive count: emit one row per
+         category in display order (Missing context, Missing
+         specifications, Multiple contexts, Unclear instructions), with
+         an explicit zero rendering for categories that did not fire so
+         the panel reads as an honest four-bucket histogram. The
+         citation footnote sits beneath the rows.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Knowledge gaps"))
+    if panel is None or not panel.has_gaps:
+        lines.extend(_placeholder_lines(_KNOWLEDGE_GAP_EMPTY))
+        return lines
+    for row in panel.rows:
+        turn_word = "turn" if row.count == 1 else "turns"
+        lines.append(_body_line(f"{row.label}: {row.count} {turn_word}"))
+    for wrapped in _wrap(
+        f"Source: {panel.citation}", width=_BODY_WIDTH
+    ):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    return lines
+
+
 def _six_dim_panel(dimensions: list[DimRowView] | None) -> list[str]:
     """Render the full six-dim panel as the digest's footer (spec 6.2).
 
@@ -923,6 +1036,30 @@ def render(digest: WeeklyDigest) -> str:
         else None
     )
     parts.extend(_verification_calibration(verification_panel))
+    # US-041: specification adoption, context engineering, and
+    # knowledge-gap distribution. The three sit AFTER verification
+    # calibration so the document reads top-down as "habit -> verify ->
+    # craft": who you are this week, then how rigorously you checked,
+    # then how you opened sessions, what scaffolding you used, and
+    # which knowledge-gap categories appeared most.
+    specification_panel = (
+        digest.panel_inputs.specification_adoption
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_specification_adoption(specification_panel))
+    context_engineering_panel = (
+        digest.panel_inputs.context_engineering
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_context_engineering(context_engineering_panel))
+    knowledge_gap_panel = (
+        digest.panel_inputs.knowledge_gap_distribution
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_knowledge_gap_distribution(knowledge_gap_panel))
     # Trailing newline so terminals that print the next prompt without
     # a leading newline don't clash with the last section's content.
     parts.append("")
