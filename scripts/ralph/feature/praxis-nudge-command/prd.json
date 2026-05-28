@@ -61,6 +61,7 @@
   "allowedPaths": [
     "praxis/cli/",
     "praxis/storage/",
+    "praxis/config.py",
     "tests/",
     "scripts/ralph/feature/praxis-nudge-command/",
     "scripts/ralph/progress.txt"
