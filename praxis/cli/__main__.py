@@ -780,7 +780,7 @@ def cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
 
 
 def cmd_commit(args: argparse.Namespace) -> int:  # noqa: ARG001
-    """Print the commit-prompt for this week (US-020).
+    """Render the commit prompt and read the user's selection.
 
     Resolves the suggestion list from the latest persisted state:
       - The current ISO week's headline_moment.suggested_alternative
@@ -792,17 +792,24 @@ def cmd_commit(args: argparse.Namespace) -> int:  # noqa: ARG001
         commitment exists (latest follow-up with ``outcome='pending'``).
       - 'Write your own', always.
 
-    Free-text capture, persistence, and replace flows land in US-021,
-    US-022, and US-023 respectively. This story only renders the prompt
-    so the next iterations have a stable seam to attach to.
+    When stdin is a TTY (interactive shell), the handler additionally
+    reads the user's choice. The free-text 'w' branch (US-021) opens a
+    validated single-line read via :func:`prompt_free_text` and echoes
+    the accepted text back. Persistence and mid-week replace land in
+    US-022 / US-023 and will reuse the same selection seam.
+
+    Non-TTY invocations (pytest, piped scripts, cron) print the prompt
+    and exit 0 without attempting to read. Ctrl-C / Ctrl-D during the
+    interactive read also exit 0 cleanly without writing.
 
     Exit codes:
-      0  prompt rendered.
+      0  prompt rendered (and selection handled when interactive).
     """
     from praxis.cli.commit import (
         build_commit_suggestions,
         format_commit_prompt,
         load_commit_context,
+        prompt_free_text,
     )
 
     week_iso = current_iso_week()
@@ -810,6 +817,26 @@ def cmd_commit(args: argparse.Namespace) -> int:  # noqa: ARG001
     ctx = load_commit_context(store, week_iso=week_iso)
     suggestions = build_commit_suggestions(ctx)
     print(format_commit_prompt(suggestions), end="")
+
+    if not sys.stdin.isatty():
+        return 0
+
+    try:
+        choice = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 0
+
+    if choice == "w":
+        print("Write your own commitment for this week.")
+        try:
+            text = prompt_free_text()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        print(f'Your commitment for {week_iso}:')
+        print(f'  "{text}"')
+
     return 0
 
 

@@ -23,14 +23,33 @@ Empty-suggestion guarantee (US-020 AC #3): even when there is no
 headline, no prior commitment, and no usable drills, the returned list
 still contains the 'Write your own' option, so the CLI prompt is never
 empty.
+
+Free-text path (US-021): :func:`prompt_free_text` reads a single-line
+commitment from stdin, trims it, and re-prompts on empty or oversize
+input. The 280-character cap matches Twitter's limit and the per-spec
+budget for SessionStart hook payloads / Copilot instruction files.
 """
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
-from typing import Literal
+from typing import Callable, Literal
 
 from praxis.scoring.coach import drills_for_dim
 from praxis.storage.profile_store import ProfileStore
+
+
+MAX_COMMITMENT_CHARS = 280
+
+
+def _default_input_reader(prompt: str, /) -> str:
+    """Default reader for :func:`prompt_free_text` -- wraps builtin :func:`input`."""
+    return input(prompt)
+
+
+def _default_stderr_writer(msg: str, /) -> None:
+    """Default sink for :func:`prompt_free_text` validation messages."""
+    print(msg, file=sys.stderr)
 
 
 SuggestionKind = Literal["headline", "drill", "keep_last", "free_text"]
@@ -213,3 +232,52 @@ def format_commit_prompt(suggestions: list[CommitSuggestion]) -> str:
     lines.append("")
     lines.append(f"Your choice [{', '.join(choice_keys)}]:")
     return "\n".join(lines) + "\n"
+
+
+def prompt_free_text(
+    *,
+    prompt_message: str = "> ",
+    input_fn: Callable[[str], str] | None = None,
+    error_writer: Callable[[str], None] | None = None,
+) -> str:
+    """Read a single-line free-text commitment, validated and re-prompted.
+
+    Reads a line via ``input_fn`` (default :func:`input`), strips
+    leading/trailing whitespace, and validates:
+
+      - Whitespace-only / empty after trim -> ``error_writer`` is called
+        with ``'Cannot be empty.'`` and the loop reads again.
+      - Trimmed length above :data:`MAX_COMMITMENT_CHARS` (280) ->
+        ``error_writer`` is called with
+        ``'Keep it under 280 characters (current: <N>).'`` (where ``N``
+        is the trimmed length) and the loop reads again.
+
+    The loop continues until the user enters a valid line or aborts.
+    :class:`KeyboardInterrupt` (Ctrl-C) and :class:`EOFError` (Ctrl-D /
+    closed stdin) propagate to the caller so the CLI can decide how to
+    react -- typically by exiting 0 without persisting anything.
+
+    ``error_writer`` defaults to writing one line to ``sys.stderr``.
+    Both ``input_fn`` and ``error_writer`` are injectable so unit tests
+    can drive the loop deterministically without touching real
+    stdin/stderr.
+    """
+    read: Callable[[str], str] = (
+        input_fn if input_fn is not None else _default_input_reader
+    )
+    write_error: Callable[[str], None] = (
+        error_writer if error_writer is not None else _default_stderr_writer
+    )
+    while True:
+        raw = read(prompt_message)
+        trimmed = raw.strip()
+        if not trimmed:
+            write_error("Cannot be empty.")
+            continue
+        if len(trimmed) > MAX_COMMITMENT_CHARS:
+            write_error(
+                f"Keep it under {MAX_COMMITMENT_CHARS} characters "
+                f"(current: {len(trimmed)})."
+            )
+            continue
+        return trimmed

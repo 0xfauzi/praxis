@@ -1,33 +1,44 @@
-"""Tests for ``praxis commit`` (US-020).
+"""Tests for ``praxis commit`` (US-020, US-021).
 
 Acceptance criteria exercised:
 
-  AC #1: prints three numbered suggestions in priority order: headline
-         drill first, then drills for the two weakest dims; the 'Keep
-         last week' option appears only when a still-open prior
-         commitment exists; 'Write your own' is always offered.
+  US-020 AC #1: prints three numbered suggestions in priority order:
+         headline drill first, then drills for the two weakest dims;
+         the 'Keep last week' option appears only when a still-open
+         prior commitment exists; 'Write your own' is always offered.
 
-  AC #2: dedup -- when the headline drill is identical to the first
-         drill from a weakest dim, that dim is skipped and the third
-         slot is filled by the next-weakest dim instead.
+  US-020 AC #2: dedup -- when the headline drill is identical to the
+         first drill from a weakest dim, that dim is skipped and the
+         third slot is filled by the next-weakest dim instead.
 
-  AC #3: empty-suggestion guarantee -- when there is no headline, no
-         prior commitment, and no usable dim drills, the prompt still
-         offers 'Write your own' and the CLI exits 0.
+  US-020 AC #3: empty-suggestion guarantee -- when there is no headline,
+         no prior commitment, and no usable dim drills, the prompt
+         still offers 'Write your own' and the CLI exits 0.
 
-The pure-function tests exercise ``build_commit_suggestions`` against
-hand-built ``CommitContext`` inputs; the integration tests drive the
-CLI entry point end-to-end (argparse + DB I/O).
+  US-021: 'Write your own' opens a single-line read; the input is
+         trimmed and validated. Length > 280 re-prompts with
+         'Keep it under 280 characters (current: <N>).'; empty (or
+         whitespace-only) re-prompts with 'Cannot be empty.'.
+
+The pure-function tests exercise ``build_commit_suggestions`` /
+``prompt_free_text`` against deterministic inputs; the integration
+tests drive the CLI entry point end-to-end (argparse + DB I/O).
 """
 from __future__ import annotations
 
+import builtins
+
+import pytest
+
 from praxis.cli.__main__ import main
 from praxis.cli.commit import (
+    MAX_COMMITMENT_CHARS,
     CommitContext,
     CommitSuggestion,
     build_commit_suggestions,
     format_commit_prompt,
     load_commit_context,
+    prompt_free_text,
 )
 from praxis.follow_up import FollowUp
 from praxis.models import Moment
@@ -499,3 +510,257 @@ def test_cmd_commit_uses_current_iso_week(monkeypatch, tmp_home, capsys):
     out = capsys.readouterr().out
     assert code == 0
     assert "1) " + FALLBACK_DRILLS["tools"][0] in out
+
+
+# ---- prompt_free_text (US-021) ---------------------------------------------
+
+
+def _scripted_input(lines: list[str]):
+    """Build a fake input() that returns successive ``lines`` per call.
+
+    Calling more times than there are scripted lines raises EOFError,
+    which mirrors how a closed stdin behaves and prevents an infinite
+    loop on an unexpected re-prompt.
+    """
+    queue = list(lines)
+
+    def fake_input(_prompt: str = "") -> str:
+        if not queue:
+            raise EOFError("scripted input exhausted")
+        return queue.pop(0)
+
+    return fake_input
+
+
+def test_prompt_free_text_returns_trimmed_input_on_first_valid_entry():
+    errors: list[str] = []
+    result = prompt_free_text(
+        input_fn=_scripted_input(["  Ask 'what would change your mind?'  "]),
+        error_writer=errors.append,
+    )
+    assert result == "Ask 'what would change your mind?'"
+    assert errors == []
+
+
+def test_prompt_free_text_rejects_empty_input_with_cannot_be_empty():
+    errors: list[str] = []
+    result = prompt_free_text(
+        input_fn=_scripted_input(["", "Pick a non-empty commitment."]),
+        error_writer=errors.append,
+    )
+    assert errors == ["Cannot be empty."]
+    assert result == "Pick a non-empty commitment."
+
+
+def test_prompt_free_text_treats_whitespace_only_as_empty():
+    """Tabs and spaces trip the empty check (whitespace-only is rejected)."""
+    errors: list[str] = []
+    result = prompt_free_text(
+        input_fn=_scripted_input(["   \t  ", "Real commitment text."]),
+        error_writer=errors.append,
+    )
+    assert errors == ["Cannot be empty."]
+    assert result == "Real commitment text."
+
+
+def test_prompt_free_text_rejects_over_280_chars_with_current_length():
+    """The re-prompt message reports the trimmed length (the cap target)."""
+    too_long = "x" * (MAX_COMMITMENT_CHARS + 5)  # 285 chars
+    errors: list[str] = []
+    result = prompt_free_text(
+        input_fn=_scripted_input([too_long, "Short enough commitment."]),
+        error_writer=errors.append,
+    )
+    assert errors == [
+        f"Keep it under {MAX_COMMITMENT_CHARS} characters "
+        f"(current: {MAX_COMMITMENT_CHARS + 5})."
+    ]
+    assert result == "Short enough commitment."
+
+
+def test_prompt_free_text_accepts_input_at_exactly_280_chars():
+    """The cap is INCLUSIVE: 280 chars exactly is valid, 281+ is not."""
+    at_cap = "y" * MAX_COMMITMENT_CHARS
+    errors: list[str] = []
+    result = prompt_free_text(
+        input_fn=_scripted_input([at_cap]),
+        error_writer=errors.append,
+    )
+    assert result == at_cap
+    assert errors == []
+
+
+def test_prompt_free_text_loops_until_valid_input_arrives():
+    """Multiple invalid attempts in a row are all re-prompted before accepting."""
+    errors: list[str] = []
+    too_long = "z" * (MAX_COMMITMENT_CHARS + 1)
+    result = prompt_free_text(
+        input_fn=_scripted_input([
+            "",
+            "   ",
+            too_long,
+            "Finally a good commitment.",
+        ]),
+        error_writer=errors.append,
+    )
+    assert errors == [
+        "Cannot be empty.",
+        "Cannot be empty.",
+        f"Keep it under {MAX_COMMITMENT_CHARS} characters "
+        f"(current: {MAX_COMMITMENT_CHARS + 1}).",
+    ]
+    assert result == "Finally a good commitment."
+
+
+def test_prompt_free_text_propagates_keyboard_interrupt():
+    """Ctrl-C aborts the loop -- the caller decides how to recover."""
+    def raising_input(_prompt: str = "") -> str:
+        raise KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        prompt_free_text(input_fn=raising_input, error_writer=lambda _m: None)
+
+
+def test_prompt_free_text_propagates_eof_error():
+    """A closed stdin (Ctrl-D) bubbles up so the CLI can exit 0 cleanly."""
+    def eof_input(_prompt: str = "") -> str:
+        raise EOFError()
+
+    with pytest.raises(EOFError):
+        prompt_free_text(input_fn=eof_input, error_writer=lambda _m: None)
+
+
+def test_prompt_free_text_default_error_writer_goes_to_stderr(capsys):
+    """The default writer sends validation messages to stderr (not stdout)."""
+    result = prompt_free_text(
+        input_fn=_scripted_input(["", "valid commitment text"]),
+    )
+    captured = capsys.readouterr()
+    assert result == "valid commitment text"
+    assert "Cannot be empty." in captured.err
+    assert "Cannot be empty." not in captured.out
+
+
+# ---- cmd_commit free-text integration (US-021) ------------------------------
+
+
+def _force_tty(monkeypatch) -> None:
+    """Pretend stdin is a TTY so cmd_commit enters the interactive read."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+
+def test_cmd_commit_w_choice_reads_validated_free_text(monkeypatch, tmp_home, capsys):
+    """End-to-end: typing 'w' then a valid commitment echoes the chosen text."""
+    _force_tty(monkeypatch)
+    inputs = iter(["w", "Ask 'list every table this writes' before each migration."])
+    monkeypatch.setattr(builtins, "input", lambda *_a, **_kw: next(inputs))
+
+    code = main(["commit"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert (
+        '"Ask \'list every table this writes\' before each migration."' in out
+    )
+
+
+def test_cmd_commit_w_choice_reprompts_on_oversize_then_accepts(
+    monkeypatch, tmp_home, capsys
+):
+    """Free-text > 280 chars triggers the cap message then re-reads."""
+    _force_tty(monkeypatch)
+    too_long = "a" * (MAX_COMMITMENT_CHARS + 1)
+    inputs = iter(["w", too_long, "Short commitment."])
+    monkeypatch.setattr(builtins, "input", lambda *_a, **_kw: next(inputs))
+
+    code = main(["commit"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert (
+        f"Keep it under {MAX_COMMITMENT_CHARS} characters "
+        f"(current: {MAX_COMMITMENT_CHARS + 1})." in captured.err
+    )
+    assert '"Short commitment."' in captured.out
+
+
+def test_cmd_commit_w_choice_reprompts_on_empty_then_accepts(
+    monkeypatch, tmp_home, capsys
+):
+    """Free-text empty/whitespace-only triggers 'Cannot be empty.' then re-reads."""
+    _force_tty(monkeypatch)
+    inputs = iter(["w", "   ", "Real commitment."])
+    monkeypatch.setattr(builtins, "input", lambda *_a, **_kw: next(inputs))
+
+    code = main(["commit"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "Cannot be empty." in captured.err
+    assert '"Real commitment."' in captured.out
+
+
+def test_cmd_commit_non_tty_skips_interactive_read(tmp_home, capsys):
+    """Without a TTY, cmd_commit prints the prompt and returns 0 (no input call).
+
+    This is the default path during pytest (stdin is not a TTY). The
+    existing US-020 tests rely on it; this assertion pins the contract.
+    """
+    code = main(["commit"])
+    out = capsys.readouterr().out
+    assert code == 0
+    # The prompt rendered fully, including the choice line, but no
+    # 'Write your own commitment' lead-in (which is only printed when
+    # the user actually selects 'w').
+    assert "Pick a commitment for this week" in out
+    assert "Write your own commitment for this week." not in out
+
+
+def test_cmd_commit_w_choice_eof_exits_zero_cleanly(monkeypatch, tmp_home, capsys):
+    """Ctrl-D during the free-text read aborts without crashing."""
+    _force_tty(monkeypatch)
+    calls = iter(["w"])
+
+    def eof_after_w(*_a, **_kw):
+        # First call returns 'w'; subsequent calls (the free-text read)
+        # raise EOFError to simulate Ctrl-D.
+        try:
+            return next(calls)
+        except StopIteration:
+            raise EOFError()
+
+    monkeypatch.setattr(builtins, "input", eof_after_w)
+    code = main(["commit"])
+    capsys.readouterr()
+    assert code == 0
+
+
+def test_cmd_commit_w_choice_keyboard_interrupt_exits_zero(
+    monkeypatch, tmp_home, capsys
+):
+    """Ctrl-C during the free-text read aborts without crashing."""
+    _force_tty(monkeypatch)
+    calls = iter(["w"])
+
+    def ctrl_c_after_w(*_a, **_kw):
+        try:
+            return next(calls)
+        except StopIteration:
+            raise KeyboardInterrupt()
+
+    monkeypatch.setattr(builtins, "input", ctrl_c_after_w)
+    code = main(["commit"])
+    capsys.readouterr()
+    assert code == 0
+
+
+def test_cmd_commit_non_w_choice_does_not_open_free_text(
+    monkeypatch, tmp_home, capsys
+):
+    """Selecting '1' or 'k' does not trigger the free-text reader (US-022 will wire those)."""
+    _force_tty(monkeypatch)
+    inputs = iter(["1"])
+    monkeypatch.setattr(builtins, "input", lambda *_a, **_kw: next(inputs))
+
+    code = main(["commit"])
+    out = capsys.readouterr().out
+    assert code == 0
+    # No free-text branch was entered.
+    assert "Write your own commitment for this week." not in out
