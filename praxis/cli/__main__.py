@@ -1013,6 +1013,28 @@ def cmd_uninstall_weekly(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+def cmd_install_coach(args: argparse.Namespace) -> int:
+    """Detect supported AI coding tools and install the coaching hooks.
+
+    Per AC US-028: prompts ``Found <Tool>. Install the Praxis coaching
+    hook? [Y/n]:`` for each detected tool. ``--yes`` skips prompting;
+    ``--tool NAME`` restricts to a single tool (still prompts unless
+    paired with ``--yes``); ``--all`` proceeds regardless of detection
+    (and is mutually exclusive with ``--tool``).
+
+    Exit codes:
+      0  -- happy path, including the "no tools detected" branch.
+      1  -- invalid ``--tool`` argument.
+    """
+    from praxis.cli.install_coach import run_install_coach
+
+    return run_install_coach(
+        assume_yes=getattr(args, "yes", False),
+        tool=getattr(args, "tool", None),
+        all_tools=getattr(args, "all", False),
+    )
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     from praxis.config_cli import (
         ConfigCLIError,
@@ -1359,6 +1381,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Remove the shell-nudge eval line from ~/.zshrc and ~/.bashrc.",
     )
     usn.set_defaults(func=cmd_uninstall_shell_nudge)
+
+    ic = sub.add_parser(
+        "install-coach",
+        help="Install the Praxis coaching hooks into your AI coding tools.",
+        description=(
+            "Detect Claude Code / Codex / Copilot and prompt to install "
+            "the SessionStart + Stop coaching hooks for each one. The "
+            "detection criteria are ~/.claude/settings.json or "
+            "~/.claude/projects/ (Claude Code), ~/.codex/ (Codex), and "
+            "any VS Code workspace storage with Copilot chat artifacts "
+            "(Copilot)."
+        ),
+    )
+    ic.add_argument(
+        "--yes", action="store_true",
+        help="Assume yes for every prompt (useful in scripted installs).",
+    )
+    ic_scope = ic.add_mutually_exclusive_group()
+    ic_scope.add_argument(
+        "--tool", type=str, default=None, metavar="NAME",
+        help=(
+            "Restrict to a single tool (claude-code, codex, copilot). "
+            "Still prompts unless --yes is also set."
+        ),
+    )
+    ic_scope.add_argument(
+        "--all", action="store_true",
+        help="Iterate every known tool regardless of detection.",
+    )
+    ic.set_defaults(func=cmd_install_coach)
 
     cfg = sub.add_parser("config",
                          help="View, --get, or --set ~/.praxis/config.toml.")
