@@ -599,6 +599,7 @@ def _cmd_review_impl(args: argparse.Namespace) -> int:
     judged_count = len(summary.judge_results) if summary.judge_results else 0
     if (
         is_current_week
+        and args.week is None
         and not args.dry_run
         and summary.sessions
         and judged_count == 0
@@ -1089,16 +1090,21 @@ def cmd_commit(args: argparse.Namespace) -> int:  # noqa: ARG001
             )
         else:
             store.insert_follow_up(follow_up)
-    except sqlite3.IntegrityError:
-        # Defensive: the partial-unique index fired despite the replace
-        # gate above (e.g. a concurrent write between our checks). Surface
-        # a friendly hint instead of a traceback.
-        print()
-        print(
-            f"You already have an active commitment for {week_iso}. "
-            "Re-run `praxis commit` to retry."
-        )
-        return 0
+    except sqlite3.IntegrityError as exc:
+        if "UNIQUE constraint" in str(exc):
+            # The partial-unique index fired despite the replace gate above
+            # (e.g. a concurrent write between our checks). Surface a friendly
+            # hint instead of a traceback.
+            print()
+            print(
+                f"You already have an active commitment for {week_iso}. "
+                "Re-run `praxis commit` to retry."
+            )
+            return 0
+        # Any other integrity failure is a real bug, not a benign race -- e.g.
+        # a stale narrow outcome CHECK on a DB that predates the 'superseded'
+        # migration. Don't mask it behind the retry hint; let it surface.
+        raise
 
     print(f'Your commitment for {week_iso}:')
     print(f'  "{display_text}"')

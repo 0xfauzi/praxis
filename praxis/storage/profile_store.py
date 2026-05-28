@@ -219,18 +219,40 @@ class ProfileStore:
         db_existed = self.db_path.exists()
         if db_existed:
             with self._conn() as conn:
-                if self._has_schema_v3_marker(conn):
-                    # Already at v3+. Run additive column migrations in-place
-                    # so older v3 DBs gain optional columns (signals_json)
-                    # without a full table rebuild; bring follow_ups up to v4
-                    # if it's still on the v3 shape; then run the numbered SQL
-                    # migrations to pick up anything later (session_reflections,
-                    # aug_auto columns, future additions).
-                    self._ensure_session_scores_columns(conn)
-                    self._ensure_follow_ups_v4(conn)
-                    self._ensure_reflect_tables(conn)
+                at_v3 = self._has_schema_v3_marker(conn)
+            if at_v3:
+                # Already at v3+. Run additive column migrations in-place
+                # so older v3 DBs gain optional columns (signals_json)
+                # without a full table rebuild; bring follow_ups up to v4
+                # if it's still on the v3 shape; then run the numbered SQL
+                # migrations to pick up anything later (session_reflections,
+                # aug_auto columns, future additions).
+                #
+                # _ensure_follow_ups_v4 can now perform a destructive table
+                # rebuild here (widening the outcome CHECK on DBs that predate
+                # 'superseded'). Only back up -- and guard with restore -- when
+                # that rebuild is actually pending: the common no-op open must
+                # stay cheap, since SessionStart hooks open the store on every
+                # session and a full DB copy each time would be wasteful.
+                backup_path = (
+                    self._backup_db_if_exists()
+                    if self._follow_ups_rebuild_pending()
+                    else None
+                )
+                try:
+                    with self._conn() as conn:
+                        self._ensure_session_scores_columns(conn)
+                        self._ensure_follow_ups_v4(conn)
+                        self._ensure_reflect_tables(conn)
                     self._run_sql_migrations()
-                    return
+                except Exception as exc:
+                    if backup_path is not None:
+                        self._restore_db_from_backup(backup_path)
+                        raise MigrationError(
+                            self._migration_failure_message(backup_path, exc)
+                        ) from exc
+                    raise
+                return
 
         # Migration needed (fresh DB, v0.1, or v0.2 DB without the v3 marker).
         # Per spec Appendix A.7: back up the live DB before any DDL, and on
@@ -248,6 +270,28 @@ class ProfileStore:
                 self._migration_failure_message(backup_path, exc)
             ) from exc
         self._run_sql_migrations()
+
+    def _follow_ups_rebuild_pending(self) -> bool:
+        """True when ``_ensure_follow_ups_v4`` will do a destructive rebuild.
+
+        Two cases require recreating the table (CREATE/INSERT/DROP/RENAME):
+        a pre-v4 shape still missing ``user_chosen``, or a v4-column DB whose
+        ``outcome`` CHECK predates ``'superseded'``. The already-migrated case
+        returns False so init stays cheap (no DB copy) on every store open.
+        Used to gate the pre-migration backup in ``_init_schema``.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'follow_ups'"
+            ).fetchone()
+            if row is None:
+                return False
+            table_sql = row[0]
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(follow_ups)")}
+        if "user_chosen" not in cols:
+            return True
+        return "superseded'" not in table_sql
 
     @staticmethod
     def _ensure_follow_ups_v4(conn: sqlite3.Connection) -> None:
@@ -268,10 +312,56 @@ class ProfileStore:
         cur = conn.execute("PRAGMA table_info(follow_ups)")
         existing_cols = {row[1] for row in cur.fetchall()}
         if "user_chosen" in existing_cols:
-            # Already at v4. Make sure the partial-unique index exists too --
-            # SCHEMA cannot create it inline because that would break the
-            # v0.2 -> v3 upgrade path (the index references superseded_by,
-            # which only exists after this method runs the first time).
+            # Columns are already at the v4 shape, but a DB created by an
+            # earlier draft may still carry the *narrow* outcome CHECK that
+            # predates 'superseded'. SQLite bakes the CHECK into the table
+            # definition and cannot ALTER it in place, so widening it means
+            # recreating the table. Without this the [r]eplace path's
+            # UPDATE ... SET outcome='superseded' fails with an IntegrityError
+            # (CHECK constraint), which the commit CLI mis-reports as "you
+            # already have an active commitment". Preserve id values: both
+            # follow_ups.superseded_by and session_reflections.follow_up_id
+            # reference follow_ups(id).
+            table_row = conn.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'follow_ups'"
+            ).fetchone()
+            check_allows_superseded = (
+                table_row is not None and "superseded'" in table_row[0]
+            )
+            if not check_allows_superseded:
+                conn.executescript(
+                    """
+                    CREATE TABLE follow_ups_checkfix (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        week_iso TEXT NOT NULL,
+                        dim_key TEXT NOT NULL,
+                        commitment_text TEXT NOT NULL,
+                        target_metric TEXT NOT NULL,
+                        baseline_value REAL NOT NULL,
+                        measured_value REAL,
+                        outcome TEXT NOT NULL CHECK (outcome IN ('improved','unchanged','worse','pending','superseded')),
+                        user_chosen INTEGER NOT NULL DEFAULT 0,
+                        display_text TEXT,
+                        superseded_by INTEGER REFERENCES follow_ups(id)
+                    );
+                    INSERT INTO follow_ups_checkfix
+                        (id, week_iso, dim_key, commitment_text, target_metric,
+                         baseline_value, measured_value, outcome,
+                         user_chosen, display_text, superseded_by)
+                    SELECT id, week_iso, dim_key, commitment_text, target_metric,
+                           baseline_value, measured_value, outcome,
+                           user_chosen, display_text, superseded_by
+                    FROM follow_ups;
+                    DROP TABLE follow_ups;
+                    ALTER TABLE follow_ups_checkfix RENAME TO follow_ups;
+                    """
+                )
+            # Make sure the partial-unique index exists too -- SCHEMA cannot
+            # create it inline because that would break the v0.2 -> v3 upgrade
+            # path (the index references superseded_by, which only exists after
+            # this method runs the first time). Also re-creates it after the
+            # rebuild above, since DROP TABLE drops the old table's indexes.
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS "
                 "idx_follow_ups_one_active_per_week "
