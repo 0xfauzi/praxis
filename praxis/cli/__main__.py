@@ -455,50 +455,14 @@ def _keep_commitment_for_next_week(
     return next_week
 
 
-def cmd_commit(args: argparse.Namespace | None = None) -> int:
-    """Open a new commitment for next week (spec section 2).
-
-    Prompts the user for a single sentence describing what they want to
-    practice next week, then saves a follow_ups row keyed to that week.
-    Reuses the most recent commitment's dim_key / target_metric /
-    baseline_value when one is on file so next week's review can close
-    the loop; otherwise picks the user's weakest dim from the latest
-    snapshot. Designed to be invoked inline by `cmd_review`'s [n]ew
-    prompt branch (US-036 AC #2) and also runnable directly so a future
-    `praxis commit` subparser can route here without a refactor.
-    """
-    _ = args  # Reserved for future subparser flags.
-    store = ProfileStore()
-    latest = store.latest_follow_up()
-    if latest is None:
-        print(
-            "  No prior commitment on file. Run `praxis review` once to "
-            "open the first commitment.",
-            file=sys.stderr,
-        )
-        return 1
-    try:
-        text = input(
-            "  What do you want to practice next week? > "
-        ).strip()
-    except EOFError:
-        return 1
-    if not text:
-        print("  No commitment recorded (empty input).", file=sys.stderr)
-        return 1
-    next_week = _next_iso_week(latest.week_iso)
-    new_row = FollowUp(
-        week_iso=next_week,
-        dim_key=latest.dim_key,
-        commitment_text=text,
-        target_metric=latest.target_metric,
-        baseline_value=latest.baseline_value,
-        measured_value=None,
-        outcome="pending",
-    )
-    store.save_follow_up(new_row)
-    print(f"  New commitment opened for {next_week}.")
-    return 0
+# NOTE: a simpler `cmd_commit` (interactive prompt → save row for next
+# week) was defined here by ralph/factory/praxis-review-rename-and-masthead
+# (US-036). The canonical `cmd_commit` defined further below
+# (ralph/factory/praxis-commit-command, US-020..023) is a superset of
+# that behavior (suggestion sources, free-text 280-cap, supersede flow)
+# so the inline simpler version was removed at merge time. Python's
+# late binding means `_handle_followup_prompt`'s `[n]ew` branch resolves
+# to the canonical implementation automatically.
 
 
 def _handle_followup_prompt(summary_week_iso: str | None) -> None:
@@ -527,7 +491,10 @@ def _handle_followup_prompt(summary_week_iso: str | None) -> None:
         print(f"  Kept commitment for {next_week}.")
         return
     if choice == _FOLLOWUP_CHOICE_NEW:
-        cmd_commit(None)
+        # Canonical cmd_commit (US-020..023) ignores its args argument
+        # but is typed as Namespace; pass an empty Namespace so the
+        # inline-from-review dispatch type-checks cleanly.
+        cmd_commit(argparse.Namespace())
 
 
 def cmd_review(args: argparse.Namespace) -> int:
