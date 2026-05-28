@@ -1169,3 +1169,180 @@ def test_notify_survives_unexpected_exception(
     captured = capsys.readouterr()
     assert code == 0
     assert "osascript notification failed" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# US-016 - `praxis nudge` resolves and surfaces this week's active commitment.
+# ---------------------------------------------------------------------------
+
+
+def _seed_follow_up(
+    week_iso: str,
+    *,
+    commitment_text: str = "ask 'list every table this migration writes'",
+    dim_key: str = "verification",
+    target_metric: str = "verification_rate",
+    baseline_value: float = 0.42,
+    measured_value: float | None = None,
+    outcome: str = "pending",
+) -> None:
+    """Insert one follow_ups row via ProfileStore for nudge-resolver tests."""
+    store = ProfileStore()
+    store.save_follow_up(
+        FollowUp(
+            week_iso=week_iso,
+            dim_key=dim_key,
+            commitment_text=commitment_text,
+            target_metric=target_metric,
+            baseline_value=baseline_value,
+            measured_value=measured_value,
+            outcome=outcome,  # type: ignore[arg-type]
+        )
+    )
+
+
+def test_nudge_subcommand_is_registered():
+    """`praxis nudge` must be parseable with no flags (US-016 AC #1)."""
+    parser = build_parser()
+    args = parser.parse_args(["nudge"])
+    assert args.cmd == "nudge"
+
+
+def test_nudge_silent_when_no_follow_up_row_exists(tmp_home, capsys):
+    """Empty follow_ups table: exit 0, empty stdout, empty stderr.
+
+    Hooks fire on every shell / IDE start; without a committed commitment
+    yet, they must produce zero noise (US-016 AC #2).
+    """
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_nudge_silent_when_only_resolved_rows_exist(tmp_home, capsys, monkeypatch):
+    """A non-pending row for THIS week is not an active commitment.
+
+    Once a row's outcome moves out of 'pending' (improved/unchanged/worse),
+    it no longer counts as the active commitment -- the user has already
+    seen its outcome in their weekly digest.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    _seed_follow_up(
+        "2026-W21",
+        commitment_text="resolved last week",
+        measured_value=0.95,
+        outcome="improved",
+    )
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == ""
+
+
+def test_nudge_silent_when_pending_row_is_for_a_different_week(
+    tmp_home, capsys, monkeypatch
+):
+    """A pending row from a prior week is not active for THIS week.
+
+    Active = pending AND week_iso == current. Stale pending rows (e.g.,
+    if the close-the-loop step didn't run) must not leak into the current
+    week's nudge surface.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    _seed_follow_up("2026-W19", commitment_text="stale pending")
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == ""
+
+
+def test_nudge_prints_active_commitment_for_current_week(
+    tmp_home, capsys, monkeypatch
+):
+    """A pending row for the current week is the active commitment.
+
+    Output is single-line so SessionStart hooks can pipe it straight to
+    the user without further parsing.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    _seed_follow_up(
+        "2026-W21",
+        commitment_text="ask 'what would falsify this answer?' before applying",
+    )
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "ask 'what would falsify this answer?' before applying" in captured.out
+    assert captured.out.endswith("\n")
+    assert captured.out.count("\n") == 1
+    assert captured.err == ""
+
+
+def test_nudge_uses_current_iso_week_resolver(tmp_home, capsys, monkeypatch):
+    """Switching the week resolver swaps which row is surfaced.
+
+    Confirms `current_iso_week()` is the seam the command resolves through
+    (not e.g. latest_follow_up, which would surface stale rows).
+    """
+    _seed_follow_up("2026-W19", commitment_text="week 19 commitment")
+    _seed_follow_up("2026-W21", commitment_text="week 21 commitment")
+
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W19"
+    )
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "week 19 commitment" in captured.out
+    assert "week 21 commitment" not in captured.out
+
+
+def test_nudge_exits_nonzero_with_clear_error_on_multiple_active_rows(
+    tmp_home, capsys, monkeypatch
+):
+    """Multi-active is a violated invariant: surface it loudly (AC #3).
+
+    The legacy schema's PRIMARY KEY (week_iso) and the migration's partial
+    unique index both prevent this case; the test injects two rows via
+    monkeypatch since the schema makes the case unreachable in practice.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    fakes = [
+        FollowUp(
+            week_iso="2026-W21",
+            dim_key="verification",
+            commitment_text="first active",
+            target_metric="verification_rate",
+            baseline_value=0.4,
+        ),
+        FollowUp(
+            week_iso="2026-W21",
+            dim_key="planning",
+            commitment_text="second active",
+            target_metric="planning_dim_mean",
+            baseline_value=6.0,
+        ),
+    ]
+    monkeypatch.setattr(
+        "praxis.cli.__main__.ProfileStore.load_active_commitments",
+        lambda self, week_iso: fakes,  # noqa: ARG005
+    )
+
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code != 0
+    # Error must reference the violated invariant in user-readable terms.
+    assert "active commitments" in captured.err
+    assert "2026-W21" in captured.err
+    # Stdout stays clean so hooks consuming stdout don't see a half-message.
+    assert captured.out == ""

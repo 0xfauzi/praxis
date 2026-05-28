@@ -28,6 +28,7 @@ from pathlib import Path
 
 from praxis import __version__
 from praxis.config import ensure_config_file
+from praxis.follow_up import FollowUp
 from praxis.orchestrator import (
     NO_API_KEY_MESSAGE,
     InvalidWeekError,
@@ -805,6 +806,50 @@ def cmd_follow_up(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+def _resolve_active_commitment(week_iso: str) -> FollowUp | None:
+    """Return the single active commitment for ``week_iso``, or None.
+
+    Raises ``RuntimeError`` when more than one active row exists -- that's
+    the "would only happen if the unique index was bypassed" case in the
+    spec (US-016 AC #3). Surfacing it loud is the whole point: silently
+    picking one would mask the corrupted invariant.
+    """
+    store = ProfileStore()
+    commitments = store.load_active_commitments(week_iso)
+    if len(commitments) > 1:
+        raise RuntimeError(
+            f"praxis nudge: {len(commitments)} active commitments found for "
+            f"{week_iso}; expected at most one (active = outcome='pending' "
+            "AND superseded_by IS NULL). The follow_ups unique-index "
+            "invariant has been violated."
+        )
+    return commitments[0] if commitments else None
+
+
+def cmd_nudge(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Print this week's active commitment, or stay silent.
+
+    Resolves the single follow_ups row for the current ISO week that has
+    ``outcome='pending'`` (and, once the schema-migrations columns land,
+    ``superseded_by IS NULL``). Output is intentionally single-line so
+    SessionStart hooks can pipe it straight to the user.
+
+    Exit codes:
+      0  active commitment printed, or no active commitment (silent).
+      4  invariant violated: more than one active row for the current week.
+    """
+    week_iso = current_iso_week()
+    try:
+        active = _resolve_active_commitment(week_iso)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 4
+    if active is None:
+        return 0
+    print(f"[Praxis] This week: {active.commitment_text}")
+    return 0
+
+
 def cmd_rubric(args: argparse.Namespace) -> int:  # noqa: ARG001
     print("\nPRAXIS — SCORING RUBRIC\n")
     for d in RUBRIC:
@@ -1292,6 +1337,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show the most recent weekly commitment and its outcome.",
     )
     fup.set_defaults(func=cmd_follow_up)
+
+    nudge = sub.add_parser(
+        "nudge",
+        help="Print this week's active commitment (silent when none exists).",
+        description=(
+            "Resolve the single follow_ups row with outcome='pending' for the "
+            "current ISO week and print it on one line. Exits 0 with empty "
+            "stdout when there is no active commitment so hooks (Claude Code "
+            "SessionStart, Codex, shell startup) stay silent until the first "
+            "commitment is recorded."
+        ),
+    )
+    nudge.set_defaults(func=cmd_nudge)
 
     mod = sub.add_parser("models",
                          help="List model cards or show one in detail.")

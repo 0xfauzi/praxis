@@ -12,8 +12,8 @@
         "Tests pass: uv run pytest"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added ProfileStore.load_active_commitments(week_iso) (schema-tolerant: appends `AND superseded_by IS NULL` only when the column from schema-migrations US-002 is present). cmd_nudge prints `[Praxis] This week: <commitment_text>` on a single line; silent (exit 0, empty stdout/stderr) when no active commitment; exits 4 with stderr error referencing the violated invariant when >1 active rows are returned."
     },
     {
       "id": "US-017",
