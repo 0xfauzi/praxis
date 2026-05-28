@@ -1197,3 +1197,1020 @@ def test_html_masthead_gap_agree_class_when_signals_align_despite_prose():
     assert 'class="cb-gap--agree"' in out
     assert 'class="cb-gap--disagree"' not in out
     assert "spurious prose" not in out
+# ----------------------------------------- US-038: behavioral-patterns panel
+
+
+def _bp_panel_with_rows():
+    """A behavioral-patterns panel with two populated signal rows."""
+    from praxis.reports.panel_inputs import (
+        BehavioralPatternRow,
+        BehavioralPatternsPanel,
+    )
+    return BehavioralPatternsPanel(rows=(
+        BehavioralPatternRow(
+            signal_kind="why_question",
+            label="Why-questions",
+            count=4,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+            excerpts=(
+                "why does this approach work for caching?",
+                "why is this slower than the previous version?",
+            ),
+        ),
+        BehavioralPatternRow(
+            signal_kind="pure_delegation",
+            label="Pure delegation",
+            count=2,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+            excerpts=("write me a function",),
+        ),
+    ))
+
+
+def _bp_empty_panel():
+    """A panel where every row has count==0 (US-038 empty-state path)."""
+    from praxis.reports.panel_inputs import (
+        BehavioralPatternRow,
+        BehavioralPatternsPanel,
+    )
+    return BehavioralPatternsPanel(rows=(
+        BehavioralPatternRow(
+            signal_kind="why_question",
+            label="Why-questions",
+            count=0,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+        ),
+    ))
+
+
+def _bp_digest(panel):
+    from praxis.reports.panel_inputs import PanelInputs
+    return WeeklyDigest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        panel_inputs=PanelInputs(behavioral_signals=panel),
+    )
+
+
+def test_behavioral_patterns_section_always_present():
+    """The section anchor (`id="behavioral-patterns"`) always renders so
+    the document shape is stable across populated + empty states."""
+    out = render(_bp_digest(_bp_panel_with_rows()))
+    assert 'id="behavioral-patterns"' in out
+    out_empty = render(_bp_digest(_bp_empty_panel()))
+    assert 'id="behavioral-patterns"' in out_empty
+
+
+def test_behavioral_patterns_renders_label_and_count():
+    """Each populated row carries its display label and total count
+    so the reader sees the raw signal volume."""
+    out = render(_bp_digest(_bp_panel_with_rows()))
+    assert "Why-questions" in out
+    assert "4 times" in out
+    assert "Pure delegation" in out
+    assert "2 times" in out
+
+
+def test_behavioral_patterns_renders_excerpts():
+    """Each populated row renders up to two raw user-turn excerpts
+    so the reader can ground the count in transcript text."""
+    out = render(_bp_digest(_bp_panel_with_rows()))
+    assert "why does this approach work for caching?" in out
+    assert "write me a function" in out
+
+
+def test_behavioral_patterns_renders_citation_per_row():
+    """Both renderers cite the primary source per signal inline in
+    small footnote text (US-038 acceptance)."""
+    out = render(_bp_digest(_bp_panel_with_rows()))
+    # The citation appears at least twice (once per populated row).
+    assert out.count("Shen &amp; Tamkin 2026 (arXiv 2601.20245)") >= 2
+
+
+def test_behavioral_patterns_renders_empty_state_when_zero_signals():
+    """When every row has count==0 the section surfaces the verbatim
+    empty-state message instead of an empty list (US-038 acceptance)."""
+    out = render(_bp_digest(_bp_empty_panel()))
+    assert "No behavioral patterns captured this week." in out
+
+
+def test_behavioral_patterns_renders_empty_state_when_no_panel():
+    """Defaults gracefully: a digest with no panel_inputs still emits
+    the empty-state message rather than a broken or missing section."""
+    out = render(_digest())  # no panel_inputs
+    assert 'id="behavioral-patterns"' in out
+    assert "No behavioral patterns captured this week." in out
+
+
+def test_behavioral_patterns_zero_count_rows_dropped_when_others_fire():
+    """Rows with count==0 do not pollute the table when other signals
+    have fired; the reader sees only triggered patterns."""
+    from praxis.reports.panel_inputs import (
+        BehavioralPatternRow,
+        BehavioralPatternsPanel,
+    )
+    panel = BehavioralPatternsPanel(rows=(
+        BehavioralPatternRow(
+            signal_kind="why_question",
+            label="Why-questions",
+            count=3,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+            excerpts=("why is this slow?",),
+        ),
+        BehavioralPatternRow(
+            signal_kind="pure_delegation",
+            label="Pure delegation",
+            count=0,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+        ),
+    ))
+    out = render(_bp_digest(panel))
+    assert "Why-questions" in out
+    assert "Pure delegation" not in out
+
+
+def test_behavioral_patterns_section_after_six_dim_panel():
+    """Behavioral patterns sits after the six-dim cards in the data
+    block so the reader sees the structural /10 read first and then
+    the raw-pattern evidence that informs it."""
+    out = render(_bp_digest(_bp_panel_with_rows()))
+    six_dim_pos = out.find('id="the-six-dimensions"')
+    bp_pos = out.find('id="behavioral-patterns"')
+    assert 0 <= six_dim_pos < bp_pos
+
+
+def test_behavioral_patterns_self_containment_holds():
+    """The US-061 self-containment contract must hold for the new
+    panel; rendering a populated panel must not introduce external
+    links, scripts, or images."""
+    out = render(_bp_digest(_bp_panel_with_rows()))
+    lower = out.lower()
+    assert "<link" not in lower
+    assert "<script" not in lower
+    assert "<img" not in lower
+    assert "http://" not in out
+    assert "https://" not in out
+    assert "@import" not in out
+    assert "url(" not in out
+
+
+def test_behavioral_patterns_html_escapes_excerpts():
+    """Excerpts are user-provided strings so the renderer must HTML-escape
+    them; a stray `<script>` in a transcript must not become a real
+    `<script>` tag in the rendered digest."""
+    from praxis.reports.panel_inputs import (
+        BehavioralPatternRow,
+        BehavioralPatternsPanel,
+    )
+    panel = BehavioralPatternsPanel(rows=(
+        BehavioralPatternRow(
+            signal_kind="why_question",
+            label="Why-questions",
+            count=1,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+            excerpts=("<script>alert('xss')</script>",),
+        ),
+    ))
+    out = render(_bp_digest(panel))
+    assert "<script>alert" not in out
+    assert "&lt;script&gt;alert" in out
+
+
+# ---------------------- US-039: aug/auto balance + cadence panels (HTML) ----
+
+
+def _aug_auto_html_panel():
+    from praxis.reports.panel_inputs import AugAutoBalancePanel
+    return AugAutoBalancePanel(
+        augmentation_count=3,
+        automation_count=2,
+        mixed_count=1,
+        unclassified_count=0,
+    )
+
+
+def _aug_auto_unavailable_panel():
+    from praxis.reports.panel_inputs import AugAutoBalancePanel
+    return AugAutoBalancePanel(
+        unclassified_count=3,
+        classifier_unavailable=True,
+    )
+
+
+def _cadence_html_panel():
+    from praxis.reports.panel_inputs import CadencePanel
+    return CadencePanel(
+        weekday_streak=5,
+        substantive_session_count=7,
+        high_adopter_position="high",
+    )
+
+
+def _cadence_empty_panel():
+    from praxis.reports.panel_inputs import CadencePanel
+    return CadencePanel(
+        weekday_streak=0,
+        substantive_session_count=0,
+        high_adopter_position=None,
+    )
+
+
+def _us039_digest(*, aug_auto=None, cadence=None):
+    from praxis.reports.panel_inputs import PanelInputs
+    return WeeklyDigest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        panel_inputs=PanelInputs(
+            aug_auto_balance=aug_auto,
+            cadence=cadence,
+        ),
+    )
+
+
+def test_aug_auto_balance_section_always_present():
+    """The section anchor (`id="aug-auto-balance"`) always renders."""
+    out_empty = render(_digest())  # no panel_inputs
+    assert 'id="aug-auto-balance"' in out_empty
+    out_full = render(_us039_digest(aug_auto=_aug_auto_html_panel()))
+    assert 'id="aug-auto-balance"' in out_full
+
+
+def test_aug_auto_balance_renders_classifier_unavailable_message():
+    """When every session in the week is unclassified the panel surfaces
+    the verbatim US-039 unavailable copy."""
+    out = render(_us039_digest(aug_auto=_aug_auto_unavailable_panel()))
+    assert "Classifier unavailable for this week." in out
+
+
+def test_aug_auto_balance_no_panel_renders_unavailable():
+    """A digest with no panel_inputs at all falls back to the
+    unavailable copy rather than 0/0/0."""
+    out = render(_digest())
+    assert "Classifier unavailable for this week." in out
+    # And does NOT show misleading 0% counts inside the panel itself
+    # (CSS uses % values for opacity/lightness, so check only the
+    # aug-auto-balance section's body for misleading zero shares).
+    start = out.find('id="aug-auto-balance"')
+    end = out.find("</section>", start)
+    panel_html = out[start:end]
+    assert "Augmentation</span>" not in panel_html  # no populated row when unavailable
+
+
+def test_aug_auto_balance_renders_shares_when_populated():
+    """When the classifier has data the panel emits the three shares."""
+    out = render(_us039_digest(aug_auto=_aug_auto_html_panel()))
+    # 3/6 = 50% aug; 2/6 = 33% auto; 1/6 = 17% mixed
+    assert "Augmentation" in out
+    assert "Automation" in out
+    assert "Mixed" in out
+    assert "50%" in out
+    assert "33%" in out
+    assert "17%" in out
+
+
+def test_aug_auto_balance_renders_anthropic_anchor():
+    """The Anthropic Economic Index anchor renders inline (US-039)."""
+    out = render(_us039_digest(aug_auto=_aug_auto_html_panel()))
+    assert "Anthropic Economic Index" in out
+    assert "52% augmentation" in out
+    assert "45% automation" in out
+
+
+def test_cadence_section_always_present():
+    """The section anchor (`id="cadence"`) always renders."""
+    out_empty = render(_digest())
+    assert 'id="cadence"' in out_empty
+    out_full = render(_us039_digest(cadence=_cadence_html_panel()))
+    assert 'id="cadence"' in out_full
+
+
+def test_cadence_renders_no_activity_message_when_empty():
+    """When zero substantive sessions fell in the window, the section
+    surfaces the verbatim US-039 message."""
+    out = render(_us039_digest(cadence=_cadence_empty_panel()))
+    assert "No substantive sessions in the last 21 days." in out
+
+
+def test_cadence_omits_high_adopter_label_when_empty():
+    """The renderer must not surface a stand-in label when there is no
+    activity to position on the spectrum."""
+    out = render(_us039_digest(cadence=_cadence_empty_panel()))
+    assert "Low-adopter" not in out
+    assert "Moderate-adopter" not in out
+    assert "High-adopter" not in out
+
+
+def test_cadence_renders_streak_when_populated():
+    """Streak renders as 'N of 21 days'."""
+    out = render(_us039_digest(cadence=_cadence_html_panel()))
+    assert "5 of 21 days" in out
+
+
+def test_cadence_renders_spectrum_label_when_populated():
+    """The high-adopter position renders as a human-facing label."""
+    out = render(_us039_digest(cadence=_cadence_html_panel()))
+    assert "High-adopter" in out
+
+
+def test_cadence_renders_arxiv_citation():
+    """The arXiv 2509.19708 anchor is cited inline (US-039 acceptance)."""
+    out = render(_us039_digest(cadence=_cadence_html_panel()))
+    assert "arXiv 2509.19708" in out
+
+
+def test_us039_panels_self_containment_holds():
+    """The US-061 self-containment contract must hold for the new
+    panels; rendering must not introduce external links, scripts, or
+    images regardless of which state each panel renders in."""
+    out = render(
+        _us039_digest(
+            aug_auto=_aug_auto_html_panel(),
+            cadence=_cadence_html_panel(),
+        )
+    )
+    lower = out.lower()
+    assert "<link" not in lower
+    assert "<script" not in lower
+    assert "<img" not in lower
+    assert "http://" not in out
+    assert "https://" not in out
+    assert "@import" not in out
+    assert "url(" not in out
+
+
+def test_us039_panels_render_in_data_block_after_behavioral_patterns():
+    """The new panels sit inside the data block after behavioral
+    patterns so the editorial cadence keeps 'what kind of user' signals
+    grouped together."""
+    out = render(
+        _us039_digest(
+            aug_auto=_aug_auto_html_panel(),
+            cadence=_cadence_html_panel(),
+        )
+    )
+    bp_pos = out.find('id="behavioral-patterns"')
+    bal_pos = out.find('id="aug-auto-balance"')
+    cad_pos = out.find('id="cadence"')
+    assert 0 <= bp_pos < bal_pos < cad_pos
+
+
+# ---------------------- US-040: repeat-task radar + verification ------------
+
+
+def _repeat_task_html_panel():
+    from praxis.reports.panel_inputs import (
+        RepeatTaskRadarPanel,
+        RepeatTaskRow,
+    )
+    return RepeatTaskRadarPanel(
+        rows=(
+            RepeatTaskRow(
+                canonical_first_sentence="fix the failing auth test",
+                occurrences=3,
+                estimated_minutes_per_occurrence=12.0,
+            ),
+            RepeatTaskRow(
+                canonical_first_sentence="regenerate the changelog entry",
+                occurrences=4,
+                estimated_minutes_per_occurrence=8.5,
+            ),
+        )
+    )
+
+
+def _repeat_task_empty_panel():
+    from praxis.reports.panel_inputs import RepeatTaskRadarPanel
+    return RepeatTaskRadarPanel()
+
+
+def _verification_html_panel():
+    from praxis.reports.panel_inputs import VerificationCalibrationPanel
+    return VerificationCalibrationPanel(
+        source_check_count=2,
+        test_run_count=3,
+        spot_check_count=1,
+        blanket_accept_count=4,
+    )
+
+
+def _verification_empty_panel():
+    from praxis.reports.panel_inputs import VerificationCalibrationPanel
+    return VerificationCalibrationPanel()
+
+
+def _us040_digest(*, repeat_task=None, verification=None):
+    from praxis.reports.panel_inputs import PanelInputs
+    return WeeklyDigest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        panel_inputs=PanelInputs(
+            repeat_task_radar=repeat_task,
+            verification_calibration=verification,
+        ),
+    )
+
+
+def test_repeat_task_radar_section_always_present():
+    """The section anchor (`id="repeat-task-radar"`) always renders."""
+    out_empty = render(_digest())
+    assert 'id="repeat-task-radar"' in out_empty
+    out_full = render(_us040_digest(repeat_task=_repeat_task_html_panel()))
+    assert 'id="repeat-task-radar"' in out_full
+
+
+def test_repeat_task_radar_renders_empty_state_message():
+    """When detect_repeats returned nothing the panel emits the verbatim
+    US-040 empty-state copy instead of an empty list."""
+    out = render(_us040_digest(repeat_task=_repeat_task_empty_panel()))
+    assert "No repeat tasks detected this week." in out
+
+
+def test_repeat_task_radar_no_panel_renders_empty_state():
+    """A digest with no panel_inputs falls back to the verbatim empty
+    state rather than emitting an empty rows section."""
+    out = render(_digest())
+    assert "No repeat tasks detected this week." in out
+
+
+def test_repeat_task_radar_renders_each_row():
+    """Each RepeatTask renders the canonical sentence, occurrence
+    count, per-occurrence minutes, and the skill tag."""
+    out = render(_us040_digest(repeat_task=_repeat_task_html_panel()))
+    assert "fix the failing auth test" in out
+    assert "regenerate the changelog entry" in out
+    assert "3 times" in out
+    assert "4 times" in out
+    assert "12 min" in out
+    assert "8.5 min" in out
+    assert "Could become a skill" in out
+
+
+def test_repeat_task_radar_renders_citation():
+    """The OpenAI + Anthropic Skills citation renders inline."""
+    out = render(_us040_digest(repeat_task=_repeat_task_html_panel()))
+    assert "OpenAI" in out
+    assert "Anthropic Skills" in out
+
+
+def test_repeat_task_radar_html_escapes_canonical_sentence():
+    """Canonical sentences come from user transcripts so they must be
+    HTML-escaped; a stray script tag must not become a real tag."""
+    from praxis.reports.panel_inputs import (
+        RepeatTaskRadarPanel,
+        RepeatTaskRow,
+    )
+    panel = RepeatTaskRadarPanel(
+        rows=(
+            RepeatTaskRow(
+                canonical_first_sentence="<script>alert('xss')</script>",
+                occurrences=3,
+                estimated_minutes_per_occurrence=5.0,
+            ),
+        )
+    )
+    out = render(_us040_digest(repeat_task=panel))
+    assert "<script>alert" not in out
+    assert "&lt;script&gt;alert" in out
+
+
+def test_verification_calibration_section_always_present():
+    """The section anchor (`id="verification-calibration"`) always renders."""
+    out_empty = render(_digest())
+    assert 'id="verification-calibration"' in out_empty
+    out_full = render(_us040_digest(verification=_verification_html_panel()))
+    assert 'id="verification-calibration"' in out_full
+
+
+def test_verification_calibration_renders_no_sessions_message():
+    """When the week has no sessions to categorize the panel emits
+    the explicit empty-state copy."""
+    out = render(_us040_digest(verification=_verification_empty_panel()))
+    assert "No sessions to calibrate verification against this week." in out
+
+
+def test_verification_calibration_renders_all_buckets():
+    """All four buckets render in display order with their counts."""
+    out = render(_us040_digest(verification=_verification_html_panel()))
+    assert "Source-check" in out
+    assert "Test-run" in out
+    assert "Spot-check" in out
+    assert "Blanket-accept" in out
+    # And the counts (2/3/1/4) render somewhere in the section body.
+    start = out.find('id="verification-calibration"')
+    end = out.find("</section>", start)
+    section_html = out[start:end]
+    assert "2 sessions" in section_html
+    assert "3 sessions" in section_html
+    assert "1 session" in section_html
+    assert "4 sessions" in section_html
+
+
+def test_verification_calibration_renders_citation():
+    """The Sonar / Stack Overflow / automation-bias citation renders
+    inline as a small footnote (US-040 AC)."""
+    out = render(_us040_digest(verification=_verification_html_panel()))
+    assert "Sonar" in out
+    assert "Stack Overflow" in out
+    assert "automation-bias" in out
+
+
+def test_us040_panels_self_containment_holds():
+    """The US-061 self-containment contract must hold; rendering must
+    not introduce external links, scripts, or images."""
+    out = render(
+        _us040_digest(
+            repeat_task=_repeat_task_html_panel(),
+            verification=_verification_html_panel(),
+        )
+    )
+    lower = out.lower()
+    assert "<link" not in lower
+    assert "<script" not in lower
+    assert "<img" not in lower
+    assert "http://" not in out
+    assert "https://" not in out
+    assert "@import" not in out
+    assert "url(" not in out
+
+
+def test_us040_panels_render_after_cadence():
+    """The repeat-task radar and verification-calibration panels sit
+    inside the data block after the cadence panel so the editorial
+    cadence stays uniform."""
+    from praxis.reports.panel_inputs import PanelInputs
+    digest = WeeklyDigest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        panel_inputs=PanelInputs(
+            aug_auto_balance=_aug_auto_html_panel(),
+            cadence=_cadence_html_panel(),
+            repeat_task_radar=_repeat_task_html_panel(),
+            verification_calibration=_verification_html_panel(),
+        ),
+    )
+    out = render(digest)
+    cad_pos = out.find('id="cadence"')
+    rt_pos = out.find('id="repeat-task-radar"')
+    vc_pos = out.find('id="verification-calibration"')
+    assert 0 <= cad_pos < rt_pos < vc_pos
+
+
+# ---------------------- US-041: spec adoption + context engineering + gaps --
+
+
+def _specification_html_panel():
+    from praxis.reports.panel_inputs import SpecificationAdoptionPanel
+    return SpecificationAdoptionPanel(
+        sessions_with_spec=3,
+        total_sessions=5,
+    )
+
+
+def _context_engineering_html_panel():
+    from praxis.reports.panel_inputs import (
+        ContextEngineeringDepthPanel,
+        ContextEngineeringRow,
+    )
+    return ContextEngineeringDepthPanel(
+        rows=(
+            ContextEngineeringRow(
+                kind="claude_md",
+                label="CLAUDE.md",
+                sessions_with_artifact=2,
+            ),
+            ContextEngineeringRow(
+                kind="agents_md",
+                label="AGENTS.md",
+                sessions_with_artifact=1,
+            ),
+            ContextEngineeringRow(
+                kind="copilot_instructions",
+                label="copilot-instructions.md",
+                sessions_with_artifact=0,
+            ),
+            ContextEngineeringRow(
+                kind="projects",
+                label="Projects / Custom GPT",
+                sessions_with_artifact=0,
+            ),
+            ContextEngineeringRow(
+                kind="skills",
+                label="Skills / subagents / hooks",
+                sessions_with_artifact=3,
+            ),
+        ),
+        total_sessions=6,
+    )
+
+
+def _knowledge_gap_html_panel():
+    from praxis.reports.panel_inputs import (
+        KnowledgeGapDistributionPanel,
+        KnowledgeGapRow,
+    )
+    return KnowledgeGapDistributionPanel(
+        rows=(
+            KnowledgeGapRow(kind="missing_context", label="Missing context", count=4),
+            KnowledgeGapRow(kind="missing_specs", label="Missing specifications", count=7),
+            KnowledgeGapRow(kind="multiple_context", label="Multiple contexts", count=1),
+            KnowledgeGapRow(kind="unclear_instructions", label="Unclear instructions", count=2),
+        )
+    )
+
+
+def _us041_digest(
+    *,
+    specification=None,
+    context_engineering=None,
+    knowledge_gap=None,
+):
+    from praxis.reports.panel_inputs import PanelInputs
+    return WeeklyDigest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        panel_inputs=PanelInputs(
+            specification_adoption=specification,
+            context_engineering=context_engineering,
+            knowledge_gap_distribution=knowledge_gap,
+        ),
+    )
+
+
+def test_specification_adoption_section_always_present():
+    """The section anchor (id='specification-adoption') always renders."""
+    out_empty = render(_digest())
+    assert 'id="specification-adoption"' in out_empty
+    out_full = render(_us041_digest(specification=_specification_html_panel()))
+    assert 'id="specification-adoption"' in out_full
+
+
+def test_specification_adoption_renders_no_sessions_placeholder():
+    """When no sessions exist the body falls through to the verbatim
+    US-041 placeholder."""
+    from praxis.reports.panel_inputs import SpecificationAdoptionPanel
+    out = render(_us041_digest(specification=SpecificationAdoptionPanel()))
+    assert "No sessions to measure specification adoption this week." in out
+
+
+def test_specification_adoption_renders_share():
+    """The share renders as a percentage; the denominator renders too
+    so the reader sees the rate AND the count."""
+    out = render(_us041_digest(specification=_specification_html_panel()))
+    # 3/5 = 60%
+    start = out.find('id="specification-adoption"')
+    end = out.find("</section>", start)
+    section = out[start:end]
+    assert "60%" in section
+    assert "3 of 5" in section
+
+
+def test_specification_adoption_renders_citation():
+    """The Woodward + SpecKit + Sean Grove citation renders inline."""
+    out = render(_us041_digest(specification=_specification_html_panel()))
+    assert "Woodward" in out
+    assert "SpecKit" in out
+    assert "Sean Grove" in out
+
+
+def test_context_engineering_section_always_present():
+    """The section anchor always renders."""
+    out_empty = render(_digest())
+    assert 'id="context-engineering-depth"' in out_empty
+    out_full = render(
+        _us041_digest(context_engineering=_context_engineering_html_panel())
+    )
+    assert 'id="context-engineering-depth"' in out_full
+
+
+def test_context_engineering_renders_no_artifacts_placeholder():
+    """An empty panel surfaces the verbatim no-artifacts placeholder."""
+    from praxis.reports.panel_inputs import ContextEngineeringDepthPanel
+    out = render(_us041_digest(context_engineering=ContextEngineeringDepthPanel()))
+    assert "No scaffolding artifacts referenced this week." in out
+
+
+def test_context_engineering_renders_kinds_with_positive_count():
+    """Kinds with positive counts render; zero-count kinds are
+    skipped so the reader's eye is drawn to what fired."""
+    out = render(
+        _us041_digest(context_engineering=_context_engineering_html_panel())
+    )
+    start = out.find('id="context-engineering-depth"')
+    end = out.find("</section>", start)
+    section = out[start:end]
+    assert "CLAUDE.md" in section
+    assert "AGENTS.md" in section
+    assert "Skills / subagents / hooks" in section
+    assert "2 sessions" in section
+    assert "1 session" in section
+    assert "3 sessions" in section
+    # Kinds with zero count are not rendered.
+    assert "Projects / Custom GPT" not in section
+
+
+def test_context_engineering_renders_citation():
+    """The DORA 2025 + Anthropic Skills citation renders inline."""
+    out = render(
+        _us041_digest(context_engineering=_context_engineering_html_panel())
+    )
+    assert "DORA 2025" in out
+
+
+def test_knowledge_gap_section_always_present():
+    """The section anchor always renders."""
+    out_empty = render(_digest())
+    assert 'id="knowledge-gap-distribution"' in out_empty
+    out_full = render(
+        _us041_digest(knowledge_gap=_knowledge_gap_html_panel())
+    )
+    assert 'id="knowledge-gap-distribution"' in out_full
+
+
+def test_knowledge_gap_renders_empty_state_when_all_zero():
+    """US-041 AC: render verbatim 'No knowledge gaps detected this
+    week.' ONLY when every category is zero."""
+    from praxis.reports.panel_inputs import (
+        KnowledgeGapDistributionPanel,
+        KnowledgeGapRow,
+    )
+    panel = KnowledgeGapDistributionPanel(
+        rows=tuple(
+            KnowledgeGapRow(kind=k, label=k, count=0)
+            for k in ("missing_context", "missing_specs", "multiple_context", "unclear_instructions")
+        )
+    )
+    out = render(_us041_digest(knowledge_gap=panel))
+    assert "No knowledge gaps detected this week." in out
+
+
+def test_knowledge_gap_renders_all_four_categories_when_populated():
+    """US-041 AC: 'a session with zero detected gaps still contributes
+    a zero to each category (no silent drops)'. When at least one
+    category is positive, all four render (including explicit zeros)."""
+    from praxis.reports.panel_inputs import (
+        KnowledgeGapDistributionPanel,
+        KnowledgeGapRow,
+    )
+    panel = KnowledgeGapDistributionPanel(
+        rows=(
+            KnowledgeGapRow(kind="missing_context", label="Missing context", count=0),
+            KnowledgeGapRow(kind="missing_specs", label="Missing specifications", count=4),
+            KnowledgeGapRow(kind="multiple_context", label="Multiple contexts", count=0),
+            KnowledgeGapRow(kind="unclear_instructions", label="Unclear instructions", count=1),
+        )
+    )
+    out = render(_us041_digest(knowledge_gap=panel))
+    start = out.find('id="knowledge-gap-distribution"')
+    end = out.find("</section>", start)
+    section = out[start:end]
+    assert "Missing context" in section
+    assert "Missing specifications" in section
+    assert "Multiple contexts" in section
+    assert "Unclear instructions" in section
+    # Explicit zeros render alongside positive counts.
+    assert "0 turns" in section
+    assert "4 turns" in section
+
+
+def test_knowledge_gap_renders_citation():
+    """The arXiv 2501.11709 citation renders inline."""
+    out = render(_us041_digest(knowledge_gap=_knowledge_gap_html_panel()))
+    assert "2501.11709" in out
+
+
+def test_us041_panels_self_containment_holds():
+    """The US-061 self-containment contract must hold; rendering the
+    new panels must not introduce external links, scripts, or images."""
+    out = render(
+        _us041_digest(
+            specification=_specification_html_panel(),
+            context_engineering=_context_engineering_html_panel(),
+            knowledge_gap=_knowledge_gap_html_panel(),
+        )
+    )
+    lower = out.lower()
+    assert "<link" not in lower
+    assert "<script" not in lower
+    assert "<img" not in lower
+    assert "http://" not in out
+    assert "https://" not in out
+    assert "@import" not in out
+    assert "url(" not in out
+
+
+def test_us041_panels_render_after_verification_calibration():
+    """The three US-041 panels sit inside the data block AFTER
+    verification calibration so the document reads habit -> verify ->
+    craft."""
+    from praxis.reports.panel_inputs import PanelInputs
+    digest = WeeklyDigest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        panel_inputs=PanelInputs(
+            verification_calibration=_verification_html_panel(),
+            specification_adoption=_specification_html_panel(),
+            context_engineering=_context_engineering_html_panel(),
+            knowledge_gap_distribution=_knowledge_gap_html_panel(),
+        ),
+    )
+    out = render(digest)
+    vc_pos = out.find('id="verification-calibration"')
+    sa_pos = out.find('id="specification-adoption"')
+    ce_pos = out.find('id="context-engineering-depth"')
+    kg_pos = out.find('id="knowledge-gap-distribution"')
+    assert 0 <= vc_pos < sa_pos < ce_pos < kg_pos
+
+
+# =========================================================================
+# US-042: tool/agent ladder + refined cost-effectiveness panels (HTML)
+# =========================================================================
+
+
+def _ladder_html_panel():
+    from praxis.reports.panel_inputs import (
+        LadderRungRow,
+        ToolAgentLadderPanel,
+    )
+    return ToolAgentLadderPanel(
+        rows=(
+            LadderRungRow(kind="prompt_only", label="Prompt-only", session_count=2),
+            LadderRungRow(kind="tools_on", label="Tools-on", session_count=3),
+            LadderRungRow(kind="skills", label="Skills", session_count=1),
+            LadderRungRow(kind="hooks", label="Hooks", session_count=0),
+            LadderRungRow(kind="subagents", label="Subagents", session_count=0),
+        ),
+        max_rung_kind="skills",
+        max_rung_label="Skills",
+    )
+
+
+def _cost_effectiveness_html_panel():
+    from praxis.reports.panel_inputs import RefinedCostEffectivenessPanel
+    return RefinedCostEffectivenessPanel(
+        higher_tier_display="Claude Opus 4.7",
+        lower_tier_display="Claude Haiku 4.5",
+        spent_on_higher_tier_usd=12.34,
+        overspend_usd=10.50,
+        qualifying_session_count=2,
+        has_cost_data=True,
+    )
+
+
+def _us042_digest(
+    *,
+    ladder=None,
+    cost_effectiveness=None,
+):
+    from praxis.reports.panel_inputs import PanelInputs
+    return WeeklyDigest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        panel_inputs=PanelInputs(
+            tool_agent_ladder=ladder,
+            refined_cost_effectiveness=cost_effectiveness,
+        ),
+    )
+
+
+def test_tool_agent_ladder_section_always_present():
+    """The section anchor renders regardless of data state."""
+    out_empty = render(_digest())
+    assert 'id="tool-agent-ladder"' in out_empty
+    out_full = render(_us042_digest(ladder=_ladder_html_panel()))
+    assert 'id="tool-agent-ladder"' in out_full
+
+
+def test_tool_agent_ladder_renders_empty_state_placeholder():
+    """Empty panel surfaces the verbatim no-activity placeholder."""
+    out = render(_digest())
+    assert "No tool/agent usage observed this week." in out
+
+
+def test_tool_agent_ladder_renders_max_rung_headline():
+    """A populated panel surfaces 'Max rung this week: <Label>'."""
+    out = render(_us042_digest(ladder=_ladder_html_panel()))
+    start = out.find('id="tool-agent-ladder"')
+    end = out.find("</section>", start)
+    section = out[start:end]
+    assert "Max rung this week" in section
+    assert "Skills" in section
+
+
+def test_tool_agent_ladder_renders_per_rung_rows():
+    """All five rungs render with their counts (including zeros)."""
+    out = render(_us042_digest(ladder=_ladder_html_panel()))
+    start = out.find('id="tool-agent-ladder"')
+    end = out.find("</section>", start)
+    section = out[start:end]
+    assert "Prompt-only" in section
+    assert "Tools-on" in section
+    assert "Hooks" in section
+    assert "Subagents" in section
+    assert "2 sessions" in section
+    assert "3 sessions" in section
+    assert "1 session" in section
+    assert "0 sessions" in section
+
+
+def test_tool_agent_ladder_renders_citation():
+    """The Anthropic Skills/hooks/subagents + OpenAI harness citation
+    renders inline."""
+    out = render(_us042_digest(ladder=_ladder_html_panel()))
+    start = out.find('id="tool-agent-ladder"')
+    end = out.find("</section>", start)
+    section = out[start:end]
+    assert "Anthropic" in section
+    assert "OpenAI" in section
+
+
+def test_cost_effectiveness_section_always_present():
+    """The section anchor renders regardless of data state."""
+    out_empty = render(_digest())
+    assert 'id="refined-cost-effectiveness"' in out_empty
+    out_full = render(
+        _us042_digest(cost_effectiveness=_cost_effectiveness_html_panel())
+    )
+    assert 'id="refined-cost-effectiveness"' in out_full
+
+
+def test_cost_effectiveness_renders_no_cost_data_placeholder():
+    """US-042 AC: empty panel renders 'No cost data this week.' rather
+    than a misleading $0 overspend (which would falsely imply
+    optimality)."""
+    out = render(_digest())
+    start = out.find('id="refined-cost-effectiveness"')
+    end = out.find("</section>", start)
+    section = out[start:end]
+    assert "No cost data this week." in section
+    # The $0 overspend literal must NOT appear in the empty-state path.
+    assert "$0.00 overspend" not in section
+
+
+def test_cost_effectiveness_renders_canonical_sentence():
+    """US-042 AC: when overspend is positive the panel renders the
+    canonical sentence 'You spent $X on <higher> for tasks <lower>
+    could have done = $Y overspend'."""
+    out = render(
+        _us042_digest(cost_effectiveness=_cost_effectiveness_html_panel())
+    )
+    start = out.find('id="refined-cost-effectiveness"')
+    end = out.find("</section>", start)
+    section = out[start:end]
+    assert "$12.34" in section
+    assert "Claude Opus 4.7" in section
+    assert "Claude Haiku 4.5" in section
+    assert "$10.50 overspend" in section
+
+
+def test_cost_effectiveness_renders_clean_signal_when_no_overspend():
+    """When cost data is present but no qualifying overspend, the
+    panel surfaces a positive-signal sentence ('No tier-mismatch
+    overspend detected...') instead of the empty-state copy."""
+    from praxis.reports.panel_inputs import RefinedCostEffectivenessPanel
+    panel = RefinedCostEffectivenessPanel(has_cost_data=True)
+    out = render(_us042_digest(cost_effectiveness=panel))
+    start = out.find('id="refined-cost-effectiveness"')
+    end = out.find("</section>", start)
+    section = out[start:end]
+    assert "No tier-mismatch overspend" in section
+    assert "No cost data this week." not in section
+
+
+def test_us042_panels_self_containment_holds():
+    """US-061: the new panels must not introduce external links,
+    scripts, or images."""
+    out = render(
+        _us042_digest(
+            ladder=_ladder_html_panel(),
+            cost_effectiveness=_cost_effectiveness_html_panel(),
+        )
+    )
+    lower = out.lower()
+    assert "<link" not in lower
+    assert "<script" not in lower
+    assert "<img" not in lower
+    assert "http://" not in out
+    assert "https://" not in out
+    assert "@import" not in out
+    assert "url(" not in out
+
+
+def test_us042_panels_render_after_knowledge_gap():
+    """The two US-042 panels sit AFTER knowledge-gap distribution so
+    the document reads habit -> verify -> craft -> scaffolding ->
+    cost."""
+    from praxis.reports.panel_inputs import PanelInputs
+    digest = WeeklyDigest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        panel_inputs=PanelInputs(
+            knowledge_gap_distribution=_knowledge_gap_html_panel(),
+            tool_agent_ladder=_ladder_html_panel(),
+            refined_cost_effectiveness=_cost_effectiveness_html_panel(),
+        ),
+    )
+    out = render(digest)
+    kg_pos = out.find('id="knowledge-gap-distribution"')
+    tal_pos = out.find('id="tool-agent-ladder"')
+    rce_pos = out.find('id="refined-cost-effectiveness"')
+    assert 0 <= kg_pos < tal_pos < rce_pos

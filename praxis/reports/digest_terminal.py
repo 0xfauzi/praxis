@@ -24,6 +24,21 @@ from typing import TYPE_CHECKING
 
 from praxis.reports.baseline_panel import format_baseline_value
 from praxis.reports.gating import format_delta
+from praxis.reports.panel_inputs import (
+    VERIFICATION_CALIBRATION_KINDS_IN_PANEL_ORDER,
+    VERIFICATION_CALIBRATION_LABELS,
+    AugAutoBalancePanel,
+    BehavioralPatternsPanel,
+    CadencePanel,
+    ContextEngineeringDepthPanel,
+    KnowledgeGapDistributionPanel,
+    PanelInputs,
+    RefinedCostEffectivenessPanel,
+    RepeatTaskRadarPanel,
+    SpecificationAdoptionPanel,
+    ToolAgentLadderPanel,
+    VerificationCalibrationPanel,
+)
 from praxis.scoring.rubric import by_key
 
 if TYPE_CHECKING:
@@ -196,6 +211,9 @@ class WeeklyDigest:
     # reads this. None means no follow-up exists for the week so the
     # masthead omits the block rather than rendering placeholder copy.
     commitment_rollup: "CommitmentRollup | None" = None
+    # v0.3 expansion panels (US-038..042). Optional; None preserves
+    # the pre-expansion document shape so older fixtures still render.
+    panel_inputs: PanelInputs | None = None
 
 
 # -------------------------------------------------------------------- helpers
@@ -518,6 +536,54 @@ _DIMENSIONS_PLACEHOLDER = (
 # case at section 7); keeping the placeholder as a single token keeps
 # the column alignment in the "vs baseline X" phrasing.
 _BASELINE_UNAVAILABLE = "--"
+
+# US-038: empty-state copy for the behavioral-patterns panel. The
+# acceptance criterion calls for this verbatim string so the renderer
+# never emits an empty table when zero signals fired across the week.
+_BEHAVIORAL_PATTERNS_EMPTY = "No behavioral patterns captured this week."
+
+# US-039: empty-state copy. The "Classifier unavailable" path fires
+# when the aug_auto classifier has no labelled session for the week
+# (typically because the user has no API key); the "no substantive
+# sessions" path fires when cadence's window saw no qualifying activity.
+# Both literals are asserted verbatim by tests so a future copy change
+# is one audit point per renderer.
+_AUG_AUTO_BALANCE_CLASSIFIER_UNAVAILABLE = "Classifier unavailable for this week."
+_AUG_AUTO_BALANCE_NO_SESSIONS = "No sessions to classify this week."
+_CADENCE_NO_ACTIVITY = "No substantive sessions in the last 21 days."
+
+# US-040: empty-state copy for the repeat-task radar (assertable verbatim
+# by tests so an empty detector list never renders as a misleading
+# blank table) and the verification-calibration panel (used when zero
+# sessions categorize into any bucket this week).
+_REPEAT_TASK_EMPTY = "No repeat tasks detected this week."
+_VERIFICATION_CALIBRATION_NO_SESSIONS = (
+    "No sessions to calibrate verification against this week."
+)
+
+# US-041: empty-state copy for the specification-adoption panel (when
+# the week had no sessions to measure), the context-engineering-depth
+# panel (when no scaffolding artifacts were referenced anywhere), and
+# the knowledge-gap distribution panel (when every category is zero).
+# All three literals are asserted verbatim by tests; copy changes are
+# one audit point per renderer.
+_SPECIFICATION_ADOPTION_NO_SESSIONS = (
+    "No sessions to measure specification adoption this week."
+)
+_CONTEXT_ENGINEERING_NO_ARTIFACTS = (
+    "No scaffolding artifacts referenced this week."
+)
+_KNOWLEDGE_GAP_EMPTY = "No knowledge gaps detected this week."
+
+# US-042: empty-state copy for the tool/agent ladder (when the week has
+# no sessions to place on the ladder) and for the refined cost-
+# effectiveness panel (when the cost ledger has no priced entries this
+# week; per AC the panel must NOT render "$0 overspend" which would
+# falsely imply optimality).
+_TOOL_AGENT_LADDER_NO_ACTIVITY = (
+    "No tool/agent usage observed this week."
+)
+_COST_EFFECTIVENESS_NO_COST_DATA = "No cost data this week."
 
 
 # Spec section 2 (coaching-reposition): the masthead's commitment block
@@ -854,6 +920,386 @@ def _format_dim_row(view: DimRowView, dim_title: str) -> str:
     return f"{title_col}  {score_col}  {baseline_col}  {delta_col}"
 
 
+def _behavioral_patterns(
+    panel: BehavioralPatternsPanel | None,
+) -> list[str]:
+    """Render the behavioral-patterns panel (US-038).
+
+    Emits one row per signal kind with the label, count, up to two
+    raw user-turn excerpts (each already clipped to <=120 chars by the
+    adapter), and a small ink-faded citation footnote. When no signals
+    fired across the week the section degrades to the empty-state
+    placeholder rather than an empty table.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Behavioral patterns"))
+    if panel is None or not panel.has_signals:
+        lines.extend(_placeholder_lines(_BEHAVIORAL_PATTERNS_EMPTY))
+        return lines
+    first = True
+    for row in panel.rows:
+        if row.count <= 0:
+            continue
+        if not first:
+            # Blank separator between rows so the eye groups each
+            # signal's label + excerpts + citation as one block.
+            lines.append("")
+        first = False
+        plural = "time" if row.count == 1 else "times"
+        lines.append(_body_line(f"{row.label}: {row.count} {plural}"))
+        for ex in row.excerpts:
+            for wrapped in _wrap(f"\"{ex}\"", width=_BODY_WIDTH - 2):
+                lines.append(_body_line("  " + wrapped, ansi=ITALIC))
+        for wrapped in _wrap(
+            f"Source: {row.citation}", width=_BODY_WIDTH - 2
+        ):
+            lines.append(_body_line("  " + wrapped, ansi=DIM))
+    return lines
+
+
+def _aug_auto_balance(panel: AugAutoBalancePanel | None) -> list[str]:
+    """Render the augmentation/automation balance panel (US-039).
+
+    Three states:
+      1. ``panel is None`` or ``classifier_unavailable``: emit the
+         "Classifier unavailable" placeholder. This is the no-API-key
+         path; rendering 0/0/0 percentages would be misleading.
+      2. No sessions at all: emit a generic empty-state.
+      3. At least one classified session: emit the three shares plus
+         the Anthropic Economic Index industry anchor as a footnote.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Augmentation/automation"))
+    if panel is None or panel.classifier_unavailable:
+        lines.extend(_placeholder_lines(_AUG_AUTO_BALANCE_CLASSIFIER_UNAVAILABLE))
+        return lines
+    if panel.classified_total == 0:
+        lines.extend(_placeholder_lines(_AUG_AUTO_BALANCE_NO_SESSIONS))
+        return lines
+    aug_pct = int(round(panel.augmentation_share * 100))
+    auto_pct = int(round(panel.automation_share * 100))
+    mixed_pct = int(round(panel.mixed_share * 100))
+    lines.append(_body_line(
+        f"Augmentation: {aug_pct}%  Automation: {auto_pct}%  Mixed: {mixed_pct}%"
+    ))
+    industry = (
+        f"Industry anchor: {int(round(panel.industry_augmentation_share * 100))}% "
+        f"augmentation / {int(round(panel.industry_automation_share * 100))}% "
+        f"automation"
+    )
+    for wrapped in _wrap(industry, width=_BODY_WIDTH):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    for wrapped in _wrap(
+        f"Source: {panel.industry_anchor_citation}", width=_BODY_WIDTH
+    ):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    return lines
+
+
+def _cadence(panel: CadencePanel | None) -> list[str]:
+    """Render the cadence panel (US-039).
+
+    Two states:
+      1. ``panel is None`` or zero substantive sessions: emit the
+         "No substantive sessions in the last 21 days." copy and OMIT
+         the high-adopter label (the spectrum position is undefined
+         without any activity to place on it).
+      2. At least one substantive session: emit the streak (e.g.
+         "Weekday streak: 4 of 21 days") plus the high-adopter label
+         when one is on file, plus the arXiv 2509.19708 citation.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Cadence"))
+    if panel is None or not panel.has_activity:
+        lines.extend(_placeholder_lines(_CADENCE_NO_ACTIVITY))
+        return lines
+    plural = "day" if panel.weekday_streak == 1 else "days"
+    lines.append(_body_line(
+        f"Weekday streak: {panel.weekday_streak} of {panel.window_days} {plural}"
+    ))
+    position_label = panel.position_label
+    if position_label:
+        lines.append(_body_line(f"Spectrum: {position_label}"))
+    for wrapped in _wrap(
+        f"Source: {panel.citation}", width=_BODY_WIDTH
+    ):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    return lines
+
+
+def _format_minutes(minutes: float) -> str:
+    """Render a minutes value without trailing-zero decimals.
+
+    The repeat-task radar shows per-occurrence and total reclaimable
+    minutes; the existing dim-row renderer uses "{value:.1f}" but for
+    minutes that produces "30.0 min" which reads as fake precision.
+    Round to int when the fractional part is below 0.5 minutes (30
+    seconds) so "12.6" still renders, "30.0" renders as "30".
+    """
+    if abs(minutes - round(minutes)) < 0.05:
+        return f"{int(round(minutes))}"
+    return f"{minutes:.1f}"
+
+
+def _repeat_task_radar(panel: RepeatTaskRadarPanel | None) -> list[str]:
+    """Render the repeat-task radar panel (US-040).
+
+    Three states:
+      1. ``panel is None`` or no repeats detected: emit the
+         "No repeat tasks detected this week." copy verbatim and skip
+         the row table entirely.
+      2. At least one repeat: emit each row with the canonical first
+         sentence, the occurrence count, the per-occurrence minutes,
+         and the "Could become a skill" tag. The citation footnote
+         (OpenAI ChatGPT usage paper + Anthropic Skills) sits below
+         the rows so the reader sees the primary source inline.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Repeat-task radar"))
+    if panel is None or not panel.has_repeats:
+        lines.extend(_placeholder_lines(_REPEAT_TASK_EMPTY))
+        return lines
+    first = True
+    for row in panel.rows:
+        if not first:
+            lines.append("")
+        first = False
+        # Header: "<canonical sentence>"  (italic so the reader's eye
+        # tracks the quoted text vs the meta row below it).
+        quoted = f"\"{row.canonical_first_sentence}\""
+        for wrapped in _wrap(quoted, width=_BODY_WIDTH):
+            lines.append(_body_line(wrapped, ansi=ITALIC))
+        meta = (
+            f"{row.occurrences} times, "
+            f"~{_format_minutes(row.estimated_minutes_per_occurrence)} min each "
+            f"[{row.skill_tag}]"
+        )
+        for wrapped in _wrap(meta, width=_BODY_WIDTH):
+            lines.append(_body_line(wrapped, ansi=DIM))
+    for wrapped in _wrap(
+        f"Source: {panel.citation}", width=_BODY_WIDTH
+    ):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    return lines
+
+
+def _verification_calibration(
+    panel: VerificationCalibrationPanel | None,
+) -> list[str]:
+    """Render the verification-calibration panel (US-040).
+
+    Two states:
+      1. ``panel is None`` or no sessions categorized: emit the
+         "No sessions to calibrate verification against this week."
+         copy so the section's slot stays stable but the body doesn't
+         mislead readers with four zero counts.
+      2. At least one session: emit one row per bucket in
+         display-order (source-check, test-run, spot-check,
+         blanket-accept) followed by the citation footnote. Zero rows
+         still render so the reader sees the absence of the rigorous
+         buckets when blanket-accept dominates.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Verification calibration"))
+    if panel is None or not panel.has_sessions:
+        lines.extend(_placeholder_lines(_VERIFICATION_CALIBRATION_NO_SESSIONS))
+        return lines
+    for kind in VERIFICATION_CALIBRATION_KINDS_IN_PANEL_ORDER:
+        label = VERIFICATION_CALIBRATION_LABELS.get(kind, kind.title())
+        count = panel.count_for(kind)
+        plural = "session" if count == 1 else "sessions"
+        lines.append(_body_line(f"{label}: {count} {plural}"))
+    for wrapped in _wrap(
+        f"Source: {panel.citation}", width=_BODY_WIDTH
+    ):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    return lines
+
+
+def _specification_adoption(
+    panel: SpecificationAdoptionPanel | None,
+) -> list[str]:
+    """Render the specification-adoption panel (US-041).
+
+    Two states:
+      1. ``panel is None`` or zero sessions observed: emit the
+         "No sessions to measure specification adoption this week."
+         placeholder.
+      2. At least one session: emit the share of sessions that opened
+         with a spec block (X% of N sessions) plus the Woodward /
+         SpecKit / Sean Grove citation as an inline footnote.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Specification adoption"))
+    if panel is None or not panel.has_sessions:
+        lines.extend(_placeholder_lines(_SPECIFICATION_ADOPTION_NO_SESSIONS))
+        return lines
+    pct = int(round(panel.adoption_share * 100))
+    session_word = "session" if panel.total_sessions == 1 else "sessions"
+    lines.append(_body_line(
+        f"Opened with a spec block: {pct}% "
+        f"({panel.sessions_with_spec} of {panel.total_sessions} {session_word})"
+    ))
+    for wrapped in _wrap(
+        f"Source: {panel.citation}", width=_BODY_WIDTH
+    ):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    return lines
+
+
+def _context_engineering(
+    panel: ContextEngineeringDepthPanel | None,
+) -> list[str]:
+    """Render the context-engineering-depth panel (US-041).
+
+    Two states:
+      1. ``panel is None`` or no scaffolding kinds fired: emit the
+         "No scaffolding artifacts referenced this week." placeholder.
+      2. At least one scaffolding kind fired: emit one row per kind
+         that fired (label + count) and skip rows with zero count so
+         the reader's eye is drawn to what they actually engage with.
+         The citation footnote sits beneath the rows.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Context engineering"))
+    if panel is None or not panel.has_any_artifact:
+        lines.extend(_placeholder_lines(_CONTEXT_ENGINEERING_NO_ARTIFACTS))
+        return lines
+    for row in panel.rows:
+        if row.sessions_with_artifact <= 0:
+            continue
+        session_word = (
+            "session" if row.sessions_with_artifact == 1 else "sessions"
+        )
+        lines.append(_body_line(
+            f"{row.label}: {row.sessions_with_artifact} {session_word}"
+        ))
+    for wrapped in _wrap(
+        f"Source: {panel.citation}", width=_BODY_WIDTH
+    ):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    return lines
+
+
+def _knowledge_gap_distribution(
+    panel: KnowledgeGapDistributionPanel | None,
+) -> list[str]:
+    """Render the knowledge-gap distribution panel (US-041).
+
+    Two states:
+      1. ``panel is None`` or every category has zero count: emit the
+         "No knowledge gaps detected this week." placeholder per US-041
+         acceptance.
+      2. At least one category has a positive count: emit one row per
+         category in display order (Missing context, Missing
+         specifications, Multiple contexts, Unclear instructions), with
+         an explicit zero rendering for categories that did not fire so
+         the panel reads as an honest four-bucket histogram. The
+         citation footnote sits beneath the rows.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Knowledge gaps"))
+    if panel is None or not panel.has_gaps:
+        lines.extend(_placeholder_lines(_KNOWLEDGE_GAP_EMPTY))
+        return lines
+    for row in panel.rows:
+        turn_word = "turn" if row.count == 1 else "turns"
+        lines.append(_body_line(f"{row.label}: {row.count} {turn_word}"))
+    for wrapped in _wrap(
+        f"Source: {panel.citation}", width=_BODY_WIDTH
+    ):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    return lines
+
+
+def _tool_agent_ladder(panel: ToolAgentLadderPanel | None) -> list[str]:
+    """Render the tool/agent ladder panel (US-042).
+
+    Two states:
+      1. ``panel is None`` or no sessions observed: emit the explicit
+         "No tool/agent usage observed this week." copy. The empty-state
+         covers a freshly-installed user as well as a week with no
+         session activity.
+      2. At least one session: emit the max rung as the headline
+         ("Max rung: <Label>") followed by per-rung counts in ladder
+         order (lowest to highest) so the reader sees the distribution
+         beneath the ceiling. The Anthropic Skills/hooks/subagents +
+         OpenAI harness-engineering citation closes the section.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Tool/agent ladder"))
+    if panel is None or not panel.has_activity:
+        lines.extend(_placeholder_lines(_TOOL_AGENT_LADDER_NO_ACTIVITY))
+        return lines
+    lines.append(_body_line(f"Max rung: {panel.max_rung_label}"))
+    for row in panel.rows:
+        session_word = "session" if row.session_count == 1 else "sessions"
+        lines.append(_body_line(
+            f"{row.label}: {row.session_count} {session_word}"
+        ))
+    for wrapped in _wrap(
+        f"Source: {panel.citation}", width=_BODY_WIDTH
+    ):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    return lines
+
+
+def _refined_cost_effectiveness(
+    panel: RefinedCostEffectivenessPanel | None,
+) -> list[str]:
+    """Render the refined cost-effectiveness panel (US-042).
+
+    Three states:
+      1. ``panel is None`` or ``has_cost_data`` is False: emit the
+         "No cost data this week." copy verbatim per US-042 AC. The
+         absence of priced sessions is structurally different from
+         "$0 overspend" (which would falsely imply optimality).
+      2. Cost data present but no overspend: emit a positive-signal
+         line ("No tier-mismatch overspend detected this week.") so the
+         reader sees the absence of waste as a win without misreading
+         the empty-state copy.
+      3. Cost data present AND overspend > 0: emit the canonical
+         sentence per AC ("You spent $X on <higher-tier> for tasks
+         <lower-tier> could have done = $Y overspend").
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Cost-effectiveness"))
+    if panel is None or not panel.has_cost_data:
+        lines.extend(_placeholder_lines(_COST_EFFECTIVENESS_NO_COST_DATA))
+        return lines
+    if not panel.has_overspend:
+        for wrapped in _wrap(
+            "No tier-mismatch overspend detected this week.",
+            width=_BODY_WIDTH,
+        ):
+            lines.append(_body_line(wrapped))
+        for wrapped in _wrap(
+            f"Source: {panel.citation}", width=_BODY_WIDTH
+        ):
+            lines.append(_body_line(wrapped, ansi=DIM))
+        return lines
+    sentence = (
+        f"You spent ${panel.spent_on_higher_tier_usd:.2f} on "
+        f"{panel.higher_tier_display} for tasks "
+        f"{panel.lower_tier_display} could have done = "
+        f"${panel.overspend_usd:.2f} overspend"
+    )
+    for wrapped in _wrap(sentence, width=_BODY_WIDTH):
+        lines.append(_body_line(wrapped))
+    session_word = (
+        "session" if panel.qualifying_session_count == 1 else "sessions"
+    )
+    lines.append(_body_line(
+        f"Across {panel.qualifying_session_count} qualifying {session_word}.",
+        ansi=DIM,
+    ))
+    for wrapped in _wrap(
+        f"Source: {panel.citation}", width=_BODY_WIDTH
+    ):
+        lines.append(_body_line(wrapped, ansi=DIM))
+    return lines
+
+
 def _six_dim_panel(dimensions: list[DimRowView] | None) -> list[str]:
     """Render the full six-dim panel as the digest's footer (spec 6.2).
 
@@ -915,6 +1361,95 @@ def render(digest: WeeklyDigest) -> str:
     # It sits AFTER all coaching and bookkeeping sections so the digest
     # closes on the structural readout of the week.
     parts.extend(_six_dim_panel(digest.dimensions))
+    # US-038: behavioral-patterns panel renders after the rubric footer
+    # so the reader sees the structural /10 read first and then the
+    # raw-pattern evidence (counts + excerpts) that informs it.
+    behavioral_panel = (
+        digest.panel_inputs.behavioral_signals
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_behavioral_patterns(behavioral_panel))
+    # US-039: aug/auto balance and cadence panels follow the behavioral
+    # patterns block. Both are derived signals about the user's habit
+    # shape this week (how they use the model + how often they show up)
+    # and sit close to the behavioral-patterns evidence so the reader
+    # reads the "what kind of user" story in one editorial run.
+    aug_auto_panel = (
+        digest.panel_inputs.aug_auto_balance
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_aug_auto_balance(aug_auto_panel))
+    cadence_panel = (
+        digest.panel_inputs.cadence
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_cadence(cadence_panel))
+    # US-040: repeat-task radar + verification-calibration panel.
+    # The radar surfaces tasks the user has worked on 3+ times this
+    # week and tags each as a candidate for skill extraction (Anthropic
+    # Skills framing); the verification-calibration panel breaks the
+    # week's sessions into four rigor buckets (Sonar / SO 2025 /
+    # automation-bias literature framing). Both panels sit AFTER the
+    # cadence + aug-auto pair so the document reads habit-shape first
+    # and then drills into repeat work + verification rigor.
+    repeat_task_panel = (
+        digest.panel_inputs.repeat_task_radar
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_repeat_task_radar(repeat_task_panel))
+    verification_panel = (
+        digest.panel_inputs.verification_calibration
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_verification_calibration(verification_panel))
+    # US-041: specification adoption, context engineering, and
+    # knowledge-gap distribution. The three sit AFTER verification
+    # calibration so the document reads top-down as "habit -> verify ->
+    # craft": who you are this week, then how rigorously you checked,
+    # then how you opened sessions, what scaffolding you used, and
+    # which knowledge-gap categories appeared most.
+    specification_panel = (
+        digest.panel_inputs.specification_adoption
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_specification_adoption(specification_panel))
+    context_engineering_panel = (
+        digest.panel_inputs.context_engineering
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_context_engineering(context_engineering_panel))
+    knowledge_gap_panel = (
+        digest.panel_inputs.knowledge_gap_distribution
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_knowledge_gap_distribution(knowledge_gap_panel))
+    # US-042: tool/agent ladder + refined cost-effectiveness panel.
+    # The ladder reports the max scaffolding rung observed this week
+    # (prompt-only -> tools-on -> skills -> hooks -> subagents); the
+    # cost-effectiveness panel applies the deterministic counterfactual
+    # rule from praxis/models_advisor/advisor.py. Both sit at the END
+    # of the document because they close the editorial arc: scaffolding
+    # readiness then dollar consequences of the week's choices.
+    ladder_panel = (
+        digest.panel_inputs.tool_agent_ladder
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_tool_agent_ladder(ladder_panel))
+    cost_effectiveness_panel = (
+        digest.panel_inputs.refined_cost_effectiveness
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_refined_cost_effectiveness(cost_effectiveness_panel))
     # Trailing newline so terminals that print the next prompt without
     # a leading newline don't clash with the last section's content.
     parts.append("")

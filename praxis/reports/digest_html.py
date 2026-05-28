@@ -58,6 +58,21 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from praxis.redactor import redact_secrets
+from praxis.reports.panel_inputs import (
+    VERIFICATION_CALIBRATION_KINDS_IN_PANEL_ORDER,
+    VERIFICATION_CALIBRATION_LABELS,
+    AugAutoBalancePanel,
+    BehavioralPatternsPanel,
+    CadencePanel,
+    ContextEngineeringDepthPanel,
+    KnowledgeGapDistributionPanel,
+    PanelInputs,
+    RefinedCostEffectivenessPanel,
+    RepeatTaskRadarPanel,
+    SpecificationAdoptionPanel,
+    ToolAgentLadderPanel,
+    VerificationCalibrationPanel,
+)
 from praxis.storage.profile_store import resolve_home
 
 if TYPE_CHECKING:
@@ -247,6 +262,9 @@ class WeeklyDigest:
     # reads this. None means no follow-up exists for the week so the
     # masthead omits the block rather than rendering placeholder copy.
     commitment_rollup: "CommitmentRollup | None" = None
+    # v0.3 expansion panels (US-038..042). Optional; None preserves the
+    # pre-expansion document shape so older fixtures still render.
+    panel_inputs: PanelInputs | None = None
 
 
 # ---------------------------------------------------------------- section text
@@ -1253,6 +1271,143 @@ def _cost_split_bar(model_split: tuple[ModelSpend, ...], total: float) -> str:
     )
 
 
+_BEHAVIORAL_PATTERNS_EMPTY = "No behavioral patterns captured this week."
+
+# US-039 empty-state copy. Tests assert the exact strings so a future
+# rewording is one audit point per renderer.
+_AUG_AUTO_BALANCE_CLASSIFIER_UNAVAILABLE = "Classifier unavailable for this week."
+_AUG_AUTO_BALANCE_NO_SESSIONS = "No sessions to classify this week."
+_CADENCE_NO_ACTIVITY = "No substantive sessions in the last 21 days."
+
+
+def _aug_auto_balance_section(panel: AugAutoBalancePanel | None) -> str:
+    """Render the augmentation/automation balance panel (US-039).
+
+    The eyebrow always renders so the document shape stays stable. The
+    body falls through three states (same as the terminal renderer):
+    classifier-unavailable, no-sessions, populated. The populated state
+    surfaces the three shares plus the Anthropic Economic Index anchor
+    so the reader can compare their habit against the industry baseline.
+    """
+    if panel is None or panel.classifier_unavailable:
+        return f"""
+  <section class="bal-section" id="aug-auto-balance">
+    <div class="s-eyebrow">Augmentation / Automation</div>
+    <p class="placeholder">{_safe(_AUG_AUTO_BALANCE_CLASSIFIER_UNAVAILABLE)}</p>
+  </section>"""
+    if panel.classified_total == 0:
+        return f"""
+  <section class="bal-section" id="aug-auto-balance">
+    <div class="s-eyebrow">Augmentation / Automation</div>
+    <p class="placeholder">{_safe(_AUG_AUTO_BALANCE_NO_SESSIONS)}</p>
+  </section>"""
+    aug_pct = int(round(panel.augmentation_share * 100))
+    auto_pct = int(round(panel.automation_share * 100))
+    mixed_pct = int(round(panel.mixed_share * 100))
+    industry_aug = int(round(panel.industry_augmentation_share * 100))
+    industry_auto = int(round(panel.industry_automation_share * 100))
+    return f"""
+  <section class="bal-section" id="aug-auto-balance">
+    <div class="s-eyebrow">Augmentation / Automation</div>
+    <div class="bal-row">
+      <span class="bal-label">Augmentation</span>
+      <span class="bal-value">{aug_pct}%</span>
+    </div>
+    <div class="bal-row">
+      <span class="bal-label">Automation</span>
+      <span class="bal-value">{auto_pct}%</span>
+    </div>
+    <div class="bal-row">
+      <span class="bal-label">Mixed</span>
+      <span class="bal-value">{mixed_pct}%</span>
+    </div>
+    <p class="bal-anchor">Industry anchor: {industry_aug}% augmentation / {industry_auto}% automation.</p>
+    <p class="bal-citation">Source: {_safe(panel.industry_anchor_citation)}</p>
+  </section>"""
+
+
+def _cadence_section(panel: CadencePanel | None) -> str:
+    """Render the cadence panel (US-039).
+
+    The eyebrow renders unconditionally so the section's slot in the
+    document doesn't move. When ``panel`` is None or carries zero
+    substantive sessions, the renderer emits the explicit "No
+    substantive sessions in the last 21 days." copy and OMITS the
+    high-adopter label. Otherwise it emits the streak, the
+    high-adopter position (when on file), and the arXiv 2509.19708
+    citation as a footnote.
+    """
+    if panel is None or not panel.has_activity:
+        return f"""
+  <section class="cad-section" id="cadence">
+    <div class="s-eyebrow">Cadence</div>
+    <p class="placeholder">{_safe(_CADENCE_NO_ACTIVITY)}</p>
+  </section>"""
+    position_html = ""
+    label = panel.position_label
+    if label:
+        position_html = (
+            f'<div class="cad-row">'
+            f'<span class="cad-label">Spectrum</span>'
+            f'<span class="cad-value">{_safe(label)}</span>'
+            f'</div>'
+        )
+    return f"""
+  <section class="cad-section" id="cadence">
+    <div class="s-eyebrow">Cadence</div>
+    <div class="cad-row">
+      <span class="cad-label">Weekday streak</span>
+      <span class="cad-value">{panel.weekday_streak} of {panel.window_days} days</span>
+    </div>
+    {position_html}
+    <p class="cad-citation">Source: {_safe(panel.citation)}</p>
+  </section>"""
+
+
+def _behavioral_patterns_section(panel: BehavioralPatternsPanel | None) -> str:
+    """Render the behavioral-patterns panel (US-038).
+
+    For each signal kind, emits a row with the signal label, the count,
+    up to two raw user-turn excerpts, and the primary-source citation
+    as a small footnote. When the panel has no signals (every count is
+    zero) the renderer surfaces the empty-state message instead of an
+    empty table.
+    """
+    if panel is None or not panel.has_signals:
+        return f"""
+  <section class="bp-section" id="behavioral-patterns">
+    <div class="s-eyebrow">Behavioral Patterns</div>
+    <p class="placeholder">{_safe(_BEHAVIORAL_PATTERNS_EMPTY)}</p>
+  </section>"""
+    rows: list[str] = []
+    for row in panel.rows:
+        if row.count <= 0:
+            continue
+        excerpts_html = ""
+        if row.excerpts:
+            items = "".join(
+                f'<li class="bp-excerpt">&ldquo;{_safe(ex)}&rdquo;</li>'
+                for ex in row.excerpts
+            )
+            excerpts_html = f'<ul class="bp-excerpts">{items}</ul>'
+        plural = "time" if row.count == 1 else "times"
+        rows.append(
+            f'<article class="bp-row">'
+            f'<header class="bp-row-head">'
+            f'<span class="bp-label">{_safe(row.label)}</span>'
+            f'<span class="bp-count">{row.count} {plural}</span>'
+            f'</header>'
+            f'{excerpts_html}'
+            f'<footer class="bp-citation">Source: {_safe(row.citation)}</footer>'
+            f'</article>'
+        )
+    return f"""
+  <section class="bp-section" id="behavioral-patterns">
+    <div class="s-eyebrow">Behavioral Patterns</div>
+    <div class="bp-list">{"".join(rows)}</div>
+  </section>"""
+
+
 def _next_week_section(sentence: str) -> str:
     if not sentence:
         return """
@@ -1264,6 +1419,298 @@ def _next_week_section(sentence: str) -> str:
   <section class="n-section" id="one-thing-to-try-next-week">
     <div class="s-eyebrow">One Thing To Try Next Week</div>
     <p class="n-body">{_safe(sentence)}</p>
+  </section>"""
+
+
+# US-040: empty-state copy for the repeat-task radar and the
+# verification-calibration panel. Tests assert on the literal text so
+# a future copy change is one audit point per renderer.
+_REPEAT_TASK_EMPTY = "No repeat tasks detected this week."
+_VERIFICATION_CALIBRATION_NO_SESSIONS = (
+    "No sessions to calibrate verification against this week."
+)
+
+
+def _format_minutes_html(minutes: float) -> str:
+    """Match the terminal renderer's minute-formatting policy."""
+    if abs(minutes - round(minutes)) < 0.05:
+        return f"{int(round(minutes))}"
+    return f"{minutes:.1f}"
+
+
+def _repeat_task_radar_section(panel: RepeatTaskRadarPanel | None) -> str:
+    """Render the repeat-task radar panel as one HTML section (US-040).
+
+    The eyebrow renders unconditionally so the document shape is
+    stable. When ``panel`` is None or carries no detected repeats the
+    body falls through to the empty-state copy; otherwise it emits
+    one row per RepeatTask with the canonical first sentence, the
+    occurrence count, the per-occurrence minutes, and the "Could
+    become a skill" tag, plus an inline citation footnote.
+    """
+    if panel is None or not panel.has_repeats:
+        return f"""
+  <section class="rt-section" id="repeat-task-radar">
+    <div class="s-eyebrow">Repeat-Task Radar</div>
+    <p class="placeholder">{_safe(_REPEAT_TASK_EMPTY)}</p>
+  </section>"""
+    rows: list[str] = []
+    for row in panel.rows:
+        minutes = _format_minutes_html(row.estimated_minutes_per_occurrence)
+        plural = "time" if row.occurrences == 1 else "times"
+        rows.append(
+            f'<article class="rt-row">'
+            f'<header class="rt-row-head">'
+            f'<blockquote class="rt-quote">&ldquo;'
+            f'{_safe(row.canonical_first_sentence)}&rdquo;</blockquote>'
+            f'<span class="rt-skill-tag">{_safe(row.skill_tag)}</span>'
+            f'</header>'
+            f'<p class="rt-meta">'
+            f'{row.occurrences} {plural}, ~{minutes} min each'
+            f'</p>'
+            f'</article>'
+        )
+    return f"""
+  <section class="rt-section" id="repeat-task-radar">
+    <div class="s-eyebrow">Repeat-Task Radar</div>
+    <div class="rt-list">{"".join(rows)}</div>
+    <p class="rt-citation">Source: {_safe(panel.citation)}</p>
+  </section>"""
+
+
+# US-041: empty-state copy for the specification-adoption, context-
+# engineering-depth, and knowledge-gap distribution panels. Tests
+# assert verbatim so a copy change is one audit point per renderer.
+_SPECIFICATION_ADOPTION_NO_SESSIONS = (
+    "No sessions to measure specification adoption this week."
+)
+_CONTEXT_ENGINEERING_NO_ARTIFACTS = (
+    "No scaffolding artifacts referenced this week."
+)
+_KNOWLEDGE_GAP_EMPTY = "No knowledge gaps detected this week."
+
+
+def _specification_adoption_section(
+    panel: SpecificationAdoptionPanel | None,
+) -> str:
+    """Render the specification-adoption panel (US-041).
+
+    The eyebrow renders unconditionally so the document shape is
+    stable. When ``panel`` is None or carries zero sessions, the body
+    falls through to the empty-state copy; otherwise it emits the
+    share of sessions that opened with a spec block plus the Woodward
+    / SpecKit / Sean Grove citation as a footnote.
+    """
+    if panel is None or not panel.has_sessions:
+        return f"""
+  <section class="sa-section" id="specification-adoption">
+    <div class="s-eyebrow">Specification Adoption</div>
+    <p class="placeholder">{_safe(_SPECIFICATION_ADOPTION_NO_SESSIONS)}</p>
+  </section>"""
+    pct = int(round(panel.adoption_share * 100))
+    session_word = "session" if panel.total_sessions == 1 else "sessions"
+    return f"""
+  <section class="sa-section" id="specification-adoption">
+    <div class="s-eyebrow">Specification Adoption</div>
+    <div class="sa-row">
+      <span class="sa-label">Opened with a spec block</span>
+      <span class="sa-value">{pct}%</span>
+    </div>
+    <p class="sa-meta">{panel.sessions_with_spec} of {panel.total_sessions} {session_word} this week.</p>
+    <p class="sa-citation">Source: {_safe(panel.citation)}</p>
+  </section>"""
+
+
+def _context_engineering_section(
+    panel: ContextEngineeringDepthPanel | None,
+) -> str:
+    """Render the context-engineering-depth panel (US-041).
+
+    When no scaffolding kinds fired across the week, the body
+    collapses to the placeholder. Otherwise the renderer emits one row
+    per kind that fired (skipping zero-count rows so the reader's eye
+    is drawn to what they actually engage with), followed by the DORA
+    2025 + Anthropic Skills citation.
+    """
+    if panel is None or not panel.has_any_artifact:
+        return f"""
+  <section class="ce-section" id="context-engineering-depth">
+    <div class="s-eyebrow">Context Engineering Depth</div>
+    <p class="placeholder">{_safe(_CONTEXT_ENGINEERING_NO_ARTIFACTS)}</p>
+  </section>"""
+    rows: list[str] = []
+    for row in panel.rows:
+        if row.sessions_with_artifact <= 0:
+            continue
+        session_word = (
+            "session" if row.sessions_with_artifact == 1 else "sessions"
+        )
+        rows.append(
+            f'<div class="ce-row">'
+            f'<span class="ce-label">{_safe(row.label)}</span>'
+            f'<span class="ce-value">{row.sessions_with_artifact} {session_word}</span>'
+            f'</div>'
+        )
+    return f"""
+  <section class="ce-section" id="context-engineering-depth">
+    <div class="s-eyebrow">Context Engineering Depth</div>
+    {"".join(rows)}
+    <p class="ce-citation">Source: {_safe(panel.citation)}</p>
+  </section>"""
+
+
+def _knowledge_gap_distribution_section(
+    panel: KnowledgeGapDistributionPanel | None,
+) -> str:
+    """Render the knowledge-gap distribution panel (US-041).
+
+    Two states:
+      1. ``panel is None`` or every category has zero count: emit the
+         verbatim "No knowledge gaps detected this week." copy.
+      2. At least one category is positive: emit one row per category
+         in display order, including explicit zeros so the reader sees
+         the absence of categories that did not fire. The citation
+         footnote sits beneath the rows.
+    """
+    if panel is None or not panel.has_gaps:
+        return f"""
+  <section class="kg-section" id="knowledge-gap-distribution">
+    <div class="s-eyebrow">Knowledge Gaps</div>
+    <p class="placeholder">{_safe(_KNOWLEDGE_GAP_EMPTY)}</p>
+  </section>"""
+    rows: list[str] = []
+    for row in panel.rows:
+        turn_word = "turn" if row.count == 1 else "turns"
+        rows.append(
+            f'<div class="kg-row">'
+            f'<span class="kg-label">{_safe(row.label)}</span>'
+            f'<span class="kg-value">{row.count} {turn_word}</span>'
+            f'</div>'
+        )
+    return f"""
+  <section class="kg-section" id="knowledge-gap-distribution">
+    <div class="s-eyebrow">Knowledge Gaps</div>
+    {"".join(rows)}
+    <p class="kg-citation">Source: {_safe(panel.citation)}</p>
+  </section>"""
+
+
+# US-042: empty-state copy for the tool/agent ladder + refined cost-
+# effectiveness panel. Tests assert verbatim so a copy change is one
+# audit point per renderer.
+_TOOL_AGENT_LADDER_NO_ACTIVITY = "No tool/agent usage observed this week."
+_COST_EFFECTIVENESS_NO_COST_DATA = "No cost data this week."
+
+
+def _tool_agent_ladder_section(panel: ToolAgentLadderPanel | None) -> str:
+    """Render the tool/agent ladder panel (US-042).
+
+    The eyebrow always renders so the document shape stays stable. The
+    body falls through two states: no activity -> placeholder copy;
+    activity -> max-rung headline plus per-rung counts plus citation.
+    """
+    if panel is None or not panel.has_activity:
+        return f"""
+  <section class="tal-section" id="tool-agent-ladder">
+    <div class="s-eyebrow">Tool / Agent Ladder</div>
+    <p class="placeholder">{_safe(_TOOL_AGENT_LADDER_NO_ACTIVITY)}</p>
+  </section>"""
+    rows: list[str] = []
+    for row in panel.rows:
+        session_word = "session" if row.session_count == 1 else "sessions"
+        rows.append(
+            f'<div class="tal-row">'
+            f'<span class="tal-label">{_safe(row.label)}</span>'
+            f'<span class="tal-value">{row.session_count} {session_word}</span>'
+            f'</div>'
+        )
+    return f"""
+  <section class="tal-section" id="tool-agent-ladder">
+    <div class="s-eyebrow">Tool / Agent Ladder</div>
+    <p class="tal-max">Max rung this week: <strong>{_safe(panel.max_rung_label)}</strong></p>
+    <div class="tal-list">{"".join(rows)}</div>
+    <p class="tal-citation">Source: {_safe(panel.citation)}</p>
+  </section>"""
+
+
+def _refined_cost_effectiveness_section(
+    panel: RefinedCostEffectivenessPanel | None,
+) -> str:
+    """Render the refined cost-effectiveness panel (US-042).
+
+    Three states:
+      1. ``panel`` is None or ``has_cost_data`` is False: emit the
+         "No cost data this week." copy. Per AC, $0 overspend must not
+         render in the absence of cost data because that would falsely
+         imply optimality.
+      2. Cost data present but no overspend: emit a positive-signal
+         sentence so the absence of waste is itself visible.
+      3. Cost data present AND overspend > 0: emit the canonical AC
+         sentence ("You spent $X on <higher-tier> for tasks
+         <lower-tier> could have done = $Y overspend").
+    """
+    if panel is None or not panel.has_cost_data:
+        return f"""
+  <section class="rce-section" id="refined-cost-effectiveness">
+    <div class="s-eyebrow">Cost-Effectiveness</div>
+    <p class="placeholder">{_safe(_COST_EFFECTIVENESS_NO_COST_DATA)}</p>
+  </section>"""
+    if not panel.has_overspend:
+        return f"""
+  <section class="rce-section" id="refined-cost-effectiveness">
+    <div class="s-eyebrow">Cost-Effectiveness</div>
+    <p class="rce-clean">No tier-mismatch overspend detected this week.</p>
+    <p class="rce-citation">Source: {_safe(panel.citation)}</p>
+  </section>"""
+    higher = _safe(panel.higher_tier_display)
+    lower = _safe(panel.lower_tier_display)
+    spent = f"${panel.spent_on_higher_tier_usd:.2f}"
+    overspend = f"${panel.overspend_usd:.2f}"
+    session_word = (
+        "session" if panel.qualifying_session_count == 1 else "sessions"
+    )
+    return f"""
+  <section class="rce-section" id="refined-cost-effectiveness">
+    <div class="s-eyebrow">Cost-Effectiveness</div>
+    <p class="rce-headline">You spent <strong>{spent}</strong> on {higher} for tasks {lower} could have done = <strong>{overspend} overspend</strong>.</p>
+    <p class="rce-meta">Across {panel.qualifying_session_count} qualifying {session_word}.</p>
+    <p class="rce-citation">Source: {_safe(panel.citation)}</p>
+  </section>"""
+
+
+def _verification_calibration_section(
+    panel: VerificationCalibrationPanel | None,
+) -> str:
+    """Render the verification-calibration panel (US-040).
+
+    When the week has no sessions to categorize the body collapses to
+    a single placeholder. When at least one session was categorized
+    the renderer emits one row per bucket in display order so the
+    reader sees the absence of rigorous buckets as clearly as their
+    presence. The citation footnote sits beneath the rows.
+    """
+    if panel is None or not panel.has_sessions:
+        return f"""
+  <section class="vc-section" id="verification-calibration">
+    <div class="s-eyebrow">Verification Calibration</div>
+    <p class="placeholder">{_safe(_VERIFICATION_CALIBRATION_NO_SESSIONS)}</p>
+  </section>"""
+    rows: list[str] = []
+    for kind in VERIFICATION_CALIBRATION_KINDS_IN_PANEL_ORDER:
+        label = VERIFICATION_CALIBRATION_LABELS.get(kind, kind.title())
+        count = panel.count_for(kind)
+        plural = "session" if count == 1 else "sessions"
+        rows.append(
+            f'<div class="vc-row">'
+            f'<span class="vc-label">{_safe(label)}</span>'
+            f'<span class="vc-value">{count} {plural}</span>'
+            f'</div>'
+        )
+    return f"""
+  <section class="vc-section" id="verification-calibration">
+    <div class="s-eyebrow">Verification Calibration</div>
+    {"".join(rows)}
+    <p class="vc-citation">Source: {_safe(panel.citation)}</p>
   </section>"""
 
 
@@ -1305,6 +1752,56 @@ def render(digest: WeeklyDigest) -> str:
         f'{_next_week_section(digest.one_thing_to_try)}'
         '</div>'
     )
+    behavioral_panel = (
+        digest.panel_inputs.behavioral_signals
+        if digest.panel_inputs is not None
+        else None
+    )
+    aug_auto_panel = (
+        digest.panel_inputs.aug_auto_balance
+        if digest.panel_inputs is not None
+        else None
+    )
+    cadence_panel = (
+        digest.panel_inputs.cadence
+        if digest.panel_inputs is not None
+        else None
+    )
+    repeat_task_panel = (
+        digest.panel_inputs.repeat_task_radar
+        if digest.panel_inputs is not None
+        else None
+    )
+    verification_panel = (
+        digest.panel_inputs.verification_calibration
+        if digest.panel_inputs is not None
+        else None
+    )
+    specification_panel = (
+        digest.panel_inputs.specification_adoption
+        if digest.panel_inputs is not None
+        else None
+    )
+    context_engineering_panel = (
+        digest.panel_inputs.context_engineering
+        if digest.panel_inputs is not None
+        else None
+    )
+    knowledge_gap_panel = (
+        digest.panel_inputs.knowledge_gap_distribution
+        if digest.panel_inputs is not None
+        else None
+    )
+    ladder_panel = (
+        digest.panel_inputs.tool_agent_ladder
+        if digest.panel_inputs is not None
+        else None
+    )
+    cost_effectiveness_panel = (
+        digest.panel_inputs.refined_cost_effectiveness
+        if digest.panel_inputs is not None
+        else None
+    )
     data_block = (
         '<div class="data-block">'
         '<div class="data-block__rule"></div>'
@@ -1312,6 +1809,16 @@ def render(digest: WeeklyDigest) -> str:
         f'{_cost_ledger_section(digest.cost_ledger)}'
         f'{_task_breakdown_section(digest.task_breakdown)}'
         f'{_dimensions_section(digest.dimensions, digest.behavioral_signals)}'
+        f'{_behavioral_patterns_section(behavioral_panel)}'
+        f'{_aug_auto_balance_section(aug_auto_panel)}'
+        f'{_cadence_section(cadence_panel)}'
+        f'{_repeat_task_radar_section(repeat_task_panel)}'
+        f'{_verification_calibration_section(verification_panel)}'
+        f'{_specification_adoption_section(specification_panel)}'
+        f'{_context_engineering_section(context_engineering_panel)}'
+        f'{_knowledge_gap_distribution_section(knowledge_gap_panel)}'
+        f'{_tool_agent_ladder_section(ladder_panel)}'
+        f'{_refined_cost_effectiveness_section(cost_effectiveness_panel)}'
         f'{_weekly_trajectory_section(digest.weekly_trajectory)}'
         '</div>'
     )
@@ -2275,6 +2782,461 @@ html, body {{
 }}
 .d-delta-down {{
   color: var(--ink-muted);
+}}
+
+/* --- 5b. Behavioral patterns (US-038) ------------------------------- */
+/* Editorial list, not a card grid: a header row with the signal label
+   and count, two italic excerpt rows beneath, and a small ink-faded
+   citation footnote. The eye scans the labels + counts left-to-right
+   first, then drops into the excerpts for what triggered them. */
+.bp-section {{
+  margin-bottom: 96px;
+}}
+.bp-list {{
+  display: flex;
+  flex-direction: column;
+}}
+.bp-row {{
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-6) 0;
+  border-top: 1px solid var(--rule);
+}}
+.bp-row:last-child {{
+  border-bottom: 1px solid var(--rule);
+}}
+.bp-row-head {{
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-5);
+}}
+.bp-label {{
+  font-family: var(--serif);
+  font-size: 18px;
+  color: var(--ink);
+  letter-spacing: -0.005em;
+}}
+.bp-count {{
+  font-family: var(--serif);
+  font-size: 20px;
+  color: var(--accent);
+  font-feature-settings: 'lnum';
+  letter-spacing: -0.01em;
+}}
+.bp-excerpts {{
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}}
+.bp-excerpt {{
+  font-family: var(--serif);
+  font-size: 14.5px;
+  font-style: italic;
+  line-height: 1.5;
+  color: var(--ink-muted);
+  padding-left: var(--space-5);
+  margin-bottom: var(--space-2);
+  position: relative;
+}}
+.bp-excerpt::before {{
+  content: "·";
+  position: absolute;
+  left: var(--space-2);
+  color: var(--accent);
+  font-size: 18px;
+  line-height: 1.1;
+}}
+.bp-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-2);
+}}
+
+/* --- 5c. Augmentation / Automation balance (US-039) ----------------- */
+/* Three rows with a label-and-value pair each, separated by hairlines.
+   Designed to read as a typographic stat list (the numbers carry the
+   weight) rather than a stacked-bar visualization, keeping editorial
+   discipline with the rest of the digest. */
+.bal-section {{
+  margin-bottom: 96px;
+}}
+.bal-row {{
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: var(--space-5) 0;
+  border-top: 1px solid var(--rule);
+}}
+.bal-row:last-of-type {{
+  border-bottom: 1px solid var(--rule);
+}}
+.bal-label {{
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--ink);
+}}
+.bal-value {{
+  font-family: var(--serif);
+  font-size: 22px;
+  color: var(--accent);
+  font-feature-settings: 'lnum';
+  letter-spacing: -0.01em;
+}}
+.bal-anchor {{
+  font-family: var(--serif);
+  font-size: 14px;
+  font-style: italic;
+  color: var(--ink-muted);
+  margin-top: var(--space-5);
+  max-width: 62ch;
+}}
+.bal-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-2);
+}}
+
+/* --- 5d. Cadence (US-039) ------------------------------------------- */
+/* Mirrors the augmentation/automation balance row layout so the two
+   panels read as a pair: streak + spectrum position + citation. */
+.cad-section {{
+  margin-bottom: 96px;
+}}
+.cad-row {{
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: var(--space-5) 0;
+  border-top: 1px solid var(--rule);
+}}
+.cad-row:last-of-type {{
+  border-bottom: 1px solid var(--rule);
+}}
+.cad-label {{
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--ink);
+}}
+.cad-value {{
+  font-family: var(--serif);
+  font-size: 22px;
+  color: var(--accent);
+  font-feature-settings: 'lnum';
+  letter-spacing: -0.01em;
+}}
+.cad-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-2);
+}}
+
+/* --- 5e. Repeat-task radar (US-040) --------------------------------- */
+/* Editorial list of recurring task seeds. Each row pairs the quoted
+   first sentence (italic) with a small "Could become a skill" tag and
+   a dim meta row (occurrences + minutes). Layout intentionally mirrors
+   the behavioral-patterns rows so the editorial cadence stays uniform. */
+.rt-section {{
+  margin-bottom: 96px;
+}}
+.rt-list {{
+  display: flex;
+  flex-direction: column;
+}}
+.rt-row {{
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-6) 0;
+  border-top: 1px solid var(--rule);
+}}
+.rt-row:last-child {{
+  border-bottom: 1px solid var(--rule);
+}}
+.rt-row-head {{
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-5);
+  flex-wrap: wrap;
+}}
+.rt-quote {{
+  font-family: var(--serif);
+  font-size: 17px;
+  font-style: italic;
+  color: var(--ink);
+  letter-spacing: -0.005em;
+  max-width: 48ch;
+}}
+.rt-skill-tag {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  padding: 2px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  white-space: nowrap;
+}}
+.rt-meta {{
+  font-family: var(--serif);
+  font-size: 14px;
+  font-style: italic;
+  color: var(--ink-muted);
+  font-feature-settings: 'lnum';
+}}
+.rt-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-5);
+}}
+
+/* --- 5f. Verification calibration (US-040) -------------------------- */
+/* Histogram of how rigorously the user verified AI output this week,
+   bucketed source-check / test-run / spot-check / blanket-accept. The
+   row layout mirrors the augmentation/automation balance panel so the
+   reader can scan both as paired stat lists. */
+.vc-section {{
+  margin-bottom: 96px;
+}}
+.vc-row {{
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: var(--space-5) 0;
+  border-top: 1px solid var(--rule);
+}}
+.vc-row:last-of-type {{
+  border-bottom: 1px solid var(--rule);
+}}
+.vc-label {{
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--ink);
+}}
+.vc-value {{
+  font-family: var(--serif);
+  font-size: 22px;
+  color: var(--accent);
+  font-feature-settings: 'lnum';
+  letter-spacing: -0.01em;
+}}
+.vc-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-5);
+}}
+
+/* --- US-041 specification adoption ---------------------------------- */
+.sa-section {{
+  margin-bottom: 96px;
+}}
+.sa-row {{
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: var(--space-5) 0;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+}}
+.sa-label {{
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--ink);
+}}
+.sa-value {{
+  font-family: var(--serif);
+  font-size: 26px;
+  color: var(--accent);
+  font-feature-settings: 'lnum';
+  letter-spacing: -0.01em;
+}}
+.sa-meta {{
+  font-family: var(--serif);
+  font-size: 14px;
+  color: var(--ink-muted);
+  margin-top: var(--space-4);
+}}
+.sa-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-5);
+}}
+
+/* --- US-041 context engineering ------------------------------------- */
+.ce-section {{
+  margin-bottom: 96px;
+}}
+.ce-row {{
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: var(--space-5) 0;
+  border-top: 1px solid var(--rule);
+}}
+.ce-row:last-of-type {{
+  border-bottom: 1px solid var(--rule);
+}}
+.ce-label {{
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--ink);
+}}
+.ce-value {{
+  font-family: var(--serif);
+  font-size: 18px;
+  color: var(--accent);
+  font-feature-settings: 'lnum';
+  letter-spacing: -0.01em;
+}}
+.ce-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-5);
+}}
+
+/* --- US-041 knowledge-gap distribution ------------------------------ */
+.kg-section {{
+  margin-bottom: 96px;
+}}
+.kg-row {{
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: var(--space-5) 0;
+  border-top: 1px solid var(--rule);
+}}
+.kg-row:last-of-type {{
+  border-bottom: 1px solid var(--rule);
+}}
+.kg-label {{
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--ink);
+}}
+.kg-value {{
+  font-family: var(--serif);
+  font-size: 18px;
+  color: var(--accent);
+  font-feature-settings: 'lnum';
+  letter-spacing: -0.01em;
+}}
+.kg-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-5);
+}}
+
+/* --- US-042 tool/agent ladder --------------------------------------- */
+.tal-section {{
+  margin-bottom: 96px;
+}}
+.tal-max {{
+  font-family: var(--serif);
+  font-size: 17px;
+  color: var(--ink);
+  margin-bottom: var(--space-5);
+}}
+.tal-max strong {{
+  color: var(--accent);
+  font-weight: 500;
+}}
+.tal-list {{
+  margin-bottom: var(--space-5);
+}}
+.tal-row {{
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: var(--space-4) 0;
+  border-top: 1px solid var(--rule);
+}}
+.tal-row:last-of-type {{
+  border-bottom: 1px solid var(--rule);
+}}
+.tal-label {{
+  font-family: var(--serif);
+  font-size: 15.5px;
+  color: var(--ink);
+}}
+.tal-value {{
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--ink-muted);
+  font-feature-settings: 'lnum';
+}}
+.tal-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-5);
+}}
+
+/* --- US-042 refined cost-effectiveness ------------------------------ */
+.rce-section {{
+  margin-bottom: 96px;
+}}
+.rce-headline {{
+  font-family: var(--serif);
+  font-size: 18px;
+  line-height: 1.55;
+  color: var(--ink);
+  margin-bottom: var(--space-4);
+  max-width: 560px;
+}}
+.rce-headline strong {{
+  color: var(--accent);
+  font-weight: 500;
+}}
+.rce-clean {{
+  font-family: var(--serif);
+  font-size: 17px;
+  color: var(--ink);
+  font-style: italic;
+  margin-bottom: var(--space-4);
+}}
+.rce-meta {{
+  font-family: var(--sans);
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  color: var(--ink-muted);
+  margin-bottom: var(--space-5);
+}}
+.rce-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-5);
 }}
 
 /* --- 6. Follow-up --------------------------------------------------- */
