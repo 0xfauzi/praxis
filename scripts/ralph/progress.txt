@@ -131,3 +131,13 @@
     * `test_help_does_not_advertise_week_as_a_command` looks for the literal string `"  week  "` (the column-aligned form) rather than the bare word `"week"`, because the help text mentions "weekly", "past week", etc. legitimately. A future help rewrite that uses different column widths could break this guard; if so, tighten the regex rather than dropping the assertion.
     * The praxis-nudge-command component knowledge claims a `praxis nudge` subcommand exists at praxis/cli/__main__.py:836-885 with detailed contracts. I verified -- those line numbers refer to a different code path (`cmd_install_weekly` and helpers), not a real `cmd_nudge`. The component knowledge appears to be stale or from a parallel worktree. Today's `praxis nudge` is the stub I just added; the documented `~/.praxis/.last_nudge` throttle, week-scoped follow_ups lookup, and exit-4 invariant ARE NOT implemented. A future story implementing `cmd_nudge` should re-read the component knowledge as a target spec, but should not assume any of it is wired up today.
 ---
+
+## Iteration 8 - Lint gate cleanup (post-US-044)
+- What I did: Cleared 4 pre-existing ruff errors that were blocking the factory verification gate (linter exit code 1). Three F541 f-string-without-placeholders (`tests/make_synthetic_data.py:239`, `tests/make_synthetic_data.py:246`, `tests/test_digest_html.py:730`) became plain strings; one F401 unused import (`Role` in `tests/test_scanners.py:12`) was deleted. No story-level code changed; both PRD stories (US-043, US-044) remained `passes=true`.
+- Files changed: tests/make_synthetic_data.py (2 print() calls), tests/test_digest_html.py (label= literal), tests/test_scanners.py (drop unused Role import), scripts/ralph/progress.txt (this entry).
+- Verification: `uv run ruff check .` -> exit 0 (was exit 1 with 4 errors). `uv run mypy praxis` -> Success: no issues found in 49 source files. `uv run pytest` -> 1119 passed in 1.07s (unchanged from iter 7).
+- What the next iteration should know:
+  - All 2 PRD stories pass AND the linter gate is now green. Ralph should detect <promise>COMPLETE</promise> on the next iteration.
+  - All 4 lint errors were pre-existing baseline noise inherited from earlier feature branches (test_digest_html.py was last touched in b9773e6; test_scanners.py + make_synthetic_data.py predate this branch). They are unrelated to US-043/US-044, but the factory verifier runs ruff globally, so the gate failed until cleared.
+  - Pyright still emits "Import pytest could not be resolved" on tests/test_digest_html.py and "<fixture> is not accessed" on tests/test_scanners.py. These are the same pytest fixture-injection diagnostics called out as baseline in iter 1-7; not introduced or worsened by this iteration.
+---
