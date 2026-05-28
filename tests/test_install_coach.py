@@ -1,9 +1,11 @@
-"""Tests for ``praxis install-coach`` (US-028, US-029, US-030, US-031).
+"""Tests for ``praxis install-coach`` / ``uninstall-coach`` (US-028-032).
 
 Covers tool detection + per-tool prompt/flag routing (US-028), the
 Claude Code settings.json merger (US-029), the Codex hooks.json
-installer (US-030), and the Copilot markdown-block injector + optional
-user-level prompt-file/settings.json patcher (US-031).
+installer (US-030), the Copilot markdown-block injector + optional
+user-level prompt-file/settings.json patcher (US-031), and the
+symmetric uninstall-coach surface that strips only Praxis-authored
+content (US-032).
 """
 from __future__ import annotations
 
@@ -33,12 +35,21 @@ from praxis.cli.install_coach import (
     detect_claude_code,
     detect_codex,
     detect_copilot,
+    detect_managed_claude_code,
+    detect_managed_codex,
+    detect_managed_copilot,
+    detect_managed_tools,
     display_name,
     install_claude_code,
     install_codex,
     install_copilot_user_level,
     install_copilot_workspace,
     run_install_coach,
+    run_uninstall_coach,
+    uninstall_claude_code,
+    uninstall_codex,
+    uninstall_copilot_user_level,
+    uninstall_copilot_workspace,
     vscode_user_dir,
 )
 
@@ -1503,3 +1514,951 @@ def test_cli_install_coach_copilot_user_level_unparseable_prints_error_continues
     assert (user_dir / "settings.json").read_text(encoding="utf-8") == "not-json"
     # The workspace surface still landed (independent of user-level failure).
     assert (tmp_cwd / ".github" / "copilot-instructions.md").exists()
+
+
+# ===========================================================================
+# US-032: ``praxis uninstall-coach`` -- symmetric teardown.
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Per-tool uninstall: Claude Code.
+# ---------------------------------------------------------------------------
+
+
+def test_uninstall_claude_code_returns_false_on_clean_home(tmp_home):
+    """No settings.json file -> nothing to remove, no writes."""
+    assert (tmp_home / ".claude" / "settings.json").exists() is False
+    assert uninstall_claude_code() is False
+    # And we did not create the file as a side effect.
+    assert (tmp_home / ".claude" / "settings.json").exists() is False
+
+
+def test_uninstall_claude_code_after_install_returns_true(tmp_home):
+    install_claude_code()
+    assert uninstall_claude_code() is True
+
+
+def test_uninstall_claude_code_deletes_file_when_only_praxis_content(tmp_home):
+    """If the file contained only Praxis hooks, it is deleted entirely.
+
+    This is the "deep-equal to fresh install" property: a clean machine
+    has no settings.json, so after install + uninstall the file should
+    not exist either.
+    """
+    install_claude_code()
+    assert (tmp_home / ".claude" / "settings.json").exists()
+    uninstall_claude_code()
+    assert (tmp_home / ".claude" / "settings.json").exists() is False
+
+
+def test_uninstall_claude_code_preserves_unrelated_top_level_keys(tmp_home):
+    """Top-level keys outside ``hooks`` survive the uninstall."""
+    settings = tmp_home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(
+        json.dumps({"theme": "dark", "telemetry": False}), encoding="utf-8"
+    )
+    install_claude_code()
+    uninstall_claude_code()
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    assert data == {"theme": "dark", "telemetry": False}
+
+
+def test_uninstall_claude_code_preserves_user_blocks_at_managed_event(tmp_home):
+    """A user-authored block alongside ours at SessionStart is preserved."""
+    settings = tmp_home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    user_block = {
+        "matcher": "src/**",
+        "hooks": [{"type": "command", "command": "echo user-on-start"}],
+    }
+    settings.write_text(
+        json.dumps({"hooks": {"SessionStart": [user_block]}}),
+        encoding="utf-8",
+    )
+    install_claude_code()  # appends our managed block alongside user_block
+    uninstall_claude_code()
+
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    # User's SessionStart block is preserved exactly.
+    assert data["hooks"]["SessionStart"] == [user_block]
+
+
+def test_uninstall_claude_code_preserves_user_events(tmp_home):
+    """Hook events we never managed (e.g., SubagentStop) are untouched."""
+    settings = tmp_home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    user_subagent = {
+        "matcher": "*",
+        "hooks": [{"type": "command", "command": "echo user-subagent"}],
+    }
+    settings.write_text(
+        json.dumps({"hooks": {"SubagentStop": [user_subagent]}}),
+        encoding="utf-8",
+    )
+    install_claude_code()
+    uninstall_claude_code()
+
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    assert data["hooks"]["SubagentStop"] == [user_subagent]
+    # And our managed events were cleaned up.
+    assert "SessionStart" not in data["hooks"]
+    assert "Stop" not in data["hooks"]
+
+
+def test_uninstall_claude_code_idempotent(tmp_home):
+    """A second uninstall after the first is a no-op (False, no writes)."""
+    install_claude_code()
+    assert uninstall_claude_code() is True
+    assert uninstall_claude_code() is False
+    # Subsequent calls remain no-ops too.
+    assert uninstall_claude_code() is False
+
+
+def test_uninstall_claude_code_aborts_on_unparseable_json(tmp_home):
+    """Unparseable JSON -> InstallCoachError + file untouched."""
+    settings = tmp_home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    bad_bytes = b"{this is not: json,,"
+    settings.write_bytes(bad_bytes)
+
+    with pytest.raises(InstallCoachError) as exc_info:
+        uninstall_claude_code()
+
+    assert settings.read_bytes() == bad_bytes
+    msg = str(exc_info.value)
+    assert "not valid JSON" in msg
+    assert str(settings) in msg
+    assert "praxis uninstall-coach" in msg
+
+
+def test_uninstall_claude_code_aborts_when_top_level_not_object(tmp_home):
+    settings = tmp_home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text("[1, 2, 3]", encoding="utf-8")
+
+    with pytest.raises(InstallCoachError) as exc_info:
+        uninstall_claude_code()
+
+    assert "JSON object" in str(exc_info.value)
+    assert settings.read_text(encoding="utf-8") == "[1, 2, 3]"
+
+
+def test_uninstall_claude_code_no_op_when_hooks_missing(tmp_home):
+    """A settings.json that has unrelated keys but no hooks -> False, no writes."""
+    settings = tmp_home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"theme": "dark"}), encoding="utf-8")
+    original_bytes = settings.read_bytes()
+
+    assert uninstall_claude_code() is False
+    # File unchanged byte-for-byte.
+    assert settings.read_bytes() == original_bytes
+
+
+def test_uninstall_claude_code_home_override(tmp_path):
+    """Explicit home= overrides Path.home() for direct callers."""
+    other = tmp_path / "alt"
+    other.mkdir()
+    install_claude_code(home=other)
+    assert uninstall_claude_code(home=other) is True
+    assert (other / ".claude" / "settings.json").exists() is False
+
+
+def test_uninstall_claude_code_atomic_write_leaves_no_tmp_file(tmp_home):
+    """When the file is partially cleaned (not deleted), no stray tmp file remains."""
+    settings = tmp_home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(
+        json.dumps({"theme": "dark"}), encoding="utf-8"
+    )
+    install_claude_code()
+    uninstall_claude_code()
+    claude_dir = tmp_home / ".claude"
+    leftovers = [
+        p.name for p in claude_dir.iterdir() if p.name != "settings.json"
+    ]
+    assert leftovers == []
+
+
+# ---------------------------------------------------------------------------
+# Per-tool uninstall: Codex.
+# ---------------------------------------------------------------------------
+
+
+def test_uninstall_codex_returns_false_on_clean_home(tmp_home):
+    """No hooks.json -> False, no writes."""
+    assert (tmp_home / ".codex" / "hooks.json").exists() is False
+    assert uninstall_codex() is False
+    assert (tmp_home / ".codex" / "hooks.json").exists() is False
+
+
+def test_uninstall_codex_after_install_returns_true(tmp_home):
+    install_codex()
+    assert uninstall_codex() is True
+
+
+def test_uninstall_codex_deletes_file_when_only_praxis_content(tmp_home):
+    install_codex()
+    assert (tmp_home / ".codex" / "hooks.json").exists()
+    uninstall_codex()
+    assert (tmp_home / ".codex" / "hooks.json").exists() is False
+
+
+def test_uninstall_codex_preserves_user_authored_entries(tmp_home):
+    """User-authored entries (no sentinel) survive uninstall."""
+    codex_dir = tmp_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    user_entry = {"event": "SessionStart", "command": "echo user-on-start"}
+    (codex_dir / "hooks.json").write_text(
+        json.dumps({"hooks": [user_entry]}), encoding="utf-8"
+    )
+    install_codex()
+    uninstall_codex()
+
+    data = json.loads((codex_dir / "hooks.json").read_text(encoding="utf-8"))
+    assert data["hooks"] == [user_entry]
+
+
+def test_uninstall_codex_preserves_unrelated_top_level_keys(tmp_home):
+    codex_dir = tmp_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "hooks.json").write_text(
+        json.dumps({"hooks": [], "model": "gpt-5"}), encoding="utf-8"
+    )
+    install_codex()
+    uninstall_codex()
+
+    data = json.loads((codex_dir / "hooks.json").read_text(encoding="utf-8"))
+    # 'hooks' key is removed since it would be empty; other keys preserved.
+    assert data == {"model": "gpt-5"}
+
+
+def test_uninstall_codex_idempotent(tmp_home):
+    install_codex()
+    assert uninstall_codex() is True
+    assert uninstall_codex() is False
+    assert uninstall_codex() is False
+
+
+def test_uninstall_codex_aborts_on_unparseable_json(tmp_home):
+    codex_dir = tmp_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    bad_bytes = b"{this is not: json,,"
+    (codex_dir / "hooks.json").write_bytes(bad_bytes)
+
+    with pytest.raises(InstallCoachError) as exc_info:
+        uninstall_codex()
+
+    assert (codex_dir / "hooks.json").read_bytes() == bad_bytes
+    msg = str(exc_info.value)
+    assert "not valid JSON" in msg
+    assert "praxis uninstall-coach" in msg
+
+
+def test_uninstall_codex_aborts_when_top_level_not_object(tmp_home):
+    codex_dir = tmp_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "hooks.json").write_text("[1, 2, 3]", encoding="utf-8")
+
+    with pytest.raises(InstallCoachError) as exc_info:
+        uninstall_codex()
+
+    assert "JSON object" in str(exc_info.value)
+    assert (codex_dir / "hooks.json").read_text(encoding="utf-8") == "[1, 2, 3]"
+
+
+def test_uninstall_codex_no_op_when_hooks_missing(tmp_home):
+    """hooks.json with unrelated keys but no 'hooks' key -> False, no writes."""
+    codex_dir = tmp_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "hooks.json").write_text(
+        json.dumps({"model": "gpt-5"}), encoding="utf-8"
+    )
+    original_bytes = (codex_dir / "hooks.json").read_bytes()
+    assert uninstall_codex() is False
+    assert (codex_dir / "hooks.json").read_bytes() == original_bytes
+
+
+def test_uninstall_codex_home_override(tmp_path):
+    other = tmp_path / "alt"
+    other.mkdir()
+    install_codex(home=other)
+    assert uninstall_codex(home=other) is True
+    assert (other / ".codex" / "hooks.json").exists() is False
+
+
+# ---------------------------------------------------------------------------
+# Per-tool uninstall: Copilot workspace surface.
+# ---------------------------------------------------------------------------
+
+
+def test_uninstall_copilot_workspace_returns_false_on_absent_file(tmp_path):
+    assert not (tmp_path / ".github" / "copilot-instructions.md").exists()
+    assert uninstall_copilot_workspace(cwd=tmp_path) is False
+    # Did not create the file as a side effect.
+    assert not (tmp_path / ".github" / "copilot-instructions.md").exists()
+
+
+def test_uninstall_copilot_workspace_returns_false_when_no_markers(tmp_path):
+    """File exists but has no praxisManaged block -> False, no writes."""
+    target_dir = tmp_path / ".github"
+    target_dir.mkdir()
+    target = target_dir / "copilot-instructions.md"
+    user_content = "# User Instructions\n\nNo praxis content here.\n"
+    target.write_text(user_content, encoding="utf-8")
+    original_bytes = target.read_bytes()
+
+    assert uninstall_copilot_workspace(cwd=tmp_path) is False
+    # File untouched byte-for-byte.
+    assert target.read_bytes() == original_bytes
+
+
+def test_uninstall_copilot_workspace_deletes_file_when_only_praxis_block(
+    tmp_path,
+):
+    """A file containing only the praxis block is deleted on uninstall."""
+    install_copilot_workspace(cwd=tmp_path)
+    target = tmp_path / ".github" / "copilot-instructions.md"
+    assert target.exists()
+
+    assert uninstall_copilot_workspace(cwd=tmp_path) is True
+    assert not target.exists()
+
+
+def test_uninstall_copilot_workspace_preserves_surrounding_content_byte_level(
+    tmp_path,
+):
+    """User content outside the markers must be preserved byte-for-byte.
+
+    The leading and trailing slices of the file must be bit-identical
+    after uninstall; only the block (and the preceding blank-line
+    separator) is removed.
+    """
+    target_dir = tmp_path / ".github"
+    target_dir.mkdir()
+    target = target_dir / "copilot-instructions.md"
+    leading = (
+        "# Project Instructions\n"
+        "\n"
+        "Be concise. Use type hints.\n"
+    )
+    trailing = (
+        "\n"
+        "## Style Guide\n"
+        "- 80-char line limit\n"
+    )
+    target.write_text(leading + trailing, encoding="utf-8")
+
+    install_copilot_workspace(cwd=tmp_path)
+    # Sanity: install inserted our block.
+    assert COPILOT_MARKER_BEGIN in target.read_text(encoding="utf-8")
+
+    uninstall_copilot_workspace(cwd=tmp_path)
+
+    final = target.read_text(encoding="utf-8")
+    # Praxis content is fully gone.
+    assert COPILOT_MARKER_BEGIN not in final
+    assert COPILOT_MARKER_END not in final
+    assert "praxis commit" not in final
+    # The original surrounding bytes are preserved.
+    assert leading in final
+    assert trailing in final
+
+
+def test_uninstall_copilot_workspace_idempotent(tmp_path):
+    install_copilot_workspace(cwd=tmp_path)
+    assert uninstall_copilot_workspace(cwd=tmp_path) is True
+    assert uninstall_copilot_workspace(cwd=tmp_path) is False
+    assert uninstall_copilot_workspace(cwd=tmp_path) is False
+
+
+def test_uninstall_copilot_workspace_preserves_user_block_at_start(tmp_path):
+    """An existing managed block at start of file removes the block + trailing newline."""
+    target_dir = tmp_path / ".github"
+    target_dir.mkdir()
+    target = target_dir / "copilot-instructions.md"
+    # Praxis block at start, user content after.
+    install_copilot_workspace(cwd=tmp_path)
+    block_content = target.read_text(encoding="utf-8")
+    # Append some user-authored content.
+    target.write_text(
+        block_content + "## User notes\nBe nice.\n", encoding="utf-8"
+    )
+
+    assert uninstall_copilot_workspace(cwd=tmp_path) is True
+
+    final = target.read_text(encoding="utf-8")
+    assert COPILOT_MARKER_BEGIN not in final
+    assert "User notes" in final
+    assert "Be nice." in final
+
+
+# ---------------------------------------------------------------------------
+# Per-tool uninstall: Copilot user-level (prompt file + settings.json).
+# ---------------------------------------------------------------------------
+
+
+def test_uninstall_copilot_user_level_returns_false_on_clean_home(
+    tmp_home, force_darwin
+):
+    """No prompt file and no settings entry -> False, no writes."""
+    user_dir = _darwin_user_dir(tmp_home)
+    assert not user_dir.exists()
+    assert uninstall_copilot_user_level() is False
+    assert not user_dir.exists()
+
+
+def test_uninstall_copilot_user_level_after_install_returns_true(
+    tmp_home, force_darwin
+):
+    install_copilot_user_level()
+    assert uninstall_copilot_user_level() is True
+
+
+def test_uninstall_copilot_user_level_deletes_prompt_file(
+    tmp_home, force_darwin
+):
+    install_copilot_user_level()
+    user_dir = _darwin_user_dir(tmp_home)
+    prompt_path = user_dir / "prompts" / COPILOT_INSTRUCTION_FILENAME
+    assert prompt_path.exists()
+
+    uninstall_copilot_user_level()
+    assert not prompt_path.exists()
+
+
+def test_uninstall_copilot_user_level_removes_settings_entry(
+    tmp_home, force_darwin
+):
+    """The praxis prompts-dir entry is dropped from chat.instructionsFilesLocations."""
+    install_copilot_user_level()
+    user_dir = _darwin_user_dir(tmp_home)
+    settings_path = user_dir / "settings.json"
+    prompts_dir = user_dir / "prompts"
+
+    uninstall_copilot_user_level()
+
+    data = json.loads(settings_path.read_text(encoding="utf-8"))
+    # Our key is gone; the locations key is removed entirely since it became empty.
+    assert COPILOT_SETTINGS_KEY not in data
+
+
+def test_uninstall_copilot_user_level_preserves_other_locations(
+    tmp_home, force_darwin
+):
+    """Existing entries in chat.instructionsFilesLocations survive uninstall."""
+    user_dir = _darwin_user_dir(tmp_home)
+    user_dir.mkdir(parents=True)
+    existing = {
+        COPILOT_SETTINGS_KEY: {"/Users/other/prompts": True},
+    }
+    (user_dir / "settings.json").write_text(
+        json.dumps(existing), encoding="utf-8"
+    )
+    install_copilot_user_level()
+    uninstall_copilot_user_level()
+
+    data = json.loads((user_dir / "settings.json").read_text(encoding="utf-8"))
+    # Our entry gone; the other one remains.
+    locations = data[COPILOT_SETTINGS_KEY]
+    assert locations == {"/Users/other/prompts": True}
+
+
+def test_uninstall_copilot_user_level_preserves_other_settings_keys(
+    tmp_home, force_darwin
+):
+    """Unrelated settings (editor, files, etc.) survive uninstall."""
+    user_dir = _darwin_user_dir(tmp_home)
+    user_dir.mkdir(parents=True)
+    existing = {
+        "editor.fontSize": 14,
+        "files.autoSave": "onFocusChange",
+    }
+    (user_dir / "settings.json").write_text(
+        json.dumps(existing), encoding="utf-8"
+    )
+    install_copilot_user_level()
+    uninstall_copilot_user_level()
+
+    data = json.loads((user_dir / "settings.json").read_text(encoding="utf-8"))
+    assert data["editor.fontSize"] == 14
+    assert data["files.autoSave"] == "onFocusChange"
+    assert COPILOT_SETTINGS_KEY not in data
+
+
+def test_uninstall_copilot_user_level_keeps_settings_file_when_empty(
+    tmp_home, force_darwin
+):
+    """settings.json is NOT deleted even when our entry was the only key.
+
+    Reason: the user-level VS Code settings file may be expected to
+    exist by other tooling; deleting it is too presumptuous.
+    """
+    install_copilot_user_level()
+    user_dir = _darwin_user_dir(tmp_home)
+    settings_path = user_dir / "settings.json"
+    assert settings_path.exists()
+
+    uninstall_copilot_user_level()
+
+    assert settings_path.exists()
+    # And the file is valid JSON: just {} or close to it.
+    data = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert isinstance(data, dict)
+
+
+def test_uninstall_copilot_user_level_idempotent(tmp_home, force_darwin):
+    install_copilot_user_level()
+    assert uninstall_copilot_user_level() is True
+    assert uninstall_copilot_user_level() is False
+    assert uninstall_copilot_user_level() is False
+
+
+def test_uninstall_copilot_user_level_aborts_on_unparseable_settings(
+    tmp_home, force_darwin
+):
+    """Unparseable user settings.json -> InstallCoachError + settings untouched."""
+    user_dir = _darwin_user_dir(tmp_home)
+    user_dir.mkdir(parents=True)
+    bad_bytes = b"{not valid json,,"
+    (user_dir / "settings.json").write_bytes(bad_bytes)
+    # Need to have *something* to uninstall, otherwise we short-circuit.
+    # Create the prompt file so the function proceeds to read settings.json.
+    (user_dir / "prompts").mkdir(parents=True)
+    (user_dir / "prompts" / COPILOT_INSTRUCTION_FILENAME).write_text(
+        "praxis prompt", encoding="utf-8"
+    )
+
+    with pytest.raises(InstallCoachError) as exc_info:
+        uninstall_copilot_user_level()
+
+    msg = str(exc_info.value)
+    assert "not valid JSON" in msg
+    assert "praxis uninstall-coach" in msg
+    # File is untouched on disk.
+    assert (user_dir / "settings.json").read_bytes() == bad_bytes
+
+
+def test_uninstall_copilot_user_level_home_override(tmp_path, force_darwin):
+    other = tmp_path / "alt-home"
+    other.mkdir()
+    install_copilot_user_level(home=other)
+    assert uninstall_copilot_user_level(home=other) is True
+
+
+# ---------------------------------------------------------------------------
+# detect_managed_* helpers (drive default uninstall flow).
+# ---------------------------------------------------------------------------
+
+
+def test_detect_managed_claude_code_false_when_settings_absent(tmp_home):
+    assert detect_managed_claude_code() is False
+
+
+def test_detect_managed_claude_code_false_when_only_user_blocks(tmp_home):
+    settings = tmp_home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(
+        json.dumps(
+            {"hooks": {"SessionStart": [{"matcher": "*", "hooks": []}]}}
+        ),
+        encoding="utf-8",
+    )
+    assert detect_managed_claude_code() is False
+
+
+def test_detect_managed_claude_code_true_after_install(tmp_home):
+    install_claude_code()
+    assert detect_managed_claude_code() is True
+
+
+def test_detect_managed_codex_false_when_hooks_absent(tmp_home):
+    assert detect_managed_codex() is False
+
+
+def test_detect_managed_codex_false_when_only_user_entries(tmp_home):
+    codex_dir = tmp_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "hooks.json").write_text(
+        json.dumps({"hooks": [{"event": "SessionStart", "command": "echo"}]}),
+        encoding="utf-8",
+    )
+    assert detect_managed_codex() is False
+
+
+def test_detect_managed_codex_true_after_install(tmp_home):
+    install_codex()
+    assert detect_managed_codex() is True
+
+
+def test_detect_managed_copilot_false_when_nothing_present(
+    tmp_home, tmp_cwd, force_darwin
+):
+    assert detect_managed_copilot() is False
+
+
+def test_detect_managed_copilot_true_when_workspace_block_present(
+    tmp_home, tmp_cwd, force_darwin
+):
+    install_copilot_workspace()
+    assert detect_managed_copilot() is True
+
+
+def test_detect_managed_copilot_true_when_user_prompt_file_present(
+    tmp_home, tmp_cwd, force_darwin
+):
+    install_copilot_user_level()
+    assert detect_managed_copilot() is True
+
+
+def test_detect_managed_tools_returns_canonical_order(
+    tmp_home, tmp_cwd, force_darwin
+):
+    install_codex()
+    install_claude_code()
+    install_copilot_workspace()
+    assert detect_managed_tools() == [
+        TOOL_CLAUDE_CODE,
+        TOOL_CODEX,
+        TOOL_COPILOT,
+    ]
+
+
+def test_detect_managed_tools_empty_on_clean_home(
+    tmp_home, tmp_cwd, force_darwin
+):
+    assert detect_managed_tools() == []
+
+
+# ---------------------------------------------------------------------------
+# Deep-equal symmetry: install -> uninstall -> install reproduces the bytes
+# of a fresh install on a clean machine.
+# ---------------------------------------------------------------------------
+
+
+def test_symmetry_claude_install_uninstall_install(tmp_home):
+    """install -> uninstall -> install produces deep-equal config (Claude Code)."""
+    install_claude_code()
+    settings = tmp_home / ".claude" / "settings.json"
+    fresh_bytes = settings.read_bytes()
+    uninstall_claude_code()
+    # After uninstall the file is gone (clean-machine-equivalent state).
+    assert not settings.exists()
+    install_claude_code()
+    # Bytes match the original fresh install exactly.
+    assert settings.read_bytes() == fresh_bytes
+
+
+def test_symmetry_codex_install_uninstall_install(tmp_home):
+    install_codex()
+    hooks = tmp_home / ".codex" / "hooks.json"
+    fresh_bytes = hooks.read_bytes()
+    uninstall_codex()
+    assert not hooks.exists()
+    install_codex()
+    assert hooks.read_bytes() == fresh_bytes
+
+
+def test_symmetry_copilot_workspace_install_uninstall_install(tmp_path):
+    install_copilot_workspace(cwd=tmp_path)
+    target = tmp_path / ".github" / "copilot-instructions.md"
+    fresh_bytes = target.read_bytes()
+    uninstall_copilot_workspace(cwd=tmp_path)
+    assert not target.exists()
+    install_copilot_workspace(cwd=tmp_path)
+    assert target.read_bytes() == fresh_bytes
+
+
+def test_symmetry_copilot_user_level_install_uninstall_install(
+    tmp_home, force_darwin
+):
+    install_copilot_user_level()
+    user_dir = _darwin_user_dir(tmp_home)
+    prompt_path = user_dir / "prompts" / COPILOT_INSTRUCTION_FILENAME
+    settings_path = user_dir / "settings.json"
+    fresh_prompt = prompt_path.read_bytes()
+    fresh_settings = json.loads(settings_path.read_text(encoding="utf-8"))
+
+    uninstall_copilot_user_level()
+    assert not prompt_path.exists()
+    # settings.json kept (per the "user-level VS Code settings file" rule).
+    assert settings_path.exists()
+
+    install_copilot_user_level()
+    # The prompt file matches the fresh install bytes.
+    assert prompt_path.read_bytes() == fresh_prompt
+    # The settings dict is deep-equal to the fresh install.
+    assert json.loads(settings_path.read_text(encoding="utf-8")) == fresh_settings
+
+
+def test_symmetry_claude_preserves_user_content_across_round_trip(tmp_home):
+    """User content survives install -> uninstall -> install unchanged."""
+    settings = tmp_home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    user_subagent = {
+        "matcher": "*",
+        "hooks": [{"type": "command", "command": "echo user-subagent"}],
+    }
+    user_state = {
+        "theme": "dark",
+        "hooks": {"SubagentStop": [user_subagent]},
+    }
+    settings.write_text(json.dumps(user_state), encoding="utf-8")
+
+    install_claude_code()
+    uninstall_claude_code()
+    # User content remains intact post-uninstall.
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    assert data["theme"] == "dark"
+    assert data["hooks"]["SubagentStop"] == [user_subagent]
+
+
+# ---------------------------------------------------------------------------
+# CLI integration: ``praxis uninstall-coach``.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_uninstall_coach_nothing_to_uninstall_when_never_installed(
+    tmp_home, tmp_cwd, capsys, force_darwin, no_copilot
+):
+    """Clean machine: 'Nothing to uninstall.' printed, exit 0, no file writes."""
+    code = main(["uninstall-coach"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Nothing to uninstall." in out
+    # No files were created as a side effect.
+    assert not (tmp_home / ".claude" / "settings.json").exists()
+    assert not (tmp_home / ".codex" / "hooks.json").exists()
+    assert not (tmp_cwd / ".github" / "copilot-instructions.md").exists()
+
+
+def test_cli_uninstall_coach_removes_claude_with_tool_flag(
+    tmp_home, capsys, no_copilot
+):
+    install_claude_code()
+    assert (tmp_home / ".claude" / "settings.json").exists()
+
+    code = main(["uninstall-coach", "--tool", "claude-code", "--yes"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Removed Claude Code coaching hook." in out
+    assert not (tmp_home / ".claude" / "settings.json").exists()
+
+
+def test_cli_uninstall_coach_removes_codex_with_tool_flag(
+    tmp_home, capsys, no_copilot
+):
+    install_codex()
+    assert (tmp_home / ".codex" / "hooks.json").exists()
+
+    code = main(["uninstall-coach", "--tool", "codex", "--yes"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Removed Codex coaching hook." in out
+    assert not (tmp_home / ".codex" / "hooks.json").exists()
+
+
+def test_cli_uninstall_coach_removes_copilot_with_tool_flag(
+    tmp_home, tmp_cwd, capsys, force_darwin, no_copilot
+):
+    install_copilot_workspace()
+    install_copilot_user_level()
+
+    code = main(["uninstall-coach", "--tool", "copilot", "--yes"])
+    out = capsys.readouterr().out
+    assert code == 0
+    # Both surfaces report removal.
+    assert "Removed Copilot workspace surface." in out
+    assert "Removed Copilot user-level surface." in out
+    # Files are gone.
+    assert not (tmp_cwd / ".github" / "copilot-instructions.md").exists()
+    user_dir = _darwin_user_dir(tmp_home)
+    assert not (user_dir / "prompts" / COPILOT_INSTRUCTION_FILENAME).exists()
+
+
+def test_cli_uninstall_coach_default_flow_only_prompts_managed_tools(
+    tmp_home, capsys, no_copilot
+):
+    """Default flow only prompts for tools that actually have Praxis content."""
+    install_claude_code()
+    # Codex was never installed; default flow should not prompt for it.
+
+    code = main(["uninstall-coach", "--yes"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Removed Claude Code coaching hook." in out
+    # Codex confirmation message should NOT appear since it wasn't detected.
+    assert "Removed Codex coaching hook." not in out
+
+
+def test_cli_uninstall_coach_prompts_per_tool(
+    tmp_home, monkeypatch, capsys, no_copilot
+):
+    """Without --yes, the per-tool prompt is shown for each managed tool."""
+    install_claude_code()
+    seen: list[str] = []
+
+    def _input(prompt):
+        seen.append(prompt)
+        return "y"
+
+    monkeypatch.setattr("builtins.input", _input)
+    code = main(["uninstall-coach"])
+    capsys.readouterr()
+    assert code == 0
+    assert len(seen) == 1
+    assert "Found Praxis coaching hook in Claude Code." in seen[0]
+    assert "Remove? [Y/n]:" in seen[0]
+
+
+def test_cli_uninstall_coach_prompt_default_yes(
+    tmp_home, monkeypatch, capsys, no_copilot
+):
+    """Empty input at the uninstall prompt is treated as YES (default-Y)."""
+    install_claude_code()
+    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+    code = main(["uninstall-coach"])
+    capsys.readouterr()
+    assert code == 0
+    assert not (tmp_home / ".claude" / "settings.json").exists()
+
+
+def test_cli_uninstall_coach_explicit_no_skips_removal(
+    tmp_home, monkeypatch, capsys, no_copilot
+):
+    install_claude_code()
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+    code = main(["uninstall-coach"])
+    out = capsys.readouterr().out
+    assert code == 0
+    # The praxis content is still there because the user declined removal.
+    assert (tmp_home / ".claude" / "settings.json").exists()
+    # And since no removal occurred, "Nothing to uninstall." is printed.
+    assert "Nothing to uninstall." in out
+
+
+def test_cli_uninstall_coach_eof_treated_as_no(
+    tmp_home, monkeypatch, capsys, no_copilot
+):
+    install_claude_code()
+
+    def _eof(_prompt):
+        raise EOFError()
+
+    monkeypatch.setattr("builtins.input", _eof)
+    code = main(["uninstall-coach"])
+    capsys.readouterr()
+    assert code == 0
+    # User implicitly declined; file should still be there.
+    assert (tmp_home / ".claude" / "settings.json").exists()
+
+
+def test_cli_uninstall_coach_yes_flag_skips_prompts(
+    tmp_home, monkeypatch, capsys, no_copilot
+):
+    install_claude_code()
+    install_codex()
+
+    def _input(_prompt):
+        raise AssertionError("--yes should skip prompts")
+
+    monkeypatch.setattr("builtins.input", _input)
+    code = main(["uninstall-coach", "--yes"])
+    capsys.readouterr()
+    assert code == 0
+    assert not (tmp_home / ".claude" / "settings.json").exists()
+    assert not (tmp_home / ".codex" / "hooks.json").exists()
+
+
+def test_cli_uninstall_coach_all_flag_iterates_all_tools(
+    tmp_home, capsys, no_copilot
+):
+    """--all attempts uninstall on every tool, even those not detected."""
+    install_codex()  # only Codex; Claude and Copilot are absent.
+
+    code = main(["uninstall-coach", "--all", "--yes"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Removed Codex coaching hook." in out
+    # Claude and Copilot were no-ops; they are not in the "Removed" output.
+    assert "Removed Claude Code coaching hook." not in out
+    assert "Removed Copilot" not in out
+
+
+def test_cli_uninstall_coach_tool_rejects_unknown_tool(tmp_home, capsys):
+    code = main(["uninstall-coach", "--tool", "bogus", "--yes"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "Unknown --tool 'bogus'" in err
+    assert "claude-code" in err
+    assert "codex" in err
+    assert "copilot" in err
+
+
+def test_cli_uninstall_coach_all_and_tool_mutually_exclusive(tmp_home, capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["uninstall-coach", "--all", "--tool", "codex"])
+    assert exc_info.value.code != 0
+
+
+def test_cli_uninstall_coach_unparseable_claude_prints_error_continues(
+    tmp_home, capsys, no_copilot
+):
+    """Unparseable settings.json -> stderr message, CLI still exits 0.
+
+    A bad config for one tool must not block uninstalling another.
+    """
+    settings = tmp_home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text("not-json", encoding="utf-8")
+
+    code = main(["uninstall-coach", "--tool", "claude-code", "--yes"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "not valid JSON" in captured.err
+    # File NOT overwritten.
+    assert settings.read_text(encoding="utf-8") == "not-json"
+
+
+def test_cli_uninstall_coach_nothing_to_uninstall_when_user_declines(
+    tmp_home, monkeypatch, capsys, no_copilot
+):
+    """If the user declines all prompts and nothing was removed, 'Nothing to uninstall.' is printed."""
+    install_claude_code()
+    install_codex()
+
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+    code = main(["uninstall-coach"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Nothing to uninstall." in out
+    # Files still present.
+    assert (tmp_home / ".claude" / "settings.json").exists()
+    assert (tmp_home / ".codex" / "hooks.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Programmatic API (run_uninstall_coach).
+# ---------------------------------------------------------------------------
+
+
+def test_run_uninstall_coach_assume_yes_iterates_detected(
+    tmp_home, capsys, no_copilot
+):
+    install_codex()
+    code = run_uninstall_coach(assume_yes=True)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Removed Codex coaching hook." in out
+    assert not (tmp_home / ".codex" / "hooks.json").exists()
+
+
+def test_run_uninstall_coach_no_detection_returns_zero(
+    tmp_home, tmp_cwd, capsys, force_darwin, no_copilot
+):
+    code = run_uninstall_coach()
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Nothing to uninstall." in out

@@ -1,4 +1,4 @@
-"""``praxis install-coach`` -- per-tool coaching hook installer.
+"""``praxis install-coach`` / ``praxis uninstall-coach`` -- per-tool coaching hooks.
 
 The coaching hooks fire on SessionStart and Stop in the supported AI
 coding tools (Claude Code, Codex, Copilot) so Praxis can surface the
@@ -8,7 +8,10 @@ in the Claude Code branch with a real settings.json merger (atomic
 write, sentinel-tagged blocks); US-030 fills in the Codex branch with
 a parallel installer that writes ``~/.codex/hooks.json``; US-031 fills
 in the Copilot branch with a workspace-level markdown injector and an
-optional user-level prompt-file + settings.json patcher.
+optional user-level prompt-file + settings.json patcher; US-032
+provides the symmetric ``uninstall-coach`` command that removes ONLY
+the Praxis-authored blocks/entries (sentinel for JSON; markers for
+markdown) so user content at the same surfaces is preserved.
 
 Detection criteria (AC US-028):
   - Claude Code: ``~/.claude/settings.json`` OR ``~/.claude/projects/``
@@ -779,4 +782,493 @@ def run_install_coach(
     for t in targets:
         if assume_yes or _prompt_yes(display_name(t)):
             install_for_tool(t, assume_yes=assume_yes)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# US-032: ``praxis uninstall-coach`` -- symmetric teardown.
+#
+# The uninstall surfaces are deliberately parallel to the install surfaces:
+# one per-tool removal function returning ``bool`` (whether anything was
+# removed), a dispatcher, and a ``run_uninstall_coach`` orchestrator that
+# mirrors :func:`run_install_coach`'s ``--yes`` / ``--tool`` / ``--all``
+# flag semantics.
+#
+# The key invariants (AC US-032):
+#   - Only blocks/entries carrying the :data:`SENTINEL` (Claude, Codex) or
+#     the markdown markers (Copilot) are removed; user-authored content
+#     at the same event/path is preserved unchanged.
+#   - On a system where Praxis was never installed, the command prints
+#     ``Nothing to uninstall.`` and exits 0 without any file writes.
+#   - Deep-equal symmetry: install -> uninstall -> install reproduces the
+#     bytes of a fresh install on a clean machine. This drives the
+#     "delete the file when its content would be empty after removal"
+#     branches in :func:`uninstall_claude_code` /
+#     :func:`uninstall_codex` / :func:`uninstall_copilot_workspace`.
+# ---------------------------------------------------------------------------
+
+
+def _read_json_settings(
+    path: Path, *, tool_label: str
+) -> dict[str, Any] | None:
+    """Read a JSON settings file or return ``None`` if absent/empty.
+
+    Raises :class:`InstallCoachError` with a clear message when the file
+    is unparseable JSON or its top-level value is not a JSON object.
+    Mirrors the install-side parse/validate so uninstall never overwrites
+    a malformed config silently. ``tool_label`` is used in the error
+    message to point the user at the offending file.
+    """
+    if not path.exists():
+        return None
+    raw = path.read_text(encoding="utf-8")
+    if raw.strip() == "":
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise InstallCoachError(
+            f"Cannot uninstall {tool_label} hooks: {path} is not valid "
+            f"JSON ({exc.msg} at line {exc.lineno} column {exc.colno}). "
+            "Fix the file manually and re-run `praxis uninstall-coach`."
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise InstallCoachError(
+            f"Cannot uninstall {tool_label} hooks: {path} top level must "
+            f"be a JSON object, got {type(parsed).__name__}. Fix the "
+            "file manually and re-run `praxis uninstall-coach`."
+        )
+    return parsed
+
+
+def uninstall_claude_code(home: Path | None = None) -> bool:
+    """Remove Praxis-managed Claude Code hooks from settings.json.
+
+    Walks the ``hooks`` dict, dropping any block whose top level carries
+    ``_praxisManaged: true``. Empty event lists are pruned; an empty
+    ``hooks`` dict is removed entirely; if the resulting top-level dict
+    is empty (i.e. Praxis was the only thing in the file), the file is
+    deleted so a subsequent ``install-coach`` reproduces the bytes of a
+    fresh-on-clean-machine install (deep-equal symmetry).
+    Returns True iff anything was removed.
+    """
+    settings_path = claude_settings_path(home)
+    data = _read_json_settings(settings_path, tool_label="Claude Code")
+    if data is None:
+        return False
+
+    raw_hooks = data.get("hooks")
+    if not isinstance(raw_hooks, dict):
+        return False
+
+    removed = False
+    new_hooks: dict[str, Any] = {}
+    for event, entries in raw_hooks.items():
+        if not isinstance(entries, list):
+            new_hooks[event] = entries
+            continue
+        kept = [
+            entry
+            for entry in entries
+            if not (isinstance(entry, dict) and entry.get(SENTINEL) is True)
+        ]
+        if len(kept) != len(entries):
+            removed = True
+        if kept:
+            new_hooks[event] = kept
+
+    if not removed:
+        return False
+
+    if new_hooks:
+        data["hooks"] = new_hooks
+    else:
+        data.pop("hooks", None)
+
+    if not data:
+        try:
+            settings_path.unlink()
+        except FileNotFoundError:
+            pass
+        return True
+
+    _atomic_write_json(settings_path, data)
+    return True
+
+
+def uninstall_codex(home: Path | None = None) -> bool:
+    """Remove Praxis-managed Codex hooks from hooks.json.
+
+    Filters the ``hooks`` list, dropping entries whose top level carries
+    ``_praxisManaged: true``. If the resulting list is empty, the
+    ``hooks`` key is removed; if the resulting top-level dict is empty,
+    the file is deleted (deep-equal symmetry for fresh-on-clean install).
+    Returns True iff anything was removed.
+    """
+    hooks_path = codex_hooks_path(home)
+    data = _read_json_settings(hooks_path, tool_label="Codex")
+    if data is None:
+        return False
+
+    raw_hooks = data.get("hooks")
+    if not isinstance(raw_hooks, list):
+        return False
+
+    kept = [
+        entry
+        for entry in raw_hooks
+        if not (isinstance(entry, dict) and entry.get(SENTINEL) is True)
+    ]
+    if len(kept) == len(raw_hooks):
+        return False
+
+    if kept:
+        data["hooks"] = kept
+    else:
+        data.pop("hooks", None)
+
+    if not data:
+        try:
+            hooks_path.unlink()
+        except FileNotFoundError:
+            pass
+        return True
+
+    _atomic_write_json(hooks_path, data)
+    return True
+
+
+def _remove_copilot_block(content: str) -> tuple[str, bool]:
+    """Strip the markers-bounded Praxis block, preserving surrounding bytes.
+
+    Returns ``(new_content, removed)``. If no markers are present the
+    content is returned unchanged with ``removed=False``. If the block
+    is found, the preceding blank-line separator (``\\n\\n``) is also
+    trimmed so the file does not retain a stray gap where the block used
+    to live; if the block is at the start of the file, a trailing
+    newline directly after the end marker is consumed instead so the
+    file still ends cleanly.
+    """
+    begin = content.find(COPILOT_MARKER_BEGIN)
+    if begin == -1:
+        return content, False
+    end = content.find(COPILOT_MARKER_END, begin)
+    if end == -1:
+        # Truncated block (no end marker). Drop from begin to EOF -- the
+        # alternative (leaving the dangling begin marker) is worse because
+        # the file would still "look praxis-managed" to detect_managed().
+        new_content = content[:begin]
+        # Trim a single leading separator if present.
+        if new_content.endswith("\n\n"):
+            new_content = new_content[:-1]
+        return new_content, True
+
+    after = end + len(COPILOT_MARKER_END)
+    leading = content[:begin]
+    trailing = content[after:]
+
+    if leading.endswith("\n\n"):
+        # User content + blank line + our block; drop one of the newlines
+        # so the surrounding content keeps its trailing single newline.
+        leading = leading[:-1]
+    elif not leading and trailing.startswith("\n"):
+        # Block at start of file with a trailing newline directly after
+        # the end marker -- consume that newline so we don't end up with
+        # a stray leading newline.
+        trailing = trailing[1:]
+
+    return leading + trailing, True
+
+
+def uninstall_copilot_workspace(cwd: Path | None = None) -> bool:
+    """Remove the workspace-level Copilot block from copilot-instructions.md.
+
+    If the file does not exist or has no markers, returns False without
+    writes. If the markers are found, removes the block (preserving
+    surrounding bytes per :func:`_remove_copilot_block`). If the file
+    becomes empty (or only whitespace), it is deleted so a subsequent
+    ``install-coach`` produces deep-equal bytes to a clean-machine
+    install. Returns True iff anything was removed.
+    """
+    target = copilot_workspace_path(cwd)
+    if not target.exists():
+        return False
+    existing = target.read_text(encoding="utf-8")
+    new_content, removed = _remove_copilot_block(existing)
+    if not removed:
+        return False
+    if new_content.strip() == "":
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+        return True
+    _atomic_write_text(target, new_content)
+    return True
+
+
+def uninstall_copilot_user_level(home: Path | None = None) -> bool:
+    """Remove the user-level Copilot prompt file + settings.json entry.
+
+    Deletes ``<vscode-user-dir>/prompts/praxis-commitment.instructions.md``
+    if present, and removes the prompts-dir entry from
+    ``chat.instructionsFilesLocations`` in user-level ``settings.json``.
+    If the locations dict becomes empty, the whole key is removed. The
+    settings.json file itself is NOT deleted even if it becomes
+    ``{}`` -- a user-level VS Code settings file may be expected to
+    exist by other tooling, and deleting it is too presumptuous.
+    Returns True iff anything was removed (prompt file or settings
+    entry).
+
+    Raises :class:`InstallCoachError` when the existing settings.json is
+    unparseable JSON or non-object top-level (mirrors the install-side
+    behavior so uninstall never overwrites a malformed config).
+    """
+    user_dir = vscode_user_dir(home)
+    prompts_dir = user_dir / "prompts"
+    prompt_path = prompts_dir / COPILOT_INSTRUCTION_FILENAME
+
+    removed = False
+    if prompt_path.exists():
+        try:
+            prompt_path.unlink()
+            removed = True
+        except FileNotFoundError:
+            pass
+
+    settings_path = user_dir / "settings.json"
+    settings_data = _read_json_settings(
+        settings_path, tool_label="Copilot user-level"
+    )
+    if settings_data is None:
+        return removed
+
+    locations = settings_data.get(COPILOT_SETTINGS_KEY)
+    if not isinstance(locations, dict):
+        return removed
+
+    prompts_key = str(prompts_dir)
+    if prompts_key not in locations:
+        return removed
+
+    locations.pop(prompts_key, None)
+    removed = True
+    if locations:
+        settings_data[COPILOT_SETTINGS_KEY] = locations
+    else:
+        settings_data.pop(COPILOT_SETTINGS_KEY, None)
+
+    _atomic_write_json(settings_path, settings_data)
+    return True
+
+
+def detect_managed_claude_code(home: Path | None = None) -> bool:
+    """Return True when settings.json carries any sentinel-tagged block.
+
+    Used by :func:`detect_managed_tools` so the default uninstall flow
+    only prompts for tools that actually have Praxis content. Unparseable
+    settings.json returns False (not an error) -- detection is a probe,
+    not a parse-or-die operation; the real install/uninstall path will
+    raise a clear error when the user opts in.
+    """
+    settings_path = claude_settings_path(home)
+    if not settings_path.exists():
+        return False
+    raw = settings_path.read_text(encoding="utf-8")
+    if raw.strip() == "":
+        return False
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    for entries in hooks.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get(SENTINEL) is True:
+                return True
+    return False
+
+
+def detect_managed_codex(home: Path | None = None) -> bool:
+    """Return True when hooks.json carries any sentinel-tagged entry."""
+    hooks_path = codex_hooks_path(home)
+    if not hooks_path.exists():
+        return False
+    raw = hooks_path.read_text(encoding="utf-8")
+    if raw.strip() == "":
+        return False
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    hooks = data.get("hooks")
+    if not isinstance(hooks, list):
+        return False
+    for entry in hooks:
+        if isinstance(entry, dict) and entry.get(SENTINEL) is True:
+            return True
+    return False
+
+
+def detect_managed_copilot(
+    home: Path | None = None, cwd: Path | None = None
+) -> bool:
+    """Return True when any Praxis-managed Copilot artifact is present.
+
+    Checks (a) the workspace copilot-instructions.md for the begin/end
+    markers, (b) the user-level prompt file's existence, and (c) the
+    user-level settings.json for our entry in
+    ``chat.instructionsFilesLocations``. Any of the three makes the tool
+    a candidate for uninstall.
+    """
+    workspace = copilot_workspace_path(cwd)
+    if workspace.exists():
+        content = workspace.read_text(encoding="utf-8")
+        if COPILOT_MARKER_BEGIN in content and COPILOT_MARKER_END in content:
+            return True
+
+    user_dir = vscode_user_dir(home)
+    prompts_dir = user_dir / "prompts"
+    prompt_path = prompts_dir / COPILOT_INSTRUCTION_FILENAME
+    if prompt_path.exists():
+        return True
+
+    settings_path = user_dir / "settings.json"
+    if settings_path.exists():
+        raw = settings_path.read_text(encoding="utf-8")
+        if raw.strip() != "":
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                return False
+            if isinstance(data, dict):
+                locations = data.get(COPILOT_SETTINGS_KEY)
+                if isinstance(locations, dict) and str(prompts_dir) in locations:
+                    return True
+    return False
+
+
+def detect_managed_tools(
+    home: Path | None = None, cwd: Path | None = None
+) -> list[str]:
+    """Return tools that have any Praxis-managed content, in canonical order."""
+    found: list[str] = []
+    if detect_managed_claude_code(home):
+        found.append(TOOL_CLAUDE_CODE)
+    if detect_managed_codex(home):
+        found.append(TOOL_CODEX)
+    if detect_managed_copilot(home=home, cwd=cwd):
+        found.append(TOOL_COPILOT)
+    return found
+
+
+def uninstall_for_tool(tool: str) -> bool:
+    """Per-tool uninstall dispatch.
+
+    Returns True iff anything was actually removed. Errors raised by the
+    per-tool removers are caught and printed to stderr; a bad Claude
+    Code config does not block a Codex uninstall. This mirrors
+    :func:`install_for_tool`'s tolerance of per-tool failures.
+    """
+    label = display_name(tool)
+    if tool == TOOL_CLAUDE_CODE:
+        try:
+            removed = uninstall_claude_code()
+        except InstallCoachError as exc:
+            print(str(exc), file=sys.stderr)
+            return False
+        if removed:
+            print(f"Removed {label} coaching hook.")
+        return removed
+    if tool == TOOL_CODEX:
+        try:
+            removed = uninstall_codex()
+        except InstallCoachError as exc:
+            print(str(exc), file=sys.stderr)
+            return False
+        if removed:
+            print(f"Removed {label} coaching hook.")
+        return removed
+    if tool == TOOL_COPILOT:
+        workspace_removed = uninstall_copilot_workspace()
+        if workspace_removed:
+            print(f"Removed {label} workspace surface.")
+        try:
+            user_removed = uninstall_copilot_user_level()
+        except InstallCoachError as exc:
+            print(str(exc), file=sys.stderr)
+            user_removed = False
+        if user_removed:
+            print(f"Removed {label} user-level surface.")
+        return workspace_removed or user_removed
+    return False
+
+
+def _prompt_uninstall_yes(tool_display: str) -> bool:
+    """Per-tool uninstall prompt (default Y, EOF -> no).
+
+    Parallels :func:`_prompt_yes` so the surface wording stays
+    consistent across install + uninstall.
+    """
+    return _prompt_yes_text(
+        f"Found Praxis coaching hook in {tool_display}. Remove?",
+        default_yes=True,
+    )
+
+
+def run_uninstall_coach(
+    *,
+    assume_yes: bool = False,
+    tool: str | None = None,
+    all_tools: bool = False,
+    home: Path | None = None,
+) -> int:
+    """Top-level orchestrator for ``praxis uninstall-coach``.
+
+    Mirrors :func:`run_install_coach`'s flag semantics:
+      - default flow: detect tools with Praxis-managed content, prompt
+        per tool, remove on yes;
+      - ``--yes``: skip per-tool prompts;
+      - ``--tool NAME``: restrict to one tool;
+      - ``--all``: iterate every known tool regardless of detection.
+
+    The ``Nothing to uninstall.`` message is printed when NO tool had
+    anything to remove (either detected nothing, or all calls returned
+    False). In every case the exit code is 0; the ``--tool NAME``
+    validation error (unknown slug) is the only exit-1 path.
+    """
+    if tool is not None:
+        key = tool.strip().lower()
+        if key not in ALL_TOOLS:
+            valid = ", ".join(ALL_TOOLS)
+            print(
+                f"Unknown --tool {tool!r}: expected one of {valid}.",
+                file=sys.stderr,
+            )
+            return 1
+        targets: list[str] = [key]
+    elif all_tools:
+        targets = list(ALL_TOOLS)
+    else:
+        targets = detect_managed_tools(home=home)
+        if not targets:
+            print("Nothing to uninstall.")
+            return 0
+
+    any_removed = False
+    for t in targets:
+        if assume_yes or _prompt_uninstall_yes(display_name(t)):
+            if uninstall_for_tool(t):
+                any_removed = True
+
+    if not any_removed:
+        print("Nothing to uninstall.")
     return 0
