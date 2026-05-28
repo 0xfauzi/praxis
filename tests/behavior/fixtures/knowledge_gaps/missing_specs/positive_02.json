@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "build a dashboard for our metrics"},
+  {"role": "assistant", "content": "Happy to. Which metrics matter most?"}
+]

@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "I want a metrics page, you know what i mean."},
+  {"role": "assistant", "content": "I want to make sure I do -- which metrics, for which audience?"}
+]

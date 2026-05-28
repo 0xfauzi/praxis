@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Update docs and also deploy, and also run the migration."},
+  {"role": "assistant", "content": "Let me sequence those."}
+]

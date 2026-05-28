@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Fix the cache bug."},
+  {"role": "assistant", "content": "Looking at it now."}
+]

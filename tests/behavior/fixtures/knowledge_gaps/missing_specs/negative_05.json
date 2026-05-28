@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Why does our auth use JWT?"},
+  {"role": "assistant", "content": "JWTs let us avoid server-side session state."}
+]

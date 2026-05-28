@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Refactor the parser, also fix the build, and additionally extend logging."},
+  {"role": "assistant", "content": "Each of those is a separate change -- I will keep them in distinct commits."}
+]

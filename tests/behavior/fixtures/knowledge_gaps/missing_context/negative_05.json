@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "It crashes with this traceback: ZeroDivisionError at line 5."},
+  {"role": "assistant", "content": "Looks like a divide-by-zero -- can you check the divisor?"}
+]

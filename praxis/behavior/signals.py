@@ -23,7 +23,7 @@ We capture this split.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from praxis.models import Session
 
@@ -154,6 +154,155 @@ _ITERATIVE_REFINEMENT = re.compile(
 )
 
 
+# --- Knowledge-gap classifier (US-006) -----------------------------------------
+# Per-user-turn classifier that assigns at most one knowledge-gap subtype.
+# Primary sources for the four subtypes:
+#   - Anthropic Claude Code best practices: "be specific", "give the model
+#     context", and "iterate" -- the explicit listing of *what fails* in a
+#     prompt is the source for missing_context, missing_specs, and
+#     unclear_instructions.
+#   - OpenAI Codex / Responses docs on structured tool-use prompts: too many
+#     bundled tasks in one turn confuses tool selection (multiple_context).
+#   - Shen & Tamkin (2026), "How AI Impacts Skill Formation" (arXiv 2601.20245):
+#     the atrophy pattern of vague, single-shot prompts maps onto these four
+#     subtypes; their 17pp comprehension gap was largest when the user did not
+#     supply context, specs, or specifics.
+#
+# Precedence (highest -> lowest), documented and enforced in
+# `_classify_knowledge_gap`. A turn matching multiple categories is counted
+# only against the highest-precedence one (no double counting):
+#   1. missing_context     -- bare 'this/it/that' referent in a short turn
+#                             with NO anchor (no code block, file extension,
+#                             error class, traceback, or path).
+#   2. missing_specs       -- creation request ("write me...", "build...",
+#                             "create...") with no spec markers (Goal:,
+#                             Acceptance:, requirements, must/should/shall,
+#                             Given/When/Then, inputs/outputs).
+#   3. multiple_context    -- 2+ transition markers ("also", "additionally",
+#                             "on top of that") signalling disparate tasks
+#                             bundled into one turn.
+#   4. unclear_instructions-- vague qualifier phrases ("somehow", "the right
+#                             way/thing/approach", "as needed/appropriate",
+#                             "or whatever", "make X better/nicer", etc.).
+KNOWLEDGE_GAP_KEYS: tuple[str, ...] = (
+    "missing_context",
+    "missing_specs",
+    "multiple_context",
+    "unclear_instructions",
+)
+
+
+def _zero_knowledge_gaps() -> dict[str, int]:
+    """Return a fresh dict with all knowledge-gap subtype keys set to 0."""
+    return {key: 0 for key in KNOWLEDGE_GAP_KEYS}
+
+
+_BARE_REFERENT = re.compile(r"\b(this|it|that)\b", re.IGNORECASE)
+_FILE_EXTENSION = re.compile(
+    r"\b\w+\.(py|js|ts|tsx|jsx|go|rs|java|cpp|c|h|md|yaml|yml|json|toml|"
+    r"sql|html|css|sh|rb|swift|kt|scala|php)\b",
+    re.IGNORECASE,
+)
+_ERROR_CLASS = re.compile(r"\b[A-Z][a-zA-Z]*Error\b")
+_TRACEBACK_MARKER = re.compile(r"\btraceback\b|\bstack\s+trace\b", re.IGNORECASE)
+
+# Length cap for missing_context. Longer turns supply enough text on their own
+# that "this/it/that" usually has a nearby anchor; bare referents in <=100-char
+# turns are the lazy reference pattern Anthropic's "give context" guidance
+# targets.
+_MISSING_CONTEXT_MAX_LEN = 100
+
+
+def _is_missing_context(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped or len(stripped) > _MISSING_CONTEXT_MAX_LEN:
+        return False
+    if not _BARE_REFERENT.search(stripped):
+        return False
+    if "```" in stripped:
+        return False
+    if _ERROR_CLASS.search(stripped):
+        return False
+    if _TRACEBACK_MARKER.search(stripped):
+        return False
+    if _FILE_EXTENSION.search(stripped):
+        return False
+    if "/" in stripped:
+        return False
+    return True
+
+
+_CREATION_REQUEST = re.compile(
+    r"^\s*(please\s+)?(write|make|create|build|generate|implement|design|"
+    r"set\s+up|setup|add|do)\s",
+    re.IGNORECASE,
+)
+_SPEC_MARKERS = re.compile(
+    r"\b(goals?|constraints?|acceptance|criteria|criterion|requirements?|"
+    r"inputs?|outputs?|must|should|shall|out\s+of\s+scope|non[\-\s]?goals?|"
+    r"given|when|then|expected|behaviour|behavior)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_missing_specs(text: str) -> bool:
+    if not _CREATION_REQUEST.match(text):
+        return False
+    if _SPEC_MARKERS.search(text):
+        return False
+    return True
+
+
+_TRANSITION_MARKERS = re.compile(
+    r"\b(also|and\s+also|additionally|on\s+top\s+of\s+that)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_multiple_context(text: str) -> bool:
+    return len(_TRANSITION_MARKERS.findall(text)) >= 2
+
+
+_UNCLEAR_INSTRUCTION_MARKERS = re.compile(
+    r"\b("
+    r"somehow|"
+    r"or\s+whatever|"
+    r"whatever\s+(makes\s+sense|works|you\s+think|you\s+want)|"
+    r"the\s+right\s+(way|thing|approach)|"
+    r"as\s+needed|"
+    r"as\s+appropriate|"
+    r"make\s+(it|this|that|the\s+[a-z]+)\s+(better|nicer|cleaner|prettier)|"
+    r"clean\s+(it|this|that|the\s+[a-z]+)\s+up|"
+    r"nicer|"
+    r"i\s+(dunno|don'?t\s+know)|"
+    r"figure\s+it\s+out|"
+    r"you\s+know\s+what\s+i\s+mean|"
+    r"do\s+(your|the)\s+thing|"
+    r"some\s+kind\s+of|"
+    r"something\s+like"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _classify_knowledge_gap(text: str) -> str | None:
+    """Return the dominant knowledge-gap subtype for one user turn, or None.
+
+    See the precedence comment block above. Each turn contributes at most 1
+    to a single subtype; a turn matching no subtype returns None and leaves
+    every knowledge_gaps key at its previous value.
+    """
+    if _is_missing_context(text):
+        return "missing_context"
+    if _is_missing_specs(text):
+        return "missing_specs"
+    if _is_multiple_context(text):
+        return "multiple_context"
+    if _UNCLEAR_INSTRUCTION_MARKERS.search(text):
+        return "unclear_instructions"
+    return None
+
+
 @dataclass
 class BehavioralSignals:
     """Per-session behavioral features. All counts are over USER turns."""
@@ -188,6 +337,12 @@ class BehavioralSignals:
     error_naming_count: int = 0
     iterative_refinement_count: int = 0
 
+    # --- Expansion (US-006). Knowledge-gap subtype counts. Dict (not nested
+    # dataclass) so dataclasses.asdict + json.dumps round-trip cleanly for
+    # session_scores.signals_json persistence. All four keys are always
+    # present; an empty session yields all-zero values, not an empty dict.
+    knowledge_gaps: dict[str, int] = field(default_factory=_zero_knowledge_gaps)
+
 
 def extract(session: Session) -> BehavioralSignals:
     user_turns = session.user_turns
@@ -208,6 +363,7 @@ def extract(session: Session) -> BehavioralSignals:
             specification_artifact_count=0,
             error_naming_count=0,
             iterative_refinement_count=0,
+            knowledge_gaps=_zero_knowledge_gaps(),
         )
 
     n = len(user_turns)
@@ -221,6 +377,12 @@ def extract(session: Session) -> BehavioralSignals:
     spec_hits = sum(1 for t in user_turns if _SPECIFICATION_ARTIFACT.search(t.content))
     err_hits = sum(1 for t in user_turns if _ERROR_NAMING.search(t.content))
     iter_hits = sum(1 for t in user_turns if _ITERATIVE_REFINEMENT.search(t.content))
+
+    knowledge_gaps = _zero_knowledge_gaps()
+    for t in user_turns:
+        gap = _classify_knowledge_gap(t.content)
+        if gap is not None:
+            knowledge_gaps[gap] += 1
 
     engagement_signals = why_hits + comp_hits + expl_hits
     atrophy_signals = del_hits + out_hits + tel_hits
@@ -245,4 +407,5 @@ def extract(session: Session) -> BehavioralSignals:
         specification_artifact_count=spec_hits,
         error_naming_count=err_hits,
         iterative_refinement_count=iter_hits,
+        knowledge_gaps=knowledge_gaps,
     )

@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "generate a SQL migration"},
+  {"role": "assistant", "content": "From which schema version, to what target shape?"}
+]
