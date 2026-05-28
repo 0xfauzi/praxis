@@ -6,7 +6,7 @@
 -- the primary key on follow_ups in US-002, so the FK resolves cleanly
 -- whether the follow-up row was created pre- or post-US-002.
 
-CREATE TABLE session_reflections (
+CREATE TABLE IF NOT EXISTS session_reflections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_stable_id TEXT NOT NULL,
     follow_up_id INTEGER NOT NULL REFERENCES follow_ups(id),
@@ -15,4 +15,4 @@ CREATE TABLE session_reflections (
     created_at TEXT NOT NULL
 );
 
-CREATE INDEX idx_reflections_follow_up ON session_reflections(follow_up_id);
+CREATE INDEX IF NOT EXISTS idx_reflections_follow_up ON session_reflections(follow_up_id);

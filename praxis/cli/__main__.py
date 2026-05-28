@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import select
 import shutil
 import subprocess
 import sys
@@ -26,10 +27,11 @@ import traceback
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from praxis import __version__
 from praxis.cli.nudge_throttle import is_throttled, record_fire
-from praxis.config import ensure_config_file, load_config
+from praxis.config import ReflectConfig, ensure_config_file, load_config
 from praxis.follow_up import FollowUp
 from praxis.orchestrator import (
     NO_API_KEY_MESSAGE,
@@ -49,7 +51,13 @@ from praxis.scoring.baseline import (
     is_baseline_forming,
 )
 from praxis.scoring.rubric import RUBRIC
-from praxis.storage.profile_store import ProfileStore, resolve_home
+from praxis.storage.profile_store import (
+    ActiveCommitment,
+    MultipleActiveCommitmentsError,
+    ProfileStore,
+    SelfReport,
+    resolve_home,
+)
 
 
 def _weekly_html_path(week_iso: str) -> Path:
@@ -1049,6 +1057,756 @@ def cmd_rubric(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+_REFLECT_PROMPT_HEADER = 'Did you focus on: "{display_text}"'
+_REFLECT_OPTIONS_HINT = "  [y]es / [n]o / [p]artial / [s]kip"
+_REFLECT_NOTE_PROMPT = "Optional one-line note (press Enter to skip): "
+_REFLECT_NO_COMMITMENT_MSG = (
+    "No active commitment this week. Run `praxis commit` to start."
+)
+
+# US-025 (--session-end with stdin payload). The 100ms timeout matches
+# the AC: AI tools post the Stop-hook JSON payload immediately on
+# session end and we must not block them. Notes are user-readable so
+# the digest panel can explain why an opt-out row landed.
+_HOOK_TIMEOUT_SECONDS = 0.1
+_HOOK_PAYLOAD_MISSING_NOTE = "hook payload missing or unparseable"
+_HOOK_PAYLOAD_NO_SESSION_NOTE = "hook payload missing session_id"
+
+# US-026 (threshold gating). When the AI tool's Stop hook fires we
+# only escalate to an interactive prompt if the session was long enough
+# to be worth reflecting on; shorter sessions write a 'skip' row with
+# the corresponding note so opt-outs / nuisance sessions are still
+# counted in the digest panel.
+_TRANSCRIPT_MISSING_NOTE = "transcript missing"
+_SESSION_TOO_SHORT_NOTE = "session too short"
+
+# US-027 (detached child). When the parent process is not attached to a
+# terminal (the Stop-hook case), the prompt is delegated to a detached
+# child that opens /dev/tty (POSIX) or CONIN$/CONOUT$ (Windows) on its
+# own. If the child cannot reach a controlling terminal, it writes a
+# 'parent terminal closed' skip row so the session is still observable.
+_PARENT_TERMINAL_CLOSED_NOTE = "parent terminal closed"
+_SPAWN_FAILED_NOTE = "failed to spawn reflect child"
+
+_SELF_REPORT_BY_CHOICE: dict[str, SelfReport] = {
+    "y": "yes",
+    "yes": "yes",
+    "n": "no",
+    "no": "no",
+    "p": "partial",
+    "partial": "partial",
+    "s": "skip",
+    "skip": "skip",
+}
+
+
+def _read_self_report_choice(stream: Any) -> SelfReport | None:
+    """Read one line from ``stream`` and map to a self_report value.
+
+    Returns None on EOF / empty input so the caller can decide whether
+    to re-prompt or fall back to 'skip'. Recognized choices are case-
+    insensitive and accept either the single letter or the full word.
+    """
+    raw = stream.readline()
+    if not raw:
+        return None
+    choice = raw.strip().lower()
+    if not choice:
+        return None
+    return _SELF_REPORT_BY_CHOICE.get(choice)
+
+
+def _read_optional_note(stream: Any) -> str | None:
+    """Read one line of optional note text; empty line -> None.
+
+    Only the first line is kept (we strip a trailing newline). Callers
+    pass None for skip; this helper is invoked only on yes/no/partial.
+    """
+    raw = stream.readline()
+    if not raw:
+        return None
+    stripped = raw.rstrip("\r\n").strip()
+    return stripped or None
+
+
+def _read_hook_payload(
+    stream: Any,
+    timeout_seconds: float = _HOOK_TIMEOUT_SECONDS,
+) -> str | None:
+    """Read a Stop-hook JSON payload from ``stream`` within ``timeout_seconds``.
+
+    Returns the raw text (caller parses JSON) or None on timeout / EOF /
+    error. The 100ms default timeout matches the US-025 AC: AI tools
+    post the hook payload immediately on session end and we must not
+    block them. On POSIX the timeout is enforced via ``select.select``;
+    on Windows or on streams without a real file descriptor (test
+    StringIOs), the read is unconditional and returns whatever is
+    available -- in practice the hook closes stdin right after writing
+    so EOF arrives quickly anyway.
+    """
+    fileno: int | None = None
+    try:
+        fileno = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        fileno = None
+
+    if fileno is not None and sys.platform != "win32":
+        try:
+            ready, _, _ = select.select([fileno], [], [], timeout_seconds)
+        except (OSError, ValueError):
+            return None
+        if not ready:
+            return None
+
+    try:
+        data = stream.read()
+    except (OSError, ValueError):
+        return None
+    if not data:
+        return None
+    if isinstance(data, bytes):
+        try:
+            data = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    return data
+
+
+def _parse_hook_payload(raw: str | None) -> dict[str, Any] | None:
+    """Parse a hook payload string. None on missing / malformed.
+
+    Duck-typed: we accept any top-level JSON object regardless of which
+    keys are present. The caller decides whether the required fields
+    for Claude Code (session_id, transcript_path, cwd, hook_event_name)
+    or Codex (session_id, cwd, hook_event_name) are satisfied.
+    """
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    try:
+        payload = json.loads(stripped)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _extract_session_id(payload: dict[str, Any]) -> str | None:
+    """Pluck ``session_id`` from a hook payload if it's a non-empty string.
+
+    Both Claude Code and Codex shapes name this field identically, so
+    the duck-typed check on ``session_id`` covers both providers
+    without per-shape branching.
+    """
+    sid = payload.get("session_id")
+    if isinstance(sid, str) and sid.strip():
+        return sid
+    return None
+
+
+def _extract_transcript_path(payload: dict[str, Any]) -> Path | None:
+    """Return the transcript_path from a hook payload as a Path.
+
+    Claude Code's Stop hook posts ``transcript_path`` pointing at a
+    JSONL file on disk; Codex's Stop hook omits this field entirely.
+    Returns None when the field is absent, blank, or not a string so
+    callers can distinguish "no transcript was sent" (Codex shape) from
+    "transcript was sent but unreadable" (Claude shape, file missing).
+    """
+    raw = payload.get("transcript_path")
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    return Path(text)
+
+
+def _read_transcript_stats(transcript_path: Path) -> tuple[int, float] | None:
+    """Return ``(user_turns, elapsed_seconds)`` for a Claude Code transcript.
+
+    The transcript is the JSONL file Claude Code posts as
+    ``transcript_path`` in its Stop hook. Each line is one event; we
+    only care about two facts:
+
+      * how many ``type == "user"`` entries had non-empty content (the
+        "user turns" the AC counts), and
+      * the elapsed time between the earliest and latest ``timestamp``
+        on the file (any entry contributes its timestamp, not just user
+        turns -- the user can sit idle while the assistant works).
+
+    Returns ``None`` if the file can't be opened (the caller treats
+    this the same as 'transcript missing'). Malformed JSON lines are
+    skipped silently so a partially-written transcript doesn't blow up
+    the read; elapsed time falls back to 0.0 when there are no
+    timestamps. The parser is intentionally tolerant: this code path
+    runs under the Stop hook and we must never crash the AI tool.
+    """
+    user_turns = 0
+    first_ts: datetime | None = None
+    last_ts: datetime | None = None
+
+    try:
+        with transcript_path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    entry = json.loads(stripped)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+
+                if entry.get("type") == "user":
+                    message = entry.get("message") or {}
+                    content = message.get("content") if isinstance(message, dict) else None
+                    if _has_user_text(content):
+                        user_turns += 1
+
+                ts_raw = entry.get("timestamp")
+                if isinstance(ts_raw, str):
+                    try:
+                        ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                    except (TypeError, ValueError):
+                        ts = None
+                    if ts is not None:
+                        if first_ts is None or ts < first_ts:
+                            first_ts = ts
+                        if last_ts is None or ts > last_ts:
+                            last_ts = ts
+    except OSError:
+        return None
+
+    if first_ts is not None and last_ts is not None:
+        elapsed = (last_ts - first_ts).total_seconds()
+    else:
+        elapsed = 0.0
+    return (user_turns, elapsed)
+
+
+def _has_user_text(content: object) -> bool:
+    """Best-effort check that a Claude Code ``message.content`` has text.
+
+    Claude Code's content is either a plain string or a list of typed
+    blocks ({type: "text", text: ...} et al.). We count the turn as a
+    real user turn only if at least one text block has non-whitespace
+    characters -- empty 'system' frames (tool_use_result with no text)
+    shouldn't bump the user-turn count.
+    """
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str) and text.strip():
+                    return True
+    return False
+
+
+def cmd_reflect(args: argparse.Namespace) -> int:
+    """Reflect on this week's active commitment.
+
+    Three modes:
+      * Interactive (default, US-024): prompt [y]es / [n]o / [p]artial /
+        [s]kip on stdin, then accept an optional one-line note. Inserts
+        one row into ``session_reflections`` so opt-outs are still
+        counted.
+      * --session-end (US-025/US-026): read a JSON Stop-hook payload
+        from stdin (Claude Code or Codex shape) within a 100ms timeout
+        and either persist a skip row (degenerate payload / threshold
+        gate fail) or spawn a detached child for the interactive prompt
+        (US-027). Never blocks the AI tool; every code path exits 0.
+      * --child (US-027): re-entry point used by the detached child
+        spawn. Opens /dev/tty (POSIX) or CONIN$/CONOUT$ (Windows),
+        reuses ``_run_interactive_reflect`` against those streams, and
+        falls back to a 'parent terminal closed' skip row if no
+        controlling terminal is available.
+
+    Exit codes (interactive mode):
+      0 -- a reflection row was inserted, or no active commitment
+           exists for the current week (silent no-op with a hint).
+      1 -- input parsing gave up (>3 invalid choices) or the
+           commitment invariant was violated.
+
+    The --session-end and --child branches NEVER return exit code 2:
+    Claude Code interprets exit 2 as a 'block' signal that aborts the
+    AI tool's session; reflect must stay out of that codespace.
+    """
+    if getattr(args, "child", False):
+        return _cmd_reflect_child(args)
+    if getattr(args, "session_end", False):
+        return _cmd_reflect_session_end(sys.stdin)
+
+    store = ProfileStore()
+    week_iso = current_iso_week()
+    try:
+        active = store.load_active_commitment(week_iso)
+    except MultipleActiveCommitmentsError as exc:
+        print(f"praxis reflect: {exc}", file=sys.stderr)
+        return 1
+
+    if active is None:
+        print(_REFLECT_NO_COMMITMENT_MSG)
+        return 0
+
+    return _run_interactive_reflect(store, active, sys.stdin, sys.stdout)
+
+
+def _cmd_reflect_session_end(stdin: Any) -> int:
+    """Handle ``praxis reflect --session-end``: parse a Stop-hook JSON
+    payload from stdin and persist a reflection row.
+
+    Never blocks the AI tool: every code path exits 0. When the payload
+    is missing, malformed, or has no session_id, a skip row is still
+    written with a descriptive note so opt-outs / hook failures are
+    counted in the digest panel. When the payload includes a
+    ``transcript_path`` (Claude Code shape), US-026 threshold gating
+    checks the transcript before reaching the happy path:
+
+      * file missing on disk -> skip + 'transcript missing'.
+      * user_turns < turns_min OR elapsed_seconds < elapsed_seconds_min
+        -> skip + 'session too short'.
+
+    Codex-shape payloads (no transcript_path) bypass the threshold gate.
+
+    Happy path (US-027): spawn a detached child via ``subprocess.Popen``
+    with ``start_new_session=True`` (POSIX) /
+    ``CREATE_NEW_PROCESS_GROUP`` (Windows). The parent returns 0
+    immediately so the AI tool's hook completes within the timeout. The
+    child opens /dev/tty (or CONIN$/CONOUT$) and runs the interactive
+    prompt; if the spawn fails (no praxis binary, OS rejection), the
+    parent writes a fallback skip row so the session is still
+    observable.
+
+    Exit code is always 0 -- the AI tool must not see a block signal.
+    """
+    store = ProfileStore()
+    week_iso = current_iso_week()
+    try:
+        active = store.load_active_commitment(week_iso)
+    except MultipleActiveCommitmentsError:
+        # Can't pick a follow_up_id without violating the invariant.
+        # Silent exit 0 -- printing to stderr here would pollute the
+        # AI tool's session log.
+        return 0
+    if active is None:
+        # Nothing to reflect on this week. Silent exit 0.
+        return 0
+
+    raw = _read_hook_payload(stdin)
+    payload = _parse_hook_payload(raw)
+    fallback_stable_id = f"session-end:{week_iso}"
+    if payload is None:
+        store.insert_session_reflection(
+            session_stable_id=fallback_stable_id,
+            follow_up_id=active.follow_up_id,
+            self_report="skip",
+            note=_HOOK_PAYLOAD_MISSING_NOTE,
+        )
+        return 0
+
+    session_id = _extract_session_id(payload)
+    if session_id is None:
+        store.insert_session_reflection(
+            session_stable_id=fallback_stable_id,
+            follow_up_id=active.follow_up_id,
+            self_report="skip",
+            note=_HOOK_PAYLOAD_NO_SESSION_NOTE,
+        )
+        return 0
+
+    transcript_path = _extract_transcript_path(payload)
+    if transcript_path is not None:
+        reflect_cfg = _load_reflect_config()
+        gate_note = _check_transcript_threshold(transcript_path, reflect_cfg)
+        if gate_note is not None:
+            store.insert_session_reflection(
+                session_stable_id=session_id,
+                follow_up_id=active.follow_up_id,
+                self_report="skip",
+                note=gate_note,
+            )
+            return 0
+
+    # Happy path: spawn the detached child and return 0 immediately.
+    # The child opens its own TTY and writes the row. We don't .wait()
+    # the child so the parent unblocks within the OS spawn time.
+    cwd_value = payload.get("cwd")
+    cwd_str: str | None = cwd_value if isinstance(cwd_value, str) and cwd_value else None
+    spawned = _spawn_reflect_child(
+        follow_up_id=active.follow_up_id,
+        session_id=session_id,
+        transcript_path=transcript_path,
+        cwd=cwd_str,
+    )
+    if not spawned:
+        # Spawn failed (no praxis binary on PATH, OS rejected the
+        # process, etc.). Fall back to a skip row so the session is
+        # still observable instead of silently lost.
+        store.insert_session_reflection(
+            session_stable_id=session_id,
+            follow_up_id=active.follow_up_id,
+            self_report="skip",
+            note=_SPAWN_FAILED_NOTE,
+        )
+    return 0
+
+
+def _spawn_reflect_child(
+    *,
+    follow_up_id: int,
+    session_id: str,
+    transcript_path: Path | None,
+    cwd: str | None,
+) -> bool:
+    """Spawn the detached child for the interactive reflect prompt.
+
+    The child runs ``praxis reflect --child --follow-up-id <id>
+    --session-id <sid>`` (plus optional --transcript-path / --cwd) in
+    its own process group / session, with stdin/stdout/stderr pointed
+    at /dev/null. The child re-opens /dev/tty (POSIX) or
+    CONIN$/CONOUT$ (Windows) to talk to the user.
+
+    Returns True on successful spawn; False on OSError so the caller
+    can write a fallback skip row. Tests monkeypatch this function to
+    capture spawn invocations without creating real subprocesses.
+
+    The Popen call returns immediately -- we deliberately do NOT call
+    .wait(), so the parent returns within the OS spawn time (well
+    under the 5s hook_timeout_seconds budget on any modern system).
+    """
+    argv = _resolve_reflect_child_command() + [
+        "reflect",
+        "--child",
+        "--follow-up-id",
+        str(follow_up_id),
+        "--session-id",
+        session_id,
+    ]
+    if transcript_path is not None:
+        argv.extend(["--transcript-path", str(transcript_path)])
+    if cwd:
+        argv.extend(["--cwd", cwd])
+
+    popen_kwargs: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if sys.platform == "win32":
+        # CREATE_NEW_PROCESS_GROUP detaches from the parent's console
+        # so the child survives parent exit and the AI tool isn't
+        # blocked waiting for descendant processes.
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        popen_kwargs["creationflags"] = creationflags
+    else:
+        # start_new_session calls setsid() so the child becomes its own
+        # session leader and can open /dev/tty as the controlling
+        # terminal (Claude Code's Stop hook closes the parent's stdin
+        # but the user's terminal is still reachable).
+        popen_kwargs["start_new_session"] = True
+
+    try:
+        subprocess.Popen(argv, **popen_kwargs)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _resolve_reflect_child_command() -> list[str]:
+    """Return the argv prefix that re-launches ``praxis`` for the child.
+
+    Mirrors ``install_weekly._resolve_praxis_command``: prefer the
+    installed console script, fall back to ``[sys.executable, '-m',
+    'praxis.cli']`` so editable / venv installs still work.
+    """
+    found = shutil.which("praxis")
+    if found:
+        return [found]
+    return [sys.executable, "-m", "praxis.cli"]
+
+
+def _cmd_reflect_child(args: argparse.Namespace) -> int:
+    """Run the interactive prompt as the detached child (US-027).
+
+    The parent process spawned us with explicit ``--follow-up-id`` and
+    ``--session-id`` so we don't have to re-resolve the active
+    commitment. We open /dev/tty (POSIX) or CONIN$/CONOUT$ (Windows) for
+    stdin/stdout; when no controlling terminal is available (parent's
+    terminal closed before we got there), we still write a 'parent
+    terminal closed' skip row so the session is observable.
+
+    Exit codes (always 0 in practice):
+      0 -- a reflection row was inserted (interactive write OR the
+           fallback 'parent terminal closed' skip).
+
+    We never return exit code 2 -- the AI tool already moved on, but we
+    keep reflect's exit codes inside {0, 1} to honor the same contract
+    the parent does.
+    """
+    follow_up_id = int(getattr(args, "follow_up_id", 0) or 0)
+    session_id = str(getattr(args, "session_id", "") or "")
+    transcript_path = getattr(args, "transcript_path", None)
+    cwd = getattr(args, "cwd", None)
+    # transcript_path and cwd are accepted for forward-compat with
+    # richer prompts (we may show the cwd in the question); the
+    # underscored locals quiet the unused-variable warning today.
+    _ = transcript_path
+    _ = cwd
+
+    store = ProfileStore()
+    if follow_up_id <= 0 or not session_id:
+        # Defensive: a malformed invocation shouldn't crash the child.
+        return 0
+
+    active = store.load_commitment_by_id(follow_up_id)
+    if active is None:
+        # The commitment was removed between parent spawn and child
+        # start; nothing to prompt about.
+        return 0
+
+    tty_stdin, tty_stdout = _open_controlling_terminal()
+    if tty_stdin is None or tty_stdout is None:
+        # No controlling terminal reachable. Write a skip row so the
+        # session is still observable in the digest panel.
+        store.insert_session_reflection(
+            session_stable_id=session_id,
+            follow_up_id=follow_up_id,
+            self_report="skip",
+            note=_PARENT_TERMINAL_CLOSED_NOTE,
+        )
+        return 0
+
+    try:
+        # _run_interactive_reflect writes 'manual:<week>' as the stable
+        # id today; override it to the real session_id so the row
+        # joins back to the AI tool's session.
+        return _run_interactive_reflect_with_session(
+            store,
+            active,
+            tty_stdin,
+            tty_stdout,
+            session_stable_id=session_id,
+        )
+    finally:
+        for stream in (tty_stdin, tty_stdout):
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
+def _open_controlling_terminal() -> tuple[Any, Any]:
+    """Open the controlling terminal for read+write.
+
+    Returns ``(stdin_stream, stdout_stream)`` on success, ``(None,
+    None)`` if no TTY is reachable. POSIX uses /dev/tty; Windows uses
+    CONIN$ / CONOUT$ (the special device names the console subsystem
+    exposes for the current console).
+
+    Best-effort: any OSError (no controlling terminal, permissions,
+    closed-stdin under daemon-style spawn) returns the (None, None)
+    sentinel so the caller falls back to the 'parent terminal closed'
+    skip row.
+    """
+    if sys.platform == "win32":
+        try:
+            stdin_stream = open("CONIN$", "r", encoding="utf-8")
+        except OSError:
+            return (None, None)
+        try:
+            stdout_stream = open("CONOUT$", "w", encoding="utf-8")
+        except OSError:
+            try:
+                stdin_stream.close()
+            except OSError:
+                pass
+            return (None, None)
+        return (stdin_stream, stdout_stream)
+
+    try:
+        stdin_stream = open("/dev/tty", "r", encoding="utf-8")
+    except OSError:
+        return (None, None)
+    try:
+        stdout_stream = open("/dev/tty", "w", encoding="utf-8")
+    except OSError:
+        try:
+            stdin_stream.close()
+        except OSError:
+            pass
+        return (None, None)
+    return (stdin_stream, stdout_stream)
+
+
+def _run_interactive_reflect_with_session(
+    store: ProfileStore,
+    active: ActiveCommitment,
+    stdin: Any,
+    stdout: Any,
+    *,
+    session_stable_id: str,
+) -> int:
+    """Same as ``_run_interactive_reflect`` but stamps a custom session id.
+
+    Used by the US-027 child so the row joins back to the AI tool's
+    real session id rather than the ``manual:<week>`` placeholder the
+    bare-interactive path uses.
+    """
+    print(
+        _REFLECT_PROMPT_HEADER.format(display_text=active.display_text),
+        file=stdout,
+    )
+    print(_REFLECT_OPTIONS_HINT, file=stdout)
+    stdout.flush()
+
+    choice: SelfReport | None = None
+    for _ in range(3):
+        choice = _read_self_report_choice(stdin)
+        if choice is not None:
+            break
+        print(
+            "Please answer with y, n, p, or s.",
+            file=stdout,
+        )
+        stdout.flush()
+    if choice is None:
+        # Child cannot reach a valid answer. Write a skip row so the
+        # session is still observable -- the parent already returned
+        # so we never affect the AI tool's exit code.
+        store.insert_session_reflection(
+            session_stable_id=session_stable_id,
+            follow_up_id=active.follow_up_id,
+            self_report="skip",
+            note=_PARENT_TERMINAL_CLOSED_NOTE,
+        )
+        return 0
+
+    note: str | None = None
+    if choice != "skip":
+        print(_REFLECT_NOTE_PROMPT, end="", file=stdout)
+        stdout.flush()
+        note = _read_optional_note(stdin)
+
+    store.insert_session_reflection(
+        session_stable_id=session_stable_id,
+        follow_up_id=active.follow_up_id,
+        self_report=choice,
+        note=note,
+    )
+    print(f"Recorded reflection: {choice}", file=stdout)
+    return 0
+
+
+def _load_reflect_config() -> ReflectConfig:
+    """Load the [reflect] section, falling back to defaults on errors.
+
+    A malformed ``~/.praxis/config.toml`` (invalid TOML, negative
+    threshold, etc.) MUST NOT crash the Stop hook -- the AI tool sees a
+    non-zero exit as a block signal. We swallow any load error and use
+    the documented defaults so the gate still applies sensibly.
+    """
+    try:
+        return load_config().reflect
+    except (OSError, ValueError, TypeError):
+        return ReflectConfig()
+
+
+def _check_transcript_threshold(
+    transcript_path: Path,
+    cfg: ReflectConfig,
+) -> str | None:
+    """Return the skip-note for a sub-threshold transcript, else None.
+
+    The two branches encode the AC for US-026:
+      * file missing on disk -> 'transcript missing'
+      * stats below either threshold -> 'session too short'
+      * meets both thresholds -> None (caller falls through to the
+        happy path)
+    """
+    if not transcript_path.is_file():
+        return _TRANSCRIPT_MISSING_NOTE
+    stats = _read_transcript_stats(transcript_path)
+    if stats is None:
+        # Unreadable transcript: treat as 'missing' so the user-facing
+        # note matches the AC's wording.
+        return _TRANSCRIPT_MISSING_NOTE
+    user_turns, elapsed_seconds = stats
+    if user_turns < cfg.turns_min or elapsed_seconds < cfg.elapsed_seconds_min:
+        return _SESSION_TOO_SHORT_NOTE
+    return None
+
+
+def _run_interactive_reflect(
+    store: ProfileStore,
+    active: ActiveCommitment,
+    stdin: Any,
+    stdout: Any,
+) -> int:
+    """Drive the interactive prompt against the given streams.
+
+    Split out from ``cmd_reflect`` so tests can pass in StringIOs
+    without monkeypatching sys.stdin/stdout and so the --session-end
+    detached-child code path (US-027) can reuse it against /dev/tty.
+    """
+    print(
+        _REFLECT_PROMPT_HEADER.format(display_text=active.display_text),
+        file=stdout,
+    )
+    print(_REFLECT_OPTIONS_HINT, file=stdout)
+    stdout.flush()
+
+    # Allow a few retries on invalid choices to forgive typos, but
+    # don't loop forever -- a piped/EOF stream must terminate.
+    choice: SelfReport | None = None
+    for _ in range(3):
+        choice = _read_self_report_choice(stdin)
+        if choice is not None:
+            break
+        print(
+            "Please answer with y, n, p, or s.",
+            file=stdout,
+        )
+        stdout.flush()
+    if choice is None:
+        print(
+            "praxis reflect: no valid choice received; aborting "
+            "without writing a reflection.",
+            file=sys.stderr,
+        )
+        return 1
+
+    note: str | None = None
+    if choice != "skip":
+        print(_REFLECT_NOTE_PROMPT, end="", file=stdout)
+        stdout.flush()
+        note = _read_optional_note(stdin)
+
+    # No associated AI session in the interactive path (US-024). Mark
+    # the row as 'manual:<iso-week>' so reports can distinguish opt-in
+    # reflections from session-end reflections (US-025). The id is
+    # human-readable but not unique on its own; session_reflections.id
+    # (the autoincrement PK) is the real key.
+    session_stable_id = f"manual:{active.follow_up.week_iso}"
+    store.insert_session_reflection(
+        session_stable_id=session_stable_id,
+        follow_up_id=active.follow_up_id,
+        self_report=choice,
+        note=note,
+    )
+    print(f"Recorded reflection: {choice}", file=stdout)
+    return 0
+
+
 def cmd_install_weekly(args: argparse.Namespace) -> int:  # noqa: ARG001
     """Generate and load the macOS LaunchAgent for ``praxis week --notify``.
 
@@ -1574,6 +2332,73 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     cmt.set_defaults(func=cmd_commit)
+
+    rfl = sub.add_parser(
+        "reflect",
+        help=(
+            "Reflect on this week's active commitment "
+            "(interactive 2-question prompt)."
+        ),
+        description=(
+            "Look up the active follow_ups row for the current ISO "
+            "week, prompt the user with the commitment's display_text, "
+            "and record one row in session_reflections (yes / no / "
+            "partial / skip plus an optional one-line note). When no "
+            "active commitment exists for this week, exits 0 with a "
+            "hint to run `praxis commit` first."
+        ),
+    )
+    rfl.add_argument(
+        "--session-end",
+        action="store_true",
+        dest="session_end",
+        help=(
+            "Read a Stop-hook JSON payload from stdin (Claude Code or "
+            "Codex shape) instead of running the interactive prompt. "
+            "Used by editor hooks; never blocks the AI tool. Writes a "
+            "skip row with a descriptive note when the payload is "
+            "missing / malformed / has no session_id, and always exits 0."
+        ),
+    )
+    # The --child path is an internal re-entry point used by the
+    # detached child the parent spawns in --session-end mode (US-027).
+    # The four flags below carry the state the parent resolved so the
+    # child doesn't have to re-derive it from scratch.
+    rfl.add_argument(
+        "--child",
+        action="store_true",
+        dest="child",
+        help=argparse.SUPPRESS,
+    )
+    rfl.add_argument(
+        "--follow-up-id",
+        type=int,
+        default=0,
+        dest="follow_up_id",
+        help=argparse.SUPPRESS,
+    )
+    rfl.add_argument(
+        "--session-id",
+        type=str,
+        default="",
+        dest="session_id",
+        help=argparse.SUPPRESS,
+    )
+    rfl.add_argument(
+        "--transcript-path",
+        type=str,
+        default=None,
+        dest="transcript_path",
+        help=argparse.SUPPRESS,
+    )
+    rfl.add_argument(
+        "--cwd",
+        type=str,
+        default=None,
+        dest="cwd",
+        help=argparse.SUPPRESS,
+    )
+    rfl.set_defaults(func=cmd_reflect)
 
     mod = sub.add_parser("models",
                          help="List model cards or show one in detail.")
