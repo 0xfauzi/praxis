@@ -9,6 +9,13 @@ US-014 acceptance criteria:
     other clusters in the window.
   - Clusters with first sentences of fewer than 3 non-stopword tokens
     are excluded from comparison.
+
+US-015 acceptance criteria:
+  - RepeatTask carries estimated_minutes_per_occurrence, computed as
+    the median session duration across the cluster (across every session
+    in every cluster of the recurring group).
+  - detect_repeats returns [] when no cluster recurs 3+ times.
+  - detect_repeats([], window_days) returns [] without raising.
 """
 from __future__ import annotations
 
@@ -88,8 +95,36 @@ def test_overlap_ratio_threshold_constant_is_seventy_percent() -> None:
 # --- detect_repeats ----------------------------------------------------------
 
 
-def _cluster(first_sentence: str, *session_ids: str) -> Cluster:
-    return Cluster(first_sentence=first_sentence, session_ids=list(session_ids))
+def _cluster(
+    first_sentence: str,
+    *session_ids: str,
+    duration_minutes: float = 10.0,
+) -> Cluster:
+    """Build a Cluster, defaulting every session's duration to the same value.
+
+    Most US-014 tests do not care about durations and only need the
+    Cluster to be constructible; the default keeps them terse. Tests that
+    exercise estimated_minutes_per_occurrence should call
+    `_cluster_with_durations` instead so the per-session values are
+    explicit in the test body.
+    """
+    return Cluster(
+        first_sentence=first_sentence,
+        session_ids=list(session_ids),
+        session_durations_minutes=[duration_minutes] * len(session_ids),
+    )
+
+
+def _cluster_with_durations(
+    first_sentence: str,
+    sessions: list[tuple[str, float]],
+) -> Cluster:
+    """Build a Cluster from an explicit list of (session_id, duration_minutes) pairs."""
+    return Cluster(
+        first_sentence=first_sentence,
+        session_ids=[sid for sid, _ in sessions],
+        session_durations_minutes=[dur for _, dur in sessions],
+    )
 
 
 def test_detect_repeats_finds_three_clusters_with_high_overlap() -> None:
@@ -201,6 +236,99 @@ def test_repeat_task_is_a_frozen_dataclass() -> None:
         canonical_first_sentence="x",
         occurrences=3,
         example_session_ids=["a"],
+        estimated_minutes_per_occurrence=10.0,
     )
     with pytest.raises(Exception):
         task.occurrences = 99  # type: ignore[misc]
+
+
+# --- US-015: estimated_minutes_per_occurrence -------------------------------
+
+
+def test_cluster_rejects_mismatched_durations_length() -> None:
+    # The two parallel lists drive the median in detect_repeats; if a
+    # caller can hand us a Cluster where session_ids and durations have
+    # different lengths, we silently lose data. The constructor must
+    # refuse the mismatch up front.
+    with pytest.raises(ValueError):
+        Cluster(
+            first_sentence="refactor the auth module",
+            session_ids=["s1", "s2"],
+            session_durations_minutes=[10.0],
+        )
+
+
+def test_estimated_minutes_is_median_across_all_sessions_in_group() -> None:
+    # Three clusters in one recurring group, with explicit per-session
+    # durations. All seven sessions feed the median:
+    #   sorted: [3, 5, 8, 10, 12, 15, 20]  -> median = 10.0 (middle value)
+    clusters = [
+        _cluster_with_durations(
+            "refactor the auth module for tenants",
+            [("a1", 3.0), ("a2", 20.0)],
+        ),
+        _cluster_with_durations(
+            "refactor auth module tenants again",
+            [("b1", 5.0), ("b2", 15.0), ("b3", 10.0)],
+        ),
+        _cluster_with_durations(
+            "refactor the auth module yet again",
+            [("c1", 8.0), ("c2", 12.0)],
+        ),
+    ]
+    repeats = detect_repeats(clusters, window_days=7)
+    assert len(repeats) == 1
+    assert repeats[0].estimated_minutes_per_occurrence == 10.0
+
+
+def test_estimated_minutes_uses_median_average_for_even_session_count() -> None:
+    # Six sessions across three clusters; sorted durations:
+    #   [4, 6, 8, 10, 12, 14]  -> median = (8 + 10) / 2 = 9.0
+    clusters = [
+        _cluster_with_durations(
+            "debug the slow dashboard query timing",
+            [("a1", 4.0), ("a2", 14.0)],
+        ),
+        _cluster_with_durations(
+            "debug slow dashboard query again",
+            [("b1", 6.0), ("b2", 12.0)],
+        ),
+        _cluster_with_durations(
+            "debug the slow dashboard query yet",
+            [("c1", 8.0), ("c2", 10.0)],
+        ),
+    ]
+    repeats = detect_repeats(clusters, window_days=7)
+    assert len(repeats) == 1
+    assert repeats[0].estimated_minutes_per_occurrence == 9.0
+
+
+def test_detect_repeats_empty_clusters_returns_empty_without_raising() -> None:
+    # The report layer hands the detector an empty cluster list when a
+    # week's sessions were all uncluster-able; we must return [] cleanly
+    # so callers do not need to special-case the empty path.
+    assert detect_repeats([], window_days=7) == []
+
+
+def test_detect_repeats_no_recurrence_returns_empty_list() -> None:
+    # Three completely unrelated clusters in the window; nothing should
+    # be flagged as a recurring task and the report layer must NOT
+    # receive a fabricated "you did X 3+ times" suggestion.
+    clusters = [
+        _cluster("refactor the auth module for tenants", "s1"),
+        _cluster("write the deckgen export pipeline", "s2"),
+        _cluster("debug the slow dashboard query timing", "s3"),
+    ]
+    assert detect_repeats(clusters, window_days=7) == []
+
+
+def test_detect_repeats_no_recurrence_when_only_two_clusters_match() -> None:
+    # Two clusters with high overlap is not a recurrence (spec requires
+    # 2+ OTHER clusters, i.e. 3+ total). The report layer must not see
+    # a half-formed RepeatTask under any circumstance.
+    clusters = [
+        _cluster("refactor the auth module for tenants", "s1"),
+        _cluster("refactor auth module tenants today", "s2"),
+        _cluster("write the deckgen export pipeline", "s3"),
+    ]
+    assert detect_repeats(clusters, window_days=7) == []

@@ -14,11 +14,16 @@ short to overlap meaningfully and are excluded from comparison.
 
 A RepeatTask is emitted for each connected component of clusters
 linked by 0.70+ pairwise overlap that contains at least three
-clusters (the seed plus two or more others).
+clusters (the seed plus two or more others). Each RepeatTask also
+carries an `estimated_minutes_per_occurrence` figure - the median of
+all session durations across every cluster in the recurring group -
+so the report layer can render the "a skill could reclaim ~X min/week"
+hint without making any second-order assumptions about session timing.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from statistics import median
 
 
 # Documented English stopword list. Kept deliberately small: aggressive
@@ -73,10 +78,27 @@ class Cluster:
     from - typically the earliest in the cluster). `session_ids` are the
     stable_ids of every session in the cluster, used to populate
     `example_session_ids` on the matching RepeatTask.
+
+    `session_durations_minutes` is the wall-clock duration of each
+    session in `session_ids`, in minutes, parallel-indexed: the i-th
+    entry is the duration of `session_ids[i]`. The lists MUST be the
+    same length - the constructor raises ValueError otherwise so callers
+    cannot silently desynchronize them. Durations feed the median used
+    by detect_repeats to populate
+    RepeatTask.estimated_minutes_per_occurrence.
     """
 
     first_sentence: str
     session_ids: list[str]
+    session_durations_minutes: list[float]
+
+    def __post_init__(self) -> None:
+        if len(self.session_ids) != len(self.session_durations_minutes):
+            raise ValueError(
+                "session_ids and session_durations_minutes must be the same "
+                f"length, got {len(self.session_ids)} ids vs "
+                f"{len(self.session_durations_minutes)} durations"
+            )
 
 
 @dataclass(frozen=True)
@@ -90,11 +112,19 @@ class RepeatTask:
     of the same work still count as two occurrences. `example_session_ids`
     aggregates the session ids across all clusters in the group, in the
     order the clusters were encountered.
+
+    `estimated_minutes_per_occurrence` is the median session duration
+    (in minutes) computed across EVERY session in EVERY cluster of the
+    recurring group, not the median of cluster-level totals. The report
+    layer multiplies this by `occurrences` to render the "a skill could
+    reclaim ~X min/week" hint. The median (rather than the mean) keeps
+    a single unusually long session from inflating the estimate.
     """
 
     canonical_first_sentence: str
     occurrences: int
     example_session_ids: list[str]
+    estimated_minutes_per_occurrence: float
 
 
 def tokenize(s: str) -> set[str]:
@@ -201,13 +231,22 @@ def detect_repeats(
             continue
         seed = clusters[indices[0]]
         example_ids: list[str] = []
+        all_durations: list[float] = []
         for idx in indices:
             example_ids.extend(clusters[idx].session_ids)
+            all_durations.extend(clusters[idx].session_durations_minutes)
+        # Defensive: a group only reaches here when each cluster is
+        # `eligible`, which requires at least MIN_TOKENS_FOR_COMPARISON
+        # tokens. Eligible clusters can in principle still have zero
+        # sessions (and therefore zero durations), so fall back to 0.0
+        # rather than letting statistics.median raise on an empty list.
+        estimated = median(all_durations) if all_durations else 0.0
         repeats.append(
             RepeatTask(
                 canonical_first_sentence=seed.first_sentence,
                 occurrences=len(indices),
                 example_session_ids=example_ids,
+                estimated_minutes_per_occurrence=float(estimated),
             )
         )
 
