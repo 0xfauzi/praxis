@@ -172,3 +172,13 @@
     * The CLI prints the snippet body AND the "Saved snippet to:" line to stdout (not stderr). This matches the existing macOS branch ("Installed weekly LaunchAgent: ...") which also goes to stdout. If a user pipes stdout to a file, both lines will land there; that's deliberate so the saved unit text is self-contained.
     * Task Scheduler XML uses a fixed `StartBoundary` of `2020-01-01T<hh>:<mm>:00` so the trigger is immediately valid. If a future story needs date-aware output (e.g., to start "next Sunday"), inject a clock; don't randomize the fixed string.
 ---
+
+## Iteration 10 - lint cleanup blocking ralph verify (no new story)
+- What I did: Fixed 4 pre-existing ruff errors that were blocking the harness's verification pipeline (the previous iteration left them in place because all 4 PRD user stories already passed). Removed two F541 f-string-without-placeholder uses in tests/make_synthetic_data.py (`f"  praxis scan"` -> `"  praxis scan"` on lines 239 and 246), one in tests/test_digest_html.py (`f"refactoring <synthetic>"` -> `"refactoring <synthetic>"` on line 730), and removed an unused `from praxis.models import Role` import (F401) from tests/test_scanners.py. None of the changes touch runtime behavior; ruff is now clean, mypy + pytest still pass.
+- Files changed: tests/make_synthetic_data.py, tests/test_digest_html.py, tests/test_scanners.py, scripts/ralph/progress.txt (this entry).
+- Verification: `uv run ruff check .` -> 0 errors (was 4). `uv run mypy praxis` -> Success: no issues found in 50 source files. `uv run pytest` -> 1148 passed.
+- What the next iteration should know:
+  - All 4 PRD stories now pass AND the harness's ruff verification gate is green. Ralph should detect <promise>COMPLETE</promise> on the next iteration.
+  - The pattern of "harness fails on pre-existing lint debt even though the user stories don't list ruff as an AC" is the same one seen in prior factory branches (commits b343caf, 3459793, 2b99a08, fed1f9c, 8b315d1). If a future factory pass hits the same wall, the fix is the same: clean ruff on the affected files; do not edit the user-story-passing logic.
+  - The remaining pyright warnings ("Import pytest could not be resolved", "tmp_home is not accessed") are pre-existing pyright limitations with pytest fixtures consumed via parameter binding, NOT regressions from this iteration. Confirmed by reading earlier progress entries (iters 1, 7, 8, 9) which all flag the same noise.
+---
