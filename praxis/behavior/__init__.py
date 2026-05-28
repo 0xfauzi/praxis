@@ -1,5 +1,16 @@
 """Behavioral analysis - measures skill formation vs atrophy over time."""
 
+from praxis.behavior.cadence import (
+    DEFAULT_STREAK_WINDOW_DAYS,
+    HIGH_STREAK_RATIO,
+    LOW_STREAK_RATIO,
+    MIN_ELAPSED_SECONDS,
+    MIN_USER_TURNS,
+    HighAdopterPosition,
+    compute_weekday_streak,
+    high_adopter_position,
+    is_substantive_session,
+)
 from praxis.behavior.signals import BehavioralSignals, extract
 from praxis.behavior.trajectory import (
     TrajectoryAssessment,
@@ -45,6 +56,15 @@ __all__ = [
     "TrajectoryAssessment",
     "TrajectoryLabel",
     "assess",
+    "DEFAULT_STREAK_WINDOW_DAYS",
+    "HIGH_STREAK_RATIO",
+    "LOW_STREAK_RATIO",
+    "MIN_ELAPSED_SECONDS",
+    "MIN_USER_TURNS",
+    "HighAdopterPosition",
+    "compute_weekday_streak",
+    "high_adopter_position",
+    "is_substantive_session",
     "DEFAULT_WINDOW_DAYS",
     "MIN_SESSIONS_FOR_FIT",
     "WeeklyBucket",
