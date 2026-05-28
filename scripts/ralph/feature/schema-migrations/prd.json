@@ -61,6 +61,8 @@
   "allowedPaths": [
     "praxis/storage/",
     "tests/",
-    "scripts/ralph/feature/schema-migrations/"
+    "scripts/ralph/feature/schema-migrations/",
+    "scripts/ralph/progress.txt",
+    "pyproject.toml"
   ]
 }
