@@ -57,6 +57,10 @@ from datetime import datetime
 from pathlib import Path
 
 from praxis.redactor import redact_secrets
+from praxis.reports.panel_inputs import (
+    BehavioralPatternsPanel,
+    PanelInputs,
+)
 from praxis.storage.profile_store import resolve_home
 
 
@@ -239,6 +243,9 @@ class WeeklyDigest:
     vital_signs: VitalSigns | None = None
     weekly_trajectory: tuple[WeeklyTrajectoryPoint, ...] = ()
     behavioral_signals: tuple[BehavioralRow, ...] = ()
+    # v0.3 expansion panels (US-038..042). Optional; None preserves the
+    # pre-expansion document shape so older fixtures still render.
+    panel_inputs: PanelInputs | None = None
 
 
 # ---------------------------------------------------------------- section text
@@ -1146,6 +1153,53 @@ def _cost_split_bar(model_split: tuple[ModelSpend, ...], total: float) -> str:
     )
 
 
+_BEHAVIORAL_PATTERNS_EMPTY = "No behavioral patterns captured this week."
+
+
+def _behavioral_patterns_section(panel: BehavioralPatternsPanel | None) -> str:
+    """Render the behavioral-patterns panel (US-038).
+
+    For each signal kind, emits a row with the signal label, the count,
+    up to two raw user-turn excerpts, and the primary-source citation
+    as a small footnote. When the panel has no signals (every count is
+    zero) the renderer surfaces the empty-state message instead of an
+    empty table.
+    """
+    if panel is None or not panel.has_signals:
+        return f"""
+  <section class="bp-section" id="behavioral-patterns">
+    <div class="s-eyebrow">Behavioral Patterns</div>
+    <p class="placeholder">{_safe(_BEHAVIORAL_PATTERNS_EMPTY)}</p>
+  </section>"""
+    rows: list[str] = []
+    for row in panel.rows:
+        if row.count <= 0:
+            continue
+        excerpts_html = ""
+        if row.excerpts:
+            items = "".join(
+                f'<li class="bp-excerpt">&ldquo;{_safe(ex)}&rdquo;</li>'
+                for ex in row.excerpts
+            )
+            excerpts_html = f'<ul class="bp-excerpts">{items}</ul>'
+        plural = "time" if row.count == 1 else "times"
+        rows.append(
+            f'<article class="bp-row">'
+            f'<header class="bp-row-head">'
+            f'<span class="bp-label">{_safe(row.label)}</span>'
+            f'<span class="bp-count">{row.count} {plural}</span>'
+            f'</header>'
+            f'{excerpts_html}'
+            f'<footer class="bp-citation">Source: {_safe(row.citation)}</footer>'
+            f'</article>'
+        )
+    return f"""
+  <section class="bp-section" id="behavioral-patterns">
+    <div class="s-eyebrow">Behavioral Patterns</div>
+    <div class="bp-list">{"".join(rows)}</div>
+  </section>"""
+
+
 def _next_week_section(sentence: str) -> str:
     if not sentence:
         return """
@@ -1198,6 +1252,11 @@ def render(digest: WeeklyDigest) -> str:
         f'{_next_week_section(digest.one_thing_to_try)}'
         '</div>'
     )
+    behavioral_panel = (
+        digest.panel_inputs.behavioral_signals
+        if digest.panel_inputs is not None
+        else None
+    )
     data_block = (
         '<div class="data-block">'
         '<div class="data-block__rule"></div>'
@@ -1205,6 +1264,7 @@ def render(digest: WeeklyDigest) -> str:
         f'{_cost_ledger_section(digest.cost_ledger)}'
         f'{_task_breakdown_section(digest.task_breakdown)}'
         f'{_dimensions_section(digest.dimensions, digest.behavioral_signals)}'
+        f'{_behavioral_patterns_section(behavioral_panel)}'
         f'{_weekly_trajectory_section(digest.weekly_trajectory)}'
         '</div>'
     )
@@ -2077,6 +2137,79 @@ html, body {{
 }}
 .d-delta-down {{
   color: var(--ink-muted);
+}}
+
+/* --- 5b. Behavioral patterns (US-038) ------------------------------- */
+/* Editorial list, not a card grid: a header row with the signal label
+   and count, two italic excerpt rows beneath, and a small ink-faded
+   citation footnote. The eye scans the labels + counts left-to-right
+   first, then drops into the excerpts for what triggered them. */
+.bp-section {{
+  margin-bottom: 96px;
+}}
+.bp-list {{
+  display: flex;
+  flex-direction: column;
+}}
+.bp-row {{
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-6) 0;
+  border-top: 1px solid var(--rule);
+}}
+.bp-row:last-child {{
+  border-bottom: 1px solid var(--rule);
+}}
+.bp-row-head {{
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-5);
+}}
+.bp-label {{
+  font-family: var(--serif);
+  font-size: 18px;
+  color: var(--ink);
+  letter-spacing: -0.005em;
+}}
+.bp-count {{
+  font-family: var(--serif);
+  font-size: 20px;
+  color: var(--accent);
+  font-feature-settings: 'lnum';
+  letter-spacing: -0.01em;
+}}
+.bp-excerpts {{
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}}
+.bp-excerpt {{
+  font-family: var(--serif);
+  font-size: 14.5px;
+  font-style: italic;
+  line-height: 1.5;
+  color: var(--ink-muted);
+  padding-left: var(--space-5);
+  margin-bottom: var(--space-2);
+  position: relative;
+}}
+.bp-excerpt::before {{
+  content: "·";
+  position: absolute;
+  left: var(--space-2);
+  color: var(--accent);
+  font-size: 18px;
+  line-height: 1.1;
+}}
+.bp-citation {{
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faded);
+  font-style: italic;
+  margin-top: var(--space-2);
 }}
 
 /* --- 6. Follow-up --------------------------------------------------- */

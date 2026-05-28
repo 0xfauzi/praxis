@@ -1154,7 +1154,16 @@ def test_six_dim_panel_renders_six_body_lines():
     digest = WeeklyDigest(dimensions=_realistic_dimensions())
     text = render(digest)
     panel_start = text.find("THE SIX DIMENSIONS")
-    panel_text = text[panel_start:]
+    # US-038 added a behavioral-patterns panel after the six-dim footer.
+    # Bound the slice between the two eyebrows so this test still
+    # measures only the six-dim rows, ignoring the trailing ANSI/blank
+    # lines that lead into the next eyebrow.
+    next_panel = text.find("BEHAVIORAL PATTERNS", panel_start)
+    if next_panel > -1:
+        line_start = text.rfind("\n", 0, next_panel)
+        panel_text = text[panel_start:line_start if line_start > -1 else next_panel]
+    else:
+        panel_text = text[panel_start:]
     body_lines = [
         line for line in panel_text.split("\n")
         if line.strip()
@@ -1185,3 +1194,167 @@ def test_six_dim_panel_renders_in_caller_provided_order():
         "renderer must preserve caller's order; "
         f"verification@{verif_pos} should precede planning@{plan_pos}"
     )
+
+
+# -------------------------------------- US-038: behavioral-patterns panel
+
+
+def _behavioral_panel_with_signals():
+    """Build a panel with two populated signals for tests."""
+    from praxis.reports.panel_inputs import (
+        BehavioralPatternRow,
+        BehavioralPatternsPanel,
+    )
+    return BehavioralPatternsPanel(rows=(
+        BehavioralPatternRow(
+            signal_kind="why_question",
+            label="Why-questions",
+            count=4,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+            excerpts=(
+                "why does this approach work for caching?",
+                "why is this slower than the previous version?",
+            ),
+        ),
+        BehavioralPatternRow(
+            signal_kind="pure_delegation",
+            label="Pure delegation",
+            count=2,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+            excerpts=(
+                "write me a function",
+                "make it handle errors",
+            ),
+        ),
+    ))
+
+
+def _empty_behavioral_panel():
+    """Build a panel where every row has count==0 (empty-state path)."""
+    from praxis.reports.panel_inputs import (
+        BehavioralPatternRow,
+        BehavioralPatternsPanel,
+    )
+    return BehavioralPatternsPanel(rows=(
+        BehavioralPatternRow(
+            signal_kind="why_question",
+            label="Why-questions",
+            count=0,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+        ),
+    ))
+
+
+def _panel_inputs(panel):
+    from praxis.reports.panel_inputs import PanelInputs
+    return PanelInputs(behavioral_signals=panel)
+
+
+def test_behavioral_patterns_section_eyebrow_is_present():
+    """The section always renders an eyebrow so the document shape stays
+    stable across empty + populated states (mirrors the other panel
+    placeholders' contract)."""
+    digest = WeeklyDigest(panel_inputs=_panel_inputs(_behavioral_panel_with_signals()))
+    text = _strip_ansi(render(digest))
+    assert "BEHAVIORAL PATTERNS" in text
+
+
+def test_behavioral_patterns_renders_label_and_count():
+    """Each populated row emits 'Label: N times' so the reader sees the
+    raw count alongside the signal label."""
+    digest = WeeklyDigest(panel_inputs=_panel_inputs(_behavioral_panel_with_signals()))
+    text = _strip_ansi(render(digest))
+    assert "Why-questions: 4 times" in text
+    assert "Pure delegation: 2 times" in text
+
+
+def test_behavioral_patterns_renders_excerpts_inline():
+    """Each populated row renders up to two raw user-turn excerpts
+    beneath the count line so the reader can ground the count in
+    actual transcript text."""
+    digest = WeeklyDigest(panel_inputs=_panel_inputs(_behavioral_panel_with_signals()))
+    text = _strip_ansi(render(digest))
+    assert "why does this approach work for caching?" in text
+    assert "write me a function" in text
+
+
+def test_behavioral_patterns_renders_citation_per_row():
+    """The primary source for each signal renders as a small footnote
+    beneath that signal's excerpts (US-038 acceptance)."""
+    digest = WeeklyDigest(panel_inputs=_panel_inputs(_behavioral_panel_with_signals()))
+    text = _strip_ansi(render(digest))
+    assert text.count("Source: Shen & Tamkin 2026 (arXiv 2601.20245)") >= 2
+
+
+def test_behavioral_patterns_renders_empty_state_when_zero_signals():
+    """When every row has count==0 the section surfaces a clear
+    empty-state message instead of an empty table."""
+    digest = WeeklyDigest(panel_inputs=_panel_inputs(_empty_behavioral_panel()))
+    text = _strip_ansi(render(digest))
+    assert "No behavioral patterns captured this week." in text
+
+
+def test_behavioral_patterns_renders_empty_state_when_no_panel():
+    """The renderer's None handling defaults to the same empty-state
+    copy as the all-zero path; a caller that forgets to populate the
+    panel never produces a malformed section."""
+    digest = WeeklyDigest()  # no panel_inputs at all
+    text = _strip_ansi(render(digest))
+    assert "BEHAVIORAL PATTERNS" in text
+    assert "No behavioral patterns captured this week." in text
+
+
+def test_behavioral_patterns_zero_count_rows_are_hidden_when_others_fire():
+    """When some signals fired and some did not, the zero-count rows
+    are dropped from the table; the reader sees only what triggered."""
+    from praxis.reports.panel_inputs import (
+        BehavioralPatternRow,
+        BehavioralPatternsPanel,
+    )
+    panel = BehavioralPatternsPanel(rows=(
+        BehavioralPatternRow(
+            signal_kind="why_question",
+            label="Why-questions",
+            count=3,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+            excerpts=("why is this slow?",),
+        ),
+        BehavioralPatternRow(
+            signal_kind="pure_delegation",
+            label="Pure delegation",
+            count=0,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+        ),
+    ))
+    digest = WeeklyDigest(panel_inputs=_panel_inputs(panel))
+    text = _strip_ansi(render(digest))
+    # Why-questions row is present.
+    assert "Why-questions: 3 times" in text
+    # The empty row is dropped (no "Pure delegation: 0 times" line).
+    assert "Pure delegation: 0 times" not in text
+
+
+def test_behavioral_patterns_lines_respect_80_column_budget():
+    """US-066 contract: every line in the terminal digest must fit in
+    <80 columns. The behavioral-patterns panel must respect the same
+    budget as the rest of the digest."""
+    digest = WeeklyDigest(panel_inputs=_panel_inputs(_behavioral_panel_with_signals()))
+    text = render(digest)
+    for line in text.split("\n"):
+        assert visible_width(line) <= MAX_LINE_WIDTH, (
+            f"line exceeds {MAX_LINE_WIDTH} cols: {line!r}"
+        )
+
+
+def test_behavioral_patterns_section_appears_after_six_dim_panel():
+    """The behavioral patterns panel sits after the six-dim footer so
+    the reader sees the structural /10 read first and then the
+    raw-pattern evidence that informs it (intentional ordering)."""
+    digest = WeeklyDigest(
+        dimensions=_realistic_dimensions(),
+        panel_inputs=_panel_inputs(_behavioral_panel_with_signals()),
+    )
+    text = _strip_ansi(render(digest))
+    six_dim_pos = text.find("THE SIX DIMENSIONS")
+    bp_pos = text.find("BEHAVIORAL PATTERNS")
+    assert 0 <= six_dim_pos < bp_pos

@@ -25,7 +25,21 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from praxis.models import Session
+from praxis.models import Session, Turn
+
+
+# Stable signal-kind keys used by the behavioral-patterns panel
+# (`praxis/reports/panel_inputs.py`). Order doubles as the panel's row
+# order: engagement signals first, then atrophy, then independence.
+SIGNAL_KINDS_IN_PANEL_ORDER: tuple[str, ...] = (
+    "why_question",
+    "comprehension_check",
+    "explanation_request",
+    "pure_delegation",
+    "outsourced_debug",
+    "telegraphic",
+    "own_attempt",
+)
 
 
 # Engagement signals — user is staying cognitively in the loop
@@ -154,3 +168,35 @@ def extract(session: Session) -> BehavioralSignals:
         independence_rate=independence_rate,
         is_pure_delegator=(delegation_rate > 0.6 and engagement_rate < 0.1),
     )
+
+
+def detect_signal_kinds(turn: Turn) -> set[str]:
+    """Return the set of signal kinds that fire for this user turn.
+
+    The keys returned are members of ``SIGNAL_KINDS_IN_PANEL_ORDER``.
+    The behavioral-patterns panel (US-038) uses this to attach example
+    excerpts to each signal kind for the user-facing footnote: counts
+    come from ``extract``, but the panel also wants to surface up to two
+    raw user-turn excerpts per signal so the reader can see what
+    triggered the count.
+
+    A single turn can match multiple kinds (e.g. an explanation request
+    that is also a pure delegation), so the return type is a set.
+    """
+    kinds: set[str] = set()
+    content = turn.content
+    if _WHY_QUESTIONS.search(content):
+        kinds.add("why_question")
+    if _COMPREHENSION_CHECKS.search(content):
+        kinds.add("comprehension_check")
+    if _EXPLANATION_REQUESTS.search(content):
+        kinds.add("explanation_request")
+    if _PURE_DELEGATION.match(content.strip()):
+        kinds.add("pure_delegation")
+    if _OUTSOURCED_DEBUG.search(content):
+        kinds.add("outsourced_debug")
+    if _is_telegraphic(content):
+        kinds.add("telegraphic")
+    if _OWN_ATTEMPT_MARKERS.search(content):
+        kinds.add("own_attempt")
+    return kinds

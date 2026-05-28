@@ -893,3 +893,182 @@ def test_render_filled_digest_with_secrets_keeps_self_containment_contract():
     assert "https://" not in out
     assert "@import" not in out
     assert "url(" not in out
+
+
+# ----------------------------------------- US-038: behavioral-patterns panel
+
+
+def _bp_panel_with_rows():
+    """A behavioral-patterns panel with two populated signal rows."""
+    from praxis.reports.panel_inputs import (
+        BehavioralPatternRow,
+        BehavioralPatternsPanel,
+    )
+    return BehavioralPatternsPanel(rows=(
+        BehavioralPatternRow(
+            signal_kind="why_question",
+            label="Why-questions",
+            count=4,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+            excerpts=(
+                "why does this approach work for caching?",
+                "why is this slower than the previous version?",
+            ),
+        ),
+        BehavioralPatternRow(
+            signal_kind="pure_delegation",
+            label="Pure delegation",
+            count=2,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+            excerpts=("write me a function",),
+        ),
+    ))
+
+
+def _bp_empty_panel():
+    """A panel where every row has count==0 (US-038 empty-state path)."""
+    from praxis.reports.panel_inputs import (
+        BehavioralPatternRow,
+        BehavioralPatternsPanel,
+    )
+    return BehavioralPatternsPanel(rows=(
+        BehavioralPatternRow(
+            signal_kind="why_question",
+            label="Why-questions",
+            count=0,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+        ),
+    ))
+
+
+def _bp_digest(panel):
+    from praxis.reports.panel_inputs import PanelInputs
+    return WeeklyDigest(
+        week_iso="2026-W21",
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        panel_inputs=PanelInputs(behavioral_signals=panel),
+    )
+
+
+def test_behavioral_patterns_section_always_present():
+    """The section anchor (`id="behavioral-patterns"`) always renders so
+    the document shape is stable across populated + empty states."""
+    out = render(_bp_digest(_bp_panel_with_rows()))
+    assert 'id="behavioral-patterns"' in out
+    out_empty = render(_bp_digest(_bp_empty_panel()))
+    assert 'id="behavioral-patterns"' in out_empty
+
+
+def test_behavioral_patterns_renders_label_and_count():
+    """Each populated row carries its display label and total count
+    so the reader sees the raw signal volume."""
+    out = render(_bp_digest(_bp_panel_with_rows()))
+    assert "Why-questions" in out
+    assert "4 times" in out
+    assert "Pure delegation" in out
+    assert "2 times" in out
+
+
+def test_behavioral_patterns_renders_excerpts():
+    """Each populated row renders up to two raw user-turn excerpts
+    so the reader can ground the count in transcript text."""
+    out = render(_bp_digest(_bp_panel_with_rows()))
+    assert "why does this approach work for caching?" in out
+    assert "write me a function" in out
+
+
+def test_behavioral_patterns_renders_citation_per_row():
+    """Both renderers cite the primary source per signal inline in
+    small footnote text (US-038 acceptance)."""
+    out = render(_bp_digest(_bp_panel_with_rows()))
+    # The citation appears at least twice (once per populated row).
+    assert out.count("Shen &amp; Tamkin 2026 (arXiv 2601.20245)") >= 2
+
+
+def test_behavioral_patterns_renders_empty_state_when_zero_signals():
+    """When every row has count==0 the section surfaces the verbatim
+    empty-state message instead of an empty list (US-038 acceptance)."""
+    out = render(_bp_digest(_bp_empty_panel()))
+    assert "No behavioral patterns captured this week." in out
+
+
+def test_behavioral_patterns_renders_empty_state_when_no_panel():
+    """Defaults gracefully: a digest with no panel_inputs still emits
+    the empty-state message rather than a broken or missing section."""
+    out = render(_digest())  # no panel_inputs
+    assert 'id="behavioral-patterns"' in out
+    assert "No behavioral patterns captured this week." in out
+
+
+def test_behavioral_patterns_zero_count_rows_dropped_when_others_fire():
+    """Rows with count==0 do not pollute the table when other signals
+    have fired; the reader sees only triggered patterns."""
+    from praxis.reports.panel_inputs import (
+        BehavioralPatternRow,
+        BehavioralPatternsPanel,
+    )
+    panel = BehavioralPatternsPanel(rows=(
+        BehavioralPatternRow(
+            signal_kind="why_question",
+            label="Why-questions",
+            count=3,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+            excerpts=("why is this slow?",),
+        ),
+        BehavioralPatternRow(
+            signal_kind="pure_delegation",
+            label="Pure delegation",
+            count=0,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+        ),
+    ))
+    out = render(_bp_digest(panel))
+    assert "Why-questions" in out
+    assert "Pure delegation" not in out
+
+
+def test_behavioral_patterns_section_after_six_dim_panel():
+    """Behavioral patterns sits after the six-dim cards in the data
+    block so the reader sees the structural /10 read first and then
+    the raw-pattern evidence that informs it."""
+    out = render(_bp_digest(_bp_panel_with_rows()))
+    six_dim_pos = out.find('id="the-six-dimensions"')
+    bp_pos = out.find('id="behavioral-patterns"')
+    assert 0 <= six_dim_pos < bp_pos
+
+
+def test_behavioral_patterns_self_containment_holds():
+    """The US-061 self-containment contract must hold for the new
+    panel; rendering a populated panel must not introduce external
+    links, scripts, or images."""
+    out = render(_bp_digest(_bp_panel_with_rows()))
+    lower = out.lower()
+    assert "<link" not in lower
+    assert "<script" not in lower
+    assert "<img" not in lower
+    assert "http://" not in out
+    assert "https://" not in out
+    assert "@import" not in out
+    assert "url(" not in out
+
+
+def test_behavioral_patterns_html_escapes_excerpts():
+    """Excerpts are user-provided strings so the renderer must HTML-escape
+    them; a stray `<script>` in a transcript must not become a real
+    `<script>` tag in the rendered digest."""
+    from praxis.reports.panel_inputs import (
+        BehavioralPatternRow,
+        BehavioralPatternsPanel,
+    )
+    panel = BehavioralPatternsPanel(rows=(
+        BehavioralPatternRow(
+            signal_kind="why_question",
+            label="Why-questions",
+            count=1,
+            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+            excerpts=("<script>alert('xss')</script>",),
+        ),
+    ))
+    out = render(_bp_digest(panel))
+    assert "<script>alert" not in out
+    assert "&lt;script&gt;alert" in out

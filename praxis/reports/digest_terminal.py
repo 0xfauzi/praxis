@@ -23,6 +23,10 @@ from dataclasses import dataclass
 
 from praxis.reports.baseline_panel import format_baseline_value
 from praxis.reports.gating import format_delta
+from praxis.reports.panel_inputs import (
+    BehavioralPatternsPanel,
+    PanelInputs,
+)
 from praxis.scoring.rubric import by_key
 
 
@@ -188,6 +192,9 @@ class WeeklyDigest:
     cost_ledger: CostLedgerView | None = None
     tasks: list[TaskRowView] | None = None
     dimensions: list[DimRowView] | None = None
+    # v0.3 expansion panels (US-038..042). Optional; None preserves
+    # the pre-expansion document shape so older fixtures still render.
+    panel_inputs: PanelInputs | None = None
 
 
 # -------------------------------------------------------------------- helpers
@@ -284,6 +291,11 @@ _DIMENSIONS_PLACEHOLDER = (
 # case at section 7); keeping the placeholder as a single token keeps
 # the column alignment in the "vs baseline X" phrasing.
 _BASELINE_UNAVAILABLE = "--"
+
+# US-038: empty-state copy for the behavioral-patterns panel. The
+# acceptance criterion calls for this verbatim string so the renderer
+# never emits an empty table when zero signals fired across the week.
+_BEHAVIORAL_PATTERNS_EMPTY = "No behavioral patterns captured this week."
 
 
 def _dim_title(dim_key: str) -> str:
@@ -590,6 +602,43 @@ def _format_dim_row(view: DimRowView, dim_title: str) -> str:
     return f"{title_col}  {score_col}  {baseline_col}  {delta_col}"
 
 
+def _behavioral_patterns(
+    panel: BehavioralPatternsPanel | None,
+) -> list[str]:
+    """Render the behavioral-patterns panel (US-038).
+
+    Emits one row per signal kind with the label, count, up to two
+    raw user-turn excerpts (each already clipped to <=120 chars by the
+    adapter), and a small ink-faded citation footnote. When no signals
+    fired across the week the section degrades to the empty-state
+    placeholder rather than an empty table.
+    """
+    lines: list[str] = []
+    lines.extend(_section_rule("Behavioral patterns"))
+    if panel is None or not panel.has_signals:
+        lines.extend(_placeholder_lines(_BEHAVIORAL_PATTERNS_EMPTY))
+        return lines
+    first = True
+    for row in panel.rows:
+        if row.count <= 0:
+            continue
+        if not first:
+            # Blank separator between rows so the eye groups each
+            # signal's label + excerpts + citation as one block.
+            lines.append("")
+        first = False
+        plural = "time" if row.count == 1 else "times"
+        lines.append(_body_line(f"{row.label}: {row.count} {plural}"))
+        for ex in row.excerpts:
+            for wrapped in _wrap(f"\"{ex}\"", width=_BODY_WIDTH - 2):
+                lines.append(_body_line("  " + wrapped, ansi=ITALIC))
+        for wrapped in _wrap(
+            f"Source: {row.citation}", width=_BODY_WIDTH - 2
+        ):
+            lines.append(_body_line("  " + wrapped, ansi=DIM))
+    return lines
+
+
 def _six_dim_panel(dimensions: list[DimRowView] | None) -> list[str]:
     """Render the full six-dim panel as the digest's footer (spec 6.2).
 
@@ -644,6 +693,15 @@ def render(digest: WeeklyDigest) -> str:
     # It sits AFTER all coaching and bookkeeping sections so the digest
     # closes on the structural readout of the week.
     parts.extend(_six_dim_panel(digest.dimensions))
+    # US-038: behavioral-patterns panel renders after the rubric footer
+    # so the reader sees the structural /10 read first and then the
+    # raw-pattern evidence (counts + excerpts) that informs it.
+    behavioral_panel = (
+        digest.panel_inputs.behavioral_signals
+        if digest.panel_inputs is not None
+        else None
+    )
+    parts.extend(_behavioral_patterns(behavioral_panel))
     # Trailing newline so terminals that print the next prompt without
     # a leading newline don't clash with the last section's content.
     parts.append("")

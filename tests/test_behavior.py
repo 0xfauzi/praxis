@@ -11,7 +11,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from praxis.behavior.signals import BehavioralSignals, extract
+from praxis.behavior.signals import (
+    SIGNAL_KINDS_IN_PANEL_ORDER,
+    BehavioralSignals,
+    detect_signal_kinds,
+    extract,
+)
 from praxis.behavior.trajectory import (
     TrajectoryLabel,
     _linear_slope,
@@ -106,6 +111,65 @@ def test_assess_trajectory_stable_passive_label_for_delegators():
         pairs.append((session, sig))
     result = assess_trajectory_heuristic(pairs)
     assert result.label == TrajectoryLabel.STABLE_PASSIVE
+
+
+def test_detect_signal_kinds_why_question_only():
+    """A turn that only matches the why-questions regex returns just
+    'why_question' (no false-positives across the other kinds)."""
+    turn = Turn(
+        role=Role.USER,
+        content="Why does this approach work for caching?",
+    )
+    kinds = detect_signal_kinds(turn)
+    assert "why_question" in kinds
+
+
+def test_detect_signal_kinds_telegraphic_short_prompt():
+    """A very short prompt with no question mark or newline is
+    telegraphic per the existing heuristic."""
+    turn = Turn(role=Role.USER, content="add tests")
+    kinds = detect_signal_kinds(turn)
+    assert "telegraphic" in kinds
+
+
+def test_detect_signal_kinds_pure_delegation_imperative_opener():
+    """A turn that opens with an imperative verb fires pure_delegation."""
+    turn = Turn(role=Role.USER, content="write me a function that sorts a list")
+    kinds = detect_signal_kinds(turn)
+    assert "pure_delegation" in kinds
+
+
+def test_detect_signal_kinds_own_attempt_marker():
+    """A 'my approach is...' opener fires the independence signal."""
+    turn = Turn(
+        role=Role.USER,
+        content="My approach is to memoize the lookup, but I'd like a sanity check.",
+    )
+    kinds = detect_signal_kinds(turn)
+    assert "own_attempt" in kinds
+
+
+def test_detect_signal_kinds_returns_subset_of_panel_order():
+    """The keys returned by detect_signal_kinds must all be members of
+    SIGNAL_KINDS_IN_PANEL_ORDER so the adapter / renderer can iterate
+    that tuple safely."""
+    panel_kinds = set(SIGNAL_KINDS_IN_PANEL_ORDER)
+    turn = Turn(role=Role.USER, content="why does this even work, fix this")
+    for kind in detect_signal_kinds(turn):
+        assert kind in panel_kinds
+
+
+def test_detect_signal_kinds_can_match_multiple_kinds():
+    """A single turn can match multiple signal kinds (e.g. an
+    imperative request followed by 'why' phrasing)."""
+    turn = Turn(
+        role=Role.USER,
+        content="fix this, and explain why it broke in the first place",
+    )
+    kinds = detect_signal_kinds(turn)
+    # Both a debug outsourcing pattern AND an explanation request.
+    assert "outsourced_debug" in kinds
+    assert len(kinds) >= 2
 
 
 def test_llm_trajectory_returns_none_without_keys(tmp_home):

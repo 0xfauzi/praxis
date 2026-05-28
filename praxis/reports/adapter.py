@@ -14,8 +14,22 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from praxis.behavior import TrajectoryLabel
+from praxis.behavior.signals import (
+    SIGNAL_KINDS_IN_PANEL_ORDER,
+    detect_signal_kinds,
+)
 from praxis.reports import digest_html as dh
 from praxis.reports import digest_terminal as dt
+from praxis.reports.panel_inputs import (
+    EXCERPT_CHAR_LIMIT,
+    MAX_EXCERPTS_PER_SIGNAL,
+    SIGNAL_CITATIONS,
+    SIGNAL_LABELS,
+    BehavioralPatternRow,
+    BehavioralPatternsPanel,
+    PanelInputs,
+    clip_excerpt,
+)
 from praxis.scoring.cost_ledger import (
     BiggestLineInputSession,
     TierFitInputSession,
@@ -594,6 +608,57 @@ def _one_thing_to_try(summary) -> str:
     return ""
 
 
+def _behavioral_patterns_panel(summary) -> BehavioralPatternsPanel:
+    """Aggregate per-session BehavioralSignals across the week (US-038).
+
+    Walks every user turn in every session in the summary, asks
+    ``detect_signal_kinds`` which signals fire for it, and accumulates
+    (a) a running count per signal kind and (b) up to
+    ``MAX_EXCERPTS_PER_SIGNAL`` raw user-turn excerpts per kind, each
+    clipped to ``EXCERPT_CHAR_LIMIT`` chars. Rows always include every
+    signal kind in panel-display order so the renderer can distinguish
+    "no signals at all" (the empty-state path) from "some signals fired,
+    some did not" (the populated table path with explicit zeros).
+    """
+    counts: dict[str, int] = {k: 0 for k in SIGNAL_KINDS_IN_PANEL_ORDER}
+    excerpts: dict[str, list[str]] = {
+        k: [] for k in SIGNAL_KINDS_IN_PANEL_ORDER
+    }
+    for s in summary.sessions or []:
+        for turn in s.user_turns:
+            kinds = detect_signal_kinds(turn)
+            for kind in kinds:
+                counts[kind] += 1
+                if len(excerpts[kind]) < MAX_EXCERPTS_PER_SIGNAL:
+                    excerpts[kind].append(
+                        clip_excerpt(turn.content, EXCERPT_CHAR_LIMIT)
+                    )
+    rows = tuple(
+        BehavioralPatternRow(
+            signal_kind=kind,
+            label=SIGNAL_LABELS[kind],
+            count=counts[kind],
+            citation=SIGNAL_CITATIONS[kind],
+            excerpts=tuple(excerpts[kind]),
+        )
+        for kind in SIGNAL_KINDS_IN_PANEL_ORDER
+    )
+    return BehavioralPatternsPanel(rows=rows)
+
+
+def build_panel_inputs(summary) -> PanelInputs:
+    """Build the v0.3 expansion-panel inputs from a WeeklyRunSummary.
+
+    Each panel is independently optional; this helper populates the
+    fields it can build from the in-flight summary. US-038 wires the
+    behavioral-patterns panel; subsequent stories extend the returned
+    ``PanelInputs`` with additional panels.
+    """
+    return PanelInputs(
+        behavioral_signals=_behavioral_patterns_panel(summary),
+    )
+
+
 def build_terminal_digest(summary, follow_up=None) -> dt.WeeklyDigest:
     """Adapter: WeeklyRunSummary -> digest_terminal.WeeklyDigest."""
     return dt.WeeklyDigest(
@@ -604,6 +669,7 @@ def build_terminal_digest(summary, follow_up=None) -> dt.WeeklyDigest:
         cost_ledger=_cost_ledger_terminal(summary),
         tasks=_task_rows_terminal(summary),
         dimensions=_dim_rows_terminal(summary),
+        panel_inputs=build_panel_inputs(summary),
     )
 
 
@@ -634,4 +700,5 @@ def build_html_digest(summary, follow_up=None) -> dh.WeeklyDigest:
         vital_signs=_vital_signs_html(summary),
         weekly_trajectory=trajectory_points,
         behavioral_signals=_behavioral_signals_html(summary, trajectory_points),
+        panel_inputs=build_panel_inputs(summary),
     )
