@@ -18,6 +18,7 @@ from praxis.config import (
     Config,
     JudgeConfig,
     NotificationConfig,
+    NudgeConfig,
     PrivacyConfig,
     ScanConfig,
     ScheduleConfig,
@@ -91,6 +92,12 @@ def test_default_notification_section(tmp_home):
     assert data["notification"]["sound"] == "default"
 
 
+def test_default_nudge_section(tmp_home):
+    path = ensure_config_file()
+    data = _load(path)
+    assert data["nudge"]["throttle_minutes"] == 30
+
+
 def test_default_privacy_section(tmp_home):
     path = ensure_config_file()
     data = _load(path)
@@ -106,6 +113,7 @@ def test_default_config_string_parses_as_valid_toml():
         "scan",
         "judge",
         "notification",
+        "nudge",
         "privacy",
     }
 
@@ -142,6 +150,7 @@ def test_load_config_returns_typed_object_with_all_sections(tmp_home):
     assert isinstance(cfg.scan, ScanConfig)
     assert isinstance(cfg.judge, JudgeConfig)
     assert isinstance(cfg.notification, NotificationConfig)
+    assert isinstance(cfg.nudge, NudgeConfig)
     assert isinstance(cfg.privacy, PrivacyConfig)
 
 
@@ -159,6 +168,7 @@ def test_load_config_returns_documented_defaults_on_first_run(tmp_home):
     assert cfg.notification.enabled is True
     assert cfg.notification.sound == "default"
     assert cfg.notification.style == "banner"
+    assert cfg.nudge.throttle_minutes == 30
     assert cfg.privacy.redact_secrets is True
 
 
@@ -271,6 +281,7 @@ def test_default_config_string_matches_typed_defaults():
     assert parsed["judge"]["cheap_model"] == defaults.judge.cheap_model
     assert parsed["notification"]["enabled"] == defaults.notification.enabled
     assert parsed["notification"]["sound"] == defaults.notification.sound
+    assert parsed["nudge"]["throttle_minutes"] == defaults.nudge.throttle_minutes
     assert parsed["privacy"]["redact_secrets"] == defaults.privacy.redact_secrets
 
 

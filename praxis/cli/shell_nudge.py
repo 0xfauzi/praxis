@@ -1,26 +1,28 @@
-"""Shell-startup reminder for the weekly digest.
+"""Shell-startup reminder for the active commitment (US-019).
 
 The macOS notification fires once and disappears. If the user misses
 it (Focus mode, laptop closed, banner dismissed), nothing else surfaces
-the digest -- it sits unread until next week overwrites the symlink in
-their attention.
+the active commitment -- it sits unseen until next week.
 
 The shell nudge closes that gap: on every interactive shell startup,
-print one line if a fresh-but-unread digest is on disk. "Fresh" means
-modified in the last 5 days; "unread" means `~/.praxis/.last_opened`
-is missing or older than `~/.praxis/latest.html`. `praxis open` is the
-canonical reader that touches the marker, so once the user opens the
-digest the reminder stops on the next shell.
+delegate to ``praxis nudge --format text``. That command is the single
+source of truth (PLAN section 5: "One source of truth, three surfaces")
+for what to show -- it reads the active follow_ups row, gates output
+through the shared ``~/.praxis/.last_nudge`` throttle file, and prints
+one line ``[Praxis] This week: <commitment>`` only when a fresh fire is
+warranted. A shell startup that follows a Claude Code or Codex
+SessionStart fire within ``[nudge].throttle_minutes`` (default 30) sees
+no output because the throttle file is shared across surfaces.
 
-The snippet is plain bash/zsh and does not invoke Python per shell
-startup (perf): the cost on a new shell is one `find`, one stat, and
-one printf at most.
+The snippet stays POSIX (bash/zsh/dash) and fails closed: if ``praxis``
+is missing from PATH, or if it raises for any reason, the user prompt
+gets nothing -- never a "command not found" or a Python traceback.
 
 Two integration paths:
-  * `praxis install-weekly` prompts the user once and appends the
-    `eval "$(praxis shell-nudge)"` line to the right RC file(s).
-  * `praxis install-shell-nudge` / `praxis uninstall-shell-nudge` let
-    the user manage it manually without re-running install-weekly.
+  * ``praxis install-weekly`` prompts the user once and appends the
+    ``eval "$(praxis shell-nudge)"`` line to the right RC file(s).
+  * ``praxis install-shell-nudge`` / ``praxis uninstall-shell-nudge``
+    let the user manage it manually without re-running install-weekly.
 """
 from __future__ import annotations
 
@@ -45,26 +47,28 @@ def emit_snippet() -> str:
 
     The snippet defines and calls a tiny function. Implementation notes:
 
-      * Uses POSIX `[ -f ]` so it works in zsh, bash, dash without
-        bashism warnings.
-      * `find -mtime -5 -print -quit` is the portable way to ask
-        "modified within the last 5 days"; `stat` formats differ
-        between BSD (macOS) and GNU (Linux) and would need two
-        codepaths.
-      * Reminder line goes to stderr so script consumers piping shell
-        stdout aren't polluted.
-      * The eval is hot-pathed: any failure mode short-circuits with
-        `return 0` so a broken nudge can never block the shell.
+      * Uses POSIX ``command -v`` (not bashism ``which`` or ``type``)
+        so it works in zsh, bash, dash without warnings.
+      * Delegates the actual cue-vs-no-cue decision to
+        ``praxis nudge --format text``. That command shares the
+        ``~/.praxis/.last_nudge`` throttle file with the Claude Code /
+        Codex SessionStart hooks, so a shell startup within
+        ``[nudge].throttle_minutes`` of either hook firing is silent.
+      * ``praxis nudge`` ``2>/dev/null`` so any error output (an
+        argparse complaint, a Python traceback from a broken install,
+        an unreadable config) never lands on the user's prompt. The
+        ``|| return 0`` adds a belt-and-braces guard so a non-zero
+        exit (e.g. exit 4 from the multi-row invariant) also stays
+        invisible.
+      * The PATH guard ``command -v praxis >/dev/null 2>&1 || return 0``
+        means a system where ``praxis`` has been uninstalled (or never
+        installed -- e.g. the RC line lingered after a reinstall) just
+        no-ops; the user does not see ``command not found: praxis``
+        on every shell startup.
     """
     return r"""__praxis_nudge() {
-  local html="$HOME/.praxis/latest.html"
-  local marker="$HOME/.praxis/.last_opened"
-  [ -f "$html" ] || return 0
-  find "$html" -mtime -5 -print -quit >/dev/null 2>&1 || return 0
-  if [ -f "$marker" ] && [ "$marker" -nt "$html" ]; then
-    return 0
-  fi
-  printf 'Praxis: this week'\''s digest is ready. Run `praxis open` to read.\n' >&2
+  command -v praxis >/dev/null 2>&1 || return 0
+  praxis nudge --format text 2>/dev/null || return 0
 }
 __praxis_nudge
 """

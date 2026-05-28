@@ -1077,3 +1077,40 @@ class ProfileStore:
             row_id = cur.lastrowid
         assert row_id is not None
         return row_id
+
+    def load_active_commitments(self, week_iso: str) -> list[FollowUp]:
+        """Return all active commitments for ``week_iso``.
+
+        "Active" = ``outcome='pending'``, and (when the schema-migrations
+        column ``superseded_by`` is present) ``superseded_by IS NULL``. The
+        partial-unique index that lands with that migration enforces "at most
+        one active row per week", so this list should be 0 or 1 elements in
+        practice; callers treat ``len > 1`` as a violated invariant.
+        """
+        with self._conn() as conn:
+            cols = {
+                r[1] for r in conn.execute("PRAGMA table_info(follow_ups)").fetchall()
+            }
+            extra = " AND superseded_by IS NULL" if "superseded_by" in cols else ""
+            rows = conn.execute(
+                "SELECT week_iso, dim_key, commitment_text, target_metric, "
+                "       baseline_value, measured_value, outcome "
+                f"FROM follow_ups WHERE week_iso = ? AND outcome = 'pending'{extra} "
+                "ORDER BY rowid ASC",
+                (week_iso,),
+            ).fetchall()
+        result: list[FollowUp] = []
+        for row in rows:
+            outcome: Outcome = row["outcome"]
+            result.append(
+                FollowUp(
+                    week_iso=row["week_iso"],
+                    dim_key=row["dim_key"],
+                    commitment_text=row["commitment_text"],
+                    target_metric=row["target_metric"],
+                    baseline_value=row["baseline_value"],
+                    measured_value=row["measured_value"],
+                    outcome=outcome,
+                )
+            )
+        return result

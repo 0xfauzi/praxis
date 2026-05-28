@@ -12,8 +12,8 @@
         "Tests pass: uv run pytest"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added ProfileStore.load_active_commitments(week_iso) (schema-tolerant: appends `AND superseded_by IS NULL` only when the column from schema-migrations US-002 is present). cmd_nudge prints `[Praxis] This week: <commitment_text>` on a single line; silent (exit 0, empty stdout/stderr) when no active commitment; exits 4 with stderr error referencing the violated invariant when >1 active rows are returned."
     },
     {
       "id": "US-017",
@@ -26,8 +26,8 @@
         "Tests pass: uv run pytest"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added `--format {text,claude-code,codex}` to the nudge subparser (default text). text prints `[Praxis] This week: <commitment>\\n`; claude-code and codex emit the same single-line compact JSON envelope `{\"hookSpecificOutput\":{\"additionalContext\":\"[Praxis] This week's focus: <commitment>\"}}`. The display field is `commitment_text` from the FollowUp dataclass; when the schema-migrations `display_text` column lands, swap to it here without touching the CLI surface. argparse's `choices=` rejects `--format html` with exit 2 and a usage-style error naming all three accepted values."
     },
     {
       "id": "US-018",
@@ -40,8 +40,8 @@
         "Tests pass: uv run pytest"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added praxis/cli/nudge_throttle.py with is_throttled / record_fire keyed by f'{surface}:{sha1(cwd)}'. Added NudgeConfig dataclass + [nudge] section to praxis/config.py (throttle_minutes default 30) and wove it into DEFAULT_CONFIG_TOML. cmd_nudge now runs the throttle check BEFORE _resolve_active_commitment so a throttled call never opens profile.db; record_fire is only invoked on the path that actually printed a commitment (silent no-op runs do NOT touch the file, otherwise a fresh user with no commitment would block themselves for 30 min after their first commit). Malformed JSON / non-object payloads are quarantined to .last_nudge.corrupt via _quarantine_corrupt_file and the current call proceeds with empty state."
     },
     {
       "id": "US-019",
@@ -54,13 +54,14 @@
         "Tests pass: uv run pytest"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Rewrote praxis/cli/shell_nudge.py emit_snippet() so the eval'd snippet (1) PATH-guards via `command -v praxis >/dev/null 2>&1 || return 0` so a missing binary fails closed silent, (2) delegates to `praxis nudge --format text 2>/dev/null || return 0` so any non-zero exit / stderr from praxis nudge never lands on the user's prompt, and (3) shares the ~/.praxis/.last_nudge throttle file with the SessionStart hooks (structural -- both call the same `praxis nudge` entry point, so a shell startup within `[nudge].throttle_minutes` of a Claude Code or Codex fire stays silent). The legacy latest.html/.last_opened/find -mtime logic is gone -- that decision now lives inside praxis nudge. Verified all 3 ACs via end-to-end smoke: with praxis on PATH + active commitment, prints `[Praxis] This week: <text>`; throttled second invocation is silent; PATH=/usr/bin invocation (praxis truly missing) exits 0 with empty output."
     }
   ],
   "allowedPaths": [
     "praxis/cli/",
     "praxis/storage/",
+    "praxis/config.py",
     "tests/",
     "scripts/ralph/feature/praxis-nudge-command/",
     "scripts/ralph/progress.txt"

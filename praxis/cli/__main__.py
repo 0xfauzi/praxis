@@ -17,6 +17,7 @@ Commands (v0.2 surface):
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -27,7 +28,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from praxis import __version__
-from praxis.config import ensure_config_file
+from praxis.cli.nudge_throttle import is_throttled, record_fire
+from praxis.config import ensure_config_file, load_config
+from praxis.follow_up import FollowUp
 from praxis.orchestrator import (
     NO_API_KEY_MESSAGE,
     InvalidWeekError,
@@ -805,6 +808,87 @@ def cmd_follow_up(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+def _resolve_active_commitment(week_iso: str) -> FollowUp | None:
+    """Return the single active commitment for ``week_iso``, or None.
+
+    Raises ``RuntimeError`` when more than one active row exists -- that's
+    the "would only happen if the unique index was bypassed" case in the
+    spec (US-016 AC #3). Surfacing it loud is the whole point: silently
+    picking one would mask the corrupted invariant.
+    """
+    store = ProfileStore()
+    commitments = store.load_active_commitments(week_iso)
+    if len(commitments) > 1:
+        raise RuntimeError(
+            f"praxis nudge: {len(commitments)} active commitments found for "
+            f"{week_iso}; expected at most one (active = outcome='pending' "
+            "AND superseded_by IS NULL). The follow_ups unique-index "
+            "invariant has been violated."
+        )
+    return commitments[0] if commitments else None
+
+
+def cmd_nudge(args: argparse.Namespace) -> int:
+    """Print this week's active commitment, or stay silent.
+
+    Resolves the single follow_ups row for the current ISO week that has
+    ``outcome='pending'`` (and, once the schema-migrations columns land,
+    ``superseded_by IS NULL``). The ``--format`` flag selects the surface:
+
+      text         (default) ``[Praxis] This week: <commitment>`` + newline,
+                   for human-readable shell / terminal surfaces.
+      claude-code  ``{"hookSpecificOutput":{"additionalContext":"[Praxis] ``
+                   ``This week's focus: <commitment>"}}`` (single-line JSON,
+                   for Claude Code SessionStart hooks per spec section 5).
+      codex        Same JSON shape as claude-code (Codex SessionStart hooks
+                   share the additionalContext envelope per spec section 5).
+
+    Throttling (US-018): the first action is a check against
+    ``~/.praxis/.last_nudge`` -- if the same (surface, cwd) fired within
+    ``[nudge].throttle_minutes`` (default 30) the command exits 0 with empty
+    stdout and never opens the DB. A successful surfacing writes a fresh
+    timestamp into that file, keyed by ``f"{surface}:{sha1(cwd)}"``.
+
+    Exit codes:
+      0  active commitment printed, or no active commitment (silent),
+         or throttled (silent).
+      4  invariant violated: more than one active row for the current week.
+    """
+    fmt = getattr(args, "format", "text")
+    surface = getattr(args, "surface", "cli")
+
+    # Throttle check runs BEFORE any DB access so a throttled call stays
+    # cheap (one stat + one read of the small JSON file) and never opens
+    # profile.db. The malformed-JSON recovery happens inside is_throttled.
+    cfg = load_config()
+    if is_throttled(surface, throttle_minutes=cfg.nudge.throttle_minutes):
+        return 0
+
+    week_iso = current_iso_week()
+    try:
+        active = _resolve_active_commitment(week_iso)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 4
+    if active is None:
+        # No commitment to surface: don't record a fire, otherwise the
+        # next legitimate cue (once the user commits) would be throttled
+        # away. Silent-no-op surfaces remain free to retry on every hook.
+        return 0
+    display_text = active.commitment_text
+    if fmt == "text":
+        print(f"[Praxis] This week: {display_text}")
+    else:
+        payload = {
+            "hookSpecificOutput": {
+                "additionalContext": f"[Praxis] This week's focus: {display_text}",
+            },
+        }
+        print(json.dumps(payload, separators=(",", ":")))
+    record_fire(surface)
+    return 0
+
+
 def cmd_rubric(args: argparse.Namespace) -> int:  # noqa: ARG001
     print("\nPRAXIS — SCORING RUBRIC\n")
     for d in RUBRIC:
@@ -1292,6 +1376,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show the most recent weekly commitment and its outcome.",
     )
     fup.set_defaults(func=cmd_follow_up)
+
+    nudge = sub.add_parser(
+        "nudge",
+        help="Print this week's active commitment (silent when none exists).",
+        description=(
+            "Resolve the single follow_ups row with outcome='pending' for the "
+            "current ISO week and print it on one line. Exits 0 with empty "
+            "stdout when there is no active commitment so hooks (Claude Code "
+            "SessionStart, Codex, shell startup) stay silent until the first "
+            "commitment is recorded."
+        ),
+    )
+    nudge.add_argument(
+        "--format",
+        choices=["text", "claude-code", "codex"],
+        default="text",
+        help=(
+            "Output format. 'text' (default) is a single human-readable line. "
+            "'claude-code' and 'codex' emit a single-line JSON envelope "
+            "({\"hookSpecificOutput\":{\"additionalContext\":...}}) for "
+            "SessionStart hooks per spec section 5."
+        ),
+    )
+    nudge.add_argument(
+        "--surface",
+        type=str,
+        default="cli",
+        help=(
+            "Surface identifier used for throttling. The throttle file "
+            "(~/.praxis/.last_nudge) is keyed by (surface, sha1(cwd)); "
+            "callers using the default share a single throttle entry so "
+            "a shell startup right after a SessionStart hook stays silent."
+        ),
+    )
+    nudge.set_defaults(func=cmd_nudge)
 
     mod = sub.add_parser("models",
                          help="List model cards or show one in detail.")

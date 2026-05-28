@@ -1169,3 +1169,562 @@ def test_notify_survives_unexpected_exception(
     captured = capsys.readouterr()
     assert code == 0
     assert "osascript notification failed" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# US-016 - `praxis nudge` resolves and surfaces this week's active commitment.
+# ---------------------------------------------------------------------------
+
+
+def _seed_follow_up(
+    week_iso: str,
+    *,
+    commitment_text: str = "ask 'list every table this migration writes'",
+    dim_key: str = "verification",
+    target_metric: str = "verification_rate",
+    baseline_value: float = 0.42,
+    measured_value: float | None = None,
+    outcome: str = "pending",
+) -> None:
+    """Insert one follow_ups row via ProfileStore for nudge-resolver tests."""
+    store = ProfileStore()
+    store.save_follow_up(
+        FollowUp(
+            week_iso=week_iso,
+            dim_key=dim_key,
+            commitment_text=commitment_text,
+            target_metric=target_metric,
+            baseline_value=baseline_value,
+            measured_value=measured_value,
+            outcome=outcome,  # type: ignore[arg-type]
+        )
+    )
+
+
+def test_nudge_subcommand_is_registered():
+    """`praxis nudge` must be parseable with no flags (US-016 AC #1)."""
+    parser = build_parser()
+    args = parser.parse_args(["nudge"])
+    assert args.cmd == "nudge"
+
+
+def test_nudge_silent_when_no_follow_up_row_exists(tmp_home, capsys):
+    """Empty follow_ups table: exit 0, empty stdout, empty stderr.
+
+    Hooks fire on every shell / IDE start; without a committed commitment
+    yet, they must produce zero noise (US-016 AC #2).
+    """
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_nudge_silent_when_only_resolved_rows_exist(tmp_home, capsys, monkeypatch):
+    """A non-pending row for THIS week is not an active commitment.
+
+    Once a row's outcome moves out of 'pending' (improved/unchanged/worse),
+    it no longer counts as the active commitment -- the user has already
+    seen its outcome in their weekly digest.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    _seed_follow_up(
+        "2026-W21",
+        commitment_text="resolved last week",
+        measured_value=0.95,
+        outcome="improved",
+    )
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == ""
+
+
+def test_nudge_silent_when_pending_row_is_for_a_different_week(
+    tmp_home, capsys, monkeypatch
+):
+    """A pending row from a prior week is not active for THIS week.
+
+    Active = pending AND week_iso == current. Stale pending rows (e.g.,
+    if the close-the-loop step didn't run) must not leak into the current
+    week's nudge surface.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    _seed_follow_up("2026-W19", commitment_text="stale pending")
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == ""
+
+
+def test_nudge_prints_active_commitment_for_current_week(
+    tmp_home, capsys, monkeypatch
+):
+    """A pending row for the current week is the active commitment.
+
+    Output is single-line so SessionStart hooks can pipe it straight to
+    the user without further parsing.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    _seed_follow_up(
+        "2026-W21",
+        commitment_text="ask 'what would falsify this answer?' before applying",
+    )
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "ask 'what would falsify this answer?' before applying" in captured.out
+    assert captured.out.endswith("\n")
+    assert captured.out.count("\n") == 1
+    assert captured.err == ""
+
+
+def test_nudge_uses_current_iso_week_resolver(tmp_home, capsys, monkeypatch):
+    """Switching the week resolver swaps which row is surfaced.
+
+    Confirms `current_iso_week()` is the seam the command resolves through
+    (not e.g. latest_follow_up, which would surface stale rows).
+    """
+    _seed_follow_up("2026-W19", commitment_text="week 19 commitment")
+    _seed_follow_up("2026-W21", commitment_text="week 21 commitment")
+
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W19"
+    )
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "week 19 commitment" in captured.out
+    assert "week 21 commitment" not in captured.out
+
+
+def test_nudge_exits_nonzero_with_clear_error_on_multiple_active_rows(
+    tmp_home, capsys, monkeypatch
+):
+    """Multi-active is a violated invariant: surface it loudly (AC #3).
+
+    The legacy schema's PRIMARY KEY (week_iso) and the migration's partial
+    unique index both prevent this case; the test injects two rows via
+    monkeypatch since the schema makes the case unreachable in practice.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    fakes = [
+        FollowUp(
+            week_iso="2026-W21",
+            dim_key="verification",
+            commitment_text="first active",
+            target_metric="verification_rate",
+            baseline_value=0.4,
+        ),
+        FollowUp(
+            week_iso="2026-W21",
+            dim_key="planning",
+            commitment_text="second active",
+            target_metric="planning_dim_mean",
+            baseline_value=6.0,
+        ),
+    ]
+    monkeypatch.setattr(
+        "praxis.cli.__main__.ProfileStore.load_active_commitments",
+        lambda self, week_iso: fakes,  # noqa: ARG005
+    )
+
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code != 0
+    # Error must reference the violated invariant in user-readable terms.
+    assert "active commitments" in captured.err
+    assert "2026-W21" in captured.err
+    # Stdout stays clean so hooks consuming stdout don't see a half-message.
+    assert captured.out == ""
+
+
+# ---------------------------------------------------------------------------
+# US-017 - `praxis nudge --format` selects between text and JSON envelopes.
+# ---------------------------------------------------------------------------
+
+
+def test_nudge_default_format_is_text(tmp_home, capsys, monkeypatch):
+    """No `--format` flag must behave exactly like `--format text` (US-017 AC #2).
+
+    The default surface is the human-readable line that shell hooks pipe
+    straight to the prompt; introducing a JSON-by-default would break
+    every existing shell-startup wiring.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    _seed_follow_up("2026-W21", commitment_text="explain the failing test first")
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == "[Praxis] This week: explain the failing test first\n"
+
+
+def test_nudge_format_text_prints_single_line_with_newline(
+    tmp_home, capsys, monkeypatch
+):
+    """`--format text` prints exactly `[Praxis] This week: <text>` + newline."""
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    _seed_follow_up(
+        "2026-W21",
+        commitment_text="ask 'what would falsify this answer?' first",
+    )
+    code = main(["nudge", "--format", "text"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert (
+        captured.out
+        == "[Praxis] This week: ask 'what would falsify this answer?' first\n"
+    )
+    assert captured.err == ""
+
+
+def test_nudge_format_claude_code_emits_single_line_json(
+    tmp_home, capsys, monkeypatch
+):
+    """`--format claude-code` prints exactly the spec section 5 JSON envelope.
+
+    The envelope is single-line JSON with no whitespace between tokens so
+    Claude Code's SessionStart hook reader sees one stdin line.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    _seed_follow_up(
+        "2026-W21",
+        commitment_text="run the linter before requesting review",
+    )
+    code = main(["nudge", "--format", "claude-code"])
+    captured = capsys.readouterr()
+    assert code == 0
+    # Single-line stdout: exactly one trailing newline, no internal newlines.
+    assert captured.out.endswith("\n")
+    assert captured.out.count("\n") == 1
+    payload = json.loads(captured.out)
+    assert payload == {
+        "hookSpecificOutput": {
+            "additionalContext": (
+                "[Praxis] This week's focus: run the linter before requesting review"
+            ),
+        },
+    }
+    # Compact form: no spaces inside the envelope.
+    assert " " not in captured.out.split('"additionalContext"')[0]
+
+
+def test_nudge_format_codex_emits_same_envelope_as_claude_code(
+    tmp_home, capsys, monkeypatch
+):
+    """`--format codex` shares the additionalContext shape (spec section 5)."""
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    _seed_follow_up(
+        "2026-W21",
+        commitment_text="state your assumptions before generating code",
+    )
+    code = main(["nudge", "--format", "codex"])
+    captured = capsys.readouterr()
+    assert code == 0
+    payload = json.loads(captured.out)
+    assert payload == {
+        "hookSpecificOutput": {
+            "additionalContext": (
+                "[Praxis] This week's focus: state your assumptions before generating code"
+            ),
+        },
+    }
+
+
+def test_nudge_format_silent_when_no_active_commitment(
+    tmp_home, capsys, monkeypatch
+):
+    """Empty stdout (no JSON envelope at all) when no active commitment exists.
+
+    Hooks must remain silent on a fresh DB regardless of which surface
+    they request; emitting an envelope with an empty additionalContext
+    would surface noise on every shell start.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    for fmt in ("text", "claude-code", "codex"):
+        code = main(["nudge", "--format", fmt])
+        captured = capsys.readouterr()
+        assert code == 0, f"format={fmt!r} must exit 0"
+        assert captured.out == "", f"format={fmt!r} must produce empty stdout"
+        assert captured.err == "", f"format={fmt!r} must produce empty stderr"
+
+
+def test_nudge_format_html_exits_nonzero_and_lists_accepted_values(
+    tmp_home, capsys
+):
+    """Unsupported `--format html` exits non-zero with the choices listed.
+
+    argparse's `choices=` machinery prints a usage-style line plus the
+    "invalid choice" error that names the three accepted values, and
+    exits 2. That satisfies US-017 AC #3 without bespoke code.
+    """
+    with pytest.raises(SystemExit) as excinfo:
+        main(["nudge", "--format", "html"])
+    assert excinfo.value.code != 0
+    err = capsys.readouterr().err
+    # The error must name each accepted value so users know how to fix it.
+    assert "text" in err
+    assert "claude-code" in err
+    assert "codex" in err
+
+
+def test_nudge_format_parses_into_args_namespace():
+    """`build_parser` exposes --format on the nudge subparser.
+
+    Locks in the wiring so a refactor can't quietly drop the flag and
+    let the handler silently fall back to the text branch.
+    """
+    parser = build_parser()
+    args = parser.parse_args(["nudge", "--format", "claude-code"])
+    assert args.cmd == "nudge"
+    assert args.format == "claude-code"
+
+    args_default = parser.parse_args(["nudge"])
+    assert args_default.format == "text"
+
+
+# ---------------------------------------------------------------------------
+# US-018 - ~/.praxis/.last_nudge throttles per (surface, cwd).
+# ---------------------------------------------------------------------------
+
+
+def _read_throttle_state(tmp_home: Path) -> dict:
+    """Return the parsed contents of ~/.praxis/.last_nudge for assertions."""
+    path = tmp_home / ".praxis" / ".last_nudge"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_nudge_surface_argument_parses_with_default_cli(tmp_home, monkeypatch):
+    """`--surface` exposes the throttle dedup key (default 'cli').
+
+    Both SessionStart hooks and the shell-startup snippet rely on the
+    default so a single human action only surfaces one cue per cycle
+    (US-019 builds on this contract). Tests below override the surface
+    explicitly to exercise the per-surface throttle keying.
+    """
+    parser = build_parser()
+    args = parser.parse_args(["nudge"])
+    assert args.surface == "cli"
+
+    args_override = parser.parse_args(["nudge", "--surface", "claude-code"])
+    assert args_override.surface == "claude-code"
+
+
+def test_nudge_records_fire_timestamp_after_successful_surface(
+    tmp_home, capsys, monkeypatch
+):
+    """A successful nudge writes an ISO-8601 timestamp into ~/.praxis/.last_nudge.
+
+    The JSON object is keyed by ``f"{surface}:{sha1(cwd)}"`` (US-018 AC #1).
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    monkeypatch.chdir(tmp_home)
+    _seed_follow_up("2026-W21", commitment_text="stay literal")
+    code = main(["nudge"])
+    assert code == 0
+    captured = capsys.readouterr()
+    assert "[Praxis] This week: stay literal" in captured.out
+
+    state = _read_throttle_state(tmp_home)
+    assert len(state) == 1
+    key = next(iter(state))
+    # Key format: surface ':' followed by a 40-char sha1 hex digest.
+    assert key.startswith("cli:")
+    assert len(key) == len("cli:") + 40
+    # Value is parseable as an ISO-8601 timestamp; we don't pin a
+    # specific instant since the helper uses datetime.now(timezone.utc).
+    ts = datetime.fromisoformat(state[key])
+    assert ts.tzinfo is not None
+
+
+def test_nudge_throttled_within_window_returns_empty_without_db_touch(
+    tmp_home, capsys, monkeypatch
+):
+    """A second invocation within throttle_minutes is silent and skips the DB.
+
+    Verifies AC #2: the throttle short-circuits before any commitment
+    resolution so the second call never opens profile.db.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    monkeypatch.chdir(tmp_home)
+    _seed_follow_up("2026-W21", commitment_text="first fire only")
+
+    first = main(["nudge"])
+    assert first == 0
+    first_out = capsys.readouterr()
+    assert "first fire only" in first_out.out
+
+    # Booby-trap the DB resolver: if the second call reaches it, the
+    # test fails loudly. The throttle must short-circuit beforehand.
+    def _explode(_week_iso: str) -> None:
+        raise AssertionError(
+            "throttled call must not reach the active-commitment resolver"
+        )
+
+    monkeypatch.setattr(
+        "praxis.cli.__main__._resolve_active_commitment", _explode
+    )
+    second = main(["nudge"])
+    second_out = capsys.readouterr()
+    assert second == 0
+    assert second_out.out == ""
+    assert second_out.err == ""
+
+
+def test_nudge_throttle_releases_after_window_elapses(
+    tmp_home, capsys, monkeypatch
+):
+    """After throttle_minutes have passed, the surface fires again."""
+    from praxis.cli import nudge_throttle
+
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    monkeypatch.chdir(tmp_home)
+    _seed_follow_up("2026-W21", commitment_text="time-travel cue")
+
+    # Prime the throttle file with a fire 31 minutes ago (default window is 30).
+    past = datetime.now(timezone.utc) - timedelta(minutes=31)
+    nudge_throttle.record_fire("cli", now=past)
+
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "time-travel cue" in captured.out
+
+
+def test_nudge_throttle_minutes_honors_config_override(
+    tmp_home, capsys, monkeypatch
+):
+    """User-set [nudge] throttle_minutes overrides the default 30."""
+    from praxis.cli import nudge_throttle
+
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    monkeypatch.chdir(tmp_home)
+    _seed_follow_up("2026-W21", commitment_text="user-config cue")
+
+    # Set throttle_minutes = 60; prime a fire 45 minutes ago. Under the
+    # default (30) this would have released; under the user override
+    # (60) it must still be throttled.
+    config = tmp_home / ".praxis" / "config.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("[nudge]\nthrottle_minutes = 60\n", encoding="utf-8")
+    past = datetime.now(timezone.utc) - timedelta(minutes=45)
+    nudge_throttle.record_fire("cli", now=past)
+
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == ""
+
+
+def test_nudge_throttle_keyed_by_surface_so_different_surfaces_fire_independently(
+    tmp_home, capsys, monkeypatch
+):
+    """Different `--surface` values get separate throttle entries.
+
+    Per US-018 AC #1 the key is (surface, sha1(cwd)); two distinct
+    surfaces in the same cwd therefore have independent throttle state.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    monkeypatch.chdir(tmp_home)
+    _seed_follow_up("2026-W21", commitment_text="per-surface cue")
+
+    code_a = main(["nudge", "--surface", "claude-code"])
+    capsys.readouterr()  # discard first
+    code_b = main(["nudge", "--surface", "codex"])
+    out_b = capsys.readouterr().out
+    assert code_a == 0
+    assert code_b == 0
+    # Codex's surface has not yet fired -> the second call fires.
+    assert "per-surface cue" in out_b
+
+    state = _read_throttle_state(tmp_home)
+    surfaces = {key.split(":", 1)[0] for key in state}
+    assert surfaces == {"claude-code", "codex"}
+
+
+def test_nudge_throttle_corrupt_json_renames_to_corrupt_and_proceeds(
+    tmp_home, capsys, monkeypatch
+):
+    """Malformed JSON quarantines to ``.last_nudge.corrupt`` and proceeds (AC #3)."""
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    monkeypatch.chdir(tmp_home)
+    _seed_follow_up("2026-W21", commitment_text="recovered cue")
+
+    praxis_home = tmp_home / ".praxis"
+    praxis_home.mkdir(parents=True, exist_ok=True)
+    last_nudge = praxis_home / ".last_nudge"
+    corrupt = praxis_home / ".last_nudge.corrupt"
+    last_nudge.write_text("{not json", encoding="utf-8")
+
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    # The call must surface the commitment instead of crashing on the
+    # bad file: AC #3's "the user-facing call never crashes on the bad
+    # file" plus "the current call proceeds as if no prior fire."
+    assert code == 0
+    assert "recovered cue" in captured.out
+
+    # Quarantine path exists and the original file has been replaced
+    # with valid JSON containing the fresh fire (the throttle entry
+    # written by this call).
+    assert corrupt.exists()
+    assert corrupt.read_text(encoding="utf-8") == "{not json"
+    new_state = _read_throttle_state(tmp_home)
+    assert any(k.startswith("cli:") for k in new_state)
+
+
+def test_nudge_no_active_commitment_does_not_record_fire(
+    tmp_home, capsys, monkeypatch
+):
+    """Silent runs (no commitment) must NOT touch the throttle file.
+
+    Recording a fire when nothing was surfaced would block the next
+    legitimate cue (after the user finally commits) for 30 minutes.
+    The throttle file should remain unchanged across no-op calls.
+    """
+    monkeypatch.setattr(
+        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
+    )
+    monkeypatch.chdir(tmp_home)
+    # No `_seed_follow_up` -- the resolver returns None.
+
+    code = main(["nudge"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == ""
+
+    throttle_file = tmp_home / ".praxis" / ".last_nudge"
+    assert not throttle_file.exists()
