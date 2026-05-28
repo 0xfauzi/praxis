@@ -69,6 +69,9 @@ CREATE TABLE IF NOT EXISTS session_scores (
     judge_model TEXT,
     judge_pass INTEGER NOT NULL DEFAULT 1,
     signals_json TEXT,
+    -- aug_auto_classification + aug_auto_confidence are added by migration
+    -- 003_session_scores_aug_auto.sql (not here) to keep SCHEMA aligned with
+    -- the migration runner's expectations.
     PRIMARY KEY (stable_id, judge_pass)
 );
 
@@ -190,10 +193,13 @@ class ProfileStore:
     def _ensure_session_scores_columns(conn: sqlite3.Connection) -> None:
         """Add additive columns introduced after the v3 marker landed.
 
-        Currently only `signals_json` (spec section 7 - persists per-session
-        BehavioralSignals so the weekly-bucketed trajectory can replay 90
-        days of history without re-parsing source files). Idempotent: a
-        DB that already has the column is left alone.
+        Currently tracks ``signals_json`` (spec section 7 - persists per-session
+        BehavioralSignals so the weekly-bucketed trajectory can replay 90 days
+        of history without re-parsing source files). ``aug_auto_*`` columns
+        are added by the numbered SQL migration runner (003_session_scores_
+        aug_auto.sql), not here, so we don't double-apply on first init.
+
+        Idempotent: a DB that already has the columns is left alone.
         """
         cur = conn.execute("PRAGMA table_info(session_scores)")
         existing_cols = {row[1] for row in cur.fetchall()}
@@ -210,6 +216,12 @@ class ProfileStore:
         # prior state (fresh, v0.1, v0.2) is brought to v0.3 in one shot.
         conn.executescript(SCHEMA)
         self._migrate_session_scores_to_v3(conn)
+        # The v3 table-rebuild path in _migrate_session_scores_to_v3 does
+        # not include columns added after the v3 marker landed (aug_auto_*),
+        # so run the additive-column step here too. Idempotent: fresh DBs
+        # already have the columns from SCHEMA above and the ALTER lines
+        # short-circuit.
+        self._ensure_session_scores_columns(conn)
 
     def _migrate_session_scores_to_v3(self, conn: sqlite3.Connection) -> None:
         """Spec §9.6 (US-029): add ``judge_pass`` to session_scores and make
@@ -536,7 +548,7 @@ class ProfileStore:
         )
         return out
 
-    # ---- aug/auto classification (US-004) -------------------------------
+    # ---- aug/auto classification (US-004 + US-010) ----------------------
 
     _AUG_AUTO_VALID = ("augmentation", "automation", "mixed")
 
@@ -566,6 +578,10 @@ class ProfileStore:
                 "WHERE stable_id = ?",
                 (classification, confidence, stable_id),
             )
+
+    # Alias used by the orchestrator's classifier pass (US-010 call site).
+    # Delegates to set_session_aug_auto so validation stays in one place.
+    save_session_aug_auto = set_session_aug_auto
 
     def get_session_aug_auto(
         self, stable_id: str
