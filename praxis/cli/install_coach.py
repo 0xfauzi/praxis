@@ -5,8 +5,9 @@ coding tools (Claude Code, Codex, Copilot) so Praxis can surface the
 weekly commitment at the start of work and capture a reflection at the
 end. US-028 wired detection + per-tool yes/no prompting; US-029 fills
 in the Claude Code branch with a real settings.json merger (atomic
-write, sentinel-tagged blocks). US-030 (Codex) and US-031 (Copilot)
-follow.
+write, sentinel-tagged blocks); US-030 fills in the Codex branch with
+a parallel installer that writes ``~/.codex/hooks.json``. US-031
+(Copilot) follows.
 
 Detection criteria (AC US-028):
   - Claude Code: ``~/.claude/settings.json`` OR ``~/.claude/projects/``
@@ -39,6 +40,24 @@ Claude Code installer (US-029):
     :class:`InstallCoachError`; the file on disk is never overwritten.
   - The merged JSON is validated via ``json.dumps`` then written
     atomically via ``tempfile.mkstemp`` + ``os.replace``.
+
+Codex installer (US-030):
+  - Reads ``~/.codex/hooks.json`` (or starts from ``{"hooks": []}``).
+    The Codex shape is a flat list of ``{event, command}`` entries, not
+    Claude's dict-of-event-lists -- so the merge logic is parallel but
+    separate.
+  - Each Praxis-managed entry carries ``_praxisManaged: true``;
+    re-installing filters out the old sentinel-tagged entries and
+    appends fresh ones, so re-runs never duplicate.
+  - User-authored entries (no sentinel) are preserved.
+  - Unparseable JSON, non-object top level, and non-array ``hooks``
+    abort with :class:`InstallCoachError`; the file is never
+    overwritten.
+  - A ``PermissionError`` from the atomic write (unwriteable
+    ``~/.codex/``) is converted to a clear :class:`InstallCoachError`
+    pointing the user at the directory; no partial file is created
+    because ``tempfile.mkstemp`` fails atomically before any content
+    is written.
 """
 from __future__ import annotations
 
@@ -71,6 +90,12 @@ SENTINEL = "_praxisManaged"
 
 CLAUDE_HOOK_COMMANDS: dict[str, str] = {
     "SessionStart": "praxis nudge --format claude-code",
+    "Stop": "praxis reflect --session-end --non-interactive-fallback",
+}
+
+
+CODEX_HOOK_COMMANDS: dict[str, str] = {
+    "SessionStart": "praxis nudge --format codex",
     "Stop": "praxis reflect --session-end --non-interactive-fallback",
 }
 
@@ -308,14 +333,122 @@ def install_claude_code(home: Path | None = None) -> Path:
     return settings_path
 
 
+def codex_hooks_path(home: Path | None = None) -> Path:
+    """Return the canonical ``~/.codex/hooks.json`` path.
+
+    ``home`` override mirrors :func:`claude_settings_path` so the
+    install + uninstall surfaces (US-030, US-032) and tests share one
+    resolver and never drift on the path string.
+    """
+    base = home if home is not None else Path.home()
+    return base / ".codex" / "hooks.json"
+
+
+def _build_codex_entry(event: str, command: str) -> dict[str, Any]:
+    """Build a single Praxis-managed Codex hook entry.
+
+    The shape mirrors PLAN.md section "Codex CLI": a flat
+    ``{event, command}`` dict carrying the sentinel so uninstall
+    (US-032) can identify and remove only Praxis-authored entries
+    without touching user hooks at the same event name.
+    """
+    return {
+        "event": event,
+        "command": command,
+        SENTINEL: True,
+    }
+
+
+def install_codex(home: Path | None = None) -> Path:
+    """Install (or refresh) the Praxis Codex SessionStart + Stop hooks.
+
+    Reads ``~/.codex/hooks.json`` (or starts from ``{"hooks": []}`` when
+    the file is absent or empty), drops any existing Praxis-managed
+    entries (sentinel-tagged), appends fresh ``SessionStart`` and
+    ``Stop`` entries, then writes the result back atomically. User-
+    authored entries (no sentinel) are preserved.
+
+    Returns the path of the written hooks file.
+
+    Raises :class:`InstallCoachError` when:
+      - the existing file is unparseable JSON;
+      - the top-level value is not a JSON object;
+      - the existing ``hooks`` key is present but not a JSON array;
+      - the ``~/.codex/`` directory is not writable (permission denied).
+    In every error case the file on disk is left untouched and no
+    partial file is created (``tempfile.mkstemp`` fails atomically
+    before any content is written).
+    """
+    hooks_path = codex_hooks_path(home)
+
+    data: dict[str, Any]
+    if hooks_path.exists():
+        raw = hooks_path.read_text(encoding="utf-8")
+        if raw.strip() == "":
+            data = {"hooks": []}
+        else:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise InstallCoachError(
+                    f"Cannot install Codex hooks: {hooks_path} is "
+                    f"not valid JSON ({exc.msg} at line {exc.lineno} "
+                    f"column {exc.colno}). Fix the file manually and "
+                    "re-run `praxis install-coach`."
+                ) from exc
+            if not isinstance(parsed, dict):
+                raise InstallCoachError(
+                    f"Cannot install Codex hooks: {hooks_path} top "
+                    f"level must be a JSON object, got "
+                    f"{type(parsed).__name__}. Fix the file manually "
+                    "and re-run `praxis install-coach`."
+                )
+            data = parsed
+    else:
+        data = {"hooks": []}
+
+    raw_hooks = data.get("hooks")
+    entries: list[Any]
+    if raw_hooks is None:
+        entries = []
+    elif isinstance(raw_hooks, list):
+        entries = raw_hooks
+    else:
+        raise InstallCoachError(
+            f"Cannot install Codex hooks: {hooks_path} 'hooks' key "
+            f"must be a JSON array, got {type(raw_hooks).__name__}. "
+            "Fix the file manually and re-run `praxis install-coach`."
+        )
+
+    preserved: list[Any] = [
+        entry
+        for entry in entries
+        if not (isinstance(entry, dict) and entry.get(SENTINEL) is True)
+    ]
+    for event, command in CODEX_HOOK_COMMANDS.items():
+        preserved.append(_build_codex_entry(event, command))
+    data["hooks"] = preserved
+
+    try:
+        _atomic_write_json(hooks_path, data)
+    except PermissionError as exc:
+        raise InstallCoachError(
+            f"Cannot install Codex hooks: permission denied writing to "
+            f"{hooks_path.parent}. Fix the directory permissions and "
+            "re-run `praxis install-coach`."
+        ) from exc
+    return hooks_path
+
+
 def install_for_tool(tool: str) -> None:
     """Per-tool installer dispatch.
 
     US-029 fills in the Claude Code branch with the real settings.json
-    merger (sentinel + atomic write). US-030 (Codex) and US-031
-    (Copilot) replace their matching branches later. Until then the
-    Codex and Copilot branches print a placeholder so users get
-    acknowledgement rather than silence.
+    merger (sentinel + atomic write); US-030 fills in the Codex branch
+    with the parallel ``~/.codex/hooks.json`` installer. US-031
+    (Copilot) replaces its matching branch later. Until then the
+    Copilot branch prints a placeholder so users get acknowledgement
+    rather than silence.
 
     Errors raised by a per-tool installer are caught here and printed
     to stderr; we deliberately do NOT abort the whole ``install-coach``
@@ -331,7 +464,12 @@ def install_for_tool(tool: str) -> None:
         print(f"Installed {label} coaching hook: {path}")
         return
     if tool == TOOL_CODEX:
-        print(f"Installing {label} coaching hook... (not yet implemented)")
+        try:
+            path = install_codex()
+        except InstallCoachError as exc:
+            print(str(exc), file=sys.stderr)
+            return
+        print(f"Installed {label} coaching hook: {path}")
         return
     if tool == TOOL_COPILOT:
         print(f"Installing {label} coaching hook... (not yet implemented)")

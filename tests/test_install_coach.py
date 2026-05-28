@@ -1,9 +1,9 @@
-"""Tests for ``praxis install-coach`` (US-028, US-029).
+"""Tests for ``praxis install-coach`` (US-028, US-029, US-030).
 
-Covers tool detection + per-tool prompt/flag routing (US-028) and the
-Claude Code settings.json merger (US-029). US-030 / US-031 add their
-own tests when those branches replace the matching placeholder in
-``install_for_tool``.
+Covers tool detection + per-tool prompt/flag routing (US-028), the
+Claude Code settings.json merger (US-029), and the Codex hooks.json
+installer (US-030). US-031 adds its own tests when the Copilot branch
+replaces the matching placeholder in ``install_for_tool``.
 """
 from __future__ import annotations
 
@@ -16,18 +16,21 @@ from praxis.cli.__main__ import main
 from praxis.cli.install_coach import (
     ALL_TOOLS,
     CLAUDE_HOOK_COMMANDS,
+    CODEX_HOOK_COMMANDS,
     SENTINEL,
     TOOL_CLAUDE_CODE,
     TOOL_CODEX,
     TOOL_COPILOT,
     InstallCoachError,
     claude_settings_path,
+    codex_hooks_path,
     detect_all,
     detect_claude_code,
     detect_codex,
     detect_copilot,
     display_name,
     install_claude_code,
+    install_codex,
     run_install_coach,
 )
 
@@ -626,3 +629,295 @@ def test_cli_install_coach_default_path_writes_when_claude_detected(
     capsys.readouterr()
     assert code == 0
     assert (tmp_home / ".claude" / "settings.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# US-030: Codex CLI hook installer (~/.codex/hooks.json flat-list shape).
+# ---------------------------------------------------------------------------
+
+
+def _read_codex_hooks(tmp_home: Path) -> dict:
+    return json.loads(
+        (tmp_home / ".codex" / "hooks.json").read_text(encoding="utf-8")
+    )
+
+
+def test_install_codex_creates_hooks_file_on_clean_codex_dir(tmp_home):
+    """No file -> writes SessionStart + Stop entries with the sentinel."""
+    (tmp_home / ".codex").mkdir(parents=True)
+    assert (tmp_home / ".codex" / "hooks.json").exists() is False
+
+    path = install_codex()
+
+    assert path == tmp_home / ".codex" / "hooks.json"
+    data = _read_codex_hooks(tmp_home)
+    assert isinstance(data["hooks"], list)
+    events = [entry["event"] for entry in data["hooks"]]
+    assert "SessionStart" in events
+    assert "Stop" in events
+    for entry in data["hooks"]:
+        assert entry[SENTINEL] is True
+
+
+def test_install_codex_session_start_command(tmp_home):
+    (tmp_home / ".codex").mkdir(parents=True)
+    install_codex()
+    data = _read_codex_hooks(tmp_home)
+    cmds = {entry["event"]: entry["command"] for entry in data["hooks"]}
+    assert cmds["SessionStart"] == "praxis nudge --format codex"
+
+
+def test_install_codex_stop_command(tmp_home):
+    (tmp_home / ".codex").mkdir(parents=True)
+    install_codex()
+    data = _read_codex_hooks(tmp_home)
+    cmds = {entry["event"]: entry["command"] for entry in data["hooks"]}
+    assert (
+        cmds["Stop"] == "praxis reflect --session-end --non-interactive-fallback"
+    )
+
+
+def test_install_codex_creates_parent_directory(tmp_home):
+    """If ~/.codex/ is absent the installer creates it via mkdir(parents=True)."""
+    codex_dir = tmp_home / ".codex"
+    assert codex_dir.exists() is False
+    install_codex()
+    assert codex_dir.exists()
+    assert (codex_dir / "hooks.json").exists()
+
+
+def test_install_codex_is_idempotent(tmp_home):
+    """Re-running the installer does not duplicate Praxis-managed entries."""
+    (tmp_home / ".codex").mkdir(parents=True)
+    install_codex()
+    install_codex()
+    install_codex()
+    data = _read_codex_hooks(tmp_home)
+    managed = [e for e in data["hooks"] if e.get(SENTINEL) is True]
+    # Exactly one SessionStart + one Stop managed entry after three installs.
+    assert len(managed) == 2
+    events = sorted(e["event"] for e in managed)
+    assert events == ["SessionStart", "Stop"]
+
+
+def test_install_codex_replaces_stale_managed_entries(tmp_home):
+    """An old Praxis entry with an outdated command is replaced, not duplicated."""
+    codex_dir = tmp_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    stale = {
+        "event": "SessionStart",
+        "command": "praxis nudge --old-flag",
+        SENTINEL: True,
+    }
+    (codex_dir / "hooks.json").write_text(
+        json.dumps({"hooks": [stale]}), encoding="utf-8"
+    )
+
+    install_codex()
+
+    data = _read_codex_hooks(tmp_home)
+    # The stale entry is gone; a fresh SessionStart + Stop are present.
+    session_entries = [e for e in data["hooks"] if e["event"] == "SessionStart"]
+    assert len(session_entries) == 1
+    assert session_entries[0]["command"] == CODEX_HOOK_COMMANDS["SessionStart"]
+    assert session_entries[0][SENTINEL] is True
+
+
+def test_install_codex_preserves_user_authored_entries(tmp_home):
+    """A user-authored entry (no sentinel) at any event is left intact."""
+    codex_dir = tmp_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    user_entry = {"event": "SessionStart", "command": "echo user-on-start"}
+    (codex_dir / "hooks.json").write_text(
+        json.dumps({"hooks": [user_entry]}), encoding="utf-8"
+    )
+
+    install_codex()
+
+    data = _read_codex_hooks(tmp_home)
+    # User entry survives (post-roundtrip) and our managed entries are appended.
+    assert user_entry in data["hooks"]
+    managed = [e for e in data["hooks"] if e.get(SENTINEL) is True]
+    assert len(managed) == 2
+
+
+def test_install_codex_preserves_unrelated_top_level_keys(tmp_home):
+    """Any top-level key that isn't 'hooks' must survive a merge."""
+    codex_dir = tmp_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "hooks.json").write_text(
+        json.dumps({"hooks": [], "model": "gpt-5", "approvals": "manual"}),
+        encoding="utf-8",
+    )
+
+    install_codex()
+
+    data = _read_codex_hooks(tmp_home)
+    assert data["model"] == "gpt-5"
+    assert data["approvals"] == "manual"
+    assert isinstance(data["hooks"], list)
+
+
+def test_install_codex_aborts_on_unparseable_json(tmp_home):
+    """Unparseable JSON -> InstallCoachError + file untouched."""
+    codex_dir = tmp_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    bad_bytes = b"{this is not: json,,"
+    (codex_dir / "hooks.json").write_bytes(bad_bytes)
+
+    with pytest.raises(InstallCoachError) as exc_info:
+        install_codex()
+
+    assert (codex_dir / "hooks.json").read_bytes() == bad_bytes
+    msg = str(exc_info.value)
+    assert "not valid JSON" in msg
+    assert str(codex_dir / "hooks.json") in msg
+    assert "praxis install-coach" in msg
+
+
+def test_install_codex_aborts_when_top_level_not_object(tmp_home):
+    """A JSON file whose top level is a list is rejected (would lose user data)."""
+    codex_dir = tmp_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "hooks.json").write_text("[1, 2, 3]", encoding="utf-8")
+
+    with pytest.raises(InstallCoachError) as exc_info:
+        install_codex()
+
+    assert "JSON object" in str(exc_info.value)
+    assert (codex_dir / "hooks.json").read_text(encoding="utf-8") == "[1, 2, 3]"
+
+
+def test_install_codex_aborts_when_hooks_not_list(tmp_home):
+    """Existing 'hooks' key with a non-array value is a structural error."""
+    codex_dir = tmp_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "hooks.json").write_text(
+        json.dumps({"hooks": "broken"}), encoding="utf-8"
+    )
+
+    with pytest.raises(InstallCoachError) as exc_info:
+        install_codex()
+
+    assert "'hooks'" in str(exc_info.value)
+    assert "JSON array" in str(exc_info.value)
+    # File untouched.
+    assert json.loads(
+        (codex_dir / "hooks.json").read_text(encoding="utf-8")
+    ) == {"hooks": "broken"}
+
+
+def test_install_codex_empty_file_treated_as_fresh(tmp_home):
+    """A pre-existing empty (or whitespace-only) file is treated like {"hooks": []}."""
+    codex_dir = tmp_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "hooks.json").write_text("   \n\t  \n", encoding="utf-8")
+
+    install_codex()
+
+    data = _read_codex_hooks(tmp_home)
+    managed = [e for e in data["hooks"] if e.get(SENTINEL) is True]
+    assert len(managed) == 2
+
+
+def test_install_codex_atomic_write_leaves_no_tmp_file(tmp_home):
+    """On success, no leftover .tmp/.partial files in ~/.codex/."""
+    install_codex()
+    install_codex()
+    codex_dir = tmp_home / ".codex"
+    leftovers = [p.name for p in codex_dir.iterdir() if p.name != "hooks.json"]
+    assert leftovers == []
+
+
+def test_install_codex_home_override(tmp_path):
+    """Explicit home= overrides Path.home() for direct callers."""
+    other = tmp_path / "alt"
+    other.mkdir()
+    path = install_codex(home=other)
+    assert path == other / ".codex" / "hooks.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert isinstance(data["hooks"], list)
+    managed = [e for e in data["hooks"] if e.get(SENTINEL) is True]
+    assert len(managed) == 2
+
+
+def test_install_codex_permission_denied_raises_clear_error(tmp_home, monkeypatch):
+    """PermissionError from the atomic write -> InstallCoachError + no partial file.
+
+    Patches ``_atomic_write_json`` to raise so the test is portable across
+    platforms (chmod semantics on macOS/Linux vs Windows differ; the
+    contract under test is the error-mapping, not the OS detail).
+    """
+    (tmp_home / ".codex").mkdir(parents=True)
+
+    def _raise(_path, _data):
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(
+        "praxis.cli.install_coach._atomic_write_json", _raise
+    )
+
+    with pytest.raises(InstallCoachError) as exc_info:
+        install_codex()
+
+    msg = str(exc_info.value)
+    assert "permission denied" in msg.lower()
+    assert str(tmp_home / ".codex") in msg
+    assert "praxis install-coach" in msg
+    # No file was created on disk (the patched write never persisted anything).
+    assert (tmp_home / ".codex" / "hooks.json").exists() is False
+
+
+def test_codex_hooks_path_uses_path_home(tmp_home):
+    """codex_hooks_path() respects Path.home() (i.e. tmp_home fixture)."""
+    assert codex_hooks_path() == tmp_home / ".codex" / "hooks.json"
+
+
+# ---------------------------------------------------------------------------
+# CLI integration for the Codex branch (US-030 wired through main()).
+# ---------------------------------------------------------------------------
+
+
+def test_cli_install_coach_codex_writes_hooks_and_prints_path(
+    tmp_home, capsys, no_copilot
+):
+    """`praxis install-coach --tool codex --yes` writes the hooks file."""
+    code = main(["install-coach", "--tool", "codex", "--yes"])
+    out = capsys.readouterr().out
+    assert code == 0
+    hooks_path = tmp_home / ".codex" / "hooks.json"
+    assert hooks_path.exists()
+    assert str(hooks_path) in out
+    data = json.loads(hooks_path.read_text(encoding="utf-8"))
+    managed = [e for e in data["hooks"] if e.get(SENTINEL) is True]
+    assert len(managed) == 2
+
+
+def test_cli_install_coach_codex_unparseable_prints_error_continues(
+    tmp_home, capsys, no_copilot
+):
+    """Unparseable hooks.json prints to stderr and CLI still exits 0."""
+    codex_dir = tmp_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "hooks.json").write_text("not-json", encoding="utf-8")
+
+    code = main(["install-coach", "--tool", "codex", "--yes"])
+    captured = capsys.readouterr()
+    # AC: the installer aborts with a clear error; the outer install-coach
+    # treats a bad config as recoverable for other tools and exits 0.
+    assert code == 0
+    assert "not valid JSON" in captured.err
+    # And we never overwrote the bad file.
+    assert (codex_dir / "hooks.json").read_text(encoding="utf-8") == "not-json"
+
+
+def test_cli_install_coach_default_path_writes_when_codex_detected(
+    tmp_home, capsys, no_copilot
+):
+    """With Codex detected, default flow (auto-yes via --yes) installs it."""
+    (tmp_home / ".codex").mkdir(parents=True)
+
+    code = main(["install-coach", "--yes"])
+    capsys.readouterr()
+    assert code == 0
+    assert (tmp_home / ".codex" / "hooks.json").exists()
