@@ -33,6 +33,7 @@
   "allowedPaths": [
     "README.md",
     "praxis/cli/",
-    "scripts/ralph/feature/readme-and-help-rewrite/"
+    "scripts/ralph/feature/readme-and-help-rewrite/",
+    "scripts/ralph/progress.txt"
   ]
 }

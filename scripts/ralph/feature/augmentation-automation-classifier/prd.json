@@ -48,6 +48,7 @@
     "praxis/behavior/",
     "praxis/orchestrator.py",
     "tests/",
-    "scripts/ralph/feature/augmentation-automation-classifier/"
+    "scripts/ralph/feature/augmentation-automation-classifier/",
+    "scripts/ralph/progress.txt"
   ]
 }
