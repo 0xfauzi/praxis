@@ -75,6 +75,7 @@
   "allowedPaths": [
     "praxis/cli/",
     "tests/",
-    "scripts/ralph/feature/install-coach-uninstall-coach/"
+    "scripts/ralph/feature/install-coach-uninstall-coach/",
+    "scripts/ralph/progress.txt"
   ]
 }
