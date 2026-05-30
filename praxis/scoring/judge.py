@@ -29,6 +29,7 @@ _VALID_DIM_KEYS: frozenset[str] = frozenset(d.key for d in RUBRIC)
 _EXCERPT_MAX = 240
 _WHY_MAX = 180
 _ALT_MAX = 220
+_COACH_MAX = 110
 _CONFIDENCE_REASON_MAX = 240
 _WHITESPACE_RE = re.compile(r"\s+")
 
@@ -190,13 +191,14 @@ Rules:
 - Only emit a moment when you actually saw a specific coachable lapse in the transcript. The judge decides this, not a score threshold. Do not emit a moment for a dim where you have nothing specific to coach on. A score of 5 with no specific lapse is not a moment; a score of 7 with one clearly avoidable mistake is. Use your judgment.
 - If the session contains no specific coachable lapse, return an empty `moments` array (`"moments": []`).
 
-Each moment object has six required fields:
+Each moment object has seven required fields:
 
 - `dim_key`: one of {{planning, context, iteration, tools, fit, verification}}.
 - `turn_index`: integer, the 0-indexed user turn where the lapse occurred.
 - `quoted_excerpt`: <= 240 chars, copied VERBATIM from the transcript (usually the user's own words; may be the assistant's words if that is what shows the missed verification). Substring-faithfulness is non-negotiable; do not paraphrase here.
 - `why_it_lost_score`: <= 180 chars, one specific sentence naming what was missing or wrong.
 - `suggested_alternative`: <= 220 chars, what to do next time. Concrete enough to act on.
+- `coach_line`: <= 100 chars, ONE sentence addressed directly TO the user in the second person ("You ..."), naming what happened as a coach would say it out loud. This is the line a coaching surface shows first, so it must stand alone without the excerpt: tight, specific, past or present tense, no jargon, no preamble, no "you should". Example: "You pasted the test results instead of having the agent run them."
 - `severity`: one of {{minor, moderate, major}}.
 
 # Confidence
@@ -249,6 +251,7 @@ Return ONLY valid JSON, no preamble, no markdown fences, in exactly this shape:
       "quoted_excerpt": "<verbatim substring from the transcript, <= 240 chars>",
       "why_it_lost_score": "<one specific sentence, <= 180 chars>",
       "suggested_alternative": "<concrete next-time action, <= 220 chars>",
+      "coach_line": "<one second-person sentence said to the user, <= 100 chars>",
       "severity": "<minor|moderate|major>"
     }}
   ],
@@ -384,6 +387,13 @@ def _parse_moments(raw: Any) -> list[Moment]:
         if not isinstance(severity, str) or severity not in _VALID_SEVERITIES:
             print(f"[scorer] moment dropped: invalid severity {severity!r}", file=sys.stderr)
             continue
+        # coach_line is required of the model but the parser is tolerant: a model
+        # that omits or empties it should not lose the whole moment, so we derive
+        # a fallback from why_it_lost_score. Older judge outputs predate the field.
+        coach = item.get("coach_line")
+        coach = coach.strip() if isinstance(coach, str) else ""
+        if not coach:
+            coach = derive_coach_line(why)
         out.append(
             Moment(
                 dim_key=dim_key,
@@ -391,11 +401,30 @@ def _parse_moments(raw: Any) -> list[Moment]:
                 quoted_excerpt=excerpt,
                 why_it_lost_score=why[:_WHY_MAX],
                 suggested_alternative=alt[:_ALT_MAX],
+                coach_line=coach[:_COACH_MAX],
                 severity=cast(Severity, severity),
             )
         )
         seen_dims.add(dim_key)
     return out
+
+
+def derive_coach_line(why: str) -> str:
+    """Best-effort coach line from a raw `why_it_lost_score`.
+
+    Used when the judge omits `coach_line` (older outputs, or a model that
+    skipped the field). Not a rewrite -- it just tightens the explanation to a
+    single clause and ensures it ends cleanly. Genuine second-person coach
+    lines come from the judge prompt; this only keeps surfaces non-empty.
+    """
+    s = _WHITESPACE_RE.sub(" ", (why or "").strip())
+    if len(s) > _COACH_MAX:
+        cut = s[:_COACH_MAX]
+        i = max(cut.rfind(". "), cut.rfind(", "), cut.rfind("; "))
+        s = cut[:i] if i > _COACH_MAX * 0.5 else cut.rsplit(" ", 1)[0]
+    if "(" in s and ")" not in s:
+        s = s[: s.rfind("(")]
+    return s.rstrip(" ,;:.") + "." if s else ""
 
 
 def _normalize_whitespace(text: str) -> str:

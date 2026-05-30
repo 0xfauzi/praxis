@@ -501,6 +501,72 @@ def test_cold_open_of_v0_2_db_with_legacy_follow_ups_upgrades_cleanly(tmp_home):
     assert seeded["superseded_by"] is None
 
 
+def test_moments_coach_line_column_added_on_open(tmp_home):
+    """A v3-marked DB whose moments table predates coach_line gains the
+    nullable column on the next open (US: coach_line in the judge)."""
+    home = tmp_home / ".praxis"
+    home.mkdir(parents=True, exist_ok=True)
+    db_path = home / "profile.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE run_log (
+              run_id INTEGER PRIMARY KEY AUTOINCREMENT, run_at TEXT NOT NULL,
+              kind TEXT NOT NULL, sessions_seen INTEGER NOT NULL,
+              sessions_new INTEGER NOT NULL, notes TEXT
+            );
+            INSERT INTO run_log (run_at, kind, sessions_seen, sessions_new, notes)
+              VALUES ('2026-05-01T00:00:00+00:00', 'schema_version', 0, 0, '3');
+            CREATE TABLE session_scores (
+              stable_id TEXT NOT NULL, provider TEXT NOT NULL,
+              started_at TEXT NOT NULL, scored_at TEXT NOT NULL, overall REAL NOT NULL,
+              dimension_scores_json TEXT NOT NULL, judge_result_json TEXT,
+              features_json TEXT NOT NULL, source_path TEXT NOT NULL,
+              judge_model TEXT, judge_pass INTEGER NOT NULL DEFAULT 1,
+              signals_json TEXT, PRIMARY KEY (stable_id, judge_pass)
+            );
+            -- moments WITHOUT coach_line (the pre-field shape).
+            CREATE TABLE moments (
+              moment_id TEXT PRIMARY KEY, session_stable_id TEXT NOT NULL,
+              dim_key TEXT NOT NULL, turn_index INTEGER NOT NULL,
+              quoted_excerpt TEXT NOT NULL, why_it_lost_score TEXT NOT NULL,
+              suggested_alternative TEXT NOT NULL,
+              dollar_impact_estimate REAL, minutes_impact_estimate INTEGER,
+              severity TEXT NOT NULL CHECK (severity IN ('minor','moderate','major')),
+              created_at TEXT NOT NULL, redacted INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO moments VALUES
+              ('m1','s1','tools',0,'q','w','a',NULL,NULL,'minor','2026-05-01T00:00:00+00:00',0);
+            CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
+            INSERT INTO schema_migrations VALUES
+              ('001_follow_ups_active_commitment.sql','2026-05-01T00:00:00+00:00'),
+              ('002_session_reflections.sql','2026-05-01T00:00:00+00:00'),
+              ('003_session_scores_aug_auto.sql','2026-05-01T00:00:00+00:00');
+            CREATE TABLE follow_ups (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, week_iso TEXT NOT NULL,
+              dim_key TEXT NOT NULL, commitment_text TEXT NOT NULL,
+              target_metric TEXT NOT NULL, baseline_value REAL NOT NULL,
+              measured_value REAL,
+              outcome TEXT NOT NULL CHECK (outcome IN ('improved','unchanged','worse','pending','superseded')),
+              user_chosen INTEGER NOT NULL DEFAULT 0, display_text TEXT,
+              superseded_by INTEGER REFERENCES follow_ups(id)
+            );
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    ProfileStore(home=resolve_home())
+    with _open_db() as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(moments)").fetchall()}
+        row = conn.execute(
+            "SELECT coach_line FROM moments WHERE moment_id='m1'").fetchone()
+    assert "coach_line" in cols, "coach_line column must be added on open"
+    assert row["coach_line"] is None, "existing rows keep coach_line NULL"
+
+
 def test_v4_columns_with_narrow_outcome_check_is_widened_on_open(tmp_home):
     """An early-draft DB that has the v4 columns (id PK, user_chosen,
     display_text, superseded_by) but a *narrow* outcome CHECK lacking
