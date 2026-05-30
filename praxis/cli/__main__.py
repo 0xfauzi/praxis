@@ -2870,9 +2870,29 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
+    # parse_args raises SystemExit on --help / bad args; let that pass through.
     args = parser.parse_args(argv)
-    ensure_config_file()
-    return args.func(args)
+    # Backstop so a real user never sees a raw traceback. Individual commands
+    # still handle their own expected errors and return specific exit codes;
+    # this only catches the unexpected. SystemExit (argparse, explicit exits)
+    # is not an Exception subclass, so it propagates untouched.
+    try:
+        ensure_config_file()
+        return args.func(args)
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        return 130
+    except Exception as exc:  # noqa: BLE001
+        if os.environ.get("PRAXIS_DEBUG"):
+            raise
+        cmd = getattr(args, "cmd", None) or "command"
+        print(f"praxis {cmd}: unexpected error: {exc}", file=sys.stderr)
+        print(
+            "  This is a bug. Re-run with PRAXIS_DEBUG=1 to see the full "
+            "traceback.",
+            file=sys.stderr,
+        )
+        return 1
 
 
 if __name__ == "__main__":

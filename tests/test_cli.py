@@ -739,6 +739,45 @@ def test_week_iso_bypasses_api_key_check(tmp_home, capsys):
     assert code != 2
 
 
+def test_week_iso_current_week_does_not_warn_about_missing_judges(
+    tmp_home, capsys, monkeypatch
+):
+    """`--week <current>` is a historical read even if the ISO tag is current."""
+    from praxis.cli import __main__ as cli_main
+    from praxis.orchestrator import WeeklyRunSummary, current_iso_week
+    from praxis.scoring.aggregate import ProfileSnapshot
+
+    week_iso = current_iso_week()
+    snapshot = ProfileSnapshot(
+        overall=6.0,
+        dimension_means={d.key: 6.0 for d in RUBRIC},
+        session_count=1,
+        provider_breakdown={"claude": 1},
+        strongest_dimension=RUBRIC[0].key,
+        weakest_dimension=RUBRIC[-1].key,
+    )
+    fake_summary = WeeklyRunSummary(
+        week_iso=week_iso,
+        sessions=[object()],
+        tasks=[],
+        judge_results={},
+        moments=[],
+        selection=None,
+        snapshot=snapshot,
+        rendered_html="<html></html>",
+        rendered_terminal="PRAXIS - Weekly read",
+        elapsed_seconds=0.0,
+    )
+    monkeypatch.setattr(cli_main, "run_weekly", lambda **kw: fake_summary)
+
+    code = main(["review", "--week", week_iso])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "PRAXIS" in captured.out
+    assert "judge produced no scores" not in captured.err
+
+
 def test_week_dry_run_bypasses_api_key_check(tmp_home, capsys):
     """`praxis review --dry-run` is read-only; it must run without API keys.
 
@@ -2046,3 +2085,48 @@ def _current_week_iso() -> str:
     """Return the current ISO-week tag (matches what run_weekly sees)."""
     from praxis.orchestrator import current_iso_week
     return current_iso_week()
+
+
+# ---------------------------------------------------------------------------
+# Top-level guard in main(): a real user must never see a raw traceback.
+# ---------------------------------------------------------------------------
+
+def _raiser(exc):
+    def _f(*_a, **_k):
+        raise exc
+    return _f
+
+
+def test_main_catches_unexpected_exception_and_exits_1(tmp_home, monkeypatch, capsys):
+    import praxis.cli.__main__ as m
+    monkeypatch.delenv("PRAXIS_DEBUG", raising=False)
+    monkeypatch.setattr(m, "ensure_config_file", _raiser(RuntimeError("kaboom")))
+    code = main(["status"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "unexpected error" in err
+    assert "kaboom" in err
+    assert "PRAXIS_DEBUG=1" in err
+
+
+def test_main_reraises_full_traceback_under_debug(tmp_home, monkeypatch):
+    import praxis.cli.__main__ as m
+    monkeypatch.setenv("PRAXIS_DEBUG", "1")
+    monkeypatch.setattr(m, "ensure_config_file", _raiser(RuntimeError("kaboom")))
+    with pytest.raises(RuntimeError, match="kaboom"):
+        main(["status"])
+
+
+def test_main_handles_keyboard_interrupt_cleanly(tmp_home, monkeypatch, capsys):
+    import praxis.cli.__main__ as m
+    monkeypatch.setattr(m, "ensure_config_file", _raiser(KeyboardInterrupt()))
+    code = main(["status"])
+    assert code == 130
+    assert "Interrupted" in capsys.readouterr().err
+
+
+def test_main_lets_systemexit_pass_through(tmp_home):
+    # argparse errors (unknown command) must still exit via SystemExit, not be
+    # swallowed by the guard.
+    with pytest.raises(SystemExit):
+        main(["no-such-command"])
