@@ -947,6 +947,112 @@ def cmd_last(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Check the install end to end and print what's healthy vs. what to fix.
+
+    Covers API keys, the profile database (presence + integrity + scored
+    count + this week's focus), the per-tool coaching hooks, and the weekly
+    schedule. Exits 0 unless something critical (an unreadable database) is
+    wrong, so it's safe to run in support scripts.
+    """
+    import sqlite3
+
+    home = resolve_home()
+    critical_ok = True
+    issues: list[str] = []
+
+    def mark(passed: bool) -> str:
+        return "✓" if passed else "✗"
+
+    print(f"Praxis doctor  -  home: {home}\n")
+
+    # --- API keys ---
+    anth = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    openai = bool(os.environ.get("OPENAI_API_KEY"))
+    print("API keys")
+    print(f"  [{mark(anth)}] ANTHROPIC_API_KEY")
+    print(f"  [{mark(openai)}] OPENAI_API_KEY")
+    if not (anth or openai):
+        issues.append("No API key set - scoring runs heuristics-only. "
+                      "export ANTHROPIC_API_KEY=... or OPENAI_API_KEY=...")
+
+    # --- database ---
+    db = home / "profile.db"
+    print("\nDatabase")
+    if not db.exists():
+        print(f"  [{mark(False)}] profile.db not found (it's created on first run)")
+    else:
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
+            scored = con.execute("SELECT COUNT(*) FROM session_scores").fetchone()[0]
+            digests = con.execute("SELECT COUNT(*) FROM weekly_digests").fetchone()[0]
+            con.close()
+            ok = integrity == "ok"
+            print(f"  [{mark(ok)}] integrity_check: {integrity}")
+            print(f"  [{mark(True)}] {scored} sessions scored, {digests} weekly digests")
+            if not ok:
+                critical_ok = False
+                issues.append("Database failed its integrity check; a backup "
+                              "may sit beside it (profile.db.backup-*).")
+        except Exception as exc:  # noqa: BLE001
+            critical_ok = False
+            print(f"  [{mark(False)}] could not read profile.db: {exc}")
+            issues.append("Database is unreadable. Restore from a "
+                          "profile.db.backup-* sibling if one exists.")
+
+    # --- this week's focus ---
+    try:
+        active = ProfileStore().active_follow_up_for_week(current_iso_week())
+        print("\nThis week")
+        if active is not None:
+            print(f"  [{mark(True)}] focus set: "
+                  f"{(active.display_text or active.commitment_text)[:60]}")
+        else:
+            print(f"  [{mark(False)}] no focus set")
+            issues.append("No focus this week - run `praxis commit`.")
+    except Exception:  # noqa: BLE001
+        pass
+
+    # --- coaching hooks ---
+    from praxis.cli.install_coach import (
+        claude_settings_path,
+        codex_hooks_path,
+    )
+
+    def _contains(path, needle: str) -> bool:
+        try:
+            return path.exists() and needle in path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+
+    claude_ok = _contains(claude_settings_path(), "_praxisManaged")
+    codex_ok = _contains(codex_hooks_path(), "praxis nudge")
+    print("\nCoaching hooks")
+    print(f"  [{mark(claude_ok)}] Claude Code")
+    print(f"  [{mark(codex_ok)}] Codex")
+    if not (claude_ok or codex_ok):
+        issues.append("No coaching hooks installed - run `praxis install-coach`.")
+
+    # --- weekly schedule (macOS) ---
+    if sys.platform == "darwin":
+        from praxis.cli.install_weekly import plist_path
+        sched = plist_path().exists()
+        print("\nWeekly digest schedule")
+        print(f"  [{mark(sched)}] LaunchAgent installed")
+        if not sched:
+            issues.append("Weekly digest not scheduled - run `praxis install-weekly`.")
+
+    # --- summary ---
+    if issues:
+        print(f"\n{len(issues)} thing(s) to look at:")
+        for i in issues:
+            print(f"  - {i}")
+    else:
+        print("\nEverything looks healthy.")
+    return 0 if critical_ok else 1
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     store = ProfileStore()
     rows = store.load_session_scores()
@@ -2715,6 +2821,18 @@ def build_parser() -> argparse.ArgumentParser:
     sts.add_argument("--json", action="store_true",
                      help="Emit machine-readable JSON instead of text.")
     sts.set_defaults(func=cmd_status)
+
+    doc = sub.add_parser(
+        "doctor",
+        help="Check API keys, database health, hooks, and schedule.",
+        description=(
+            "Run a health check across API keys, the profile database "
+            "(presence + integrity + scored count), this week's focus, the "
+            "coaching hooks, and the weekly schedule. Prints what's healthy "
+            "and what to fix. Exits non-zero only on a critical problem."
+        ),
+    )
+    doc.set_defaults(func=cmd_doctor)
 
     rub = sub.add_parser("rubric", help=argparse.SUPPRESS)
     rub.set_defaults(func=cmd_rubric)

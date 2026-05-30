@@ -2232,3 +2232,20 @@ def test_main_friendly_message_on_corrupt_db(tmp_home, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert code == 1
     assert "corrupt" in err
+
+
+def test_doctor_runs_and_reports_all_sections(tmp_home, capsys):
+    code = main(["doctor"])
+    out = capsys.readouterr().out
+    assert code == 0  # nothing critical on a fresh, readable (empty) install
+    for section in ("API keys", "Database", "Coaching hooks", "doctor"):
+        assert section in out
+
+
+def test_doctor_flags_no_api_key_and_no_focus(tmp_home, monkeypatch, capsys):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    main(["doctor"])
+    out = capsys.readouterr().out
+    assert "No API key set" in out
+    assert "No focus this week" in out
