@@ -1379,3 +1379,17 @@ def test_run_skips_a_session_that_errors_and_keeps_going(
     summary = run()
     assert summary.sessions_scored == 0
     assert summary.sessions_skipped >= 1
+
+
+def test_reconstruct_sessions_omits_unparseable_or_unknown_rows(tmp_home):
+    """A moved/corrupt source file or an unknown provider must be dropped, not
+    crash a past-week render (hardening for _reconstruct_sessions_from_score_rows)."""
+    from praxis.orchestrator import _reconstruct_sessions_from_score_rows
+    rows = [
+        {"stable_id": "s1", "provider": "claude",
+         "source_path": "/nonexistent/definitely/missing.jsonl"},
+        {"stable_id": "s2", "provider": "no-such-provider", "source_path": "/x"},
+        {"stable_id": "", "provider": "claude", "source_path": "/y"},  # missing id
+    ]
+    # Must not raise; every row is dropped for a documented reason.
+    assert _reconstruct_sessions_from_score_rows(rows) == []

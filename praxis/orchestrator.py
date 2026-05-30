@@ -1733,7 +1733,16 @@ def _reconstruct_sessions_from_score_rows(rows: list[dict[str, Any]]) -> list[Se
         if scanner_cls is None:
             continue
         scanner = scanner_cls()
-        session = scanner.parse(Path(str(source_path)))
+        try:
+            session = scanner.parse(Path(str(source_path)))
+        except Exception as exc:  # noqa: BLE001 -- a moved/corrupt source file must
+            # not crash a past-week render; omit the session, as the docstring
+            # promises, instead of propagating FileNotFoundError/parse errors.
+            print(
+                f"[orchestrator] could not re-parse {source_path}: {exc!r}",
+                file=sys.stderr,
+            )
+            continue
         if session is None or session.stable_id != stable_id:
             continue
         aug_auto_label = row.get("aug_auto_classification")
