@@ -225,7 +225,13 @@ def install_weekly_macos(
             capture_output=True,
         )
 
-    plist_file.write_text(plist_text, encoding="utf-8")
+    # Atomic write (temp + os.replace, same helper the coach installer uses)
+    # so a crash or full disk mid-write can't leave a truncated plist that
+    # the immediately-following `launchctl load` would reject. Function-local
+    # import keeps the module dependency one-directional.
+    from praxis.cli.install_coach import _atomic_write_text
+
+    _atomic_write_text(plist_file, plist_text)
 
     result = subprocess.run(
         ["launchctl", "load", "-w", str(plist_file)],

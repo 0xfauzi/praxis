@@ -58,7 +58,11 @@ class WeeklyBucket:
 def iso_week_tag(d: date | datetime) -> str:
     """Return the ISO-week tag in the form 'YYYY-Www' (zero-padded week)."""
     if isinstance(d, datetime):
-        d = d.date()
+        # Convert to UTC before taking the calendar date: a timestamp with
+        # a non-UTC offset must bucket by its UTC date, matching
+        # bucket_sessions_by_iso_week, or a near-midnight session lands in
+        # the wrong week and corrupts week-over-week deltas.
+        d = _to_utc(d).date()
     year, week, _ = d.isocalendar()
     return f"{year:04d}-W{week:02d}"
 
@@ -66,7 +70,7 @@ def iso_week_tag(d: date | datetime) -> str:
 def iso_week_start(d: date | datetime) -> date:
     """Return the Monday (start) of the ISO week containing d."""
     if isinstance(d, datetime):
-        d = d.date()
+        d = _to_utc(d).date()
     year, week, _ = d.isocalendar()
     # ISO weekday 1 is Monday.
     return date.fromisocalendar(year, week, 1)

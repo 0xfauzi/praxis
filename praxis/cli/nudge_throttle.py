@@ -180,7 +180,14 @@ def record_fire(
     key = _throttle_key(surface, cwd)
     current = now if now is not None else datetime.now(timezone.utc)
     state[key] = current.isoformat()
-    path.write_text(
+    # Atomic write so a concurrent reader -- or another surface's near-
+    # simultaneous record_fire, the exact multi-surface case this module
+    # dedupes -- never observes a half-written file. The per-pid temp keeps
+    # os.replace atomic on POSIX without two writers clobbering one tempfile;
+    # last replace wins, which is the intended best-effort dedup semantics.
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp_path.write_text(
         json.dumps(state, separators=(",", ":"), sort_keys=True),
         encoding="utf-8",
     )
+    os.replace(tmp_path, path)

@@ -13,6 +13,7 @@ Cost control:
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
@@ -20,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from praxis.models import Confidence, Moment, Session, Severity
+from praxis.redactor import redact_secrets
 from praxis.scoring.rubric import RUBRIC
 
 
@@ -93,7 +95,11 @@ def _compact_transcript(session: Session) -> str:
             break
         rendered.append(block)
         budget -= len(block) + 1
-    return "\n".join(lines + rendered)
+    # Redact before the transcript leaves the machine for a third-party
+    # LLM. A Claude transcript can contain an OpenAI/AWS/GitHub credential
+    # (and vice versa); the judge does not need real secret values to
+    # assess coaching behavior. redact_secrets is idempotent.
+    return redact_secrets("\n".join(lines + rendered))
 
 
 _SHARPEN_CALIBRATION_NOTE = (
@@ -287,25 +293,49 @@ def _parse_response(text: str, model: str) -> JudgeResult:
         raise ValueError(f"No JSON object found in judge response: {text[:200]}")
     payload = json.loads(cleaned[start : end + 1])
 
-    # Coerce scores defensively: missing key → empty dict, non-numeric → 5.0 neutral.
-    raw_scores = payload.get("scores", {}) or {}
+    # Coerce scores defensively. The judge is an LLM and can return the
+    # wrong SHAPE, not just wrong values: `scores` as a list/string/number
+    # would make .items() raise, and (swallowed by the caller's broad
+    # except) silently drop the whole session. Guard the container type
+    # first, then each value.
+    raw_scores = payload.get("scores")
+    if not isinstance(raw_scores, dict):
+        raw_scores = {}
     scores: dict[str, float] = {}
     for k, v in raw_scores.items():
         try:
-            scores[k] = max(0.0, min(10.0, float(v)))
+            fv = float(v)
         except (TypeError, ValueError):
-            scores[k] = 5.0  # Spec §8.5: "insufficient signal" defaults to neutral.
+            scores[str(k)] = 5.0  # Spec §8.5: "insufficient signal" → neutral.
+            continue
+        # json.loads accepts NaN/Infinity literals; a non-finite score must
+        # not survive as 10.0 (max(0.0, min(10.0, nan)) == 10.0 in CPython,
+        # turning garbage into a perfect score). Treat it as neutral.
+        if not math.isfinite(fv):
+            scores[str(k)] = 5.0
+            continue
+        scores[str(k)] = max(0.0, min(10.0, fv))
 
     confidence, confidence_reason = _parse_confidence(
         payload.get("confidence"),
         payload.get("confidence_reason"),
     )
 
+    # Same shape-defense for the remaining containers: a wrong type here
+    # (e.g. standout_moments as a string) would otherwise char-splat into
+    # garbage single-character entries or raise.
+    raw_rationale = payload.get("rationale")
+    rationale = raw_rationale if isinstance(raw_rationale, dict) else {}
+    raw_standout = payload.get("standout_moments")
+    standout = [str(x) for x in raw_standout] if isinstance(raw_standout, list) else []
+    raw_failure = payload.get("failure_modes")
+    failure = [str(x) for x in raw_failure] if isinstance(raw_failure, list) else []
+
     return JudgeResult(
         dimension_scores=scores,
-        rationale=dict(payload.get("rationale", {}) or {}),
-        standout_moments=list(payload.get("standout_moments", []) or []),
-        failure_modes=list(payload.get("failure_modes", []) or []),
+        rationale=rationale,
+        standout_moments=standout,
+        failure_modes=failure,
         overall_note=str(payload.get("overall_note", "") or ""),
         judge_model=model,
         moments=_parse_moments(payload.get("moments", []) or []),
@@ -445,8 +475,13 @@ def _session_corpus(session: Session) -> str:
     the full text stored locally - the judge is not allowed to quote
     spans it never saw. Tool-call metadata is deliberately excluded:
     the judge prompt directs the model to quote rendered text only.
+
+    Redacted identically to the transcript the judge sees (_compact_transcript)
+    so substring verification stays consistent: a secret is [REDACTED] on
+    both sides, so a quote of redacted text still matches and a real secret
+    can never be surfaced as an "excerpt".
     """
-    return " ".join(turn.content for turn in session.turns)
+    return redact_secrets(" ".join(turn.content for turn in session.turns))
 
 
 def verify_moment_substrings(session: Session, moments: list[Moment]) -> list[Moment]:

@@ -28,6 +28,14 @@ from dataclasses import dataclass, field
 from praxis.models import Session, Turn
 
 
+# A "pure delegator" verdict needs enough turns to be real. One terse
+# prompt ("fix this") can trip pure-delegation, outsourced-debug AND
+# telegraphic patterns at once, hitting delegation_rate 1.0 on a single
+# turn. The judge prompt itself treats fewer than 3 user turns as too
+# short to score, so we require the same floor before labeling a user.
+_MIN_TURNS_FOR_DELEGATION_VERDICT = 3
+
+
 # Stable signal-kind keys used by the behavioral-patterns panel
 # (`praxis/reports/panel_inputs.py`). Order doubles as the panel's row
 # order: engagement signals first, then atrophy, then independence.
@@ -863,7 +871,11 @@ def extract(session: Session) -> BehavioralSignals:
         engagement_rate=engagement_rate,
         delegation_rate=delegation_rate,
         independence_rate=independence_rate,
-        is_pure_delegator=(delegation_rate > 0.6 and engagement_rate < 0.1),
+        is_pure_delegator=(
+            n >= _MIN_TURNS_FOR_DELEGATION_VERDICT
+            and delegation_rate > 0.6
+            and engagement_rate < 0.1
+        ),
         specification_artifact_count=spec_hits,
         error_naming_count=err_hits,
         iterative_refinement_count=iter_hits,

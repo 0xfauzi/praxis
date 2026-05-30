@@ -40,7 +40,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 export OPENAI_API_KEY=sk-...
 ```
 
-Praxis runs heuristics-only without keys, but the deep coaching signal comes from the LLM-as-judge layer.
+At least one key is required. Scoring and the weekly digest go through the LLM-as-judge layer, so `praxis scan` and the current-week `praxis review` refuse to run without one. (Read-only views and past-week renders still work from already-scored data.)
 
 After install, wire the cue into the AI tools you actually use:
 

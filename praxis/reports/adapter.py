@@ -36,9 +36,6 @@ from praxis.models_advisor.advisor import compute_counterfactual_overspend
 from praxis.reports import digest_html as dh
 from praxis.reports import digest_terminal as dt
 from praxis.reports.panel_inputs import (
-    CADENCE_WINDOW_DAYS,
-    EXCERPT_CHAR_LIMIT,
-    MAX_EXCERPTS_PER_SIGNAL,
     REPEAT_TASK_WINDOW_DAYS,
     SCAFFOLDING_LABELS,
     SIGNAL_CITATIONS,
@@ -59,8 +56,8 @@ from praxis.reports.panel_inputs import (
     SpecificationAdoptionPanel,
     ToolAgentLadderPanel,
     VerificationCalibrationPanel,
-    clip_excerpt,
 )
+from praxis.scoring.clustering import LABEL_SOURCE_FALLBACK
 from praxis.scoring.cost_ledger import (
     BiggestLineInputSession,
     TierFitInputSession,
@@ -81,8 +78,9 @@ def _cost_inputs(summary):
     """
     task_label_by_sid: dict[str, str] = {}
     for task in summary.tasks or []:
+        task_label = _public_task_label(task)
         for sid in task.session_ids:
-            task_label_by_sid[sid] = task.label
+            task_label_by_sid[sid] = task_label
 
     biggest_inputs: list[BiggestLineInputSession] = []
     tier_inputs: list[TierFitInputSession] = []
@@ -144,6 +142,15 @@ def _week_label_from_iso(week_iso: str) -> str:
         week_i = int(week_part)
         start = datetime.fromisocalendar(year_i, week_i, 1)
         end = datetime.fromisocalendar(year_i, week_i, 7)
+        # When the week straddles a month boundary the end's month (and,
+        # for the W01 / W53 cross-year case, its year) must be shown
+        # explicitly. Otherwise "Feb 23-1" reads as Feb 23 -> Feb 1 and a
+        # cross-year week labels December dates with the wrong year. Same
+        # month-aware logic the HTML renderer (_format_week_label) uses.
+        if start.year != end.year:
+            return f"Week of {start:%b %-d}, {start.year} - {end:%b %-d}, {end.year}"
+        if start.month != end.month:
+            return f"Week of {start:%b %-d} - {end:%b %-d}, {year_i}"
         return f"Week of {start:%b %-d}-{end:%-d}, {year_i}"
     except (ValueError, AttributeError):
         return week_iso or "This week"
@@ -158,7 +165,7 @@ def _headline_moment_view_terminal(summary) -> dt.HeadlineMomentView | None:
         if m.moment_id == headline_id:
             return dt.HeadlineMomentView(
                 dim_key=m.dim_key,
-                quoted_excerpt=m.quoted_excerpt,
+                quoted_excerpt="",
                 why_it_lost_score=m.why_it_lost_score,
                 suggested_alternative=m.suggested_alternative,
             )
@@ -195,7 +202,7 @@ def _headline_moment_panel_html(summary, recurrence_count: int = 0) -> dh.Moment
     for m in summary.moments:
         if m.moment_id == headline_id:
             return dh.MomentPanel(
-                quoted_excerpt=m.quoted_excerpt,
+                quoted_excerpt="",
                 why_lost_score=m.why_it_lost_score,
                 next_time_try=m.suggested_alternative,
                 cost_dollars=m.dollar_impact_estimate,
@@ -322,7 +329,7 @@ def _task_rows_terminal(summary) -> list[dt.TaskRowView] | None:
                     worst_dim = d.key
         task_total = sum(cost_by_sid.get(sid, 0.0) for sid in task.session_ids)
         rows.append(dt.TaskRowView(
-            label=task.label,
+            label=_public_task_label(task),
             sessions=len(task.session_ids),
             total_usd=task_total,
             worst_dim_key=worst_dim,
@@ -364,7 +371,7 @@ def _task_rows_html(summary) -> tuple[dh.TaskRow, ...]:
                     worst = m
         task_total = sum(cost_by_sid.get(sid, 0.0) for sid in task.session_ids)
         rows.append(dh.TaskRow(
-            label=task.label,
+            label=_public_task_label(task),
             session_count=len(task.session_ids),
             dollars=task_total,
             worst_score=worst,
@@ -666,33 +673,25 @@ def _behavioral_patterns_panel(summary) -> BehavioralPatternsPanel:
 
     Walks every user turn in every session in the summary, asks
     ``detect_signal_kinds`` which signals fire for it, and accumulates
-    (a) a running count per signal kind and (b) up to
-    ``MAX_EXCERPTS_PER_SIGNAL`` raw user-turn excerpts per kind, each
-    clipped to ``EXCERPT_CHAR_LIMIT`` chars. Rows always include every
-    signal kind in panel-display order so the renderer can distinguish
-    "no signals at all" (the empty-state path) from "some signals fired,
-    some did not" (the populated table path with explicit zeros).
+    a running count per signal kind. Rows intentionally do not carry
+    transcript excerpts: the digest is a coaching artifact, not an
+    evidence dump. Rows always include every signal kind in panel-display
+    order so the renderer can distinguish "no signals at all" (the
+    empty-state path) from "some signals fired, some did not" (the
+    populated table path with explicit zeros).
     """
     counts: dict[str, int] = {k: 0 for k in SIGNAL_KINDS_IN_PANEL_ORDER}
-    excerpts: dict[str, list[str]] = {
-        k: [] for k in SIGNAL_KINDS_IN_PANEL_ORDER
-    }
     for s in summary.sessions or []:
         for turn in s.user_authored_turns:
             kinds = detect_signal_kinds(turn)
             for kind in kinds:
                 counts[kind] += 1
-                if len(excerpts[kind]) < MAX_EXCERPTS_PER_SIGNAL:
-                    excerpts[kind].append(
-                        clip_excerpt(turn.content, EXCERPT_CHAR_LIMIT)
-                    )
     rows = tuple(
         BehavioralPatternRow(
             signal_kind=kind,
             label=SIGNAL_LABELS[kind],
             count=counts[kind],
             citation=SIGNAL_CITATIONS[kind],
-            excerpts=tuple(excerpts[kind]),
         )
         for kind in SIGNAL_KINDS_IN_PANEL_ORDER
     )
@@ -771,6 +770,16 @@ def _aug_auto_balance_panel(summary) -> AugAutoBalancePanel:
 _CADENCE_LOW_THRESHOLD = 1 / 3
 _CADENCE_HIGH_THRESHOLD = 2 / 3
 
+# The digest's cadence panel only has the current ISO week's sessions
+# (summary.sessions), so its weekday streak is bounded at 7. Classifying
+# and displaying that streak against the 21-day CADENCE_WINDOW_DAYS made
+# the "high" tier (ratio >= 2/3, i.e. >= 14 weekdays) mathematically
+# unreachable and the "N of 21 days" label misleading. The panel measures
+# the week it actually has. A true 21-day rolling streak is the canonical
+# cadence.compute_weekday_streak (reserved for the cadence-detector story),
+# not this panel.
+_CADENCE_PANEL_WINDOW_DAYS = 7
+
 
 def _classify_high_adopter(streak: int, window_days: int) -> str | None:
     """Resolve a weekday-streak to a high-adopter spectrum position.
@@ -801,11 +810,12 @@ def _cadence_panel(summary) -> CadencePanel:
     substantive sessions fell in the window the renderer surfaces an
     explicit empty-state message and omits the high-adopter label.
 
-    The window defaults to ``CADENCE_WINDOW_DAYS`` (21 days). When the
-    summary's sessions span less than 21 days (typical for a fresh
-    install), the streak is still measured over the same denominator so
-    the high-adopter position is calibrated against the canonical
-    window length, not against whatever happens to be on file.
+    The streak and high-adopter position are measured against the current
+    ISO week (``_CADENCE_PANEL_WINDOW_DAYS`` = 7), which is the only window
+    the summary's sessions cover. "5 of 7 days" means five distinct
+    weekdays active this week, and a 5-7 weekday week reaches the "high"
+    tier. A true 21-day rolling streak lives in the canonical cadence
+    module, not in this digest panel.
     """
     weekdays: set[int] = set()
     substantive = 0
@@ -823,14 +833,14 @@ def _cadence_panel(summary) -> CadencePanel:
             continue
     streak = len(weekdays)
     position = (
-        _classify_high_adopter(streak, CADENCE_WINDOW_DAYS)
+        _classify_high_adopter(streak, _CADENCE_PANEL_WINDOW_DAYS)
         if substantive > 0
         else None
     )
     return CadencePanel(
         weekday_streak=streak,
         substantive_session_count=substantive,
-        window_days=CADENCE_WINDOW_DAYS,
+        window_days=_CADENCE_PANEL_WINDOW_DAYS,
         high_adopter_position=position,
     )
 
@@ -883,6 +893,49 @@ def _first_user_turn_text(session) -> str:
         return ""
     content = getattr(user_turns[0], "content", "")
     return content or ""
+
+
+_TASK_TYPE_LABELS: dict[str, str] = {
+    "debugging": "debugging task",
+    "refactoring": "refactoring task",
+    "building_new": "build task",
+    "planning": "planning task",
+    "learning": "learning task",
+    "research": "research task",
+    "ops": "operations task",
+    "other": "task",
+}
+
+
+def _public_task_label(task) -> str:
+    """Return the non-transcript label the report may show for a task.
+
+    LLM task labels are already constrained to short, non-personal
+    summaries. Singleton fallback labels are derived from the first user
+    turn, so those must not cross the renderer boundary.
+    """
+    source = getattr(task, "label_source", "")
+    label = (getattr(task, "label", "") or "").strip()
+    if label and source != LABEL_SOURCE_FALLBACK:
+        return label
+    task_type = getattr(task, "task_type", "") or "other"
+    return _TASK_TYPE_LABELS.get(task_type, "task")
+
+
+def _display_label_for_repeat(repeat, tasks) -> str:
+    """Pick a public task label for a detected repeat group."""
+    repeated_ids = set(repeat.example_session_ids)
+    labels: list[str] = []
+    for task in tasks:
+        task_ids = set(getattr(task, "session_ids", None) or [])
+        if task_ids & repeated_ids:
+            labels.append(_public_task_label(task))
+    if not labels:
+        return "recurring task"
+    counts: dict[str, int] = {}
+    for label in labels:
+        counts[label] = counts.get(label, 0) + 1
+    return max(counts, key=lambda label: counts[label])
 
 
 def _repeat_task_radar_panel(summary) -> RepeatTaskRadarPanel:
@@ -944,7 +997,7 @@ def _repeat_task_radar_panel(summary) -> RepeatTaskRadarPanel:
     repeats = detect_repeats(clusters, REPEAT_TASK_WINDOW_DAYS)
     rows = tuple(
         RepeatTaskRow(
-            canonical_first_sentence=repeat.canonical_first_sentence,
+            canonical_first_sentence=_display_label_for_repeat(repeat, tasks),
             occurrences=repeat.occurrences,
             estimated_minutes_per_occurrence=repeat.estimated_minutes_per_occurrence,
         )

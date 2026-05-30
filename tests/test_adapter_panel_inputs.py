@@ -14,11 +14,14 @@ from types import SimpleNamespace
 from praxis.models import Provider, Role, Session, Turn
 from praxis.reports.adapter import (
     _behavioral_patterns_panel,
+    _cost_ledger_html,
+    _cost_ledger_terminal,
+    _task_rows_html,
+    _task_rows_terminal,
     build_panel_inputs,
 )
 from praxis.reports.panel_inputs import (
     EXCERPT_CHAR_LIMIT,
-    MAX_EXCERPTS_PER_SIGNAL,
     SIGNAL_KINDS_IN_PANEL_ORDER,
     BehavioralPatternRow,
     BehavioralPatternsPanel,
@@ -164,8 +167,7 @@ def test_behavioral_panel_has_signals_true_when_any_row_fires():
 
 
 def test_behavioral_panel_captures_excerpts_for_fired_signals():
-    """Each fired signal carries up to MAX_EXCERPTS_PER_SIGNAL example
-    excerpts so the reader can see what triggered the count."""
+    """Fired signals carry counts but no transcript excerpts."""
     sessions = [
         _make_session([
             "Why does this approach work for caching?",
@@ -175,20 +177,18 @@ def test_behavioral_panel_captures_excerpts_for_fired_signals():
     ]
     panel = _behavioral_patterns_panel(_FakeSummary(sessions=sessions))
     why_row = next(r for r in panel.rows if r.signal_kind == "why_question")
-    assert len(why_row.excerpts) == MAX_EXCERPTS_PER_SIGNAL
-    assert "caching" in why_row.excerpts[0]
-    assert "slower" in why_row.excerpts[1]
+    assert why_row.count == 3
+    assert why_row.excerpts == ()
 
 
 def test_behavioral_panel_clips_long_excerpts():
-    """Long user turns get clipped to EXCERPT_CHAR_LIMIT so a sprawling
-    transcript paragraph does not blow up the panel layout."""
+    """Long user turns are counted without being stored as report excerpts."""
     long_why = "Why " + ("does this work as expected " * 20) + "?"
     sessions = [_make_session([long_why])]
     panel = _behavioral_patterns_panel(_FakeSummary(sessions=sessions))
     why_row = next(r for r in panel.rows if r.signal_kind == "why_question")
-    assert len(why_row.excerpts) == 1
-    assert len(why_row.excerpts[0]) <= EXCERPT_CHAR_LIMIT
+    assert why_row.count == 1
+    assert why_row.excerpts == ()
 
 
 def test_behavioral_panel_carries_citation_per_row():
@@ -227,6 +227,41 @@ def test_build_panel_inputs_behavioral_signals_uses_sessions():
     pi = build_panel_inputs(_FakeSummary(sessions=sessions))
     assert pi.behavioral_signals is not None
     assert pi.behavioral_signals.has_signals is True
+
+
+def test_fallback_task_labels_stay_out_of_task_and_cost_views():
+    """Singleton fallback labels come from first user turns and must not render."""
+    raw_label = "Review this change for security"
+    session = _make_session([raw_label])
+    session.started_at = datetime.now(timezone.utc)
+    session.model_hint = "gpt-5"
+    task = SimpleNamespace(
+        label=raw_label,
+        task_type="other",
+        session_ids=[session.stable_id],
+        label_source="fallback",
+    )
+    summary = SimpleNamespace(
+        sessions=[session],
+        tasks=[task],
+        judge_results={},
+        cost_total_usd=1.0,
+        cost_baseline_usd=None,
+    )
+
+    html_tasks = _task_rows_html(summary)
+    terminal_tasks = _task_rows_terminal(summary)
+    html_ledger = _cost_ledger_html(summary)
+    terminal_ledger = _cost_ledger_terminal(summary)
+
+    assert html_tasks[0].label == "task"
+    assert terminal_tasks is not None
+    assert terminal_tasks[0].label == "task"
+    assert html_ledger is not None
+    assert raw_label not in html_ledger.biggest_line
+    assert " on task " in html_ledger.biggest_line
+    assert terminal_ledger is not None
+    assert terminal_ledger.biggest_task_label == "task"
 
 
 # --------------------------------------------- dataclass shape contracts
@@ -488,17 +523,28 @@ def test_cadence_panel_drops_non_substantive_sessions():
     assert panel.has_activity is False
 
 
-def test_cadence_panel_high_adopter_position_at_two_thirds():
-    """Streak >= 2/3 of the 21-day window => 'high'."""
-    sessions = [
-        _session_with_aug_auto(None, weekday=i) for i in range(14)
-    ]
+def test_cadence_panel_high_adopter_position_reachable():
+    """A week active on 5+ distinct weekdays reaches the 'high' tier.
+
+    Regression: the panel only ever has the current ISO week's sessions,
+    so the weekday streak is bounded at 7 (python's weekday() is 0..6).
+    Classifying that against the 21-day window made 'high' (ratio >= 2/3,
+    i.e. >= 14 weekdays) mathematically unreachable from real panel data
+    and the old test sidestepped it by passing a hand-built 14. The panel
+    now classifies against the 7-day window the data actually covers, so
+    'high' is reachable and the spectrum spans real inputs.
+    """
+    sessions = [_session_with_aug_auto(None, weekday=i) for i in range(7)]
     panel = _cadence_panel(SimpleNamespace(sessions=sessions))
-    # 14 / 21 = 0.667 -> high
-    assert panel.weekday_streak == 7  # bounded by python's weekday() returning 0..6
-    # The classification reads ratio = 7/21 = 0.33 which is on the boundary.
-    # Use a more direct check via _classify_high_adopter to be unambiguous.
-    assert _classify_high_adopter(14, CADENCE_WINDOW_DAYS) == "high"
+    assert panel.weekday_streak == 7
+    assert panel.window_days == 7
+    assert panel.high_adopter_position == "high"
+    assert panel.position_label == "High-adopter"
+    # Every tier is reachable from a streak the panel can actually produce
+    # (0..7), using the panel's own window as the denominator.
+    assert _classify_high_adopter(5, panel.window_days) == "high"
+    assert _classify_high_adopter(3, panel.window_days) == "moderate"
+    assert _classify_high_adopter(2, panel.window_days) == "low"
 
 
 def test_cadence_panel_carries_citation():

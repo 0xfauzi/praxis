@@ -27,6 +27,20 @@ if TYPE_CHECKING:
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
+
+def _parse_started_at(value: str) -> datetime:
+    """Parse a stored ``started_at`` string, coercing naive values to UTC.
+
+    Rows written before the scanners normalized timezones (or hand-edited
+    DBs) can hold a naive timestamp; comparing one against the aware UTC
+    week bounds below raises "can't compare offset-naive and offset-aware
+    datetimes" and would otherwise crash the entire weekly run on one row.
+    """
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
 from praxis.behavior import (
     BehavioralSignals,
     TrajectoryAssessment,
@@ -923,7 +937,7 @@ def assess_trajectory_weekly(
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
         inputs.append(WeeklySessionInput(
-            started_at=datetime.fromisoformat(row["started_at"]),
+            started_at=_parse_started_at(row["started_at"]),
             engagement_rate=float(sig.get("engagement_rate", 0.0)),
             delegation_rate=float(sig.get("delegation_rate", 0.0)),
             independence_rate=float(sig.get("independence_rate", 0.0)),
@@ -1011,7 +1025,7 @@ def _count_sessions_in_iso_week(store: ProfileStore, week_iso: str) -> int:
     rows = store.load_session_scores(since=since_dt)
     return sum(
         1 for row in rows
-        if datetime.fromisoformat(row["started_at"]) < until_dt
+        if _parse_started_at(row["started_at"]) < until_dt
     )
 
 
@@ -1161,7 +1175,7 @@ def run_weekly(
         all_rows = store.load_session_scores(since=since_dt)
         rows = [
             row for row in all_rows
-            if datetime.fromisoformat(row["started_at"]) < until_dt
+            if _parse_started_at(row["started_at"]) < until_dt
         ]
         snapshot = _snapshot_from_rows(rows)
         past_sessions = _reconstruct_sessions_from_score_rows(rows)
@@ -1369,7 +1383,7 @@ def run_weekly(
         cw_rows_all = snapshot_store.load_session_scores(since=cw_since_dt)
         cw_rows = [
             row for row in cw_rows_all
-            if datetime.fromisoformat(row["started_at"]) < cw_until_dt
+            if _parse_started_at(row["started_at"]) < cw_until_dt
         ]
         snapshot = _snapshot_from_rows(cw_rows) if cw_rows else ProfileSnapshot.from_scores([])
     else:
@@ -1619,7 +1633,7 @@ def _snapshot_from_rows(rows: list[dict]) -> ProfileSnapshot:
             SessionScore(
                 session_stable_id=row["stable_id"],
                 provider=row["provider"],
-                started_at=datetime.fromisoformat(row["started_at"]),
+                started_at=_parse_started_at(row["started_at"]),
                 dimension_scores=row["dimension_scores"],
                 overall=row["overall"],
                 judge_result=judge,
@@ -1820,7 +1834,7 @@ def list_persisted_weeks() -> list[dict[str, Any]]:
     rows = store.load_session_scores()
     buckets: dict[str, list[float]] = {}
     for row in rows:
-        started = datetime.fromisoformat(row["started_at"])
+        started = _parse_started_at(row["started_at"])
         year, week, _ = started.date().isocalendar()
         week_iso = f"{year:04d}-W{week:02d}"
         buckets.setdefault(week_iso, []).append(float(row["overall"]))

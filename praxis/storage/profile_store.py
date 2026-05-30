@@ -612,6 +612,18 @@ class ProfileStore:
         for sql_path in sorted(migrations_dir.glob("*.sql")):
             if sql_path.name in applied:
                 continue
+            # If the ledger row was lost but the migration's effect is already
+            # in the schema (partial restore from a profile.db.backup-*,
+            # external sqlite tooling, or a cross-build upgrade), reconcile the
+            # ledger instead of re-running the body. A blind re-run of the
+            # destructive 001 rebuild would CREATE/INSERT(base cols)/DROP/RENAME
+            # and silently wipe live follow_ups columns (display_text,
+            # user_chosen, superseded_by); 003 would crash on a duplicate
+            # ADD COLUMN. _ensure_* helpers already produced the v4 shape
+            # idempotently before this runs, so skipping the body loses nothing.
+            if self._migration_already_effected(sql_path.name):
+                self._record_migration_applied(sql_path.name)
+                continue
             self._apply_sql_migration(sql_path.name, sql_path.read_text())
 
     def _ensure_schema_migrations_table(self) -> None:
@@ -629,6 +641,53 @@ class ProfileStore:
                 "SELECT version FROM schema_migrations"
             ).fetchall()
         return {row["version"] for row in rows}
+
+    def _table_exists(self, table: str) -> bool:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ).fetchone()
+        return row is not None
+
+    def _table_has_column(self, table: str, column: str) -> bool:
+        # PRAGMA table_info does not accept a bound parameter for the table
+        # name; `table` is always an internal literal here, never user input.
+        with self._conn() as conn:
+            cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        return column in cols
+
+    def _migration_already_effected(self, version: str) -> bool:
+        """True when a shipped migration's schema effect is already present.
+
+        Makes migrations safe to re-encounter when the schema_migrations
+        ledger is lost while the schema itself is already migrated. Each
+        predicate detects the post-migration shape; a migration not listed
+        here always runs (returns False).
+        """
+        if version == "001_follow_ups_active_commitment.sql":
+            # 001 rebuilds follow_ups, adding user_chosen/display_text/
+            # superseded_by. user_chosen's presence proves the rebuild ran.
+            return self._table_has_column("follow_ups", "user_chosen")
+        if version == "002_session_reflections.sql":
+            return self._table_exists("session_reflections")
+        if version == "003_session_scores_aug_auto.sql":
+            return self._table_has_column("session_scores", "aug_auto_classification")
+        return False
+
+    def _record_migration_applied(self, version: str) -> None:
+        """Record a migration as applied without running its body.
+
+        Reconciles the ledger to the real schema state when the effect is
+        already present (see _migration_already_effected) so the body never
+        runs again.
+        """
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at) "
+                "VALUES (?, ?)",
+                (version, _utcnow().isoformat()),
+            )
 
     def _apply_sql_migration(self, version: str, body_sql: str) -> None:
         """Run one migration's SQL + the marker insert in one transaction.

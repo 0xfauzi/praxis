@@ -23,9 +23,16 @@ def _parse_ts(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return None
+    # A timestamp with no 'Z' and no offset parses to a naive datetime.
+    # Downstream week-window filters compare against aware UTC bounds, so
+    # a naive value would raise "can't compare offset-naive and aware".
+    # Treat a missing zone as UTC at the parse boundary.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def _extract_text(content: object) -> str:
@@ -112,6 +119,13 @@ class ClaudeScanner(BaseScanner):
                         entry = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    # A line that is valid JSON but not an object (a bare
+                    # array/number/string/bool/null from a truncated or
+                    # hand-edited file) would make entry.get(...) raise
+                    # AttributeError, which is NOT a JSONDecodeError and
+                    # would escape parse() and abort the whole scan.
+                    if not isinstance(entry, dict):
+                        continue
 
                     entry_type = entry.get("type")
                     if entry_type not in {"user", "assistant"}:
@@ -134,7 +148,9 @@ class ClaudeScanner(BaseScanner):
 
                     if model_hint is None:
                         m = message.get("model")
-                        if m and not (isinstance(m, str) and m.startswith("<") and m.endswith(">")):
+                        # Only a real string model id is usable; a dict/number
+                        # here would flow into cost estimation and rendering.
+                        if isinstance(m, str) and m and not (m.startswith("<") and m.endswith(">")):
                             model_hint = m
 
                     tool_calls: list[dict] = []

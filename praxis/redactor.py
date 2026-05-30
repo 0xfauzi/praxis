@@ -41,6 +41,25 @@ _GITHUB_PAT = re.compile(
 # header) so we don't redact random dotted identifiers.
 _JWT = re.compile(r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+")
 
+# Google / Gemini API keys: literal `AIza` + 35 url-safe chars. These
+# appear bare (not behind a "key" label) in Gemini code and URLs, so the
+# generic labeled pattern would miss them.
+_GOOGLE_API_KEY = re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b")
+
+# Slack tokens: bot/user/app/refresh/legacy, `xox[baprs]-` + a dash-joined
+# high-entropy tail.
+_SLACK_TOKEN = re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}")
+
+# PEM private-key blocks (RSA / EC / OPENSSH / DSA / generic). The body is
+# matched lazily so it stops at the first END line and cannot catastrophically
+# backtrack. A leaked private key block is among the worst things to ship to a
+# third-party LLM, so the whole armored block is replaced.
+_PEM_PRIVATE_KEY = re.compile(
+    r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----"
+    r"[\s\S]*?"
+    r"-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----"
+)
+
 # Labeled secret tails: a >= 20 char [A-Za-z0-9_-] sequence that
 # follows the literal word "key", "token", "secret", or "password"
 # (case-insensitive). `\b...\b` keeps us from matching the literal
@@ -60,11 +79,19 @@ _GENERIC_LABELED_SECRET = re.compile(
 # redact the whole match; the labeled-secret pattern uses \1 to keep
 # the label + separator and redact only the high-entropy tail.
 _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # PEM blocks first: redact the whole armored block before any other
+    # pattern can match a fragment inside it.
+    (_PEM_PRIVATE_KEY, PLACEHOLDER),
     (_ANTHROPIC, PLACEHOLDER),
     (_OPENAI, PLACEHOLDER),
+    (_GOOGLE_API_KEY, PLACEHOLDER),
+    (_SLACK_TOKEN, PLACEHOLDER),
     (_AWS_ACCESS_KEY, PLACEHOLDER),
     (_GITHUB_PAT, PLACEHOLDER),
     (_JWT, PLACEHOLDER),
+    # Generic labeled secret runs last: it only redacts a high-entropy tail
+    # that follows a key/token/secret/password label, so the specific
+    # provider patterns above get first claim on their own formats.
     (_GENERIC_LABELED_SECRET, r"\1" + PLACEHOLDER),
 )
 

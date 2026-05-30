@@ -550,7 +550,7 @@ _BEHAVIORAL_PATTERNS_EMPTY = "No behavioral patterns captured this week."
 # is one audit point per renderer.
 _AUG_AUTO_BALANCE_CLASSIFIER_UNAVAILABLE = "Classifier unavailable for this week."
 _AUG_AUTO_BALANCE_NO_SESSIONS = "No sessions to classify this week."
-_CADENCE_NO_ACTIVITY = "No substantive sessions in the last 21 days."
+_CADENCE_NO_ACTIVITY = "No substantive sessions this week."
 
 # US-040: empty-state copy for the repeat-task radar (assertable verbatim
 # by tests so an empty detector list never renders as a misleading
@@ -673,11 +673,10 @@ def _headline_moment(moment: HeadlineMomentView | None) -> list[str]:
 
     Mandatory section. Layout, top to bottom:
       - terracotta dim title (e.g. 'Verification habits')
-      - italic quoted excerpt
       - 'Why:' line explaining what cost the score
       - 'Try:' line with the suggested alternative
 
-    Lines wrap to the body width so a long excerpt or suggestion
+    Lines wrap to the body width so a long suggestion
     cannot push the section over the 80-column budget.
     """
     lines: list[str] = []
@@ -686,9 +685,6 @@ def _headline_moment(moment: HeadlineMomentView | None) -> list[str]:
         lines.extend(_placeholder_lines(_HEADLINE_MOMENT_PLACEHOLDER))
         return lines
     lines.append(_body_line(_dim_title(moment.dim_key), ansi=TERRA))
-    quoted = f"\"{moment.quoted_excerpt}\""
-    for wrapped in _wrap(quoted, width=_BODY_WIDTH):
-        lines.append(_body_line(wrapped, ansi=ITALIC))
     lines.append("")
     for wrapped in _wrap(f"Why: {moment.why_it_lost_score}", width=_BODY_WIDTH):
         lines.append(_body_line(wrapped))
@@ -925,11 +921,11 @@ def _behavioral_patterns(
 ) -> list[str]:
     """Render the behavioral-patterns panel (US-038).
 
-    Emits one row per signal kind with the label, count, up to two
-    raw user-turn excerpts (each already clipped to <=120 chars by the
-    adapter), and a small ink-faded citation footnote. When no signals
-    fired across the week the section degrades to the empty-state
-    placeholder rather than an empty table.
+    Emits one row per signal kind with the label, count, and a small
+    ink-faded citation footnote. Transcript excerpts are intentionally
+    omitted so the digest stays a coaching read rather than a transcript
+    sample. When no signals fired across the week the section degrades
+    to the empty-state placeholder rather than an empty table.
     """
     lines: list[str] = []
     lines.extend(_section_rule("Behavioral patterns"))
@@ -942,14 +938,11 @@ def _behavioral_patterns(
             continue
         if not first:
             # Blank separator between rows so the eye groups each
-            # signal's label + excerpts + citation as one block.
+            # signal's label + citation as one block.
             lines.append("")
         first = False
         plural = "time" if row.count == 1 else "times"
         lines.append(_body_line(f"{row.label}: {row.count} {plural}"))
-        for ex in row.excerpts:
-            for wrapped in _wrap(f"\"{ex}\"", width=_BODY_WIDTH - 2):
-                lines.append(_body_line("  " + wrapped, ansi=ITALIC))
         for wrapped in _wrap(
             f"Source: {row.citation}", width=_BODY_WIDTH - 2
         ):
@@ -1001,7 +994,7 @@ def _cadence(panel: CadencePanel | None) -> list[str]:
 
     Two states:
       1. ``panel is None`` or zero substantive sessions: emit the
-         "No substantive sessions in the last 21 days." copy and OMIT
+         "No substantive sessions this week." copy and OMIT
          the high-adopter label (the spectrum position is undefined
          without any activity to place on it).
       2. At least one substantive session: emit the streak (e.g.
@@ -1048,8 +1041,8 @@ def _repeat_task_radar(panel: RepeatTaskRadarPanel | None) -> list[str]:
       1. ``panel is None`` or no repeats detected: emit the
          "No repeat tasks detected this week." copy verbatim and skip
          the row table entirely.
-      2. At least one repeat: emit each row with the canonical first
-         sentence, the occurrence count, the per-occurrence minutes,
+      2. At least one repeat: emit each row with a public task label,
+         the occurrence count, the per-occurrence minutes,
          and the "Could become a skill" tag. The citation footnote
          (OpenAI ChatGPT usage paper + Anthropic Skills) sits below
          the rows so the reader sees the primary source inline.
@@ -1064,14 +1057,11 @@ def _repeat_task_radar(panel: RepeatTaskRadarPanel | None) -> list[str]:
         if not first:
             lines.append("")
         first = False
-        # Header: "<canonical sentence>"  (italic so the reader's eye
-        # tracks the quoted text vs the meta row below it).
-        quoted = f"\"{row.canonical_first_sentence}\""
-        for wrapped in _wrap(quoted, width=_BODY_WIDTH):
-            lines.append(_body_line(wrapped, ansi=ITALIC))
+        for wrapped in _wrap(row.canonical_first_sentence, width=_BODY_WIDTH):
+            lines.append(_body_line(wrapped))
         meta = (
-            f"{row.occurrences} times, "
-            f"~{_format_minutes(row.estimated_minutes_per_occurrence)} min each "
+            f"Detected {row.occurrences} times, "
+            f"about {_format_minutes(row.estimated_minutes_per_occurrence)} min each "
             f"[{row.skill_tag}]"
         )
         for wrapped in _wrap(meta, width=_BODY_WIDTH):
