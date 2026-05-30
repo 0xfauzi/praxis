@@ -375,11 +375,12 @@ def test_trajectory_section_renders_headline_when_provided():
     )
 
 
-def test_moment_section_renders_quoted_excerpt_when_provided():
-    """The headline moment quote should be visible in the moment
-    section so the reader can ground the coaching in real text."""
+def test_moment_section_omits_quoted_excerpt_when_provided():
+    """The report is coaching-first and must not show transcript spans."""
     out = render(_filled_digest())
-    assert "write the function that does the thing" in out
+    assert "write the function that does the thing" not in out
+    assert "No goal, constraints, or acceptance criteria." in out
+    assert "State the goal and acceptance criteria first." in out
 
 
 def test_cost_ledger_renders_this_week_total_when_provided():
@@ -807,13 +808,11 @@ def test_render_redacts_secret_in_every_user_facing_field():
         assert needle not in out, f"{needle!r} leaked into rendered HTML"
 
 
-def test_render_preserves_surrounding_prose_around_redacted_secret():
-    """Redaction must not eat the rest of the sentence. The reader
-    needs the surrounding prose intact so the redaction is legible
-    (e.g. 'my key is [REDACTED] and I pasted it here')."""
+def test_render_omits_transcript_quote_before_redaction():
+    """Quoted transcript text is not rendered, even when it contains a secret."""
     out = render(_digest_with_secrets())
-    assert "my key is" in out
-    assert "and I pasted it here" in out
+    assert "my key is" not in out
+    assert "and I pasted it here" not in out
 
 
 def test_render_is_idempotent_under_sanitisation():
@@ -859,11 +858,8 @@ def test_render_still_html_escapes_after_sanitisation():
     assert "&lt;W&gt;" in out
 
 
-def test_render_does_not_re_redact_existing_placeholder():
-    """If a moment field already carries the ``[REDACTED]`` token (e.g.
-    an upstream redaction already ran), the renderer must not mangle
-    it. Idempotence depends on the redactor not matching its own
-    placeholder."""
+def test_render_does_not_render_redacted_placeholder_from_quote():
+    """Even already-redacted transcript quotes stay out of the digest."""
     digest = WeeklyDigest(
         week_iso="2026-W21",
         generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
@@ -874,10 +870,8 @@ def test_render_does_not_re_redact_existing_placeholder():
         ),
     )
     out = render(digest)
-    assert "[REDACTED]" in out
-    # Exactly one occurrence in the moment quote - no accidental
-    # second redaction pass that doubles the placeholder.
-    assert out.count("[REDACTED]") == 1
+    assert "[REDACTED]" not in out
+    assert "leaked secret was scrubbed" in out
 
 
 def test_render_filled_digest_with_secrets_keeps_self_containment_contract():
@@ -1271,12 +1265,13 @@ def test_behavioral_patterns_renders_label_and_count():
     assert "2 times" in out
 
 
-def test_behavioral_patterns_renders_excerpts():
-    """Each populated row renders up to two raw user-turn excerpts
-    so the reader can ground the count in transcript text."""
+def test_behavioral_patterns_omits_excerpts():
+    """Behavioral patterns show counts, not raw user-turn excerpts."""
     out = render(_bp_digest(_bp_panel_with_rows()))
-    assert "why does this approach work for caching?" in out
-    assert "write me a function" in out
+    assert "why does this approach work for caching?" not in out
+    assert "write me a function" not in out
+    assert "Why-questions" in out
+    assert "4 times" in out
 
 
 def test_behavioral_patterns_renders_citation_per_row():
@@ -1354,10 +1349,8 @@ def test_behavioral_patterns_self_containment_holds():
     assert "url(" not in out
 
 
-def test_behavioral_patterns_html_escapes_excerpts():
-    """Excerpts are user-provided strings so the renderer must HTML-escape
-    them; a stray `<script>` in a transcript must not become a real
-    `<script>` tag in the rendered digest."""
+def test_behavioral_patterns_drops_excerpts_before_html_escape():
+    """A stray script-looking transcript excerpt must not render at all."""
     from praxis.reports.panel_inputs import (
         BehavioralPatternRow,
         BehavioralPatternsPanel,
@@ -1373,7 +1366,8 @@ def test_behavioral_patterns_html_escapes_excerpts():
     ))
     out = render(_bp_digest(panel))
     assert "<script>alert" not in out
-    assert "&lt;script&gt;alert" in out
+    assert "&lt;script&gt;alert" not in out
+    assert "Why-questions" in out
 
 
 # ---------------------- US-039: aug/auto balance + cadence panels (HTML) ----
@@ -1488,7 +1482,7 @@ def test_cadence_renders_no_activity_message_when_empty():
     """When zero substantive sessions fell in the window, the section
     surfaces the verbatim US-039 message."""
     out = render(_us039_digest(cadence=_cadence_empty_panel()))
-    assert "No substantive sessions in the last 21 days." in out
+    assert "No substantive sessions this week." in out
 
 
 def test_cadence_omits_high_adopter_label_when_empty():

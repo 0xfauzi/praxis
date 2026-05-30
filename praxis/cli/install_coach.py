@@ -601,7 +601,6 @@ def install_copilot_user_level(home: Path | None = None) -> tuple[Path, Path]:
     prompt_path = prompts_dir / COPILOT_INSTRUCTION_FILENAME
 
     prompt_content = _build_copilot_block_content() + "\n"
-    _atomic_write_text(prompt_path, prompt_content)
 
     settings_path = user_dir / "settings.json"
     settings_data: dict[str, Any]
@@ -629,6 +628,13 @@ def install_copilot_user_level(home: Path | None = None) -> tuple[Path, Path]:
             settings_data = parsed
     else:
         settings_data = {}
+
+    # Validate settings.json BEFORE writing anything (the parse/shape checks
+    # above raise InstallCoachError on bad input). Only now, with the patch
+    # known to be applicable, write the prompt file -- otherwise a malformed
+    # settings.json would leave an orphan prompt file on disk, contradicting
+    # this function's documented "left untouched" contract.
+    _atomic_write_text(prompt_path, prompt_content)
 
     raw_locations = settings_data.get(COPILOT_SETTINGS_KEY)
     locations: dict[str, Any]

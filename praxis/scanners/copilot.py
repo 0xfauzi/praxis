@@ -26,6 +26,12 @@ from praxis.models import Provider, Role, Session, Turn
 from praxis.scanners.base import BaseScanner
 from praxis.scanners.preamble import is_tool_injected_content
 
+# The Copilot vscdb/JSON is undocumented, volatile, and writable by anything
+# on the machine. _mine_turns walks arbitrary nested JSON, so a deeply nested
+# structure could blow Python's recursion limit and (uncaught) abort the whole
+# Copilot scan. Real chat structures are shallow; bound the descent.
+_MAX_MINE_DEPTH = 200
+
 
 def _vscode_user_paths() -> list[Path]:
     """Possible VS Code 'User' dir locations across OSes and forks."""
@@ -156,9 +162,11 @@ class CopilotScanner(BaseScanner):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def _mine_turns(self, blob: object) -> list[Turn]:
+    def _mine_turns(self, blob: object, depth: int = 0) -> list[Turn]:
         """Recursively find user/assistant messages in arbitrary JSON."""
         out: list[Turn] = []
+        if depth > _MAX_MINE_DEPTH:
+            return out
         if isinstance(blob, dict):
             # Heuristic: if it looks like a chat turn, extract it
             role = blob.get("role")
@@ -174,10 +182,10 @@ class CopilotScanner(BaseScanner):
                     )
                 )
             for v in blob.values():
-                out.extend(self._mine_turns(v))
+                out.extend(self._mine_turns(v, depth + 1))
         elif isinstance(blob, list):
             for v in blob:
-                out.extend(self._mine_turns(v))
+                out.extend(self._mine_turns(v, depth + 1))
         return out
 
     @staticmethod

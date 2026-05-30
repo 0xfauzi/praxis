@@ -304,8 +304,8 @@ def test_partial_inputs_render_other_sections_as_placeholders():
     assert _FOLLOW_UP_PLACEHOLDER in text
 
 
-def test_headline_moment_renders_quote_and_alternative():
-    """The headline moment shows the dim title, the quote, and the 'Try:' line.
+def test_headline_moment_omits_quote_and_renders_alternative():
+    """The headline moment shows the dim title, why line, and the 'Try:' line.
 
     These are the three pieces of information a coachable moment needs
     to be actionable; if any one drops out, the section becomes noise.
@@ -315,7 +315,8 @@ def test_headline_moment_renders_quote_and_alternative():
     text = _strip_ansi(render(digest))
     # The rubric resolves "verification" to "Verification habits".
     assert "Verification habits" in text
-    assert moment.quoted_excerpt in text
+    assert moment.quoted_excerpt not in text
+    assert "Claimed the change was verified without showing test output" in text
     # "Try:" prefix and the start of the suggested alternative.
     assert "Try: " in text
     assert "Run `pytest`" in text
@@ -1814,14 +1815,13 @@ def test_behavioral_patterns_renders_label_and_count():
     assert "Pure delegation: 2 times" in text
 
 
-def test_behavioral_patterns_renders_excerpts_inline():
-    """Each populated row renders up to two raw user-turn excerpts
-    beneath the count line so the reader can ground the count in
-    actual transcript text."""
+def test_behavioral_patterns_omits_excerpts_inline():
+    """Behavioral rows render counts and citations, not transcript excerpts."""
     digest = WeeklyDigest(panel_inputs=_panel_inputs(_behavioral_panel_with_signals()))
     text = _strip_ansi(render(digest))
-    assert "why does this approach work for caching?" in text
-    assert "write me a function" in text
+    assert "why does this approach work for caching?" not in text
+    assert "write me a function" not in text
+    assert "Why-questions: 4 times" in text
 
 
 def test_behavioral_patterns_renders_citation_per_row():

@@ -26,6 +26,11 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
+  # The lint/type config below is only meaningful if the tools are
+  # installable; pin them here so `uv pip install -e .[dev]` is enough
+  # to reproduce the gate that CI and contributors run.
+  "ruff>=0.6",
+  "mypy>=1.11",
 ]
 
 [project.scripts]
@@ -57,8 +62,14 @@ disable_error_code = ["union-attr"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+# Moved under [tool.ruff.lint] (ruff deprecated the top-level form; the
+# old placement silently stopped applying in newer ruff, which is how the
+# suppressions had drifted out of effect).
 # E402: module-level imports after early-execution code (used in
 # storage/profile_store.py for sqlite registration before imports).
-# E501: line-length is enforced by --line-length above; ruff still
+# E501: line-length is enforced by line-length above; ruff still
 # flags strings inside code that intentionally exceed the limit.
+# E741: ambiguous single-char names in a few tight numeric helpers.
 ignore = ["E402", "E501", "E741"]

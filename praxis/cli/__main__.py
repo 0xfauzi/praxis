@@ -984,7 +984,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
     print(f"  [{mark(anth)}] ANTHROPIC_API_KEY")
     print(f"  [{mark(openai)}] OPENAI_API_KEY")
     if not (anth or openai):
-        issues.append("No API key set - scoring runs heuristics-only. "
+        issues.append("No API key set - scoring and the weekly digest need one. "
                       "export ANTHROPIC_API_KEY=... or OPENAI_API_KEY=...")
 
     # --- database ---

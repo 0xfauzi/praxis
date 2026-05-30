@@ -30,9 +30,14 @@ def _parse_ts(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return None
+    # Missing zone -> treat as UTC so downstream aware-UTC comparisons
+    # (week-window filters) never hit naive-vs-aware TypeErrors.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 class CodexScanner(BaseScanner):
@@ -74,9 +79,16 @@ class CodexScanner(BaseScanner):
                         entry = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    # Guard against a JSONL line that is valid JSON but not
+                    # an object: entry.get(...) below would otherwise raise
+                    # AttributeError, escape parse(), and abort the scan.
+                    if not isinstance(entry, dict):
+                        continue
 
                     entry_type = entry.get("type")
-                    payload = entry.get("payload", {}) or {}
+                    payload = entry.get("payload")
+                    if not isinstance(payload, dict):
+                        payload = {}
                     ts = _parse_ts(entry.get("timestamp"))
 
                     if entry_type == "session_meta":
@@ -138,9 +150,10 @@ class CodexScanner(BaseScanner):
                         "tool_search_call",
                         "web_search_call",
                     }:
+                        action = payload.get("action")
                         name = (
                             payload.get("name")
-                            or payload.get("action", {}).get("type")
+                            or (action.get("type") if isinstance(action, dict) else None)
                             or entry_type
                         )
                         args = payload.get("arguments") or payload.get("input") or payload.get("action")

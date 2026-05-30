@@ -562,20 +562,20 @@ def _trajectory_evidence_section(traj: Trajectory | None) -> str:
 def _moment_section(moment: MomentPanel | None, dim_title: str = "") -> str:
     """The headline coaching moment. First panel after the trajectory hero.
 
-    Renders as the feature article of the digest: a pull-quote with
-    session context, a why paragraph, a what-to-try paragraph, and a
-    recurrence callout when the same suggested_alternative has been
-    flagged in prior weeks.
+    Renders as the feature article of the digest: session context, a
+    why paragraph, a what-to-try paragraph, and a recurrence callout
+    when the same suggested_alternative has been flagged in prior weeks.
+    Transcript quotes are intentionally not shown. The report is coaching,
+    not a transcript viewer.
     """
     coaching_tag = '<div class="coaching-tag">Coaching</div>'
-    if moment is None or not (moment.quoted_excerpt or moment.why_lost_score):
+    if moment is None or not (moment.why_lost_score or moment.next_time_try):
         return f"""
   <section class="m-section" id="this-weeks-moment">
     {coaching_tag}
     <div class="s-eyebrow">This Week's Moment</div>
     <p class="placeholder">No coachable moment surfaced this week. Run more sessions to surface one.</p>
   </section>"""
-    quote = _safe(moment.quoted_excerpt) if moment.quoted_excerpt else ""
     why = _safe(moment.why_lost_score) if moment.why_lost_score else ""
     nxt = _safe(moment.next_time_try) if moment.next_time_try else ""
     # Prefer the MomentPanel's own dim_title; fall back to caller-passed value.
@@ -594,16 +594,18 @@ def _moment_section(moment: MomentPanel | None, dim_title: str = "") -> str:
         blocks.append(
             f'<div class="m-recurrence">This is the {_ordinal(n)} week we\'ve flagged this exact pattern.</div>'
         )
-    if quote:
-        ctx = ""
-        if moment.session_started_at:
-            ctx = f'<div class="m-quote-context">{_safe(moment.session_started_at)}</div>'
+    context_bits: list[str] = []
+    if effective_dim:
+        context_bits.append(_safe(effective_dim))
+    if moment.session_started_at:
+        context_bits.append(_safe(moment.session_started_at))
+    if context_bits:
         blocks.append(
-            f'<blockquote class="m-quote"><span class="m-quote-mark">&ldquo;</span>{quote}<span class="m-quote-mark m-quote-mark--close">&rdquo;</span></blockquote>{ctx}'
+            f'<p class="m-quote-context">Observed: {" · ".join(context_bits)}</p>'
         )
     if why:
         blocks.append(
-            f'<p class="m-body"><span class="m-inline-label">Why this lost score</span>{why}</p>'
+            f'<p class="m-body"><span class="m-inline-label">Coach\'s read</span>{why}</p>'
         )
     if nxt:
         # Split next_time_try into bullets when the LLM returned a
@@ -614,12 +616,12 @@ def _moment_section(moment: MomentPanel | None, dim_title: str = "") -> str:
         if len(clauses) >= 2 and all(len(c) > 10 for c in clauses):
             items = "".join(f"<li>{_safe(c)}</li>" for c in clauses)
             blocks.append(
-                f'<div class="m-body"><span class="m-inline-label">What to do instead</span>'
+                f'<div class="m-body"><span class="m-inline-label">Practice next week</span>'
                 f'<ul class="m-try-list">{items}</ul></div>'
             )
         else:
             blocks.append(
-                f'<p class="m-body"><span class="m-inline-label">What to do instead</span>{nxt}</p>'
+                f'<p class="m-body"><span class="m-inline-label">Practice next week</span>{nxt}</p>'
             )
     cost_bits: list[str] = []
     if moment.cost_dollars is not None:
@@ -1277,7 +1279,7 @@ _BEHAVIORAL_PATTERNS_EMPTY = "No behavioral patterns captured this week."
 # rewording is one audit point per renderer.
 _AUG_AUTO_BALANCE_CLASSIFIER_UNAVAILABLE = "Classifier unavailable for this week."
 _AUG_AUTO_BALANCE_NO_SESSIONS = "No sessions to classify this week."
-_CADENCE_NO_ACTIVITY = "No substantive sessions in the last 21 days."
+_CADENCE_NO_ACTIVITY = "No substantive sessions this week."
 
 
 def _aug_auto_balance_section(panel: AugAutoBalancePanel | None) -> str:
@@ -1332,7 +1334,7 @@ def _cadence_section(panel: CadencePanel | None) -> str:
     The eyebrow renders unconditionally so the section's slot in the
     document doesn't move. When ``panel`` is None or carries zero
     substantive sessions, the renderer emits the explicit "No
-    substantive sessions in the last 21 days." copy and OMITS the
+    substantive sessions this week." copy and OMITS the
     high-adopter label. Otherwise it emits the streak, the
     high-adopter position (when on file), and the arXiv 2509.19708
     citation as a footnote.
@@ -1368,10 +1370,11 @@ def _behavioral_patterns_section(panel: BehavioralPatternsPanel | None) -> str:
     """Render the behavioral-patterns panel (US-038).
 
     For each signal kind, emits a row with the signal label, the count,
-    up to two raw user-turn excerpts, and the primary-source citation
-    as a small footnote. When the panel has no signals (every count is
-    zero) the renderer surfaces the empty-state message instead of an
-    empty table.
+    and the primary-source citation as a small footnote. The renderer
+    deliberately omits raw user-turn excerpts so the digest stays a
+    coaching read rather than a transcript sample. When the panel has no
+    signals (every count is zero) the renderer surfaces the empty-state
+    message instead of an empty table.
     """
     if panel is None or not panel.has_signals:
         return f"""
@@ -1383,13 +1386,6 @@ def _behavioral_patterns_section(panel: BehavioralPatternsPanel | None) -> str:
     for row in panel.rows:
         if row.count <= 0:
             continue
-        excerpts_html = ""
-        if row.excerpts:
-            items = "".join(
-                f'<li class="bp-excerpt">&ldquo;{_safe(ex)}&rdquo;</li>'
-                for ex in row.excerpts
-            )
-            excerpts_html = f'<ul class="bp-excerpts">{items}</ul>'
         plural = "time" if row.count == 1 else "times"
         rows.append(
             f'<article class="bp-row">'
@@ -1397,7 +1393,6 @@ def _behavioral_patterns_section(panel: BehavioralPatternsPanel | None) -> str:
             f'<span class="bp-label">{_safe(row.label)}</span>'
             f'<span class="bp-count">{row.count} {plural}</span>'
             f'</header>'
-            f'{excerpts_html}'
             f'<footer class="bp-citation">Source: {_safe(row.citation)}</footer>'
             f'</article>'
         )
@@ -1444,9 +1439,10 @@ def _repeat_task_radar_section(panel: RepeatTaskRadarPanel | None) -> str:
     The eyebrow renders unconditionally so the document shape is
     stable. When ``panel`` is None or carries no detected repeats the
     body falls through to the empty-state copy; otherwise it emits
-    one row per RepeatTask with the canonical first sentence, the
-    occurrence count, the per-occurrence minutes, and the "Could
-    become a skill" tag, plus an inline citation footnote.
+    one row per RepeatTask with a public task label, the occurrence
+    count, the per-occurrence minutes, and the "Could become a skill"
+    tag, plus an inline citation footnote. It never shows the raw first
+    prompt that caused the repeat detector to fire.
     """
     if panel is None or not panel.has_repeats:
         return f"""
@@ -1461,18 +1457,19 @@ def _repeat_task_radar_section(panel: RepeatTaskRadarPanel | None) -> str:
         rows.append(
             f'<article class="rt-row">'
             f'<header class="rt-row-head">'
-            f'<blockquote class="rt-quote">&ldquo;'
-            f'{_safe(row.canonical_first_sentence)}&rdquo;</blockquote>'
+            f'<h3 class="rt-label">{_safe(row.canonical_first_sentence)}</h3>'
             f'<span class="rt-skill-tag">{_safe(row.skill_tag)}</span>'
             f'</header>'
             f'<p class="rt-meta">'
-            f'{row.occurrences} {plural}, ~{minutes} min each'
+            f'Detected {row.occurrences} {plural}, about {minutes} min each'
             f'</p>'
             f'</article>'
         )
+    reclaimable = _format_minutes_html(panel.total_reclaimable_minutes)
     return f"""
   <section class="rt-section" id="repeat-task-radar">
     <div class="s-eyebrow">Repeat-Task Radar</div>
+    <p class="rt-summary">Skills or saved prompts could reclaim about {reclaimable} min/week.</p>
     <div class="rt-list">{"".join(rows)}</div>
     <p class="rt-citation">Source: {_safe(panel.citation)}</p>
   </section>"""
@@ -1965,13 +1962,13 @@ html, body {{
   padding: 0;
 }}
 .cb-quote::before {{
-  content: "\201C";
+  content: "\\201C";
   color: var(--accent);
   font-style: normal;
   margin-right: 2px;
 }}
 .cb-quote::after {{
-  content: "\201D";
+  content: "\\201D";
   color: var(--accent);
   font-style: normal;
   margin-left: 2px;
@@ -2200,7 +2197,7 @@ html, body {{
   font-weight: 500;
 }}
 .m-recurrence::before {{
-  content: "\21BB";   /* ↻ — recurrence glyph */
+  content: "\\21BB";
   font-family: var(--serif);
   font-size: 16px;
   letter-spacing: 0;
@@ -2978,6 +2975,15 @@ html, body {{
   letter-spacing: -0.005em;
   max-width: 48ch;
 }}
+.rt-label {{
+  font-family: var(--serif);
+  font-size: 18px;
+  font-weight: 400;
+  color: var(--ink);
+  letter-spacing: -0.005em;
+  margin: 0;
+  max-width: 48ch;
+}}
 .rt-skill-tag {{
   font-family: var(--sans);
   font-size: 10.5px;
@@ -2995,6 +3001,14 @@ html, body {{
   font-style: italic;
   color: var(--ink-muted);
   font-feature-settings: 'lnum';
+}}
+.rt-summary {{
+  font-family: var(--serif);
+  font-size: 16px;
+  line-height: 1.55;
+  color: var(--ink);
+  margin-bottom: var(--space-5);
+  max-width: 56ch;
 }}
 .rt-citation {{
   font-family: var(--sans);
@@ -3322,11 +3336,669 @@ html, body {{
   text-align: center;
   letter-spacing: 0.02em;
 }}
+
+/* =================================================================
+   Dossier visual pass
+   Wider editorial canvas, geometric texture, purposeful cards, and
+   quiet motion. This layer intentionally overrides parts of the older
+   single-column article styling above.
+   ================================================================= */
+:root {{
+  --sage:            oklch(62% 0.055 148);
+  --sage-soft:       oklch(62% 0.055 148 / 0.10);
+  --ochre:           oklch(72% 0.105 82);
+  --ochre-soft:      oklch(72% 0.105 82 / 0.13);
+  --paper:           oklch(98% 0.007 78);
+  --paper-warm:      oklch(94.5% 0.012 70);
+  --shadow-paper:    oklch(38% 0.035 55 / 0.15);
+  --ease-out-quint:  cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out-expo:   cubic-bezier(0.16, 1, 0.3, 1);
+}}
+
+@keyframes dossier-rise {{
+  from {{ opacity: 0; transform: translateY(18px); }}
+  to   {{ opacity: 1; transform: translateY(0); }}
+}}
+
+@keyframes dossier-drift {{
+  from {{ transform: translate3d(0, 0, 0); }}
+  to   {{ transform: translate3d(-24px, 18px, 0); }}
+}}
+
+@keyframes ring-draw {{
+  from {{ stroke-dashoffset: 180; }}
+}}
+
+body {{
+  min-height: 100vh;
+  background:
+    linear-gradient(115deg, oklch(56% 0.135 38 / 0.07), transparent 34%),
+    linear-gradient(15deg, transparent 58%, oklch(38% 0.070 232 / 0.08)),
+    radial-gradient(circle at 1px 1px, oklch(22% 0.012 60 / 0.10) 1px, transparent 1.4px),
+    var(--cream);
+  background-size: auto, auto, 22px 22px, auto;
+  position: relative;
+  overflow-x: hidden;
+}}
+
+body::before {{
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.42;
+  background:
+    repeating-linear-gradient(
+      100deg,
+      transparent 0,
+      transparent 56px,
+      oklch(38% 0.070 232 / 0.055) 56px,
+      oklch(38% 0.070 232 / 0.055) 57px
+    ),
+    repeating-linear-gradient(
+      0deg,
+      transparent 0,
+      transparent 112px,
+      oklch(56% 0.135 38 / 0.055) 112px,
+      oklch(56% 0.135 38 / 0.055) 113px
+    );
+  animation: dossier-drift 22s linear alternate infinite;
+}}
+
+.page {{
+  width: min(100%, 1180px);
+  max-width: none;
+  position: relative;
+  z-index: 1;
+  isolation: isolate;
+  padding: clamp(28px, 5vw, 72px) clamp(18px, 4vw, 56px) 128px;
+  counter-reset: dossier-section;
+}}
+
+.page::before {{
+  content: "";
+  position: absolute;
+  z-index: -1;
+  top: 104px;
+  right: clamp(10px, 4vw, 52px);
+  width: min(34vw, 360px);
+  aspect-ratio: 1;
+  border: 1px solid oklch(22% 0.012 60 / 0.10);
+  background:
+    linear-gradient(135deg, transparent 0 41%, var(--accent-soft) 41% 44%, transparent 44%),
+    linear-gradient(45deg, transparent 0 58%, var(--counter-faint) 58% 61%, transparent 61%),
+    repeating-linear-gradient(90deg, transparent 0 18px, oklch(22% 0.012 60 / 0.045) 18px 19px);
+  clip-path: polygon(8% 0, 100% 14%, 86% 100%, 0 82%);
+}}
+
+.masthead {{
+  justify-content: space-between;
+  align-items: end;
+  gap: var(--space-6);
+  margin-bottom: clamp(28px, 5vw, 64px);
+  padding: var(--space-5) 0;
+  border-top: 1px solid var(--rule-strong);
+  border-bottom: 1px solid var(--rule-strong);
+}}
+
+.masthead-brand {{
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}}
+
+.masthead-kicker,
+.masthead-week,
+.masthead-meta {{
+  font-family: var(--sans);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}}
+
+.masthead-kicker {{
+  color: var(--accent);
+  font-weight: 700;
+}}
+
+.masthead-title {{
+  font-family: var(--serif);
+  font-size: clamp(18px, 2vw, 25px);
+  line-height: 1.1;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+}}
+
+.masthead-week {{
+  color: var(--counter);
+  justify-self: center;
+}}
+
+.masthead-meta {{
+  color: var(--ink-muted);
+  text-align: right;
+}}
+
+.cb-section {{
+  display: grid;
+  grid-template-columns: minmax(0, 1.12fr) minmax(280px, 0.88fr);
+  gap: clamp(28px, 5vw, 64px);
+  margin-bottom: clamp(48px, 7vw, 92px);
+  padding: clamp(26px, 4vw, 44px);
+  border: 1px solid var(--rule-strong);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, var(--paper), oklch(96% 0.010 74 / 0.92)),
+    repeating-linear-gradient(135deg, transparent 0 12px, oklch(56% 0.135 38 / 0.05) 12px 13px);
+  box-shadow: 0 28px 70px var(--shadow-paper);
+}}
+
+.cb-focus,
+.cb-status {{
+  margin: 0;
+}}
+
+.cb-quote {{
+  font-size: clamp(22px, 2.4vw, 34px);
+  line-height: 1.25;
+  max-width: 18ch;
+}}
+
+.cb-fields {{
+  gap: 12px 20px;
+}}
+
+.t-hero {{
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+  gap: clamp(28px, 5vw, 72px);
+  padding: clamp(34px, 6vw, 76px);
+  margin-bottom: clamp(64px, 9vw, 120px);
+  border: 1px solid var(--rule-strong);
+  border-radius: 8px;
+  overflow: hidden;
+  background:
+    linear-gradient(120deg, var(--paper), oklch(94.5% 0.018 74)),
+    repeating-linear-gradient(0deg, transparent 0 31px, oklch(22% 0.012 60 / 0.06) 31px 32px);
+  box-shadow: 0 36px 90px var(--shadow-paper);
+  animation: dossier-rise 720ms var(--ease-out-quint) both;
+}}
+
+.t-hero::before {{
+  content: "";
+  position: absolute;
+  right: -80px;
+  top: -70px;
+  width: 420px;
+  height: 420px;
+  background:
+    repeating-conic-gradient(
+      from 20deg,
+      oklch(56% 0.135 38 / 0.13) 0deg 9deg,
+      transparent 9deg 18deg
+    );
+  clip-path: polygon(50% 0, 100% 38%, 82% 100%, 18% 100%, 0 38%);
+  opacity: 0.72;
+}}
+
+.t-hero::after {{
+  content: "";
+  position: absolute;
+  inset: auto 0 0 auto;
+  width: min(52%, 560px);
+  height: 36%;
+  background:
+    linear-gradient(135deg, transparent 0 44%, var(--ochre-soft) 44% 68%, transparent 68%),
+    linear-gradient(20deg, transparent 0 60%, var(--sage-soft) 60%);
+  clip-path: polygon(18% 0, 100% 22%, 100% 100%, 0 100%);
+}}
+
+.t-hero > * {{
+  position: relative;
+  z-index: 1;
+}}
+
+.t-eyebrow,
+.t-label,
+.t-rule,
+.t-lede {{
+  grid-column: 1;
+}}
+
+.t-label {{
+  font-size: clamp(72px, 10vw, 148px);
+  max-width: 8ch;
+  margin-bottom: 16px;
+}}
+
+.t-rule {{
+  width: 96px;
+  height: 6px;
+  background:
+    linear-gradient(90deg, var(--accent) 0 45%, var(--ochre) 45% 70%, var(--counter) 70%);
+  margin-bottom: 26px;
+}}
+
+.t-lede {{
+  max-width: 34ch;
+  font-size: clamp(19px, 2vw, 27px);
+  line-height: 1.42;
+}}
+
+.vitals {{
+  grid-column: 2;
+  grid-row: 1 / span 5;
+  align-self: stretch;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-4);
+  margin-top: 0;
+  background: transparent;
+  border: 0;
+}}
+
+.vital {{
+  min-height: 118px;
+  border: 1px solid oklch(22% 0.012 60 / 0.13);
+  border-radius: 8px;
+  background: oklch(98% 0.006 78 / 0.80);
+  padding: var(--space-6);
+  justify-content: space-between;
+  backdrop-filter: none;
+  transition: transform 220ms var(--ease-out-quint), background-color 220ms var(--ease-out-quint);
+}}
+
+.vital:hover {{
+  transform: translateY(-3px);
+  background: var(--paper);
+}}
+
+.vital-value {{
+  font-size: clamp(30px, 3vw, 44px);
+  letter-spacing: -0.03em;
+}}
+
+.coaching {{
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
+  gap: var(--space-7);
+  margin-bottom: clamp(72px, 9vw, 128px);
+  padding: clamp(34px, 5vw, 64px) 0;
+  border-top: 1px solid var(--rule-strong);
+  border-bottom: 1px solid var(--rule-strong);
+}}
+
+.coaching::before {{
+  content: "Coaching read";
+  position: absolute;
+  top: -12px;
+  left: 0;
+  font-family: var(--sans);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--cream);
+  background: var(--ink);
+  padding: 4px 10px;
+}}
+
+.coaching .m-section {{
+  grid-column: 1;
+  grid-row: 1 / span 3;
+  margin: 0;
+  padding: clamp(28px, 4vw, 44px);
+  border: 1px solid var(--rule-strong);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, var(--paper), oklch(95.5% 0.010 74)),
+    radial-gradient(circle at 1px 1px, oklch(56% 0.135 38 / 0.13) 1px, transparent 1.5px);
+  background-size: auto, 18px 18px;
+}}
+
+.coaching .pattern-section,
+.coaching .f-section,
+.coaching .n-section {{
+  grid-column: 2;
+  margin: 0;
+  padding: var(--space-7);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: oklch(98% 0.006 78 / 0.70);
+}}
+
+.coaching .f-section,
+.coaching .n-section {{
+  border-top: 1px solid var(--rule);
+}}
+
+.m-body,
+.f-body,
+.n-body,
+.pattern-list li {{
+  max-width: 64ch;
+}}
+
+.data-block {{
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: var(--space-6);
+  margin-top: 0;
+  padding-top: var(--space-9);
+}}
+
+.data-block::before {{
+  content: "";
+  position: absolute;
+  inset: 0 calc(50% - 50vw);
+  z-index: -1;
+  background:
+    linear-gradient(180deg, oklch(93.5% 0.010 74 / 0.68), transparent 64%),
+    repeating-linear-gradient(90deg, transparent 0 88px, oklch(22% 0.012 60 / 0.045) 88px 89px);
+  border-top: 1px solid var(--rule-strong);
+  border-bottom: 1px solid var(--rule);
+}}
+
+.data-block__rule,
+.data-block__label {{
+  grid-column: 1 / -1;
+}}
+
+.data-block__rule {{
+  height: 3px;
+  width: min(280px, 42vw);
+  background: linear-gradient(90deg, var(--accent), var(--ochre), var(--counter));
+  margin: 0;
+}}
+
+.data-block__label {{
+  margin-bottom: var(--space-7);
+  color: var(--ink);
+}}
+
+.data-block > section {{
+  counter-increment: dossier-section;
+  position: relative;
+  animation: dossier-rise 720ms var(--ease-out-quint) both;
+  animation-delay: 80ms;
+}}
+
+.data-block > section:nth-of-type(2) {{ animation-delay: 115ms; }}
+.data-block > section:nth-of-type(3) {{ animation-delay: 150ms; }}
+.data-block > section:nth-of-type(4) {{ animation-delay: 185ms; }}
+.data-block > section:nth-of-type(5) {{ animation-delay: 220ms; }}
+.data-block > section:nth-of-type(n + 6) {{ animation-delay: 255ms; }}
+
+.data-block > section::before {{
+  content: counter(dossier-section, decimal-leading-zero);
+  position: absolute;
+  right: var(--space-5);
+  top: var(--space-4);
+  font-family: var(--serif);
+  font-size: 34px;
+  line-height: 1;
+  letter-spacing: -0.04em;
+  color: oklch(22% 0.012 60 / 0.13);
+  pointer-events: none;
+}}
+
+.c-section,
+.w-section {{
+  grid-column: span 6;
+}}
+
+.d-section,
+.bp-section,
+.rt-section,
+.wt-section {{
+  grid-column: 1 / -1;
+}}
+
+.bal-section,
+.cad-section,
+.vc-section,
+.sa-section,
+.ce-section,
+.kg-section,
+.tal-section,
+.rce-section {{
+  grid-column: span 6;
+}}
+
+.data-block > section:not(.d-section):not(.wt-section) {{
+  margin-bottom: 0;
+  padding: clamp(24px, 3vw, 36px);
+  border: 1px solid var(--rule-strong);
+  border-radius: 8px;
+  background: oklch(98% 0.006 78 / 0.78);
+  box-shadow: 0 18px 42px oklch(38% 0.035 55 / 0.08);
+}}
+
+.d-section,
+.wt-section {{
+  margin-bottom: 0;
+  padding: clamp(28px, 4vw, 48px) 0;
+}}
+
+.bp-list,
+.rt-list {{
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-4);
+}}
+
+.bp-row,
+.rt-row {{
+  min-height: 148px;
+  padding: var(--space-6);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, var(--paper), oklch(95.5% 0.010 74));
+  transition: transform 220ms var(--ease-out-quint), border-color 220ms var(--ease-out-quint);
+}}
+
+.bp-row:hover,
+.rt-row:hover,
+.dim-card:hover {{
+  transform: translateY(-3px);
+  border-color: oklch(56% 0.135 38 / 0.30);
+}}
+
+.bp-row:last-child,
+.rt-row:last-child {{
+  border-bottom: 1px solid var(--rule);
+}}
+
+.bp-count,
+.rt-skill-tag,
+.vc-value,
+.bal-value,
+.cad-value,
+.sa-value,
+.ce-value,
+.kg-value {{
+  color: var(--accent-deep);
+}}
+
+.dims-grid,
+.mc-grid {{
+  gap: var(--space-4);
+  background: transparent;
+}}
+
+.dim-card,
+.mc {{
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, var(--paper), oklch(95.5% 0.010 74));
+  transition: transform 220ms var(--ease-out-quint), border-color 220ms var(--ease-out-quint);
+}}
+
+.dim-card__ring-fill {{
+  animation: ring-draw 900ms var(--ease-out-expo) both;
+}}
+
+.bal-row,
+.cad-row,
+.vc-row,
+.sa-row,
+.ce-row,
+.kg-row,
+.tal-row {{
+  background:
+    linear-gradient(90deg, oklch(56% 0.135 38 / 0.06), transparent 42%);
+  padding-inline: var(--space-4);
+  border-color: var(--rule);
+}}
+
+.c-section .c-amount {{
+  padding: var(--space-6);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, var(--accent-soft), transparent 48%),
+    var(--paper);
+}}
+
+.w-task {{
+  grid-template-columns: 74px 1fr;
+  padding: var(--space-6);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, var(--paper), oklch(95.5% 0.010 74));
+  margin-bottom: var(--space-4);
+  transition: transform 220ms var(--ease-out-quint), border-color 220ms var(--ease-out-quint);
+}}
+
+.w-task:hover {{
+  transform: translateY(-3px);
+  border-color: oklch(38% 0.070 232 / 0.25);
+}}
+
+.w-task:last-child {{
+  border-bottom: 1px solid var(--rule);
+}}
+
+.w-num {{
+  color: var(--counter);
+}}
+
+section {{
+  scroll-margin-top: var(--space-8);
+}}
+
+.colophon {{
+  margin-top: var(--space-10);
+  animation: dossier-rise 720ms var(--ease-out-quint) both;
+}}
+
+@media (max-width: 980px) {{
+  .page {{
+    width: min(100%, 820px);
+  }}
+  .masthead {{
+    align-items: start;
+    flex-wrap: wrap;
+  }}
+  .masthead-meta {{
+    text-align: left;
+  }}
+  .cb-section,
+  .t-hero,
+  .coaching {{
+    grid-template-columns: 1fr;
+  }}
+  .t-eyebrow,
+  .t-label,
+  .t-rule,
+  .t-lede,
+  .vitals,
+  .coaching .m-section,
+  .coaching .pattern-section,
+  .coaching .f-section,
+  .coaching .n-section {{
+    grid-column: 1;
+    grid-row: auto;
+  }}
+  .vitals {{
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }}
+  .data-block {{
+    grid-template-columns: 1fr;
+  }}
+  .data-block > section,
+  .c-section,
+  .w-section,
+  .bal-section,
+  .cad-section,
+  .vc-section,
+  .sa-section,
+  .ce-section,
+  .kg-section,
+  .tal-section,
+  .rce-section {{
+    grid-column: 1;
+  }}
+}}
+
+@media (max-width: 640px) {{
+  .page {{
+    padding-inline: var(--space-5);
+  }}
+  .t-hero,
+  .cb-section,
+  .coaching .m-section,
+  .coaching .pattern-section,
+  .coaching .f-section,
+  .coaching .n-section,
+  .data-block > section:not(.d-section):not(.wt-section) {{
+    border-radius: 6px;
+  }}
+  .t-label {{
+    font-size: clamp(56px, 19vw, 84px);
+  }}
+  .vitals,
+  .bp-list,
+  .rt-list {{
+    grid-template-columns: 1fr;
+  }}
+  .w-task {{
+    grid-template-columns: 52px 1fr;
+  }}
+  .w-num {{
+    font-size: 40px;
+  }}
+  .cb-fields {{
+    grid-template-columns: 1fr;
+  }}
+}}
+
+@media (prefers-reduced-motion: reduce) {{
+  *,
+  *::before,
+  *::after {{
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }}
+}}
 </style>
 </head>
 <body>
 <main class="page">
   <header class="masthead">
+    <div class="masthead-brand">
+      <span class="masthead-kicker">Praxis</span>
+      <span class="masthead-title">Weekly coaching dossier</span>
+    </div>
+    <span class="masthead-week">{week}</span>
     <span class="masthead-meta">{generated_readable}</span>
   </header>
 {body_sections}
