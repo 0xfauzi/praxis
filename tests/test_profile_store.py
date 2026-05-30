@@ -30,6 +30,7 @@ def _moment(
     excerpt: str = "an excerpt",
     why: str = "a reason",
     alt: str = "an alternative",
+    coach_line: str | None = "You skipped a step.",
     severity: str = "minor",
 ) -> Moment:
     return Moment(
@@ -38,8 +39,40 @@ def _moment(
         quoted_excerpt=excerpt,
         why_it_lost_score=why,
         suggested_alternative=alt,
+        coach_line=coach_line,
         severity=severity,  # type: ignore[arg-type]
     )
+
+
+def test_save_moments_round_trips_coach_line(tmp_home) -> None:
+    """coach_line persists and reads back through save_moments/load_moments."""
+    store = ProfileStore(home=resolve_home())
+    store.save_moments(
+        "sessC",
+        [_moment(coach_line="You pasted results instead of running them.")],
+    )
+    rows = store.load_moments("sessC")
+    assert len(rows) == 1
+    assert rows[0]["coach_line"] == "You pasted results instead of running them."
+
+
+def test_save_moments_redacts_secret_in_coach_line(tmp_home) -> None:
+    store = ProfileStore(home=resolve_home())
+    store.save_moments(
+        "sessR",
+        [_moment(coach_line="You leaked sk-ant-secret123456789012345678 in the prompt.")],
+    )
+    rows = store.load_moments("sessR")
+    assert "sk-ant-secret123456789012345678" not in (rows[0]["coach_line"] or "")
+    assert rows[0]["redacted"] == 1
+
+
+def test_save_moments_allows_null_coach_line(tmp_home) -> None:
+    """A moment without a coach_line (None) still persists cleanly."""
+    store = ProfileStore(home=resolve_home())
+    store.save_moments("sessN", [_moment(coach_line=None)])
+    rows = store.load_moments("sessN")
+    assert rows[0]["coach_line"] is None
 
 
 # ---------------------------------------------------------------------------

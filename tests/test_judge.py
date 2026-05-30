@@ -23,6 +23,7 @@ from praxis.scoring.judge import (
     _parse_confidence,
     _parse_moments,
     _parse_response,
+    derive_coach_line,
     score_session_pass1,
     score_session_pass2,
     verify_moment_substrings,
@@ -108,7 +109,7 @@ def test_system_prompt_instructs_moments_array() -> None:
 
 
 def test_system_prompt_documents_all_required_moment_fields() -> None:
-    """AC: each moment must include the 6 named fields with the right caps."""
+    """AC: each moment must include the 7 named fields with the right caps."""
     prompt = _build_system_prompt()
     for field in (
         "dim_key",
@@ -116,12 +117,14 @@ def test_system_prompt_documents_all_required_moment_fields() -> None:
         "quoted_excerpt",
         "why_it_lost_score",
         "suggested_alternative",
+        "coach_line",
         "severity",
     ):
         assert field in prompt, f"prompt missing field name {field!r}"
     assert "240" in prompt, "quoted_excerpt cap (240) not documented"
     assert "180" in prompt, "why_it_lost_score cap (180) not documented"
     assert "220" in prompt, "suggested_alternative cap (220) not documented"
+    assert "second person" in prompt.lower(), "coach_line voice not documented"
     for sev in ("minor", "moderate", "major"):
         assert sev in prompt, f"severity value {sev!r} missing from prompt"
 
@@ -155,6 +158,63 @@ def test_parse_response_attaches_moments() -> None:
     assert m.dim_key == "verification"
     assert m.turn_index == 4
     assert m.severity == "moderate"
+
+
+def test_parse_moments_reads_coach_line_when_present() -> None:
+    """The judge's second-person coach_line is parsed onto the Moment."""
+    moments = _parse_moments([
+        {
+            "dim_key": "tools",
+            "turn_index": 2,
+            "quoted_excerpt": "here are the results",
+            "why_it_lost_score": "Results were pasted, not run.",
+            "suggested_alternative": "Ask the agent to run the checks.",
+            "coach_line": "You pasted the results instead of having the agent run them.",
+            "severity": "moderate",
+        }
+    ])
+    assert len(moments) == 1
+    assert moments[0].coach_line == (
+        "You pasted the results instead of having the agent run them."
+    )
+
+
+def test_parse_moments_derives_coach_line_when_missing() -> None:
+    """A moment that omits coach_line is kept, with a fallback derived from why."""
+    moments = _parse_moments([
+        {
+            "dim_key": "planning",
+            "turn_index": 0,
+            "quoted_excerpt": "build it",
+            "why_it_lost_score": "You never named which story to implement first.",
+            "suggested_alternative": "Name the story.",
+            "severity": "minor",
+        }
+    ])
+    assert len(moments) == 1, "missing coach_line must not drop the moment"
+    assert moments[0].coach_line == "You never named which story to implement first."
+
+
+def test_parse_moments_caps_coach_line_length() -> None:
+    long = "You " + "x" * 300
+    moments = _parse_moments([
+        {
+            "dim_key": "context", "turn_index": 1, "quoted_excerpt": "q",
+            "why_it_lost_score": "w", "suggested_alternative": "a",
+            "coach_line": long, "severity": "minor",
+        }
+    ])
+    assert len(moments[0].coach_line) <= 110
+
+
+def test_derive_coach_line_trims_to_one_clean_clause() -> None:
+    why = ("You documented the type error but did not ask the assistant to "
+           "produce a fix, re-run the checks, or confirm the failure cleared.")
+    line = derive_coach_line(why)
+    assert len(line) <= 110
+    assert line.endswith(".")
+    assert "..." not in line
+    assert line.startswith("You documented the type error")
 
 
 def test_parse_response_empty_moments_array_is_supported() -> None:

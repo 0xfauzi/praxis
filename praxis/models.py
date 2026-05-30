@@ -117,6 +117,10 @@ class Moment:
     why_it_lost_score: str
     suggested_alternative: str
     severity: Severity
+    # One tight second-person coaching sentence ("You pasted results instead of
+    # running them."). Judge-authored; falls back to a trimmed why_it_lost_score
+    # when an older judge output omitted it. Coach surfaces lead with this.
+    coach_line: str | None = None
     moment_id: str | None = None
     session_stable_id: str | None = None
     created_at: datetime | None = None

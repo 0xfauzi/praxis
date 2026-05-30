@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS moments (
     quoted_excerpt TEXT NOT NULL,
     why_it_lost_score TEXT NOT NULL,
     suggested_alternative TEXT NOT NULL,
+    coach_line TEXT,
     dollar_impact_estimate REAL,
     minutes_impact_estimate INTEGER,
     severity TEXT NOT NULL CHECK (severity IN ('minor','moderate','major')),
@@ -242,6 +243,7 @@ class ProfileStore:
                 try:
                     with self._conn() as conn:
                         self._ensure_session_scores_columns(conn)
+                        self._ensure_moments_columns(conn)
                         self._ensure_follow_ups_v4(conn)
                         self._ensure_reflect_tables(conn)
                     self._run_sql_migrations()
@@ -416,6 +418,23 @@ class ProfileStore:
             conn.execute(
                 "ALTER TABLE session_scores ADD COLUMN signals_json TEXT"
             )
+
+    @staticmethod
+    def _ensure_moments_columns(conn: sqlite3.Connection) -> None:
+        """Add the ``coach_line`` column to ``moments`` on pre-existing DBs.
+
+        The judge writes one tight second-person coaching sentence per moment;
+        DBs created before that field need the nullable column added. Fresh DBs
+        get it from SCHEMA. Idempotent: a DB that already has it is left alone.
+        """
+        cur = conn.execute("PRAGMA table_info(moments)")
+        existing_cols = {row[1] for row in cur.fetchall()}
+        if not existing_cols:
+            # No moments table (minimal/legacy DB, or one a test dropped to
+            # prove SCHEMA does not re-run). Nothing to migrate; do not resurrect.
+            return
+        if "coach_line" not in existing_cols:
+            conn.execute("ALTER TABLE moments ADD COLUMN coach_line TEXT")
 
     @staticmethod
     def _ensure_reflect_tables(conn: sqlite3.Connection) -> None:
@@ -866,10 +885,12 @@ class ProfileStore:
             redacted_excerpt = redact_secrets(m.quoted_excerpt)
             redacted_why = redact_secrets(m.why_it_lost_score)
             redacted_alt = redact_secrets(m.suggested_alternative)
+            redacted_coach = redact_secrets(m.coach_line) if m.coach_line else None
             was_redacted = (
                 redacted_excerpt != m.quoted_excerpt
                 or redacted_why != m.why_it_lost_score
                 or redacted_alt != m.suggested_alternative
+                or redacted_coach != m.coach_line
             )
             moment_id = compute_moment_id(session_stable_id, m.dim_key, m.turn_index)
             rows.append(
@@ -881,6 +902,7 @@ class ProfileStore:
                     redacted_excerpt,
                     redacted_why,
                     redacted_alt,
+                    redacted_coach,
                     m.dollar_impact_estimate,
                     m.minutes_impact_estimate,
                     m.severity,
@@ -895,6 +917,7 @@ class ProfileStore:
                     quoted_excerpt=redacted_excerpt,
                     why_it_lost_score=redacted_why,
                     suggested_alternative=redacted_alt,
+                    coach_line=redacted_coach,
                     severity=m.severity,
                     moment_id=moment_id,
                     session_stable_id=session_stable_id,
@@ -914,9 +937,9 @@ class ProfileStore:
                     INSERT OR REPLACE INTO moments
                     (moment_id, session_stable_id, dim_key, turn_index,
                      quoted_excerpt, why_it_lost_score, suggested_alternative,
-                     dollar_impact_estimate, minutes_impact_estimate,
+                     coach_line, dollar_impact_estimate, minutes_impact_estimate,
                      severity, created_at, redacted)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     rows,
                 )
