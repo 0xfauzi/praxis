@@ -117,6 +117,9 @@ class RunSummary:
     snapshot: ProfileSnapshot
     coaching: Coaching
     consolidated_for: date | None
+    # Sessions that errored mid-scoring and were skipped so the batch could
+    # finish. Default 0 for back-compat with existing constructors/tests.
+    sessions_skipped: int = 0
     trajectory: TrajectoryAssessment | None = None
     model_profiles: list[ModelUsageProfile] | None = None
     # Spec section 8.1: when 2+ weeks of data are available, per-dim
@@ -267,47 +270,61 @@ def run(
 
     pass1_confidence_counts = {"low": 0, "medium": 0, "high": 0}
     scored_count = 0
+    skipped_count = 0
     for session in to_score:
-        # Spec §9.1 (US-027): pass 1 runs on every session in the window using
-        # the cheap-tier judge. No heuristic features gate this call.
-        pass1_score = score_one_session_pass1(
-            session,
-            sharpen_calibration=sharpen_calibration,
-            stricter_low=stricter_low,
-        )
-        if pass1_score is None:
-            # No judge available (no API keys, or judge errored) - skip the
-            # session rather than substituting a fallback score.
-            continue
-        # Spec §9.6 (US-031): count the pass-1 self-confidence before any
-        # downstream override, so the rolling 4-week telemetry reflects what
-        # the cheap-tier judge actually emitted (pass 2 may overturn the
-        # scores, but the calibration signal we tune on is pass 1's read).
-        pass1_confidence_counts[pass1_score.judge_result.confidence] += 1
-        # Spec §9.6 (US-029): persist pass-1 first so the cheap-tier read is
-        # always recorded (judge_pass=1), even when escalation will later add
-        # a pass-2 row. Both rows then coexist for audit / disagreement
-        # analysis instead of being overwritten.
-        store.save_session_score(pass1_score)
-        winning_score = pass1_score
-        # Spec §9.1 (US-028): when pass 1 self-flags as low confidence, re-judge
-        # on the frontier model in a fresh call (no pass-1 context). The pass-2
-        # result overrides pass-1's scores, rationale, and moments. If pass 2
-        # fails (no key, transient error), keep the pass-1 score rather than
-        # leaving the session unjudged.
-        if pass1_score.judge_result.confidence == "low":
-            pass2_score = score_one_session_pass2(session)
-            if pass2_score is not None:
-                # Persist pass-2 alongside the existing pass-1 row (composite
-                # primary key on (stable_id, judge_pass) keeps both alive).
-                store.save_session_score(pass2_score)
-                winning_score = pass2_score
-        if winning_score.judge_result is not None:
-            # Moments come from the winning judgment (pass 2 when escalation
-            # happened, pass 1 otherwise). Only one set of moments per session
-            # is persisted to avoid surfacing duplicate coaching items.
-            store.save_moments(session.stable_id, winning_score.judge_result.moments)
-        scored_count += 1
+        # Resilience: one malformed/unscorable session (a parse error in
+        # _session_score_from_judge, a DB hiccup, an unexpected judge shape)
+        # must never abort the whole batch. Already-scored sessions are saved
+        # per-session above, so we log the failure, skip the session, and keep
+        # going. The judge call itself already isolates network/API errors.
+        try:
+            # Spec §9.1 (US-027): pass 1 runs on every session in the window
+            # using the cheap-tier judge. No heuristic features gate this call.
+            pass1_score = score_one_session_pass1(
+                session,
+                sharpen_calibration=sharpen_calibration,
+                stricter_low=stricter_low,
+            )
+            if pass1_score is None:
+                # No judge available (no API keys, or judge errored) - skip the
+                # session rather than substituting a fallback score.
+                continue
+            # Spec §9.6 (US-031): count the pass-1 self-confidence before any
+            # downstream override, so the rolling 4-week telemetry reflects what
+            # the cheap-tier judge actually emitted (pass 2 may overturn the
+            # scores, but the calibration signal we tune on is pass 1's read).
+            pass1_confidence_counts[pass1_score.judge_result.confidence] += 1
+            # Spec §9.6 (US-029): persist pass-1 first so the cheap-tier read is
+            # always recorded (judge_pass=1), even when escalation will later add
+            # a pass-2 row. Both rows then coexist for audit / disagreement
+            # analysis instead of being overwritten.
+            store.save_session_score(pass1_score)
+            winning_score = pass1_score
+            # Spec §9.1 (US-028): when pass 1 self-flags as low confidence,
+            # re-judge on the frontier model in a fresh call (no pass-1
+            # context). The pass-2 result overrides pass-1's scores, rationale,
+            # and moments. If pass 2 fails (no key, transient error), keep the
+            # pass-1 score rather than leaving the session unjudged.
+            if pass1_score.judge_result.confidence == "low":
+                pass2_score = score_one_session_pass2(session)
+                if pass2_score is not None:
+                    # Persist pass-2 alongside the existing pass-1 row
+                    # (composite primary key (stable_id, judge_pass) keeps both).
+                    store.save_session_score(pass2_score)
+                    winning_score = pass2_score
+            if winning_score.judge_result is not None:
+                # Moments come from the winning judgment (pass 2 when escalation
+                # happened, pass 1 otherwise). Only one set of moments per
+                # session is persisted to avoid duplicate coaching items.
+                store.save_moments(
+                    session.stable_id, winning_score.judge_result.moments)
+            scored_count += 1
+        except Exception as exc:  # noqa: BLE001 -- one bad session must not abort the batch
+            skipped_count += 1
+            print(
+                f"[orchestrator] skipped session {session.stable_id}: {exc!r}",
+                file=sys.stderr,
+            )
 
     # Spec §9.6 (US-031): persist this run's pass-1 confidence distribution
     # so future weekly runs can compute the rolling 4-week share. Skip the
@@ -357,7 +374,7 @@ def run(
         kind="full",
         sessions_seen=len(sessions),
         sessions_new=len(new_sessions),
-        notes=f"scored={scored_count}, "
+        notes=f"scored={scored_count}, skipped={skipped_count}, "
               f"trajectory={trajectory.label.value}, "
               f"models={len(model_profiles)}",
     )
@@ -366,6 +383,7 @@ def run(
         sessions_seen=len(sessions),
         sessions_new=len(new_sessions),
         sessions_scored=scored_count,
+        sessions_skipped=skipped_count,
         elapsed_seconds=round(time.time() - started, 2),
         snapshot=snapshot,
         coaching=coaching,
@@ -1146,6 +1164,7 @@ def run_weekly(
             if datetime.fromisoformat(row["started_at"]) < until_dt
         ]
         snapshot = _snapshot_from_rows(rows)
+        past_sessions = _reconstruct_sessions_from_score_rows(rows)
         past_follow_up = store.load_follow_up(week_iso)
         past_digest = store.load_weekly_digest(week_iso)
 
@@ -1235,7 +1254,7 @@ def run_weekly(
         past_rollup = apply_gap_prose(past_rollup)
 
         rendered_html, rendered_terminal = _step_render(
-            [], past_tasks, past_selection, past_follow_up, snapshot,
+            past_sessions, past_tasks, past_selection, past_follow_up, snapshot,
             dry_run=True,
             week_iso=week_iso,
             trajectory=past_trajectory,
@@ -1247,7 +1266,7 @@ def run_weekly(
         )
         return WeeklyRunSummary(
             week_iso=week_iso,
-            sessions=[],
+            sessions=past_sessions,
             tasks=past_tasks,
             judge_results={},
             moments=past_moments,
@@ -1688,6 +1707,41 @@ def _scanner_for_provider(provider: str):
         if cls.provider_name == provider:
             return cls
     return None
+
+
+def _reconstruct_sessions_from_score_rows(rows: list[dict[str, Any]]) -> list[Session]:
+    """Re-parse persisted score rows into Sessions for historical reports.
+
+    Past-week renders are read-only: they must not rescan discovery roots
+    or re-run scoring, but the expansion panels still need the same
+    turn-level Session objects that fresh weekly renders use. The score
+    rows carry exact provider/source_path pairs, so we parse only those
+    files and keep only sessions whose stable_id still matches the row.
+
+    If a source file has moved or no longer parses, we omit that session
+    instead of fabricating a partial Session from aggregate score data.
+    """
+    sessions: list[Session] = []
+    seen: set[str] = set()
+    for row in rows:
+        stable_id = str(row.get("stable_id") or "")
+        provider = str(row.get("provider") or "")
+        source_path = row.get("source_path")
+        if not stable_id or not provider or not source_path or stable_id in seen:
+            continue
+        scanner_cls = _scanner_for_provider(provider)
+        if scanner_cls is None:
+            continue
+        scanner = scanner_cls()
+        session = scanner.parse(Path(str(source_path)))
+        if session is None or session.stable_id != stable_id:
+            continue
+        aug_auto_label = row.get("aug_auto_classification")
+        if isinstance(aug_auto_label, str):
+            setattr(session, "aug_auto_classification", aug_auto_label)
+        sessions.append(session)
+        seen.add(stable_id)
+    return sessions
 
 
 def re_score_session(session_stable_id: str) -> SessionScore:

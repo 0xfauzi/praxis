@@ -784,6 +784,115 @@ def _build_session_score_for(session, *, dim_value: float = 6.0) -> orch.Session
     )
 
 
+def _write_historical_claude_session(
+    home, *, when: datetime, session_name: str
+):
+    """Write and parse one Claude session in an explicit historical week."""
+    from praxis.scanners.claude import ClaudeScanner
+
+    root = home / ".claude" / "projects" / "historical-week"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{session_name}.jsonl"
+    events = [
+        {
+            "type": "user",
+            "timestamp": when.isoformat().replace("+00:00", "Z"),
+            "message": {
+                "role": "user",
+                "content": (
+                    "Goal: refactor auth callback handling. "
+                    "Constraints: preserve session tokens."
+                ),
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": (when + timedelta(minutes=5)).isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-7",
+                "content": "I will trace the callback boundary and add tests.",
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": (when + timedelta(minutes=10)).isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "message": {
+                "role": "user",
+                "content": (
+                    "Why does this auth callback refactor prevent token drift? "
+                    "Explain the trade-off."
+                ),
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": (when + timedelta(minutes=15)).isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-7",
+                "content": "Because the token refresh path becomes single-owner.",
+            },
+        },
+    ]
+    with path.open("w", encoding="utf-8") as f:
+        for event in events:
+            f.write(json.dumps(event) + "\n")
+    session = ClaudeScanner().parse(path)
+    assert session is not None
+    return session
+
+
+def test_past_week_reconstructs_sessions_for_expansion_panels(tmp_home):
+    """Historical weekly renders must feed real sessions into v0.3 panels.
+
+    Regression: the `--week` branch rebuilt the score snapshot from
+    persisted rows but passed `sessions=[]` into `_step_render`, leaving
+    every turn-level coaching panel empty even when the original source
+    files were still present.
+    """
+    store = ProfileStore(home=resolve_home())
+    week_iso = "2026-W21"
+    sessions = [
+        _write_historical_claude_session(
+            tmp_home,
+            when=datetime(2026, 5, 18 + i, 10, 0, tzinfo=timezone.utc),
+            session_name=f"hist-{i}",
+        )
+        for i in range(3)
+    ]
+    for i, session in enumerate(sessions):
+        store.save_session_score(_build_session_score_for(session))
+        store.save_task(
+            task_id=f"hist-task-{i}",
+            label="Auth refactor",
+            task_type="refactoring",
+            project_hint=session.project_hint,
+            started_at=session.started_at,
+            ended_at=session.started_at + timedelta(minutes=15),
+            session_stable_ids=[session.stable_id],
+            total_cost_estimate_usd=None,
+            label_source="llm",
+        )
+
+    summary = run_weekly(store=store, week_iso=week_iso)
+
+    assert [s.stable_id for s in summary.sessions] == [s.stable_id for s in sessions]
+    assert "Behavioral Patterns" in summary.rendered_html
+    assert "Why-questions" in summary.rendered_html
+    assert "Repeat-Task Radar" in summary.rendered_html
+    assert "Auth refactor" in summary.rendered_html
+    assert "Detected 3 times" in summary.rendered_html
+    assert "Goal: refactor auth callback handling" not in summary.rendered_html
+    assert "Why does this auth callback refactor" not in summary.rendered_html
+
+
 @pytest.fixture
 def stub_pass1_judge(monkeypatch):
     """Replace ``score_one_session_pass1`` with a fixed-shape SessionScore.
@@ -1253,3 +1362,20 @@ def test_user_week_total_includes_tool_injected_preamble_chars(
             "cost_total_usd narrowed to authored-only chars; preamble bytes"
             " sent to the LLM must still count toward billed spend."
         )
+
+
+def test_run_skips_a_session_that_errors_and_keeps_going(
+    tmp_home, synthetic_claude_session, monkeypatch
+):
+    """One session that blows up mid-scoring must be skipped, not abort the
+    batch; sessions_skipped records it and run() returns normally."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+
+    def _boom(session, **kwargs):  # noqa: ARG001
+        raise RuntimeError("scoring blew up")
+
+    monkeypatch.setattr(orch, "score_one_session_pass1", _boom)
+    # Must not raise despite the per-session failure.
+    summary = run()
+    assert summary.sessions_scored == 0
+    assert summary.sessions_skipped >= 1

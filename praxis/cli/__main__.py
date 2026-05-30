@@ -685,10 +685,12 @@ def cmd_scan(args: argparse.Namespace) -> int:
         max_new_scored=args.max_new,
     )
 
+    skipped = getattr(summary, "sessions_skipped", 0)
+    skipped_note = f"; skipped {skipped} (errors, see log)" if skipped else ""
     print(
         f"Scanned {summary.sessions_seen} session(s); "
         f"{summary.sessions_new} new; "
-        f"scored {summary.sessions_scored} via judge "
+        f"scored {summary.sessions_scored} via judge{skipped_note} "
         f"({summary.elapsed_seconds}s)."
     )
     print("Render the digest with: praxis review")
