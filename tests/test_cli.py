@@ -2130,3 +2130,63 @@ def test_main_lets_systemexit_pass_through(tmp_home):
     # swallowed by the guard.
     with pytest.raises(SystemExit):
         main(["no-such-command"])
+
+
+# ---------------------------------------------------------------------------
+# Non-interactive loop commands (scripts + the menu-bar app).
+# ---------------------------------------------------------------------------
+
+def test_reflect_set_records_non_interactively(tmp_home, capsys):
+    import sqlite3
+    from praxis.storage.profile_store import resolve_home
+    wk = _current_week_iso()
+    _seed_commitment(wk)
+    code = main(["reflect", "--set", "yes", "--note", "felt good"])
+    assert code == 0
+    assert "Reflected: yes" in capsys.readouterr().out
+    con = sqlite3.connect(resolve_home() / "profile.db")
+    row = con.execute(
+        "SELECT self_report, note FROM session_reflections "
+        "WHERE session_stable_id LIKE 'manual:%' ORDER BY id DESC LIMIT 1").fetchone()
+    assert row == ("yes", "felt good")
+
+
+def test_commit_text_writes_non_interactively(tmp_home, capsys):
+    import sqlite3
+    from praxis.storage.profile_store import resolve_home
+    wk = _current_week_iso()
+    code = main(["commit", "--text", "my own focus this week"])
+    assert code == 0
+    assert "my own focus this week" in capsys.readouterr().out
+    con = sqlite3.connect(resolve_home() / "profile.db")
+    row = con.execute(
+        "SELECT outcome, user_chosen, display_text FROM follow_ups "
+        "WHERE week_iso=? ORDER BY id DESC LIMIT 1", (wk,)).fetchone()
+    assert row[0] == "pending" and row[1] == 1 and row[2] == "my own focus this week"
+
+
+def test_commit_text_replaces_active_with_history(tmp_home, capsys):
+    import sqlite3
+    from praxis.storage.profile_store import resolve_home
+    wk = _current_week_iso()
+    _seed_commitment(wk, commitment_text="old focus")
+    code = main(["commit", "--text", "a new focus"])
+    assert code == 0
+    con = sqlite3.connect(resolve_home() / "profile.db")
+    active = con.execute(
+        "SELECT COUNT(*) FROM follow_ups WHERE week_iso=? AND outcome='pending' "
+        "AND superseded_by IS NULL", (wk,)).fetchone()[0]
+    assert active == 1  # old superseded, new pending; exactly one active
+
+
+def test_commit_pick_on_empty_db_reports_no_suggestions(tmp_home, capsys):
+    # No digest yet -> no headline/drill picks to choose from.
+    code = main(["commit", "--pick", "1"])
+    assert code == 1
+    assert "no suggestions" in capsys.readouterr().err.lower()
+
+
+def test_commit_text_empty_errors(tmp_home, capsys):
+    code = main(["commit", "--text", "   "])
+    assert code == 1
+    assert "empty" in capsys.readouterr().err

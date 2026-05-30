@@ -958,7 +958,70 @@ def cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
-def cmd_commit(args: argparse.Namespace) -> int:  # noqa: ARG001
+def _commit_non_interactive(store, week_iso, pick, free_text) -> int:
+    """Write a commitment without prompting (praxis commit --pick N / --text).
+
+    Reuses the exact engine path the interactive flow and the menu-bar app use:
+    build_user_chosen_follow_up + supersede-or-insert. Returns a CLI exit code.
+    """
+    import sqlite3
+
+    from praxis.cli.commit import (
+        CommitSuggestion,
+        build_commit_suggestions,
+        build_user_chosen_follow_up,
+        load_commit_context,
+    )
+
+    suggestions = build_commit_suggestions(load_commit_context(store, week_iso=week_iso))
+    if free_text is not None:
+        text = free_text.strip()
+        if not text:
+            print("praxis commit: --text was empty.", file=sys.stderr)
+            return 1
+        suggestion = next(
+            (s for s in suggestions if s.kind == "free_text"), None
+        ) or CommitSuggestion(kind="free_text", text="Write your own")
+        display = text[:280]
+    else:
+        picks = [s for s in suggestions if s.kind in ("headline", "drill")]
+        if not picks:
+            print("praxis commit: no suggestions available; run `praxis scan` first.",
+                  file=sys.stderr)
+            return 1
+        if pick < 1 or pick > len(picks):
+            print(f"praxis commit: --pick must be between 1 and {len(picks)}.",
+                  file=sys.stderr)
+            return 1
+        suggestion = picks[pick - 1]
+        display = suggestion.text
+
+    follow_up = build_user_chosen_follow_up(
+        week_iso=week_iso, suggestion=suggestion, display_text=display,
+        prior=store.latest_follow_up())
+    prior_id: int | None = None
+    if store.active_follow_up_for_week(week_iso) is not None:
+        with sqlite3.connect(store.db_path) as conn:
+            row = conn.execute(
+                "SELECT id FROM follow_ups WHERE week_iso=? AND outcome='pending' "
+                "AND superseded_by IS NULL LIMIT 1", (week_iso,)).fetchone()
+        prior_id = int(row[0]) if row else None
+    try:
+        if prior_id is not None:
+            store.supersede_and_insert_follow_up(prior_id=prior_id, new_follow_up=follow_up)
+        else:
+            store.insert_follow_up(follow_up)
+    except sqlite3.IntegrityError as exc:
+        if "UNIQUE constraint" in str(exc):
+            print(f"You already have an active commitment for {week_iso}. "
+                  "Re-run `praxis commit` to retry.", file=sys.stderr)
+            return 1
+        raise
+    print(f'Committed for {week_iso}: "{display}"')
+    return 0
+
+
+def cmd_commit(args: argparse.Namespace) -> int:
     """Render the commit prompt, read the user's selection, persist it.
 
     Resolves the suggestion list from the latest persisted state:
@@ -1010,6 +1073,13 @@ def cmd_commit(args: argparse.Namespace) -> int:  # noqa: ARG001
 
     week_iso = current_iso_week()
     store = ProfileStore()
+
+    # Non-interactive (scripts + the menu-bar app): commit a pick or free text
+    # and exit, mirroring the interactive replace-or-insert semantics.
+    pick = getattr(args, "pick", None)
+    free_text = getattr(args, "text", None)
+    if pick is not None or free_text is not None:
+        return _commit_non_interactive(store, week_iso, pick, free_text)
 
     # Mid-week replace gate (US-023). Runs BEFORE the suggestion prompt so
     # the user is never surprised by an IntegrityError from a stale active
@@ -1528,6 +1598,19 @@ def cmd_reflect(args: argparse.Namespace) -> int:
 
     if active is None:
         print(_REFLECT_NO_COMMITMENT_MSG)
+        return 0
+
+    # Non-interactive (scripts + the menu-bar app): record straight away.
+    set_value = getattr(args, "set_value", None)
+    if set_value is not None:
+        note = (getattr(args, "note", None) or "").strip() or None
+        store.insert_session_reflection(
+            session_stable_id=f"manual:{week_iso}",
+            follow_up_id=active.follow_up_id,
+            self_report=set_value,
+            note=note,
+        )
+        print(f"Reflected: {set_value}.")
         return 0
 
     return _run_interactive_reflect(store, active, sys.stdin, sys.stdout)
@@ -2664,6 +2747,22 @@ def build_parser() -> argparse.ArgumentParser:
             "exists, and the 'Write your own' fallback."
         ),
     )
+    cmt.add_argument(
+        "--pick",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Commit suggestion N (1-based, from the printed list) non-"
+            "interactively and exit. For scripts and the menu-bar app."
+        ),
+    )
+    cmt.add_argument(
+        "--text",
+        type=str,
+        default=None,
+        help="Commit your own free-text focus non-interactively (<=280 chars) and exit.",
+    )
     cmt.set_defaults(func=cmd_commit)
 
     rfl = sub.add_parser(
@@ -2730,6 +2829,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         dest="cwd",
         help=argparse.SUPPRESS,
+    )
+    rfl.add_argument(
+        "--set",
+        choices=("yes", "no", "partial", "skip"),
+        dest="set_value",
+        default=None,
+        help=(
+            "Record the reflection non-interactively (for scripts and the menu-"
+            "bar app) and exit 0, instead of prompting."
+        ),
+    )
+    rfl.add_argument(
+        "--note",
+        type=str,
+        default=None,
+        help="Optional one-line note to store with --set.",
     )
     rfl.set_defaults(func=cmd_reflect)
 
