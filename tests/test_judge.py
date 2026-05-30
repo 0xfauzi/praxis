@@ -892,3 +892,46 @@ def test_score_session_pass1_forwards_calibration_flags(monkeypatch) -> None:
     )
     assert captured["sharpen_calibration"] is True
     assert captured["stricter_low"] is True
+
+
+# ---------------------------------------------------------------------------
+# LLM robustness: timeout/retries config + clear, de-duplicated errors.
+# ---------------------------------------------------------------------------
+
+def test_llm_timeout_and_retries_read_env_with_safe_defaults(monkeypatch):
+    from praxis.scoring.judge import _llm_retries, _llm_timeout
+    monkeypatch.delenv("PRAXIS_LLM_TIMEOUT", raising=False)
+    monkeypatch.delenv("PRAXIS_LLM_RETRIES", raising=False)
+    assert _llm_timeout() == 90.0
+    assert _llm_retries() == 3
+    monkeypatch.setenv("PRAXIS_LLM_TIMEOUT", "30")
+    monkeypatch.setenv("PRAXIS_LLM_RETRIES", "5")
+    assert _llm_timeout() == 30.0
+    assert _llm_retries() == 5
+    monkeypatch.setenv("PRAXIS_LLM_TIMEOUT", "garbage")
+    assert _llm_timeout() == 90.0  # malformed -> safe default, never crash
+
+
+def test_explain_llm_error_names_the_rejected_key_on_401():
+    from praxis.scoring.judge import _explain_llm_error
+
+    class AuthenticationError(Exception):
+        status_code = 401
+
+    msg = _explain_llm_error("claude", AuthenticationError("nope"))
+    assert "ANTHROPIC_API_KEY" in msg and "401" in msg
+    msg2 = _explain_llm_error("openai", AuthenticationError("nope"))
+    assert "OPENAI_API_KEY" in msg2
+
+
+def test_log_llm_error_dedupes_auth_spam(capsys):
+    import praxis.scoring.judge as j
+    j._WARNED_LLM_ERRORS.clear()
+
+    class AuthenticationError(Exception):
+        status_code = 401
+
+    e = AuthenticationError("bad")
+    j.log_llm_error("openai", e)
+    j.log_llm_error("openai", e)  # identical 401 across sessions -> reported once
+    assert capsys.readouterr().err.count("OPENAI_API_KEY") == 1
