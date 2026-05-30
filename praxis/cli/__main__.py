@@ -923,35 +923,52 @@ def cmd_last(args: argparse.Namespace) -> int:  # noqa: ARG001
         return 0
     # The week_iso lives in the filename: weeks/<iso>.html.
     week_iso = html.stem
-    print(f"Week:  {week_iso}")
-    print(f"Path:  {html}")
+    raw_label = None
+    label = None
     # Best-effort trajectory label from the persisted weekly_digests row.
     try:
         store = ProfileStore()
         row = store.load_weekly_digest(week_iso)
         if row and row.get("trajectory_label"):
-            label = _TRAJECTORY_LABEL_DISPLAY.get(
-                row["trajectory_label"], row["trajectory_label"].title()
-            )
-            print(f"Label: {label}")
+            raw_label = row["trajectory_label"]
+            label = _TRAJECTORY_LABEL_DISPLAY.get(raw_label, raw_label.title())
     except Exception as exc:  # noqa: BLE001
         # Read-only metadata fetch; never block the user on a DB issue.
         print(f"[cli] could not read trajectory label: {exc!r}", file=sys.stderr)
+    if getattr(args, "json", False):
+        print(json.dumps(
+            {"week": week_iso, "path": str(html), "label": label,
+             "trajectory": raw_label}, indent=2))
+        return 0
+    print(f"Week:  {week_iso}")
+    print(f"Path:  {html}")
+    if label:
+        print(f"Label: {label}")
     return 0
 
 
-def cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
+def cmd_status(args: argparse.Namespace) -> int:
     store = ProfileStore()
     rows = store.load_session_scores()
     digest_count = store.count_weekly_digests()
+    providers: dict[str, int] = {}
+    for r in rows:
+        providers[r["provider"]] = providers.get(r["provider"], 0) + 1
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "home": str(resolve_home()),
+            "sessions_scored": len(rows),
+            "first": rows[0]["started_at"] if rows else None,
+            "most_recent": rows[-1]["started_at"] if rows else None,
+            "providers": providers,
+            "weekly_digests": digest_count,
+        }, indent=2))
+        return 0
     print(f"Scorecard home: {resolve_home()}")
     print(f"Sessions scored: {len(rows)}")
     if rows:
         print(f"  First: {rows[0]['started_at']}")
         print(f"  Most recent: {rows[-1]['started_at']}")
-        providers: dict[str, int] = {}
-        for r in rows:
-            providers[r["provider"]] = providers.get(r["provider"], 0) + 1
         for prov, count in sorted(providers.items(), key=lambda kv: -kv[1]):
             print(f"  {prov}: {count}")
     print(f"Weekly digests on file: {digest_count}")
@@ -2690,9 +2707,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     lst.add_argument("--path-only", action="store_true",
                      help="Print only the absolute path (one line, no labels).")
+    lst.add_argument("--json", action="store_true",
+                     help="Emit machine-readable JSON instead of text.")
     lst.set_defaults(func=cmd_last)
 
     sts = sub.add_parser("status", help=argparse.SUPPRESS)
+    sts.add_argument("--json", action="store_true",
+                     help="Emit machine-readable JSON instead of text.")
     sts.set_defaults(func=cmd_status)
 
     rub = sub.add_parser("rubric", help=argparse.SUPPRESS)

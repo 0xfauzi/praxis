@@ -2190,3 +2190,18 @@ def test_commit_text_empty_errors(tmp_home, capsys):
     code = main(["commit", "--text", "   "])
     assert code == 1
     assert "empty" in capsys.readouterr().err
+
+
+def test_status_json_is_valid_and_has_expected_keys(tmp_home, capsys):
+    import json as _json
+    code = main(["status", "--json"])
+    assert code == 0
+    data = _json.loads(capsys.readouterr().out)
+    assert set(data) >= {"home", "sessions_scored", "providers", "weekly_digests"}
+    assert data["sessions_scored"] == 0  # fresh DB
+
+
+def test_last_json_error_path_when_no_digest(tmp_home, capsys):
+    code = main(["last", "--json"])
+    assert code == 1  # no digest yet
+    assert "No weekly digest" in capsys.readouterr().err
