@@ -2249,3 +2249,11 @@ def test_doctor_flags_no_api_key_and_no_focus(tmp_home, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "No API key set" in out
     assert "No focus this week" in out
+
+
+def test_global_debug_flag_reraises_traceback(tmp_home, monkeypatch):
+    import praxis.cli.__main__ as m
+    monkeypatch.delenv("PRAXIS_DEBUG", raising=False)
+    monkeypatch.setattr(m, "ensure_config_file", _raiser(RuntimeError("kaboom")))
+    with pytest.raises(RuntimeError, match="kaboom"):
+        main(["--debug", "status"])

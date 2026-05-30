@@ -571,14 +571,19 @@ def _cmd_review_impl(args: argparse.Namespace) -> int:
     # run_weekly distinguishes None / 0 from a positive cap internally.
     raw_max_new = getattr(args, "max_new", 50)
     max_new_arg: int | None = raw_max_new if raw_max_new and raw_max_new > 0 else None
+    from praxis.storage.lock import ScanLockError, scan_lock
     try:
-        summary = run_weekly(
-            week_iso=args.week,
-            dry_run=args.dry_run,
-            frontier_only=args.frontier_only,
-            explain_judging=args.explain_judging,
-            max_new=max_new_arg,
-        )
+        with scan_lock(resolve_home()):
+            summary = run_weekly(
+                week_iso=args.week,
+                dry_run=args.dry_run,
+                frontier_only=args.frontier_only,
+                explain_judging=args.explain_judging,
+                max_new=max_new_arg,
+            )
+    except ScanLockError as exc:
+        print(f"praxis review: {exc}. Try again in a moment.", file=sys.stderr)
+        return 1
     except InvalidWeekError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -680,10 +685,16 @@ def cmd_scan(args: argparse.Namespace) -> int:
         print(NO_API_KEY_MESSAGE, file=sys.stderr)
         return 2
 
-    summary = run(
-        since_days=args.since_days,
-        max_new_scored=args.max_new,
-    )
+    from praxis.storage.lock import ScanLockError, scan_lock
+    try:
+        with scan_lock(resolve_home()):
+            summary = run(
+                since_days=args.since_days,
+                max_new_scored=args.max_new,
+            )
+    except ScanLockError as exc:
+        print(f"praxis scan: {exc}. Try again in a moment.", file=sys.stderr)
+        return 1
 
     skipped = getattr(summary, "sessions_skipped", 0)
     skipped_note = f"; skipped {skipped} (errors, see log)" if skipped else ""
@@ -2606,6 +2617,11 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=_LOOP_HELP_EPILOG,
     )
     p.add_argument("--version", action="version", version=f"praxis {__version__}")
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help="On an unexpected error, print the full traceback (same as PRAXIS_DEBUG=1).",
+    )
     # ``help=argparse.SUPPRESS`` on every subparser hides the auto-generated
     # "{commit,nudge,...}" list so the curated epilog above is the canonical
     # listing the user sees. The ordering of ``add_parser`` calls below is
@@ -3128,6 +3144,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     # parse_args raises SystemExit on --help / bad args; let that pass through.
     args = parser.parse_args(argv)
+    if getattr(args, "debug", False):
+        os.environ["PRAXIS_DEBUG"] = "1"
     # Backstop so a real user never sees a raw traceback. Individual commands
     # still handle their own expected errors and return specific exit codes;
     # this only catches the unexpected. SystemExit (argparse, explicit exits)
