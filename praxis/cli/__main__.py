@@ -571,14 +571,19 @@ def _cmd_review_impl(args: argparse.Namespace) -> int:
     # run_weekly distinguishes None / 0 from a positive cap internally.
     raw_max_new = getattr(args, "max_new", 50)
     max_new_arg: int | None = raw_max_new if raw_max_new and raw_max_new > 0 else None
+    from praxis.storage.lock import ScanLockError, scan_lock
     try:
-        summary = run_weekly(
-            week_iso=args.week,
-            dry_run=args.dry_run,
-            frontier_only=args.frontier_only,
-            explain_judging=args.explain_judging,
-            max_new=max_new_arg,
-        )
+        with scan_lock(resolve_home()):
+            summary = run_weekly(
+                week_iso=args.week,
+                dry_run=args.dry_run,
+                frontier_only=args.frontier_only,
+                explain_judging=args.explain_judging,
+                max_new=max_new_arg,
+            )
+    except ScanLockError as exc:
+        print(f"praxis review: {exc}. Try again in a moment.", file=sys.stderr)
+        return 1
     except InvalidWeekError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -680,15 +685,23 @@ def cmd_scan(args: argparse.Namespace) -> int:
         print(NO_API_KEY_MESSAGE, file=sys.stderr)
         return 2
 
-    summary = run(
-        since_days=args.since_days,
-        max_new_scored=args.max_new,
-    )
+    from praxis.storage.lock import ScanLockError, scan_lock
+    try:
+        with scan_lock(resolve_home()):
+            summary = run(
+                since_days=args.since_days,
+                max_new_scored=args.max_new,
+            )
+    except ScanLockError as exc:
+        print(f"praxis scan: {exc}. Try again in a moment.", file=sys.stderr)
+        return 1
 
+    skipped = getattr(summary, "sessions_skipped", 0)
+    skipped_note = f"; skipped {skipped} (errors, see log)" if skipped else ""
     print(
         f"Scanned {summary.sessions_seen} session(s); "
         f"{summary.sessions_new} new; "
-        f"scored {summary.sessions_scored} via judge "
+        f"scored {summary.sessions_scored} via judge{skipped_note} "
         f"({summary.elapsed_seconds}s)."
     )
     print("Render the digest with: praxis review")
@@ -921,42 +934,228 @@ def cmd_last(args: argparse.Namespace) -> int:  # noqa: ARG001
         return 0
     # The week_iso lives in the filename: weeks/<iso>.html.
     week_iso = html.stem
-    print(f"Week:  {week_iso}")
-    print(f"Path:  {html}")
+    raw_label = None
+    label = None
     # Best-effort trajectory label from the persisted weekly_digests row.
     try:
         store = ProfileStore()
         row = store.load_weekly_digest(week_iso)
         if row and row.get("trajectory_label"):
-            label = _TRAJECTORY_LABEL_DISPLAY.get(
-                row["trajectory_label"], row["trajectory_label"].title()
-            )
-            print(f"Label: {label}")
+            raw_label = row["trajectory_label"]
+            label = _TRAJECTORY_LABEL_DISPLAY.get(raw_label, raw_label.title())
     except Exception as exc:  # noqa: BLE001
         # Read-only metadata fetch; never block the user on a DB issue.
         print(f"[cli] could not read trajectory label: {exc!r}", file=sys.stderr)
+    if getattr(args, "json", False):
+        print(json.dumps(
+            {"week": week_iso, "path": str(html), "label": label,
+             "trajectory": raw_label}, indent=2))
+        return 0
+    print(f"Week:  {week_iso}")
+    print(f"Path:  {html}")
+    if label:
+        print(f"Label: {label}")
     return 0
 
 
-def cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
+def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Check the install end to end and print what's healthy vs. what to fix.
+
+    Covers API keys, the profile database (presence + integrity + scored
+    count + this week's focus), the per-tool coaching hooks, and the weekly
+    schedule. Exits 0 unless something critical (an unreadable database) is
+    wrong, so it's safe to run in support scripts.
+    """
+    import sqlite3
+
+    home = resolve_home()
+    critical_ok = True
+    issues: list[str] = []
+
+    def mark(passed: bool) -> str:
+        return "✓" if passed else "✗"
+
+    print(f"Praxis doctor  -  home: {home}\n")
+
+    # --- API keys ---
+    anth = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    openai = bool(os.environ.get("OPENAI_API_KEY"))
+    print("API keys")
+    print(f"  [{mark(anth)}] ANTHROPIC_API_KEY")
+    print(f"  [{mark(openai)}] OPENAI_API_KEY")
+    if not (anth or openai):
+        issues.append("No API key set - scoring runs heuristics-only. "
+                      "export ANTHROPIC_API_KEY=... or OPENAI_API_KEY=...")
+
+    # --- database ---
+    db = home / "profile.db"
+    print("\nDatabase")
+    if not db.exists():
+        print(f"  [{mark(False)}] profile.db not found (it's created on first run)")
+    else:
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
+            scored = con.execute("SELECT COUNT(*) FROM session_scores").fetchone()[0]
+            digests = con.execute("SELECT COUNT(*) FROM weekly_digests").fetchone()[0]
+            con.close()
+            ok = integrity == "ok"
+            print(f"  [{mark(ok)}] integrity_check: {integrity}")
+            print(f"  [{mark(True)}] {scored} sessions scored, {digests} weekly digests")
+            if not ok:
+                critical_ok = False
+                issues.append("Database failed its integrity check; a backup "
+                              "may sit beside it (profile.db.backup-*).")
+        except Exception as exc:  # noqa: BLE001
+            critical_ok = False
+            print(f"  [{mark(False)}] could not read profile.db: {exc}")
+            issues.append("Database is unreadable. Restore from a "
+                          "profile.db.backup-* sibling if one exists.")
+
+    # --- this week's focus ---
+    try:
+        active = ProfileStore().active_follow_up_for_week(current_iso_week())
+        print("\nThis week")
+        if active is not None:
+            print(f"  [{mark(True)}] focus set: "
+                  f"{(active.display_text or active.commitment_text)[:60]}")
+        else:
+            print(f"  [{mark(False)}] no focus set")
+            issues.append("No focus this week - run `praxis commit`.")
+    except Exception:  # noqa: BLE001
+        pass
+
+    # --- coaching hooks ---
+    from praxis.cli.install_coach import (
+        claude_settings_path,
+        codex_hooks_path,
+    )
+
+    def _contains(path, needle: str) -> bool:
+        try:
+            return path.exists() and needle in path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+
+    claude_ok = _contains(claude_settings_path(), "_praxisManaged")
+    codex_ok = _contains(codex_hooks_path(), "praxis nudge")
+    print("\nCoaching hooks")
+    print(f"  [{mark(claude_ok)}] Claude Code")
+    print(f"  [{mark(codex_ok)}] Codex")
+    if not (claude_ok or codex_ok):
+        issues.append("No coaching hooks installed - run `praxis install-coach`.")
+
+    # --- weekly schedule (macOS) ---
+    if sys.platform == "darwin":
+        from praxis.cli.install_weekly import plist_path
+        sched = plist_path().exists()
+        print("\nWeekly digest schedule")
+        print(f"  [{mark(sched)}] LaunchAgent installed")
+        if not sched:
+            issues.append("Weekly digest not scheduled - run `praxis install-weekly`.")
+
+    # --- summary ---
+    if issues:
+        print(f"\n{len(issues)} thing(s) to look at:")
+        for i in issues:
+            print(f"  - {i}")
+    else:
+        print("\nEverything looks healthy.")
+    return 0 if critical_ok else 1
+
+
+def cmd_status(args: argparse.Namespace) -> int:
     store = ProfileStore()
     rows = store.load_session_scores()
     digest_count = store.count_weekly_digests()
+    providers: dict[str, int] = {}
+    for r in rows:
+        providers[r["provider"]] = providers.get(r["provider"], 0) + 1
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "home": str(resolve_home()),
+            "sessions_scored": len(rows),
+            "first": rows[0]["started_at"] if rows else None,
+            "most_recent": rows[-1]["started_at"] if rows else None,
+            "providers": providers,
+            "weekly_digests": digest_count,
+        }, indent=2))
+        return 0
     print(f"Scorecard home: {resolve_home()}")
     print(f"Sessions scored: {len(rows)}")
     if rows:
         print(f"  First: {rows[0]['started_at']}")
         print(f"  Most recent: {rows[-1]['started_at']}")
-        providers: dict[str, int] = {}
-        for r in rows:
-            providers[r["provider"]] = providers.get(r["provider"], 0) + 1
         for prov, count in sorted(providers.items(), key=lambda kv: -kv[1]):
             print(f"  {prov}: {count}")
     print(f"Weekly digests on file: {digest_count}")
     return 0
 
 
-def cmd_commit(args: argparse.Namespace) -> int:  # noqa: ARG001
+def _commit_non_interactive(store, week_iso, pick, free_text) -> int:
+    """Write a commitment without prompting (praxis commit --pick N / --text).
+
+    Reuses the exact engine path the interactive flow and the menu-bar app use:
+    build_user_chosen_follow_up + supersede-or-insert. Returns a CLI exit code.
+    """
+    import sqlite3
+
+    from praxis.cli.commit import (
+        CommitSuggestion,
+        build_commit_suggestions,
+        build_user_chosen_follow_up,
+        load_commit_context,
+    )
+
+    suggestions = build_commit_suggestions(load_commit_context(store, week_iso=week_iso))
+    if free_text is not None:
+        text = free_text.strip()
+        if not text:
+            print("praxis commit: --text was empty.", file=sys.stderr)
+            return 1
+        suggestion = next(
+            (s for s in suggestions if s.kind == "free_text"), None
+        ) or CommitSuggestion(kind="free_text", text="Write your own")
+        display = text[:280]
+    else:
+        picks = [s for s in suggestions if s.kind in ("headline", "drill")]
+        if not picks:
+            print("praxis commit: no suggestions available; run `praxis scan` first.",
+                  file=sys.stderr)
+            return 1
+        if pick < 1 or pick > len(picks):
+            print(f"praxis commit: --pick must be between 1 and {len(picks)}.",
+                  file=sys.stderr)
+            return 1
+        suggestion = picks[pick - 1]
+        display = suggestion.text
+
+    follow_up = build_user_chosen_follow_up(
+        week_iso=week_iso, suggestion=suggestion, display_text=display,
+        prior=store.latest_follow_up())
+    prior_id: int | None = None
+    if store.active_follow_up_for_week(week_iso) is not None:
+        with sqlite3.connect(store.db_path) as conn:
+            row = conn.execute(
+                "SELECT id FROM follow_ups WHERE week_iso=? AND outcome='pending' "
+                "AND superseded_by IS NULL LIMIT 1", (week_iso,)).fetchone()
+        prior_id = int(row[0]) if row else None
+    try:
+        if prior_id is not None:
+            store.supersede_and_insert_follow_up(prior_id=prior_id, new_follow_up=follow_up)
+        else:
+            store.insert_follow_up(follow_up)
+    except sqlite3.IntegrityError as exc:
+        if "UNIQUE constraint" in str(exc):
+            print(f"You already have an active commitment for {week_iso}. "
+                  "Re-run `praxis commit` to retry.", file=sys.stderr)
+            return 1
+        raise
+    print(f'Committed for {week_iso}: "{display}"')
+    return 0
+
+
+def cmd_commit(args: argparse.Namespace) -> int:
     """Render the commit prompt, read the user's selection, persist it.
 
     Resolves the suggestion list from the latest persisted state:
@@ -1008,6 +1207,13 @@ def cmd_commit(args: argparse.Namespace) -> int:  # noqa: ARG001
 
     week_iso = current_iso_week()
     store = ProfileStore()
+
+    # Non-interactive (scripts + the menu-bar app): commit a pick or free text
+    # and exit, mirroring the interactive replace-or-insert semantics.
+    pick = getattr(args, "pick", None)
+    free_text = getattr(args, "text", None)
+    if pick is not None or free_text is not None:
+        return _commit_non_interactive(store, week_iso, pick, free_text)
 
     # Mid-week replace gate (US-023). Runs BEFORE the suggestion prompt so
     # the user is never surprised by an IntegrityError from a stale active
@@ -1526,6 +1732,19 @@ def cmd_reflect(args: argparse.Namespace) -> int:
 
     if active is None:
         print(_REFLECT_NO_COMMITMENT_MSG)
+        return 0
+
+    # Non-interactive (scripts + the menu-bar app): record straight away.
+    set_value = getattr(args, "set_value", None)
+    if set_value is not None:
+        note = (getattr(args, "note", None) or "").strip() or None
+        store.insert_session_reflection(
+            session_stable_id=f"manual:{week_iso}",
+            follow_up_id=active.follow_up_id,
+            self_report=set_value,
+            note=note,
+        )
+        print(f"Reflected: {set_value}.")
         return 0
 
     return _run_interactive_reflect(store, active, sys.stdin, sys.stdout)
@@ -2398,6 +2617,11 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=_LOOP_HELP_EPILOG,
     )
     p.add_argument("--version", action="version", version=f"praxis {__version__}")
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help="On an unexpected error, print the full traceback (same as PRAXIS_DEBUG=1).",
+    )
     # ``help=argparse.SUPPRESS`` on every subparser hides the auto-generated
     # "{commit,nudge,...}" list so the curated epilog above is the canonical
     # listing the user sees. The ordering of ``add_parser`` calls below is
@@ -2605,10 +2829,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     lst.add_argument("--path-only", action="store_true",
                      help="Print only the absolute path (one line, no labels).")
+    lst.add_argument("--json", action="store_true",
+                     help="Emit machine-readable JSON instead of text.")
     lst.set_defaults(func=cmd_last)
 
     sts = sub.add_parser("status", help=argparse.SUPPRESS)
+    sts.add_argument("--json", action="store_true",
+                     help="Emit machine-readable JSON instead of text.")
     sts.set_defaults(func=cmd_status)
+
+    doc = sub.add_parser(
+        "doctor",
+        help="Check API keys, database health, hooks, and schedule.",
+        description=(
+            "Run a health check across API keys, the profile database "
+            "(presence + integrity + scored count), this week's focus, the "
+            "coaching hooks, and the weekly schedule. Prints what's healthy "
+            "and what to fix. Exits non-zero only on a critical problem."
+        ),
+    )
+    doc.set_defaults(func=cmd_doctor)
 
     rub = sub.add_parser("rubric", help=argparse.SUPPRESS)
     rub.set_defaults(func=cmd_rubric)
@@ -2661,6 +2901,22 @@ def build_parser() -> argparse.ArgumentParser:
             "'Keep last week' option when a still-open commitment "
             "exists, and the 'Write your own' fallback."
         ),
+    )
+    cmt.add_argument(
+        "--pick",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Commit suggestion N (1-based, from the printed list) non-"
+            "interactively and exit. For scripts and the menu-bar app."
+        ),
+    )
+    cmt.add_argument(
+        "--text",
+        type=str,
+        default=None,
+        help="Commit your own free-text focus non-interactively (<=280 chars) and exit.",
     )
     cmt.set_defaults(func=cmd_commit)
 
@@ -2728,6 +2984,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         dest="cwd",
         help=argparse.SUPPRESS,
+    )
+    rfl.add_argument(
+        "--set",
+        choices=("yes", "no", "partial", "skip"),
+        dest="set_value",
+        default=None,
+        help=(
+            "Record the reflection non-interactively (for scripts and the menu-"
+            "bar app) and exit 0, instead of prompting."
+        ),
+    )
+    rfl.add_argument(
+        "--note",
+        type=str,
+        default=None,
+        help="Optional one-line note to store with --set.",
     )
     rfl.set_defaults(func=cmd_reflect)
 
@@ -2870,9 +3142,56 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
+    # parse_args raises SystemExit on --help / bad args; let that pass through.
     args = parser.parse_args(argv)
-    ensure_config_file()
-    return args.func(args)
+    if getattr(args, "debug", False):
+        os.environ["PRAXIS_DEBUG"] = "1"
+    # Backstop so a real user never sees a raw traceback. Individual commands
+    # still handle their own expected errors and return specific exit codes;
+    # this only catches the unexpected. SystemExit (argparse, explicit exits)
+    # is not an Exception subclass, so it propagates untouched.
+    import sqlite3
+    try:
+        ensure_config_file()
+        return args.func(args)
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        return 130
+    except sqlite3.OperationalError as exc:
+        if os.environ.get("PRAXIS_DEBUG"):
+            raise
+        if "locked" in str(exc).lower():
+            print(
+                "praxis: the profile database is locked - another praxis "
+                "process (or the menu-bar app) may be writing. Try again in a "
+                "moment.",
+                file=sys.stderr,
+            )
+        else:
+            print(f"praxis: database error: {exc}", file=sys.stderr)
+        return 1
+    except sqlite3.DatabaseError as exc:
+        if os.environ.get("PRAXIS_DEBUG"):
+            raise
+        db = resolve_home() / "profile.db"
+        print(
+            f"praxis: the profile database at {db} looks corrupt or "
+            f"unreadable ({exc}). A timestamped backup may sit beside it "
+            "(profile.db.backup-*); `praxis doctor` can check.",
+            file=sys.stderr,
+        )
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        if os.environ.get("PRAXIS_DEBUG"):
+            raise
+        cmd = getattr(args, "cmd", None) or "command"
+        print(f"praxis {cmd}: unexpected error: {exc}", file=sys.stderr)
+        print(
+            "  This is a bug. Re-run with PRAXIS_DEBUG=1 to see the full "
+            "traceback.",
+            file=sys.stderr,
+        )
+        return 1
 
 
 if __name__ == "__main__":

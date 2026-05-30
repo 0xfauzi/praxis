@@ -473,6 +473,56 @@ def verify_moment_substrings(session: Session, moments: list[Moment]) -> list[Mo
     return survivors
 
 
+def _llm_timeout() -> float:
+    """Per-request LLM timeout in seconds (PRAXIS_LLM_TIMEOUT, default 90).
+
+    The SDKs default to ~10 minutes, which would let a single hung request
+    stall a whole scan. 90s is generous for a scoring call and bounds the
+    worst case; raise it via env for very large transcripts.
+    """
+    try:
+        return float(os.environ.get("PRAXIS_LLM_TIMEOUT") or 90.0)
+    except ValueError:
+        return 90.0
+
+
+def _llm_retries() -> int:
+    """Bounded automatic retries on 429/5xx (PRAXIS_LLM_RETRIES, default 3)."""
+    try:
+        return int(os.environ.get("PRAXIS_LLM_RETRIES") or 3)
+    except ValueError:
+        return 3
+
+
+_WARNED_LLM_ERRORS: set[str] = set()
+
+
+def _explain_llm_error(choice: str, exc: Exception) -> str:
+    name = type(exc).__name__
+    status = getattr(exc, "status_code", None)
+    if status == 401 or "Authentication" in name or "PermissionDenied" in name:
+        key = "ANTHROPIC_API_KEY" if choice == "claude" else "OPENAI_API_KEY"
+        return f"[scorer] {choice}: {key} was rejected (401). Check that the key is valid."
+    if status == 429 or "RateLimit" in name:
+        return (f"[scorer] {choice}: rate limited (429) after {_llm_retries()} retries. "
+                "Try again later or lower --max-new.")
+    if status and 500 <= status < 600:
+        return f"[scorer] {choice}: provider error ({status}) after retries."
+    return f"[scorer] {choice} judge failed: {exc!r}"
+
+
+def log_llm_error(choice: str, exc: Exception) -> None:
+    """Print a clear LLM error; de-dupe auth/rate-limit so a bad key, which
+    fails identically for every session, is reported once, not N times."""
+    msg = _explain_llm_error(choice, exc)
+    status = getattr(exc, "status_code", None)
+    if status in (401, 429):
+        if msg in _WARNED_LLM_ERRORS:
+            return
+        _WARNED_LLM_ERRORS.add(msg)
+    print(msg, file=sys.stderr)
+
+
 def score_with_claude(
     session: Session,
     model: str = CLAUDE_FRONTIER_MODEL,
@@ -483,7 +533,7 @@ def score_with_claude(
     """Score one session using Claude. Requires ANTHROPIC_API_KEY in env."""
     from anthropic import Anthropic  # type: ignore
 
-    client = Anthropic()
+    client = Anthropic(timeout=_llm_timeout(), max_retries=_llm_retries())
     transcript = _compact_transcript(session)
     response = client.messages.create(
         model=model,
@@ -517,7 +567,7 @@ def score_with_openai(
     """Score one session using OpenAI. Requires OPENAI_API_KEY in env."""
     from openai import OpenAI  # type: ignore
 
-    client = OpenAI()
+    client = OpenAI(timeout=_llm_timeout(), max_retries=_llm_retries())
     transcript = _compact_transcript(session)
     response = client.chat.completions.create(
         model=model,
@@ -564,7 +614,7 @@ def score_session(session: Session, prefer: str = "claude") -> JudgeResult | Non
                 return score_with_openai(session)
         except Exception as exc:  # noqa: BLE001
             # Keep going — the other provider might work.
-            print(f"[scorer] {choice} judge failed: {exc!r}", file=sys.stderr)
+            log_llm_error(choice, exc)
             continue
     return None
 
@@ -618,7 +668,7 @@ def score_session_pass1(
                     stricter_low=stricter_low,
                 )
         except Exception as exc:  # noqa: BLE001
-            print(f"[scorer] {choice} pass-1 judge failed: {exc!r}", file=sys.stderr)
+            log_llm_error(choice, exc)
             continue
     return None
 

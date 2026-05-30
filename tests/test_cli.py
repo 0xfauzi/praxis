@@ -739,6 +739,45 @@ def test_week_iso_bypasses_api_key_check(tmp_home, capsys):
     assert code != 2
 
 
+def test_week_iso_current_week_does_not_warn_about_missing_judges(
+    tmp_home, capsys, monkeypatch
+):
+    """`--week <current>` is a historical read even if the ISO tag is current."""
+    from praxis.cli import __main__ as cli_main
+    from praxis.orchestrator import WeeklyRunSummary, current_iso_week
+    from praxis.scoring.aggregate import ProfileSnapshot
+
+    week_iso = current_iso_week()
+    snapshot = ProfileSnapshot(
+        overall=6.0,
+        dimension_means={d.key: 6.0 for d in RUBRIC},
+        session_count=1,
+        provider_breakdown={"claude": 1},
+        strongest_dimension=RUBRIC[0].key,
+        weakest_dimension=RUBRIC[-1].key,
+    )
+    fake_summary = WeeklyRunSummary(
+        week_iso=week_iso,
+        sessions=[object()],
+        tasks=[],
+        judge_results={},
+        moments=[],
+        selection=None,
+        snapshot=snapshot,
+        rendered_html="<html></html>",
+        rendered_terminal="PRAXIS - Weekly read",
+        elapsed_seconds=0.0,
+    )
+    monkeypatch.setattr(cli_main, "run_weekly", lambda **kw: fake_summary)
+
+    code = main(["review", "--week", week_iso])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "PRAXIS" in captured.out
+    assert "judge produced no scores" not in captured.err
+
+
 def test_week_dry_run_bypasses_api_key_check(tmp_home, capsys):
     """`praxis review --dry-run` is read-only; it must run without API keys.
 
@@ -2046,3 +2085,175 @@ def _current_week_iso() -> str:
     """Return the current ISO-week tag (matches what run_weekly sees)."""
     from praxis.orchestrator import current_iso_week
     return current_iso_week()
+
+
+# ---------------------------------------------------------------------------
+# Top-level guard in main(): a real user must never see a raw traceback.
+# ---------------------------------------------------------------------------
+
+def _raiser(exc):
+    def _f(*_a, **_k):
+        raise exc
+    return _f
+
+
+def test_main_catches_unexpected_exception_and_exits_1(tmp_home, monkeypatch, capsys):
+    import praxis.cli.__main__ as m
+    monkeypatch.delenv("PRAXIS_DEBUG", raising=False)
+    monkeypatch.setattr(m, "ensure_config_file", _raiser(RuntimeError("kaboom")))
+    code = main(["status"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "unexpected error" in err
+    assert "kaboom" in err
+    assert "PRAXIS_DEBUG=1" in err
+
+
+def test_main_reraises_full_traceback_under_debug(tmp_home, monkeypatch):
+    import praxis.cli.__main__ as m
+    monkeypatch.setenv("PRAXIS_DEBUG", "1")
+    monkeypatch.setattr(m, "ensure_config_file", _raiser(RuntimeError("kaboom")))
+    with pytest.raises(RuntimeError, match="kaboom"):
+        main(["status"])
+
+
+def test_main_handles_keyboard_interrupt_cleanly(tmp_home, monkeypatch, capsys):
+    import praxis.cli.__main__ as m
+    monkeypatch.setattr(m, "ensure_config_file", _raiser(KeyboardInterrupt()))
+    code = main(["status"])
+    assert code == 130
+    assert "Interrupted" in capsys.readouterr().err
+
+
+def test_main_lets_systemexit_pass_through(tmp_home):
+    # argparse errors (unknown command) must still exit via SystemExit, not be
+    # swallowed by the guard.
+    with pytest.raises(SystemExit):
+        main(["no-such-command"])
+
+
+# ---------------------------------------------------------------------------
+# Non-interactive loop commands (scripts + the menu-bar app).
+# ---------------------------------------------------------------------------
+
+def test_reflect_set_records_non_interactively(tmp_home, capsys):
+    import sqlite3
+    from praxis.storage.profile_store import resolve_home
+    wk = _current_week_iso()
+    _seed_commitment(wk)
+    code = main(["reflect", "--set", "yes", "--note", "felt good"])
+    assert code == 0
+    assert "Reflected: yes" in capsys.readouterr().out
+    con = sqlite3.connect(resolve_home() / "profile.db")
+    row = con.execute(
+        "SELECT self_report, note FROM session_reflections "
+        "WHERE session_stable_id LIKE 'manual:%' ORDER BY id DESC LIMIT 1").fetchone()
+    assert row == ("yes", "felt good")
+
+
+def test_commit_text_writes_non_interactively(tmp_home, capsys):
+    import sqlite3
+    from praxis.storage.profile_store import resolve_home
+    wk = _current_week_iso()
+    code = main(["commit", "--text", "my own focus this week"])
+    assert code == 0
+    assert "my own focus this week" in capsys.readouterr().out
+    con = sqlite3.connect(resolve_home() / "profile.db")
+    row = con.execute(
+        "SELECT outcome, user_chosen, display_text FROM follow_ups "
+        "WHERE week_iso=? ORDER BY id DESC LIMIT 1", (wk,)).fetchone()
+    assert row[0] == "pending" and row[1] == 1 and row[2] == "my own focus this week"
+
+
+def test_commit_text_replaces_active_with_history(tmp_home, capsys):
+    import sqlite3
+    from praxis.storage.profile_store import resolve_home
+    wk = _current_week_iso()
+    _seed_commitment(wk, commitment_text="old focus")
+    code = main(["commit", "--text", "a new focus"])
+    assert code == 0
+    con = sqlite3.connect(resolve_home() / "profile.db")
+    active = con.execute(
+        "SELECT COUNT(*) FROM follow_ups WHERE week_iso=? AND outcome='pending' "
+        "AND superseded_by IS NULL", (wk,)).fetchone()[0]
+    assert active == 1  # old superseded, new pending; exactly one active
+
+
+def test_commit_pick_on_empty_db_reports_no_suggestions(tmp_home, capsys):
+    # No digest yet -> no headline/drill picks to choose from.
+    code = main(["commit", "--pick", "1"])
+    assert code == 1
+    assert "no suggestions" in capsys.readouterr().err.lower()
+
+
+def test_commit_text_empty_errors(tmp_home, capsys):
+    code = main(["commit", "--text", "   "])
+    assert code == 1
+    assert "empty" in capsys.readouterr().err
+
+
+def test_status_json_is_valid_and_has_expected_keys(tmp_home, capsys):
+    import json as _json
+    code = main(["status", "--json"])
+    assert code == 0
+    data = _json.loads(capsys.readouterr().out)
+    assert set(data) >= {"home", "sessions_scored", "providers", "weekly_digests"}
+    assert data["sessions_scored"] == 0  # fresh DB
+
+
+def test_last_json_error_path_when_no_digest(tmp_home, capsys):
+    code = main(["last", "--json"])
+    assert code == 1  # no digest yet
+    assert "No weekly digest" in capsys.readouterr().err
+
+
+def test_main_friendly_message_on_locked_db(tmp_home, monkeypatch, capsys):
+    import sqlite3
+    import praxis.cli.__main__ as m
+    monkeypatch.delenv("PRAXIS_DEBUG", raising=False)
+    monkeypatch.setattr(
+        m, "ensure_config_file",
+        _raiser(sqlite3.OperationalError("database is locked")))
+    code = main(["status"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "locked" in err and "menu-bar" in err
+    assert "Traceback" not in err
+
+
+def test_main_friendly_message_on_corrupt_db(tmp_home, monkeypatch, capsys):
+    import sqlite3
+    import praxis.cli.__main__ as m
+    monkeypatch.delenv("PRAXIS_DEBUG", raising=False)
+    monkeypatch.setattr(
+        m, "ensure_config_file",
+        _raiser(sqlite3.DatabaseError("file is not a database")))
+    code = main(["status"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "corrupt" in err
+
+
+def test_doctor_runs_and_reports_all_sections(tmp_home, capsys):
+    code = main(["doctor"])
+    out = capsys.readouterr().out
+    assert code == 0  # nothing critical on a fresh, readable (empty) install
+    for section in ("API keys", "Database", "Coaching hooks", "doctor"):
+        assert section in out
+
+
+def test_doctor_flags_no_api_key_and_no_focus(tmp_home, monkeypatch, capsys):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    main(["doctor"])
+    out = capsys.readouterr().out
+    assert "No API key set" in out
+    assert "No focus this week" in out
+
+
+def test_global_debug_flag_reraises_traceback(tmp_home, monkeypatch):
+    import praxis.cli.__main__ as m
+    monkeypatch.delenv("PRAXIS_DEBUG", raising=False)
+    monkeypatch.setattr(m, "ensure_config_file", _raiser(RuntimeError("kaboom")))
+    with pytest.raises(RuntimeError, match="kaboom"):
+        main(["--debug", "status"])
