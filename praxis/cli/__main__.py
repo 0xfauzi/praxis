@@ -3014,12 +3014,37 @@ def main(argv: list[str] | None = None) -> int:
     # still handle their own expected errors and return specific exit codes;
     # this only catches the unexpected. SystemExit (argparse, explicit exits)
     # is not an Exception subclass, so it propagates untouched.
+    import sqlite3
     try:
         ensure_config_file()
         return args.func(args)
     except KeyboardInterrupt:
         print("\nInterrupted.", file=sys.stderr)
         return 130
+    except sqlite3.OperationalError as exc:
+        if os.environ.get("PRAXIS_DEBUG"):
+            raise
+        if "locked" in str(exc).lower():
+            print(
+                "praxis: the profile database is locked - another praxis "
+                "process (or the menu-bar app) may be writing. Try again in a "
+                "moment.",
+                file=sys.stderr,
+            )
+        else:
+            print(f"praxis: database error: {exc}", file=sys.stderr)
+        return 1
+    except sqlite3.DatabaseError as exc:
+        if os.environ.get("PRAXIS_DEBUG"):
+            raise
+        db = resolve_home() / "profile.db"
+        print(
+            f"praxis: the profile database at {db} looks corrupt or "
+            f"unreadable ({exc}). A timestamped backup may sit beside it "
+            "(profile.db.backup-*); `praxis doctor` can check.",
+            file=sys.stderr,
+        )
+        return 1
     except Exception as exc:  # noqa: BLE001
         if os.environ.get("PRAXIS_DEBUG"):
             raise

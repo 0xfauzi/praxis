@@ -2205,3 +2205,30 @@ def test_last_json_error_path_when_no_digest(tmp_home, capsys):
     code = main(["last", "--json"])
     assert code == 1  # no digest yet
     assert "No weekly digest" in capsys.readouterr().err
+
+
+def test_main_friendly_message_on_locked_db(tmp_home, monkeypatch, capsys):
+    import sqlite3
+    import praxis.cli.__main__ as m
+    monkeypatch.delenv("PRAXIS_DEBUG", raising=False)
+    monkeypatch.setattr(
+        m, "ensure_config_file",
+        _raiser(sqlite3.OperationalError("database is locked")))
+    code = main(["status"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "locked" in err and "menu-bar" in err
+    assert "Traceback" not in err
+
+
+def test_main_friendly_message_on_corrupt_db(tmp_home, monkeypatch, capsys):
+    import sqlite3
+    import praxis.cli.__main__ as m
+    monkeypatch.delenv("PRAXIS_DEBUG", raising=False)
+    monkeypatch.setattr(
+        m, "ensure_config_file",
+        _raiser(sqlite3.DatabaseError("file is not a database")))
+    code = main(["status"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "corrupt" in err
