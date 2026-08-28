@@ -17,6 +17,7 @@ Design contract enforced by these tests:
   - Neither surface uses 'invoice'/'invoiced'/'billed' language for any
     dollar amount -- the spec is explicit that these are estimates.
 """
+
 from __future__ import annotations
 
 from datetime import date

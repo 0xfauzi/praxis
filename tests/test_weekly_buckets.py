@@ -7,9 +7,10 @@ Spec 7.2 acceptance criteria:
   - Weeks with fewer than 2 sessions are excluded from the fit but
     retained for cost-ledger rendering.
 """
+
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from praxis.behavior.weekly import (
     DEFAULT_WINDOW_DAYS,
@@ -20,7 +21,6 @@ from praxis.behavior.weekly import (
     iso_week_tag,
 )
 from praxis.scoring.rubric import RUBRIC
-
 
 RUBRIC_KEYS = [d.key for d in RUBRIC]
 
@@ -55,7 +55,7 @@ def test_iso_week_tag_format():
     d = date(2026, 5, 25)
     assert iso_week_tag(d) == "2026-W22"
     # Datetime input also accepted; same week.
-    assert iso_week_tag(datetime(2026, 5, 28, 14, 30, tzinfo=timezone.utc)) == "2026-W22"
+    assert iso_week_tag(datetime(2026, 5, 28, 14, 30, tzinfo=UTC)) == "2026-W22"
 
 
 def test_iso_week_start_is_monday():
@@ -66,10 +66,14 @@ def test_iso_week_start_is_monday():
 
 
 def test_single_week_with_two_sessions_is_eligible():
-    now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)  # Wed, ISO 2026-W22
+    now = datetime(2026, 5, 27, 12, 0, tzinfo=UTC)  # Wed, ISO 2026-W22
     inputs = [
-        _make_input(now - timedelta(days=2), engagement=0.4, delegation=0.2, independence=0.1, dim_score=6.0),
-        _make_input(now - timedelta(days=1), engagement=0.6, delegation=0.4, independence=0.3, dim_score=8.0),
+        _make_input(
+            now - timedelta(days=2), engagement=0.4, delegation=0.2, independence=0.1, dim_score=6.0
+        ),
+        _make_input(
+            now - timedelta(days=1), engagement=0.6, delegation=0.4, independence=0.3, dim_score=8.0
+        ),
     ]
     buckets = bucket_sessions_by_iso_week(inputs, now=now)
     assert len(buckets) == 1
@@ -85,7 +89,7 @@ def test_single_week_with_two_sessions_is_eligible():
 
 
 def test_singleton_week_kept_but_marked_ineligible():
-    now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 27, 12, 0, tzinfo=UTC)
     inputs = [_make_input(now - timedelta(days=1), engagement=0.5, dim_score=7.0)]
     buckets = bucket_sessions_by_iso_week(inputs, now=now)
     assert len(buckets) == 1
@@ -99,7 +103,7 @@ def test_singleton_week_kept_but_marked_ineligible():
 
 
 def test_sessions_outside_90_day_window_are_dropped():
-    now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 27, 12, 0, tzinfo=UTC)
     inputs = [
         # In-window: 30 days ago.
         _make_input(now - timedelta(days=30), engagement=0.2),
@@ -116,7 +120,7 @@ def test_sessions_outside_90_day_window_are_dropped():
 
 
 def test_window_boundary_is_inclusive_at_cutoff():
-    now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 27, 12, 0, tzinfo=UTC)
     # Exactly 90 days ago is the boundary; treat as in-window.
     on_boundary = now - timedelta(days=DEFAULT_WINDOW_DAYS)
     inputs = [
@@ -129,7 +133,7 @@ def test_window_boundary_is_inclusive_at_cutoff():
 
 
 def test_multiple_weeks_are_sorted_oldest_first():
-    now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 27, 12, 0, tzinfo=UTC)
     # Three weeks ending in 2026-W22, 2026-W21, 2026-W20.
     week_22 = now - timedelta(days=1)
     week_21 = now - timedelta(days=8)
@@ -150,7 +154,7 @@ def test_multiple_weeks_are_sorted_oldest_first():
 
 
 def test_dim_score_means_are_averaged_per_key():
-    now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 27, 12, 0, tzinfo=UTC)
     inputs = [
         WeeklySessionInput(
             started_at=now - timedelta(days=1),
@@ -174,7 +178,7 @@ def test_dim_score_means_are_averaged_per_key():
 
 
 def test_naive_datetime_is_treated_as_utc():
-    now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 27, 12, 0, tzinfo=UTC)
     naive_when = (now - timedelta(days=1)).replace(tzinfo=None)
     inputs = [
         _make_input(naive_when, engagement=0.5),
@@ -191,7 +195,7 @@ def test_min_sessions_constant_is_two():
 
 
 def test_mixed_eligible_and_ineligible_weeks_all_returned():
-    now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 27, 12, 0, tzinfo=UTC)
     week_22 = now - timedelta(days=1)
     week_21 = now - timedelta(days=8)
     inputs = [
@@ -215,7 +219,7 @@ def test_mixed_eligible_and_ineligible_weeks_all_returned():
 def test_dim_score_means_skip_keys_no_session_provides():
     # If no session in a bucket reports a given key, that key is absent
     # from dim_score_means (rather than invented as 0.0).
-    now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 27, 12, 0, tzinfo=UTC)
     partial_keys = {RUBRIC_KEYS[0]: 5.0, RUBRIC_KEYS[1]: 7.0}
     inputs = [
         WeeklySessionInput(

@@ -7,10 +7,11 @@ self-flag and confidence_reason. These tests cover the parser, the
 system prompt, and the verifier - they do NOT hit a live model. The
 Anthropic/OpenAI client codepaths are exercised separately.
 """
+
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from praxis.models import Moment, Provider, Role, Session, Turn
 from praxis.scoring.judge import (
@@ -35,7 +36,7 @@ def _make_session(turns: list[tuple[Role, str]]) -> Session:
     return Session(
         provider=Provider.CLAUDE,
         session_id="test-session",
-        started_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
+        started_at=datetime(2026, 5, 27, tzinfo=UTC),
         turns=[Turn(role=r, content=c) for r, c in turns],
         source_path="/tmp/fake.jsonl",
     )
@@ -133,7 +134,11 @@ def test_system_prompt_documents_empty_array_for_no_lapse() -> None:
     """AC: sessions with no specific coachable lapse return an empty moments array."""
     prompt = _build_system_prompt()
     assert "empty" in prompt.lower()
-    assert '"moments": []' in prompt or "moments\": []" in prompt or "empty `moments` array" in prompt.lower()
+    assert (
+        '"moments": []' in prompt
+        or 'moments": []' in prompt
+        or "empty `moments` array" in prompt.lower()
+    )
 
 
 def test_parse_response_attaches_moments() -> None:
@@ -162,54 +167,64 @@ def test_parse_response_attaches_moments() -> None:
 
 def test_parse_moments_reads_coach_line_when_present() -> None:
     """The judge's second-person coach_line is parsed onto the Moment."""
-    moments = _parse_moments([
-        {
-            "dim_key": "tools",
-            "turn_index": 2,
-            "quoted_excerpt": "here are the results",
-            "why_it_lost_score": "Results were pasted, not run.",
-            "suggested_alternative": "Ask the agent to run the checks.",
-            "coach_line": "You pasted the results instead of having the agent run them.",
-            "severity": "moderate",
-        }
-    ])
-    assert len(moments) == 1
-    assert moments[0].coach_line == (
-        "You pasted the results instead of having the agent run them."
+    moments = _parse_moments(
+        [
+            {
+                "dim_key": "tools",
+                "turn_index": 2,
+                "quoted_excerpt": "here are the results",
+                "why_it_lost_score": "Results were pasted, not run.",
+                "suggested_alternative": "Ask the agent to run the checks.",
+                "coach_line": "You pasted the results instead of having the agent run them.",
+                "severity": "moderate",
+            }
+        ]
     )
+    assert len(moments) == 1
+    assert moments[0].coach_line == ("You pasted the results instead of having the agent run them.")
 
 
 def test_parse_moments_derives_coach_line_when_missing() -> None:
     """A moment that omits coach_line is kept, with a fallback derived from why."""
-    moments = _parse_moments([
-        {
-            "dim_key": "planning",
-            "turn_index": 0,
-            "quoted_excerpt": "build it",
-            "why_it_lost_score": "You never named which story to implement first.",
-            "suggested_alternative": "Name the story.",
-            "severity": "minor",
-        }
-    ])
+    moments = _parse_moments(
+        [
+            {
+                "dim_key": "planning",
+                "turn_index": 0,
+                "quoted_excerpt": "build it",
+                "why_it_lost_score": "You never named which story to implement first.",
+                "suggested_alternative": "Name the story.",
+                "severity": "minor",
+            }
+        ]
+    )
     assert len(moments) == 1, "missing coach_line must not drop the moment"
     assert moments[0].coach_line == "You never named which story to implement first."
 
 
 def test_parse_moments_caps_coach_line_length() -> None:
     long = "You " + "x" * 300
-    moments = _parse_moments([
-        {
-            "dim_key": "context", "turn_index": 1, "quoted_excerpt": "q",
-            "why_it_lost_score": "w", "suggested_alternative": "a",
-            "coach_line": long, "severity": "minor",
-        }
-    ])
+    moments = _parse_moments(
+        [
+            {
+                "dim_key": "context",
+                "turn_index": 1,
+                "quoted_excerpt": "q",
+                "why_it_lost_score": "w",
+                "suggested_alternative": "a",
+                "coach_line": long,
+                "severity": "minor",
+            }
+        ]
+    )
     assert len(moments[0].coach_line) <= 110
 
 
 def test_derive_coach_line_trims_to_one_clean_clause() -> None:
-    why = ("You documented the type error but did not ask the assistant to "
-           "produce a fix, re-run the checks, or confirm the failure cleared.")
+    why = (
+        "You documented the type error but did not ask the assistant to "
+        "produce a fix, re-run the checks, or confirm the failure cleared."
+    )
     line = derive_coach_line(why)
     assert len(line) <= 110
     assert line.endswith(".")
@@ -260,7 +275,7 @@ def test_parse_moments_drops_moment_with_unknown_dim_key() -> None:
 
 
 def test_parse_moments_drops_moment_with_excerpt_over_cap() -> None:
-    """quoted_excerpt > 240 chars cannot be silently truncated — that would
+    """quoted_excerpt > 240 chars cannot be silently truncated: that would
     break the US-018 substring check. Drop it instead."""
     raw = [
         {
@@ -377,9 +392,7 @@ def test_parse_moments_rejects_non_list_input() -> None:
 
 def test_verify_keeps_exact_substring_match() -> None:
     """AC: an excerpt copied verbatim from the transcript passes."""
-    session = _make_session(
-        [(Role.USER, "Please help me write a binary search tree in Python.")]
-    )
+    session = _make_session([(Role.USER, "Please help me write a binary search tree in Python.")])
     moments = [_make_moment("help me write a binary search tree")]
     assert verify_moment_substrings(session, moments) == moments
 
@@ -390,9 +403,7 @@ def test_verify_passes_when_only_whitespace_differs() -> None:
     The transcript has tabs / newlines / runs of spaces; the excerpt has
     single spaces between the same words. After normalization they match.
     """
-    session = _make_session(
-        [(Role.USER, "Please\n\thelp  me  write\n  a   tree")]
-    )
+    session = _make_session([(Role.USER, "Please\n\thelp  me  write\n  a   tree")])
     moments = [_make_moment("help me write a tree")]
     assert verify_moment_substrings(session, moments) == moments
 
@@ -427,9 +438,7 @@ def test_verify_mixed_pass_and_fail_preserves_only_survivors(
 ) -> None:
     """A batch with one valid and one invented moment: valid survives,
     invented is dropped, and exactly one failure line is emitted."""
-    session = _make_session(
-        [(Role.USER, "Please verify the SQL before running the migration.")]
-    )
+    session = _make_session([(Role.USER, "Please verify the SQL before running the migration.")])
     moments = [
         _make_moment("verify the SQL", dim_key="verification"),
         _make_moment("totally invented text", dim_key="planning"),
@@ -497,9 +506,7 @@ def test_verify_log_line_includes_dim_and_turn_context(
     """The exact prefix `[scorer] moment failed substring check` is
     required; extra context after it makes failures debuggable."""
     session = _make_session([(Role.USER, "actual transcript content")])
-    moments = [
-        _make_moment("invented quote", dim_key="iteration", turn_index=3)
-    ]
+    moments = [_make_moment("invented quote", dim_key="iteration", turn_index=3)]
     verify_moment_substrings(session, moments)
     err = capsys.readouterr().err  # type: ignore[attr-defined]
     assert "[scorer] moment failed substring check" in err
@@ -677,11 +684,15 @@ def test_pass1_uses_cheap_claude_model_when_preferred(monkeypatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     seen: dict[str, object] = {}
 
-    def _fake(session, model=CLAUDE_FRONTIER_MODEL, **kwargs):  # noqa: ARG001
+    def _fake(session, model=CLAUDE_FRONTIER_MODEL, **kwargs):
         seen["model"] = model
         return JudgeResult(
-            dimension_scores={}, rationale={}, standout_moments=[],
-            failure_modes=[], overall_note="", judge_model=model,
+            dimension_scores={},
+            rationale={},
+            standout_moments=[],
+            failure_modes=[],
+            overall_note="",
+            judge_model=model,
         )
 
     monkeypatch.setattr("praxis.scoring.judge.score_with_claude", _fake)
@@ -696,11 +707,15 @@ def test_pass1_uses_cheap_openai_model_when_preferred(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
     seen: dict[str, object] = {}
 
-    def _fake(session, model=OPENAI_FRONTIER_MODEL, **kwargs):  # noqa: ARG001
+    def _fake(session, model=OPENAI_FRONTIER_MODEL, **kwargs):
         seen["model"] = model
         return JudgeResult(
-            dimension_scores={}, rationale={}, standout_moments=[],
-            failure_modes=[], overall_note="", judge_model=model,
+            dimension_scores={},
+            rationale={},
+            standout_moments=[],
+            failure_modes=[],
+            overall_note="",
+            judge_model=model,
         )
 
     monkeypatch.setattr("praxis.scoring.judge.score_with_openai", _fake)
@@ -715,14 +730,18 @@ def test_pass1_falls_back_to_other_provider_on_error(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
     seen_openai: dict[str, object] = {}
 
-    def _broken_claude(session, model=CLAUDE_FRONTIER_MODEL, **kwargs):  # noqa: ARG001
+    def _broken_claude(session, model=CLAUDE_FRONTIER_MODEL, **kwargs):
         raise RuntimeError("anthropic down")
 
-    def _fake_openai(session, model=OPENAI_FRONTIER_MODEL, **kwargs):  # noqa: ARG001
+    def _fake_openai(session, model=OPENAI_FRONTIER_MODEL, **kwargs):
         seen_openai["model"] = model
         return JudgeResult(
-            dimension_scores={}, rationale={}, standout_moments=[],
-            failure_modes=[], overall_note="", judge_model=model,
+            dimension_scores={},
+            rationale={},
+            standout_moments=[],
+            failure_modes=[],
+            overall_note="",
+            judge_model=model,
         )
 
     monkeypatch.setattr("praxis.scoring.judge.score_with_claude", _broken_claude)
@@ -756,11 +775,15 @@ def test_pass2_uses_frontier_claude_model_when_preferred(monkeypatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     seen: dict[str, object] = {}
 
-    def _fake(session, model=CLAUDE_FRONTIER_MODEL):  # noqa: ARG001
+    def _fake(session, model=CLAUDE_FRONTIER_MODEL):
         seen["model"] = model
         return JudgeResult(
-            dimension_scores={}, rationale={}, standout_moments=[],
-            failure_modes=[], overall_note="", judge_model=model,
+            dimension_scores={},
+            rationale={},
+            standout_moments=[],
+            failure_modes=[],
+            overall_note="",
+            judge_model=model,
         )
 
     monkeypatch.setattr("praxis.scoring.judge.score_with_claude", _fake)
@@ -775,11 +798,15 @@ def test_pass2_uses_frontier_openai_model_when_preferred(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
     seen: dict[str, object] = {}
 
-    def _fake(session, model=OPENAI_FRONTIER_MODEL):  # noqa: ARG001
+    def _fake(session, model=OPENAI_FRONTIER_MODEL):
         seen["model"] = model
         return JudgeResult(
-            dimension_scores={}, rationale={}, standout_moments=[],
-            failure_modes=[], overall_note="", judge_model=model,
+            dimension_scores={},
+            rationale={},
+            standout_moments=[],
+            failure_modes=[],
+            overall_note="",
+            judge_model=model,
         )
 
     monkeypatch.setattr("praxis.scoring.judge.score_with_openai", _fake)
@@ -801,8 +828,12 @@ def test_pass2_receives_only_the_session_no_pass1_context(monkeypatch) -> None:
     def _fake(*args, **kwargs):
         captured_calls.append((args, kwargs))
         return JudgeResult(
-            dimension_scores={}, rationale={}, standout_moments=[],
-            failure_modes=[], overall_note="", judge_model=CLAUDE_FRONTIER_MODEL,
+            dimension_scores={},
+            rationale={},
+            standout_moments=[],
+            failure_modes=[],
+            overall_note="",
+            judge_model=CLAUDE_FRONTIER_MODEL,
         )
 
     monkeypatch.setattr("praxis.scoring.judge.score_with_claude", _fake)
@@ -843,7 +874,7 @@ def test_system_prompt_sharpens_high_when_flagged() -> None:
     assert "90%" in prompt
     assert "over-confidence" in prompt.lower()
     # The instruction must reach the "high" rating, not just be a generic note.
-    assert "\"high\"" in prompt or "high" in prompt.lower()
+    assert '"high"' in prompt or "high" in prompt.lower()
 
 
 def test_system_prompt_tightens_low_when_flagged() -> None:
@@ -876,12 +907,16 @@ def test_score_session_pass1_forwards_calibration_flags(monkeypatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     captured: dict[str, object] = {}
 
-    def _fake(session, model=CLAUDE_FRONTIER_MODEL, **kwargs):  # noqa: ARG001
+    def _fake(session, model=CLAUDE_FRONTIER_MODEL, **kwargs):
         captured["sharpen_calibration"] = kwargs.get("sharpen_calibration")
         captured["stricter_low"] = kwargs.get("stricter_low")
         return JudgeResult(
-            dimension_scores={}, rationale={}, standout_moments=[],
-            failure_modes=[], overall_note="", judge_model=model,
+            dimension_scores={},
+            rationale={},
+            standout_moments=[],
+            failure_modes=[],
+            overall_note="",
+            judge_model=model,
         )
 
     monkeypatch.setattr("praxis.scoring.judge.score_with_claude", _fake)
@@ -898,8 +933,10 @@ def test_score_session_pass1_forwards_calibration_flags(monkeypatch) -> None:
 # LLM robustness: timeout/retries config + clear, de-duplicated errors.
 # ---------------------------------------------------------------------------
 
+
 def test_llm_timeout_and_retries_read_env_with_safe_defaults(monkeypatch):
     from praxis.scoring.judge import _llm_retries, _llm_timeout
+
     monkeypatch.delenv("PRAXIS_LLM_TIMEOUT", raising=False)
     monkeypatch.delenv("PRAXIS_LLM_RETRIES", raising=False)
     assert _llm_timeout() == 90.0
@@ -926,6 +963,7 @@ def test_explain_llm_error_names_the_rejected_key_on_401():
 
 def test_log_llm_error_dedupes_auth_spam(capsys):
     import praxis.scoring.judge as j
+
     j._WARNED_LLM_ERRORS.clear()
 
     class AuthenticationError(Exception):

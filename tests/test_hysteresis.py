@@ -7,9 +7,10 @@ Acceptance criteria (PRD US-045, spec section 7.4):
   - On identical input, the label does not change between two consecutive
     runs.
 """
+
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from praxis.behavior import (
     HYSTERESIS_STDERR_MULTIPLIER,
@@ -28,7 +29,6 @@ from praxis.behavior import (
     label_trajectory_with_hysteresis,
 )
 from praxis.scoring.rubric import RUBRIC
-
 
 RUBRIC_KEYS = [d.key for d in RUBRIC]
 
@@ -152,9 +152,7 @@ def test_apply_hysteresis_no_previous_returns_naive_steady():
 
 
 def test_apply_hysteresis_no_previous_returns_naive_learning():
-    label = apply_hysteresis(
-        4, _fit(eng=_WEAK_UP, deleg=_WEAK_DOWN), previous_label=None
-    )
+    label = apply_hysteresis(4, _fit(eng=_WEAK_UP, deleg=_WEAK_DOWN), previous_label=None)
     assert label is WeeklyTrajectoryLabel.LEARNING
 
 
@@ -167,9 +165,7 @@ def test_apply_hysteresis_no_previous_returns_reading_below_threshold():
 
 
 def test_apply_hysteresis_naive_equals_previous_steady():
-    label = apply_hysteresis(
-        4, _fit(), previous_label=WeeklyTrajectoryLabel.STEADY
-    )
+    label = apply_hysteresis(4, _fit(), previous_label=WeeklyTrajectoryLabel.STEADY)
     assert label is WeeklyTrajectoryLabel.STEADY
 
 
@@ -190,9 +186,7 @@ def test_apply_hysteresis_reading_to_x_passes_through():
     # Even if no axis is strongly significant, the change Reading -> Steady
     # must pass through because it is data-availability driven, not
     # slope-direction driven.
-    label = apply_hysteresis(
-        4, _fit(), previous_label=WeeklyTrajectoryLabel.READING
-    )
+    label = apply_hysteresis(4, _fit(), previous_label=WeeklyTrajectoryLabel.READING)
     assert label is WeeklyTrajectoryLabel.STEADY
 
 
@@ -212,7 +206,8 @@ def test_apply_hysteresis_x_to_reading_passes_through():
     # Dropping below 4 eligible buckets -> Reading. Hysteresis must not
     # hold us at the prior label when we no longer have enough data.
     label = apply_hysteresis(
-        3, _fit(eng=_STRONG_UP, deleg=_STRONG_DOWN),
+        3,
+        _fit(eng=_STRONG_UP, deleg=_STRONG_DOWN),
         previous_label=WeeklyTrajectoryLabel.LEARNING,
     )
     assert label is WeeklyTrajectoryLabel.READING
@@ -237,7 +232,7 @@ def test_apply_hysteresis_blocks_learning_to_steady_when_slopes_just_dropped_bel
     # -> naive = Steady. Neither axis is strongly significant (they are
     # not even weakly significant), so per spec 7.4 the change is not
     # supported by 2.0 evidence -> retain Learning.
-    near_flat_up = SlopeFit(slope=0.5, stderr=0.5, n=4)   # |slope|/stderr = 1.0
+    near_flat_up = SlopeFit(slope=0.5, stderr=0.5, n=4)  # |slope|/stderr = 1.0
     near_flat_down = SlopeFit(slope=-0.5, stderr=0.5, n=4)
     assert near_flat_up.significant is False
     assert is_strongly_significant(near_flat_up) is False
@@ -373,9 +368,7 @@ def test_label_trajectory_with_hysteresis_short_circuits_below_threshold():
         _bucket(monday + timedelta(weeks=i), eng=0.10 * i, deleg=0.50 - 0.10 * i, count=2)
         for i in range(3)
     ]
-    label = label_trajectory_with_hysteresis(
-        buckets, previous_label=WeeklyTrajectoryLabel.LEARNING
-    )
+    label = label_trajectory_with_hysteresis(buckets, previous_label=WeeklyTrajectoryLabel.LEARNING)
     # Below the 4-bucket threshold, Reading wins (the Reading bypass branch
     # allows this transition even though previous was Learning).
     assert label is WeeklyTrajectoryLabel.READING
@@ -403,7 +396,7 @@ def test_label_trajectory_with_hysteresis_blocks_whiplash_on_noisy_buckets():
     # slope but the stderr is large enough that the slope only clears
     # 1.5*stderr, not 2.0*stderr.
     monday = date(2026, 5, 4)
-    eng_values = [0.20, 0.40, 0.25, 0.45, 0.30]   # noisy upward drift
+    eng_values = [0.20, 0.40, 0.25, 0.45, 0.30]  # noisy upward drift
     deleg_values = [0.50, 0.30, 0.45, 0.25, 0.40]  # noisy downward drift
     buckets = [
         _bucket(monday + timedelta(weeks=i), eng=eng_values[i], deleg=deleg_values[i], count=2)
@@ -417,9 +410,7 @@ def test_label_trajectory_with_hysteresis_blocks_whiplash_on_noisy_buckets():
     # naive==prev case. To test the block, use prev = Learning and
     # confirm we retain Learning even though naive=Steady.
     assert naive is WeeklyTrajectoryLabel.STEADY
-    label = label_trajectory_with_hysteresis(
-        buckets, previous_label=WeeklyTrajectoryLabel.LEARNING
-    )
+    label = label_trajectory_with_hysteresis(buckets, previous_label=WeeklyTrajectoryLabel.LEARNING)
     # naive (Steady) != prev (Learning), and no axis is strongly significant
     # -> hysteresis retains Learning.
     assert label is WeeklyTrajectoryLabel.LEARNING
@@ -438,9 +429,7 @@ def test_label_trajectory_with_hysteresis_accepts_strong_change_end_to_end():
         )
         for i in range(6)
     ]
-    label = label_trajectory_with_hysteresis(
-        buckets, previous_label=WeeklyTrajectoryLabel.STEADY
-    )
+    label = label_trajectory_with_hysteresis(buckets, previous_label=WeeklyTrajectoryLabel.STEADY)
     # Clear Learning trajectory -> change accepted.
     assert label is WeeklyTrajectoryLabel.LEARNING
 
@@ -450,7 +439,7 @@ def test_label_trajectory_with_hysteresis_via_bucket_pipeline_stable():
     # identical input, assert no change. This is the AC #3 scenario as
     # the orchestrator would actually invoke it (the `now=` pin in
     # bucket_sessions_by_iso_week keeps the 90-day window stable).
-    now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 27, 12, 0, tzinfo=UTC)
     sessions: list[WeeklySessionInput] = []
     for week_index in range(5):
         week_anchor = now - timedelta(days=28 - 7 * week_index)

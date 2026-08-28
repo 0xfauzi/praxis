@@ -6,7 +6,7 @@
   "tier": "balanced",
   "context_window_tokens": 128000,
   "strengths": [
-    "Tight IDE integration — sees your open file and project context automatically",
+    "Tight IDE integration: sees your open file and project context automatically",
     "Strong for in-line code completion and quick fixes"
   ],
   "weaknesses": [
@@ -16,7 +16,7 @@
   "prompting_quirks": [
     "Use #file, #selection, and other Copilot context references explicitly",
     "Switching the underlying model (Claude / GPT options) materially changes behavior",
-    "Workspace indexing improves answers — invest in it for larger repos"
+    "Workspace indexing improves answers: invest in it for larger repos"
   ],
   "best_for": [
     "In-editor completions and short refactors",
@@ -26,7 +26,7 @@
     "Long-horizon planning or multi-file architecture changes (use Claude Code or Codex CLI)",
     "Anything where you need a stable, named model version"
   ],
-  "notes": "Copilot routes to different underlying models. Check which model is configured — your scorecard will reflect the model in use, not an abstract 'Copilot' baseline.",
+  "notes": "Copilot routes to different underlying models. Check which model is configured: your scorecard will reflect the model in use, not an abstract 'Copilot' baseline.",
   "sources": [
     "https://docs.github.com/en/copilot",
     "https://github.com/features/copilot/plans"

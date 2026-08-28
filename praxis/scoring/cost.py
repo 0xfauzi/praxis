@@ -16,12 +16,12 @@ The HTML digest already carries the spec's "rough estimate from
 token volume + tier pricing" disclaimer (spec 10.2); the same
 disclaimer applies here.
 """
+
 from __future__ import annotations
 
 from praxis.models import Session
 from praxis.models_advisor.cards import find_card_for_model_hint
 from praxis.scoring.judge import JudgeResult, _compact_transcript
-
 
 # Industry-standard rough approximation. The Anthropic and OpenAI
 # tokenizers both land near 3.5-4.5 chars/token for English-language
@@ -43,8 +43,8 @@ DEFAULT_CHEAP_MODEL = "claude-haiku-4-5"
 # measure from this module's inputs. Used as upper bounds so the cost
 # projection errs on the high side. Numbers are derived from the
 # prompt sizes in praxis/scoring/clustering.py and moment_selector.py.
-_CLUSTER_OUTPUT_CHARS_PER_SESSION = 80   # ~one task block per session in JSON
-_SELECTOR_OUTPUT_CHARS_PER_MOMENT = 60   # one selection record + reason
+_CLUSTER_OUTPUT_CHARS_PER_SESSION = 80  # ~one task block per session in JSON
+_SELECTOR_OUTPUT_CHARS_PER_MOMENT = 60  # one selection record + reason
 
 # Spec 9.2 caps the per-session transcript sent to the judge at
 # MAX_TRANSCRIPT_CHARS (12_000); the JudgeResult JSON typically runs
@@ -52,9 +52,7 @@ _SELECTOR_OUTPUT_CHARS_PER_MOMENT = 60   # one selection record + reason
 _JUDGE_OUTPUT_CHARS_DEFAULT = 2_500
 
 
-def estimate_call_cost(
-    model_id: str, input_chars: int, output_chars: int
-) -> float:
+def estimate_call_cost(model_id: str, input_chars: int, output_chars: int) -> float:
     """Project a single LLM call's dollar cost.
 
     Returns 0.0 when the model has no pricing on file (e.g. Copilot,
@@ -108,20 +106,14 @@ def _judge_output_chars(result: JudgeResult) -> int:
     total += len(result.overall_note)
     total += len(result.confidence_reason)
     for m in result.moments:
-        total += (
-            len(m.quoted_excerpt)
-            + len(m.why_it_lost_score)
-            + len(m.suggested_alternative)
-        )
+        total += len(m.quoted_excerpt) + len(m.why_it_lost_score) + len(m.suggested_alternative)
     # Cap at the empirical ceiling so an oversized output (e.g. a
     # judge that pads rationales) cannot single-handedly push the
     # estimate past the perf gate.
     return min(total + 200, _JUDGE_OUTPUT_CHARS_DEFAULT)
 
 
-def estimate_judge_pass_cost(
-    sessions: list[Session], results: dict[str, JudgeResult]
-) -> float:
+def estimate_judge_pass_cost(sessions: list[Session], results: dict[str, JudgeResult]) -> float:
     """Sum of per-session judge cost across one pass.
 
     `results` keys are session stable_ids; only sessions present in
@@ -143,9 +135,7 @@ def estimate_judge_pass_cost(
     return total
 
 
-def estimate_cluster_cost(
-    sessions: list[Session], model_id: str = DEFAULT_CHEAP_MODEL
-) -> float:
+def estimate_cluster_cost(sessions: list[Session], model_id: str = DEFAULT_CHEAP_MODEL) -> float:
     """Project the cost of the single weekly clustering call.
 
     Spec 5.2 sends one cheap-tier call with all N sessions inlined as
@@ -164,9 +154,7 @@ def estimate_cluster_cost(
     return estimate_call_cost(model_id, input_chars, output_chars)
 
 
-def estimate_selector_cost(
-    moment_count: int, model_id: str = DEFAULT_CHEAP_MODEL
-) -> float:
+def estimate_selector_cost(moment_count: int, model_id: str = DEFAULT_CHEAP_MODEL) -> float:
     """Project the cost of the single weekly moment-selector call.
 
     Spec 4.3 sends one cheap-tier call with up to N candidate moments.

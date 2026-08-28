@@ -12,15 +12,15 @@ This module owns step 1 only: it produces a deterministic, ordered list of
 WeeklyBuckets that downstream stages (US-043 slope+stderr, US-044 label
 mapping, US-045 hysteresis, US-046 headline) build on.
 """
+
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from statistics import mean
-from typing import Iterable
 
 from praxis.scoring.rubric import RUBRIC
-
 
 DEFAULT_WINDOW_DAYS = 90
 MIN_SESSIONS_FOR_FIT = 2
@@ -45,14 +45,14 @@ class WeeklySessionInput:
 
 @dataclass(frozen=True)
 class WeeklyBucket:
-    iso_week: str            # "YYYY-Www", e.g. "2026-W21"
-    week_start: date         # Monday of that ISO week (UTC)
+    iso_week: str  # "YYYY-Www", e.g. "2026-W21"
+    week_start: date  # Monday of that ISO week (UTC)
     session_count: int
     engagement_rate_mean: float
     delegation_rate_mean: float
     independence_rate_mean: float
-    dim_score_means: dict[str, float]   # one entry per RUBRIC key
-    eligible_for_fit: bool   # session_count >= MIN_SESSIONS_FOR_FIT
+    dim_score_means: dict[str, float]  # one entry per RUBRIC key
+    eligible_for_fit: bool  # session_count >= MIN_SESSIONS_FOR_FIT
 
 
 def iso_week_tag(d: date | datetime) -> str:
@@ -83,8 +83,8 @@ def _to_utc(dt: datetime) -> datetime:
     pipeline (scanners emit UTC; tests use timezone.utc).
     """
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def bucket_sessions_by_iso_week(
@@ -104,7 +104,7 @@ def bucket_sessions_by_iso_week(
     can pin the window. `window_days` defaults to 90 per spec 7.2.
     """
     if now is None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
     else:
         now = _to_utc(now)
     cutoff = now - timedelta(days=window_days)
@@ -129,11 +129,7 @@ def bucket_sessions_by_iso_week(
 
         dim_means: dict[str, float] = {}
         for d in RUBRIC:
-            values = [
-                m.dim_scores[d.key]
-                for m in members
-                if d.key in m.dim_scores
-            ]
+            values = [m.dim_scores[d.key] for m in members if d.key in m.dim_scores]
             if values:
                 dim_means[d.key] = mean(values)
 

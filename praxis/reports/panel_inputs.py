@@ -10,6 +10,7 @@ renders the panels for which data exists: missing input on one panel
 does not block any other. The first panel implemented under this
 contract is the behavioral-patterns panel (US-038).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -22,7 +23,6 @@ from praxis.behavior.signals import (
     SCAFFOLDING_KINDS_IN_PANEL_ORDER,
     SIGNAL_KINDS_IN_PANEL_ORDER,
 )
-
 
 # Spec section 12 ("Behavioral patterns" panel): "up to two concrete
 # excerpts each, each excerpt clipped to <=120 chars." Kept as
@@ -118,9 +118,7 @@ class BehavioralPatternsPanel:
 # the cadence panel. Strings are kept as module-level constants so the
 # adapter, the renderers, and the tests all share one source of truth
 # and a future copy change is one audit point.
-AUG_AUTO_ANCHOR_CITATION = (
-    "Anthropic Economic Index 2025 (~52% augmentation / 45% automation)"
-)
+AUG_AUTO_ANCHOR_CITATION = "Anthropic Economic Index 2025 (~52% augmentation / 45% automation)"
 AUG_AUTO_INDUSTRY_AUG_SHARE = 0.52
 AUG_AUTO_INDUSTRY_AUTO_SHARE = 0.45
 
@@ -242,9 +240,7 @@ class CadencePanel:
 # breaks the week's sessions into four rigor buckets and anchors against
 # Sonar's AI Code Trust Index, the Stack Overflow 2025 developer survey,
 # and the broader automation-bias literature.
-REPEAT_TASK_CITATION = (
-    "OpenAI 2025 ChatGPT usage paper + Anthropic Skills documentation"
-)
+REPEAT_TASK_CITATION = "OpenAI 2025 ChatGPT usage paper + Anthropic Skills documentation"
 # Spec section 12: a repeat-task is a candidate for skill extraction. The
 # renderer surfaces this label as a small tag next to each row so the
 # reader can scan the radar for skill candidates.
@@ -256,8 +252,7 @@ REPEAT_TASK_SKILL_TAG = "Could become a skill"
 REPEAT_TASK_WINDOW_DAYS = 7
 
 VERIFICATION_CALIBRATION_CITATION = (
-    "Sonar AI Code Trust Index + Stack Overflow Developer Survey 2025 + "
-    "automation-bias literature"
+    "Sonar AI Code Trust Index + Stack Overflow Developer Survey 2025 + automation-bias literature"
 )
 
 
@@ -323,10 +318,7 @@ class RepeatTaskRadarPanel:
         rows. Surfaces as the radar's "skills could reclaim ~N min/week"
         callout in the renderer when at least one row is present.
         """
-        return sum(
-            row.occurrences * row.estimated_minutes_per_occurrence
-            for row in self.rows
-        )
+        return sum(row.occurrences * row.estimated_minutes_per_occurrence for row in self.rows)
 
 
 @dataclass(frozen=True)
@@ -386,17 +378,12 @@ class VerificationCalibrationPanel:
 # knowledge-gap distribution. Each citation is a module-level constant
 # so the adapter, renderers, and tests share one source of truth.
 SPECIFICATION_ADOPTION_CITATION = (
-    "Woodward (Google I/O 2026 Dialogues) + SpecKit + Sean Grove "
-    "\"The New Code\""
+    'Woodward (Google I/O 2026 Dialogues) + SpecKit + Sean Grove "The New Code"'
 )
 
-CONTEXT_ENGINEERING_CITATION = (
-    "DORA 2025 (top-7 AI capability) + Anthropic Agent Skills"
-)
+CONTEXT_ENGINEERING_CITATION = "DORA 2025 (top-7 AI capability) + Anthropic Agent Skills"
 
-KNOWLEDGE_GAP_CITATION = (
-    "arXiv 2501.11709 (44.6% vs 12.6% gap rate)"
-)
+KNOWLEDGE_GAP_CITATION = "arXiv 2501.11709 (44.6% vs 12.6% gap rate)"
 
 
 # Display labels for the scaffolding kinds shipped in signals.py. Keys
@@ -522,13 +509,9 @@ class KnowledgeGapDistributionPanel:
 # tools-on -> skills -> hooks -> subagents) across the week; the
 # cost-effectiveness panel applies the deterministic counterfactual
 # rule documented in praxis/models_advisor/advisor.py.
-TOOL_AGENT_LADDER_CITATION = (
-    "Anthropic Skills/hooks/subagents + OpenAI harness engineering"
-)
+TOOL_AGENT_LADDER_CITATION = "Anthropic Skills/hooks/subagents + OpenAI harness engineering"
 
-COST_EFFECTIVENESS_CITATION = (
-    "Anthropic + OpenAI model card pricing"
-)
+COST_EFFECTIVENESS_CITATION = "Anthropic + OpenAI model card pricing"
 
 
 @dataclass(frozen=True)
@@ -611,11 +594,7 @@ class RefinedCostEffectivenessPanel:
         gates the "you spent $X for tasks $Y could have done" copy
         specifically.
         """
-        return (
-            self.has_cost_data
-            and self.overspend_usd > 0.0
-            and self.qualifying_session_count > 0
-        )
+        return self.has_cost_data and self.overspend_usd > 0.0 and self.qualifying_session_count > 0
 
 
 @dataclass(frozen=True)
@@ -642,49 +621,49 @@ class PanelInputs:
 
 
 __all__ = [
-    "EXCERPT_CHAR_LIMIT",
-    "MAX_EXCERPTS_PER_SIGNAL",
-    "SIGNAL_LABELS",
-    "SIGNAL_CITATIONS",
-    "SIGNAL_KINDS_IN_PANEL_ORDER",
     "AUG_AUTO_ANCHOR_CITATION",
     "AUG_AUTO_INDUSTRY_AUG_SHARE",
     "AUG_AUTO_INDUSTRY_AUTO_SHARE",
     "CADENCE_ANCHOR_CITATION",
-    "CADENCE_WINDOW_DAYS",
     "CADENCE_POSITION_LABELS",
-    "REPEAT_TASK_CITATION",
-    "REPEAT_TASK_SKILL_TAG",
-    "REPEAT_TASK_WINDOW_DAYS",
-    "VERIFICATION_CALIBRATION_CITATION",
-    "VERIFICATION_CALIBRATION_KINDS_IN_PANEL_ORDER",
-    "VERIFICATION_CALIBRATION_LABELS",
-    "SPECIFICATION_ADOPTION_CITATION",
+    "CADENCE_WINDOW_DAYS",
     "CONTEXT_ENGINEERING_CITATION",
+    "COST_EFFECTIVENESS_CITATION",
+    "EXCERPT_CHAR_LIMIT",
     "KNOWLEDGE_GAP_CITATION",
-    "SCAFFOLDING_KINDS_IN_PANEL_ORDER",
-    "SCAFFOLDING_LABELS",
     "KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER",
     "KNOWLEDGE_GAP_LABELS",
     "LADDER_KINDS_IN_PANEL_ORDER",
     "LADDER_LABELS",
+    "MAX_EXCERPTS_PER_SIGNAL",
+    "REPEAT_TASK_CITATION",
+    "REPEAT_TASK_SKILL_TAG",
+    "REPEAT_TASK_WINDOW_DAYS",
+    "SCAFFOLDING_KINDS_IN_PANEL_ORDER",
+    "SCAFFOLDING_LABELS",
+    "SIGNAL_CITATIONS",
+    "SIGNAL_KINDS_IN_PANEL_ORDER",
+    "SIGNAL_LABELS",
+    "SPECIFICATION_ADOPTION_CITATION",
     "TOOL_AGENT_LADDER_CITATION",
-    "COST_EFFECTIVENESS_CITATION",
+    "VERIFICATION_CALIBRATION_CITATION",
+    "VERIFICATION_CALIBRATION_KINDS_IN_PANEL_ORDER",
+    "VERIFICATION_CALIBRATION_LABELS",
+    "AugAutoBalancePanel",
     "BehavioralPatternRow",
     "BehavioralPatternsPanel",
-    "AugAutoBalancePanel",
     "CadencePanel",
-    "RepeatTaskRow",
-    "RepeatTaskRadarPanel",
-    "VerificationCalibrationPanel",
-    "SpecificationAdoptionPanel",
-    "ContextEngineeringRow",
     "ContextEngineeringDepthPanel",
-    "KnowledgeGapRow",
+    "ContextEngineeringRow",
     "KnowledgeGapDistributionPanel",
+    "KnowledgeGapRow",
     "LadderRungRow",
-    "ToolAgentLadderPanel",
-    "RefinedCostEffectivenessPanel",
     "PanelInputs",
+    "RefinedCostEffectivenessPanel",
+    "RepeatTaskRadarPanel",
+    "RepeatTaskRow",
+    "SpecificationAdoptionPanel",
+    "ToolAgentLadderPanel",
+    "VerificationCalibrationPanel",
     "clip_excerpt",
 ]

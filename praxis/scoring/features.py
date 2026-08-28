@@ -8,13 +8,13 @@ coaching decisions. The LLM judge owns scoring; this module owns the
 raw numbers that downstream consumers (the judge, advisors, reports)
 can read.
 """
+
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
 
 from praxis.models import Session
-
 
 # Patterns chosen for precision over recall - we'd rather miss a planning
 # turn than false-positive on one. Bare "will" and "first.*then" were

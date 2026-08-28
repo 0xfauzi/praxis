@@ -18,11 +18,13 @@ The streak window defaults to DEFAULT_STREAK_WINDOW_DAYS = 21 days
 (three rolling weeks): long enough to capture weekly users and short
 enough to react to a recent drop-off.
 """
+
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Literal, Mapping
+from collections.abc import Mapping
+from datetime import UTC, date, datetime, timedelta
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from praxis.storage.profile_store import ProfileStore
@@ -80,7 +82,7 @@ def is_substantive_session(row: Mapping[str, Any] | None) -> bool:
 
 
 def compute_weekday_streak(
-    profile_store: "ProfileStore",
+    profile_store: ProfileStore,
     ending_on_date: date,
     *,
     window_days: int = DEFAULT_STREAK_WINDOW_DAYS,
@@ -106,9 +108,7 @@ def compute_weekday_streak(
         return 0
 
     window_start_date = ending_on_date - timedelta(days=window_days - 1)
-    window_start_dt = datetime.combine(
-        window_start_date, datetime.min.time(), tzinfo=timezone.utc
-    )
+    window_start_dt = datetime.combine(window_start_date, datetime.min.time(), tzinfo=UTC)
 
     try:
         rows = profile_store.load_session_scores(since=window_start_dt)
@@ -166,13 +166,9 @@ def high_adopter_position(streak: int, window_days: int) -> HighAdopterPosition:
             contains).
     """
     if window_days <= 0:
-        raise ValueError(
-            f"window_days must be positive; got {window_days}"
-        )
+        raise ValueError(f"window_days must be positive; got {window_days}")
     if streak > window_days:
-        raise ValueError(
-            f"streak ({streak}) cannot exceed window_days ({window_days})"
-        )
+        raise ValueError(f"streak ({streak}) cannot exceed window_days ({window_days})")
 
     ratio = streak / window_days
     if ratio < LOW_STREAK_RATIO:
@@ -253,7 +249,7 @@ def _coerce_to_utc_date(value: Any) -> date | None:
     if isinstance(value, datetime):
         if value.tzinfo is None:
             return value.date()
-        return value.astimezone(timezone.utc).date()
+        return value.astimezone(UTC).date()
     if isinstance(value, date):
         return value
     if isinstance(value, str) and value:
@@ -263,5 +259,5 @@ def _coerce_to_utc_date(value: Any) -> date | None:
             return None
         if dt.tzinfo is None:
             return dt.date()
-        return dt.astimezone(timezone.utc).date()
+        return dt.astimezone(UTC).date()
     return None

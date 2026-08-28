@@ -7,10 +7,11 @@ Acceptance criteria:
 
 Spec section 7.2 (PRAXIS_V0_2_SPEC.md).
 """
+
 from __future__ import annotations
 
 import math
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from praxis.behavior import (
     MIN_SESSIONS_FOR_FIT,
@@ -27,7 +28,6 @@ from praxis.behavior import (
 )
 from praxis.behavior.slope import _least_squares
 from praxis.scoring.rubric import RUBRIC
-
 
 RUBRIC_KEYS = [d.key for d in RUBRIC]
 
@@ -205,10 +205,7 @@ def test_fit_metric_x_axis_tracks_calendar_weeks_not_index():
 
 def test_fit_metric_positive_trend_gives_positive_slope():
     monday = date(2026, 5, 4)
-    buckets = [
-        _bucket(monday + timedelta(weeks=i), eng=0.1 * (i + 1), count=2)
-        for i in range(4)
-    ]
+    buckets = [_bucket(monday + timedelta(weeks=i), eng=0.1 * (i + 1), count=2) for i in range(4)]
     fit = fit_metric(buckets, lambda b: b.engagement_rate_mean)
     assert fit.slope > 0.0
     # Perfect line with step 0.1/week, so stderr should be ~0.
@@ -219,8 +216,7 @@ def test_fit_metric_positive_trend_gives_positive_slope():
 def test_fit_metric_negative_trend_gives_negative_slope():
     monday = date(2026, 5, 4)
     buckets = [
-        _bucket(monday + timedelta(weeks=i), deleg=0.5 - 0.05 * i, count=2)
-        for i in range(4)
+        _bucket(monday + timedelta(weeks=i), deleg=0.5 - 0.05 * i, count=2) for i in range(4)
     ]
     fit = fit_metric(buckets, lambda b: b.delegation_rate_mean)
     assert fit.slope < 0.0
@@ -243,10 +239,7 @@ def test_fit_metric_skips_buckets_missing_a_dim_key():
 
 def test_fit_metric_input_order_does_not_change_result():
     monday = date(2026, 5, 4)
-    in_order = [
-        _bucket(monday + timedelta(weeks=i), eng=0.1 * i + 0.2, count=2)
-        for i in range(5)
-    ]
+    in_order = [_bucket(monday + timedelta(weeks=i), eng=0.1 * i + 0.2, count=2) for i in range(5)]
     shuffled = [in_order[3], in_order[0], in_order[4], in_order[1], in_order[2]]
     a = fit_metric(in_order, lambda b: b.engagement_rate_mean)
     b = fit_metric(shuffled, lambda b: b.engagement_rate_mean)
@@ -256,10 +249,7 @@ def test_fit_metric_input_order_does_not_change_result():
 def test_fit_metric_significance_gate_blocks_subthreshold_slope():
     # |slope| = 0.04/week is below the 0.05/week floor.
     monday = date(2026, 5, 4)
-    buckets = [
-        _bucket(monday + timedelta(weeks=i), eng=0.5 + 0.04 * i, count=2)
-        for i in range(5)
-    ]
+    buckets = [_bucket(monday + timedelta(weeks=i), eng=0.5 + 0.04 * i, count=2) for i in range(5)]
     fit = fit_metric(buckets, lambda b: b.engagement_rate_mean)
     assert abs(fit.slope - 0.04) < 1e-12
     assert fit.significant is False
@@ -269,10 +259,7 @@ def test_fit_metric_significance_gate_blocks_noisy_slope():
     # Construct points where |slope| < 1.5 * stderr even though slope > 0.05.
     monday = date(2026, 5, 4)
     rates = [0.10, 0.80, 0.20, 0.70, 0.30]
-    buckets = [
-        _bucket(monday + timedelta(weeks=i), eng=rates[i], count=2)
-        for i in range(5)
-    ]
+    buckets = [_bucket(monday + timedelta(weeks=i), eng=rates[i], count=2) for i in range(5)]
     fit = fit_metric(buckets, lambda b: b.engagement_rate_mean)
     # Noisy enough that the stderr swamps the slope.
     assert abs(fit.slope) < SIGNIFICANCE_STDERR_MULTIPLIER * fit.stderr
@@ -360,7 +347,7 @@ def test_fit_weekly_trajectory_dim_keys_union_across_eligible_buckets():
 def test_fit_weekly_trajectory_via_bucket_pipeline_end_to_end():
     # Build sessions, bucket them, then fit. Locks in that
     # WeeklyBucket -> WeeklyTrajectoryFit composes without glue.
-    now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 27, 12, 0, tzinfo=UTC)
     sessions: list[WeeklySessionInput] = []
     # Four weeks: engagement rises 0.10/week.
     for week_index in range(4):

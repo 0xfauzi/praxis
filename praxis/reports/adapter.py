@@ -9,9 +9,11 @@ concerns out of `praxis/orchestrator.py`, which already has more than its
 share of merge artifacts. The adapter is the only place that knows both
 sides of the boundary.
 """
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import sqlite3
+from datetime import UTC, datetime
 
 from praxis.behavior import TrajectoryLabel
 from praxis.behavior.repeat_task import (
@@ -94,26 +96,26 @@ def _cost_inputs(summary):
         # signal (avg prompt size) so it excludes preambles.
         total_chars = sum(len(t.content) for t in s.user_turns)
         cost = estimate_session_cost_usd(s.model_hint, total_chars)
-        biggest_inputs.append(BiggestLineInputSession(
-            started_at=s.started_at,
-            cost_usd=cost,
-            model_hint=s.model_hint,
-            task_label=task_label_by_sid.get(s.stable_id),
-        ))
-        tier_savings = estimate_tier_fit_savings_for_session(
-            s.model_hint, total_chars
+        biggest_inputs.append(
+            BiggestLineInputSession(
+                started_at=s.started_at,
+                cost_usd=cost,
+                model_hint=s.model_hint,
+                task_label=task_label_by_sid.get(s.stable_id),
+            )
         )
-        authored_chars = sum(
-            len(t.content) for t in s.user_authored_turns
-        )
+        tier_savings = estimate_tier_fit_savings_for_session(s.model_hint, total_chars)
+        authored_chars = sum(len(t.content) for t in s.user_authored_turns)
         n_user_turns = len(s.user_authored_turns)
         avg_chars = authored_chars / n_user_turns if n_user_turns else 0.0
-        tier_inputs.append(TierFitInputSession(
-            started_at=s.started_at,
-            user_turn_count=n_user_turns,
-            avg_prompt_chars=avg_chars,
-            tier_fit_savings_usd=tier_savings,
-        ))
+        tier_inputs.append(
+            TierFitInputSession(
+                started_at=s.started_at,
+                user_turn_count=n_user_turns,
+                avg_prompt_chars=avg_chars,
+                tier_fit_savings_usd=tier_savings,
+            )
+        )
     biggest = compute_biggest_line(biggest_inputs)
     tier = compute_tier_fit_savings(tier_inputs)
     return biggest, tier
@@ -176,6 +178,7 @@ def _dim_title_from_key(dim_key: str) -> str:
     """Look up a rubric dimension's display title from its key."""
     try:
         from praxis.scoring.rubric import by_key
+
         return by_key(dim_key).title
     except Exception:  # noqa: BLE001
         return dim_key.title() if dim_key else ""
@@ -310,8 +313,7 @@ def _task_rows_terminal(summary) -> list[dt.TaskRowView] | None:
         ),
         reverse=True,
     )[:3]
-    sid_to_score = {sid: r.dimension_scores
-                    for sid, r in summary.judge_results.items()}
+    sid_to_score = {sid: r.dimension_scores for sid, r in summary.judge_results.items()}
     for task in ranked:
         # Worst dim across the task's sessions
         worst_dim = "verification"  # default fallback
@@ -328,12 +330,14 @@ def _task_rows_terminal(summary) -> list[dt.TaskRowView] | None:
                     worst_mean = m
                     worst_dim = d.key
         task_total = sum(cost_by_sid.get(sid, 0.0) for sid in task.session_ids)
-        rows.append(dt.TaskRowView(
-            label=_public_task_label(task),
-            sessions=len(task.session_ids),
-            total_usd=task_total,
-            worst_dim_key=worst_dim,
-        ))
+        rows.append(
+            dt.TaskRowView(
+                label=_public_task_label(task),
+                sessions=len(task.session_ids),
+                total_usd=task_total,
+                worst_dim_key=worst_dim,
+            )
+        )
     return rows
 
 
@@ -356,26 +360,29 @@ def _task_rows_html(summary) -> tuple[dh.TaskRow, ...]:
         key=lambda t: len(t.session_ids),
         reverse=True,
     )[:3]
-    sid_to_score = {sid: r.dimension_scores
-                    for sid, r in summary.judge_results.items()}
+    sid_to_score = {sid: r.dimension_scores for sid, r in summary.judge_results.items()}
     rows: list[dh.TaskRow] = []
     for task in ranked:
         worst = None
         for d in RUBRIC:
-            scores = [sid_to_score[sid][d.key]
-                      for sid in task.session_ids
-                      if sid in sid_to_score and d.key in sid_to_score[sid]]
+            scores = [
+                sid_to_score[sid][d.key]
+                for sid in task.session_ids
+                if sid in sid_to_score and d.key in sid_to_score[sid]
+            ]
             if scores:
                 m = sum(scores) / len(scores)
                 if worst is None or m < worst:
                     worst = m
         task_total = sum(cost_by_sid.get(sid, 0.0) for sid in task.session_ids)
-        rows.append(dh.TaskRow(
-            label=_public_task_label(task),
-            session_count=len(task.session_ids),
-            dollars=task_total,
-            worst_score=worst,
-        ))
+        rows.append(
+            dh.TaskRow(
+                label=_public_task_label(task),
+                session_count=len(task.session_ids),
+                dollars=task_total,
+                worst_score=worst,
+            )
+        )
     return tuple(rows)
 
 
@@ -403,12 +410,14 @@ def _dim_rows_html(summary) -> tuple[dh.DimRow, ...]:
         score = float(means.get(d.key, 0.0))
         baseline = last.get(d.key)
         delta = (score - baseline) if baseline is not None else None
-        rows.append(dh.DimRow(
-            title=d.title,
-            score=score,
-            baseline=baseline,
-            delta=delta,
-        ))
+        rows.append(
+            dh.DimRow(
+                title=d.title,
+                score=score,
+                baseline=baseline,
+                delta=delta,
+            )
+        )
     return tuple(rows)
 
 
@@ -434,6 +443,7 @@ def _vital_signs_html(summary) -> dh.VitalSigns | None:
     if not summary.sessions:
         return None
     from praxis.behavior import extract as extract_signals
+
     eng_rates: list[float] = []
     del_rates: list[float] = []
     for s in summary.sessions:
@@ -460,23 +470,24 @@ def _weekly_trajectory_html(summary) -> tuple:
     empty tuple when no signals are persisted (the renderer shows a
     placeholder in that case).
     """
+    import json
+    from datetime import datetime, timedelta
+
     from praxis.behavior.weekly import (
         WeeklySessionInput,
         bucket_sessions_by_iso_week,
     )
-    import json
-    from datetime import datetime, timedelta, timezone
     from praxis.storage.profile_store import ProfileStore
 
     try:
         store = ProfileStore()
     except Exception:  # noqa: BLE001
-        return tuple()
-    since = datetime.now(timezone.utc) - timedelta(days=90)
+        return ()
+    since = datetime.now(UTC) - timedelta(days=90)
     try:
         rows = store.load_session_scores(since=since)
     except Exception:  # noqa: BLE001
-        return tuple()
+        return ()
     # We bucket two streams in parallel here:
     #   1. The standard WeeklyBucket model (used for hysteresis / labels)
     #      which doesn't include a verification-marker rate.
@@ -497,13 +508,15 @@ def _weekly_trajectory_html(summary) -> tuple:
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
         started_at = datetime.fromisoformat(row["started_at"])
-        inputs.append(WeeklySessionInput(
-            started_at=started_at,
-            engagement_rate=float(sig.get("engagement_rate", 0.0)),
-            delegation_rate=float(sig.get("delegation_rate", 0.0)),
-            independence_rate=float(sig.get("independence_rate", 0.0)),
-            dim_scores=row.get("dimension_scores") or {},
-        ))
+        inputs.append(
+            WeeklySessionInput(
+                started_at=started_at,
+                engagement_rate=float(sig.get("engagement_rate", 0.0)),
+                delegation_rate=float(sig.get("delegation_rate", 0.0)),
+                independence_rate=float(sig.get("independence_rate", 0.0)),
+                dim_scores=row.get("dimension_scores") or {},
+            )
+        )
         # Per-session verification marker rate = marker_hit_counts.verification / turn_count.
         feats = row.get("features") or {}
         markers = (feats.get("marker_hit_counts") or {}) if isinstance(feats, dict) else {}
@@ -519,7 +532,7 @@ def _weekly_trajectory_html(summary) -> tuple:
             verify_tally[iso] = (cur_hits + verify_hits, cur_turns + ut)
 
     if not inputs:
-        return tuple()
+        return ()
     buckets = bucket_sessions_by_iso_week(inputs)
     points = []
     for b in buckets:
@@ -527,19 +540,19 @@ def _weekly_trajectory_html(summary) -> tuple:
             continue
         v_hits, v_turns = verify_tally.get(b.iso_week, (0, 0))
         verification_rate = (v_hits / v_turns) if v_turns > 0 else 0.0
-        points.append(dh.WeeklyTrajectoryPoint(
-            week_iso=b.iso_week,
-            engagement_rate=b.engagement_rate_mean,
-            delegation_rate=b.delegation_rate_mean,
-            independence_rate=b.independence_rate_mean,
-            verification_marker_rate=verification_rate,
-        ))
+        points.append(
+            dh.WeeklyTrajectoryPoint(
+                week_iso=b.iso_week,
+                engagement_rate=b.engagement_rate_mean,
+                delegation_rate=b.delegation_rate_mean,
+                independence_rate=b.independence_rate_mean,
+                verification_marker_rate=verification_rate,
+            )
+        )
     return tuple(points)
 
 
-def _behavioral_signals_html(
-    summary, points: tuple
-) -> tuple:
+def _behavioral_signals_html(summary, points: tuple) -> tuple:
     """Build the 4 behavioral-signal cards (Engagement, Delegation,
     Independence, Verification) shown beneath the rubric dim cards.
 
@@ -550,7 +563,7 @@ def _behavioral_signals_html(
     "forming" rather than guessing.
     """
     if not points:
-        return tuple()
+        return ()
     current = points[-1]
     history = points[:-1]
 
@@ -599,8 +612,9 @@ def _recurrence_count_for_headline(summary) -> int:
     if not target_alt:
         return 0
     # Look at the prior 3 weekly_digests
-    from praxis.storage.profile_store import ProfileStore
     from praxis.orchestrator import _prior_iso_week  # type: ignore
+    from praxis.storage.profile_store import ProfileStore
+
     try:
         store = ProfileStore()
     except Exception:  # noqa: BLE001
@@ -611,7 +625,9 @@ def _recurrence_count_for_headline(summary) -> int:
         iso = _prior_iso_week(iso)
         try:
             digest_row = store.load_weekly_digest(iso)
-        except Exception:  # noqa: BLE001
+        except (sqlite3.Error, ValueError):
+            # Missing table or unparseable snapshot_json: this lookback is
+            # best-effort, so skip the week rather than fail the digest.
             continue
         if digest_row is None:
             continue
@@ -629,7 +645,7 @@ def _recurrence_count_for_headline(summary) -> int:
 def _model_split_html(summary) -> tuple:
     """Per-model spend tuples for the cost stacked-bar chart."""
     if not summary.sessions:
-        return tuple()
+        return ()
     spend_by_model: dict[str, float] = {}
     for s in summary.sessions:
         # Cost panel needs billable bytes (incl. tool-injected preambles);
@@ -640,10 +656,7 @@ def _model_split_html(summary) -> tuple:
             continue
         key = s.model_hint or "unknown"
         spend_by_model[key] = spend_by_model.get(key, 0.0) + c
-    return tuple(
-        dh.ModelSpend(model=m, dollars=v)
-        for m, v in spend_by_model.items()
-    )
+    return tuple(dh.ModelSpend(model=m, dollars=v) for m, v in spend_by_model.items())
 
 
 def _trajectory_headline_terminal(summary) -> str | None:
@@ -833,9 +846,7 @@ def _cadence_panel(summary) -> CadencePanel:
             continue
     streak = len(weekdays)
     position = (
-        _classify_high_adopter(streak, _CADENCE_PANEL_WINDOW_DAYS)
-        if substantive > 0
-        else None
+        _classify_high_adopter(streak, _CADENCE_PANEL_WINDOW_DAYS) if substantive > 0 else None
     )
     return CadencePanel(
         weekday_streak=streak,
@@ -876,9 +887,7 @@ def _session_duration_minutes(session) -> float:
     has_timestamps = [ts for ts in timestamps if ts is not None]
     if len(has_timestamps) >= 2:
         try:
-            span_seconds = (
-                max(has_timestamps) - min(has_timestamps)
-            ).total_seconds()
+            span_seconds = (max(has_timestamps) - min(has_timestamps)).total_seconds()
         except (AttributeError, TypeError):
             span_seconds = 0.0
         if span_seconds > 0:
@@ -982,9 +991,7 @@ def _repeat_task_radar_panel(summary) -> RepeatTaskRadarPanel:
         first_sentence = _first_user_turn_text(seed_session)
         if not first_sentence:
             first_sentence = getattr(task, "label", "") or ""
-        durations = [
-            _session_duration_minutes(s) for s in task_sessions
-        ]
+        durations = [_session_duration_minutes(s) for s in task_sessions]
         clusters.append(
             Cluster(
                 first_sentence=first_sentence,
@@ -1114,9 +1121,7 @@ def _knowledge_gap_distribution_panel(
     counts are zero (US-041 acceptance: no silent drops); the renderer
     surfaces the empty-state copy only when every category is zero.
     """
-    counts: dict[str, int] = {
-        kind: 0 for kind in KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER
-    }
+    counts: dict[str, int] = {kind: 0 for kind in KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER}
     for s in getattr(summary, "sessions", None) or []:
         try:
             per_session = count_session_knowledge_gaps(s)
@@ -1176,9 +1181,7 @@ def _tool_agent_ladder_panel(summary) -> ToolAgentLadderPanel:
         )
         for kind in LADDER_KINDS_IN_PANEL_ORDER
     )
-    max_rung_label = (
-        LADDER_LABELS.get(max_rung_kind, "") if max_rung_kind else ""
-    )
+    max_rung_label = LADDER_LABELS.get(max_rung_kind, "") if max_rung_kind else ""
     return ToolAgentLadderPanel(
         rows=rows,
         max_rung_kind=max_rung_kind,
@@ -1275,7 +1278,7 @@ def build_html_digest(summary, follow_up=None) -> dh.WeeklyDigest:
     trajectory_points = _weekly_trajectory_html(summary)
     return dh.WeeklyDigest(
         week_iso=summary.week_iso or "",
-        generated_at=datetime.now(timezone.utc),
+        generated_at=datetime.now(UTC),
         trajectory=_trajectory_html(summary),
         headline_moment=_headline_moment_panel_html(summary, recurrence_count=recurrence),
         cost_ledger=_cost_ledger_html(summary),

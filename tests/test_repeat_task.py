@@ -17,7 +17,10 @@ US-015 acceptance criteria:
   - detect_repeats returns [] when no cluster recurs 3+ times.
   - detect_repeats([], window_days) returns [] without raising.
 """
+
 from __future__ import annotations
+
+from dataclasses import FrozenInstanceError
 
 import pytest
 
@@ -33,7 +36,6 @@ from praxis.behavior.repeat_task import (
     tokenize,
 )
 
-
 # --- tokenize ----------------------------------------------------------------
 
 
@@ -46,7 +48,7 @@ def test_tokenize_removes_documented_stopwords() -> None:
     result = tokenize("I want to refactor the auth module")
     assert result == {"want", "refactor", "auth", "module"}
     # The removed tokens are all documented stopwords.
-    for removed in {"i", "to", "the"}:
+    for removed in ("i", "to", "the"):
         assert removed in STOPWORDS
 
 
@@ -238,7 +240,7 @@ def test_repeat_task_is_a_frozen_dataclass() -> None:
         example_session_ids=["a"],
         estimated_minutes_per_occurrence=10.0,
     )
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError):
         task.occurrences = 99  # type: ignore[misc]
 
 

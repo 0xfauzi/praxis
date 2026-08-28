@@ -14,12 +14,12 @@ both `html_report.py` and `terminal.py` import and call this function
 when rendering a delta, which is how the "applied uniformly" property
 required by US-034 is enforced -- there is one source of truth, not two.
 """
-from __future__ import annotations
 
+from __future__ import annotations
 
 SIGNIFICANCE_THRESHOLD = 0.3
 INSIGNIFICANT_GLYPH = "~"
-UP_GLYPH = "↑"    # ↑
+UP_GLYPH = "↑"  # ↑
 DOWN_GLYPH = "↓"  # ↓
 
 

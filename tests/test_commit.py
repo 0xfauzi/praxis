@@ -24,6 +24,7 @@ The pure-function tests exercise ``build_commit_suggestions`` /
 ``prompt_free_text`` against deterministic inputs; the integration
 tests drive the CLI entry point end-to-end (argparse + DB I/O).
 """
+
 from __future__ import annotations
 
 import builtins
@@ -47,7 +48,6 @@ from praxis.scoring.aggregate import ProfileSnapshot
 from praxis.scoring.coach import FALLBACK_DRILLS, drills_for_dim
 from praxis.scoring.rubric import RUBRIC
 from praxis.storage.profile_store import ProfileStore
-
 
 # ---- build_commit_suggestions (pure) ---------------------------------------
 
@@ -445,9 +445,7 @@ def test_cmd_commit_dedups_headline_against_weakest_dim_drill(tmp_home, capsys):
         week_iso=week,
         trajectory_label="learning",
         trajectory_headline="learning week",
-        snapshot=_snapshot_with_means(
-            {"planning": 2.0, "context": 3.0, "iteration": 4.0}
-        ),
+        snapshot=_snapshot_with_means({"planning": 2.0, "context": 3.0, "iteration": 4.0}),
         headline_moment_id=moments[0].moment_id,
     )
 
@@ -572,8 +570,7 @@ def test_prompt_free_text_rejects_over_280_chars_with_current_length():
         error_writer=errors.append,
     )
     assert errors == [
-        f"Keep it under {MAX_COMMITMENT_CHARS} characters "
-        f"(current: {MAX_COMMITMENT_CHARS + 5})."
+        f"Keep it under {MAX_COMMITMENT_CHARS} characters (current: {MAX_COMMITMENT_CHARS + 5})."
     ]
     assert result == "Short enough commitment."
 
@@ -595,25 +592,27 @@ def test_prompt_free_text_loops_until_valid_input_arrives():
     errors: list[str] = []
     too_long = "z" * (MAX_COMMITMENT_CHARS + 1)
     result = prompt_free_text(
-        input_fn=_scripted_input([
-            "",
-            "   ",
-            too_long,
-            "Finally a good commitment.",
-        ]),
+        input_fn=_scripted_input(
+            [
+                "",
+                "   ",
+                too_long,
+                "Finally a good commitment.",
+            ]
+        ),
         error_writer=errors.append,
     )
     assert errors == [
         "Cannot be empty.",
         "Cannot be empty.",
-        f"Keep it under {MAX_COMMITMENT_CHARS} characters "
-        f"(current: {MAX_COMMITMENT_CHARS + 1}).",
+        f"Keep it under {MAX_COMMITMENT_CHARS} characters (current: {MAX_COMMITMENT_CHARS + 1}).",
     ]
     assert result == "Finally a good commitment."
 
 
 def test_prompt_free_text_propagates_keyboard_interrupt():
     """Ctrl-C aborts the loop -- the caller decides how to recover."""
+
     def raising_input(_prompt: str = "") -> str:
         raise KeyboardInterrupt()
 
@@ -623,6 +622,7 @@ def test_prompt_free_text_propagates_keyboard_interrupt():
 
 def test_prompt_free_text_propagates_eof_error():
     """A closed stdin (Ctrl-D) bubbles up so the CLI can exit 0 cleanly."""
+
     def eof_input(_prompt: str = "") -> str:
         raise EOFError()
 
@@ -658,14 +658,10 @@ def test_cmd_commit_w_choice_reads_validated_free_text(monkeypatch, tmp_home, ca
     code = main(["commit"])
     out = capsys.readouterr().out
     assert code == 0
-    assert (
-        '"Ask \'list every table this writes\' before each migration."' in out
-    )
+    assert "\"Ask 'list every table this writes' before each migration.\"" in out
 
 
-def test_cmd_commit_w_choice_reprompts_on_oversize_then_accepts(
-    monkeypatch, tmp_home, capsys
-):
+def test_cmd_commit_w_choice_reprompts_on_oversize_then_accepts(monkeypatch, tmp_home, capsys):
     """Free-text > 280 chars triggers the cap message then re-reads."""
     _force_tty(monkeypatch)
     too_long = "a" * (MAX_COMMITMENT_CHARS + 1)
@@ -682,9 +678,7 @@ def test_cmd_commit_w_choice_reprompts_on_oversize_then_accepts(
     assert '"Short commitment."' in captured.out
 
 
-def test_cmd_commit_w_choice_reprompts_on_empty_then_accepts(
-    monkeypatch, tmp_home, capsys
-):
+def test_cmd_commit_w_choice_reprompts_on_empty_then_accepts(monkeypatch, tmp_home, capsys):
     """Free-text empty/whitespace-only triggers 'Cannot be empty.' then re-reads."""
     _force_tty(monkeypatch)
     inputs = iter(["w", "   ", "Real commitment."])
@@ -732,9 +726,7 @@ def test_cmd_commit_w_choice_eof_exits_zero_cleanly(monkeypatch, tmp_home, capsy
     assert code == 0
 
 
-def test_cmd_commit_w_choice_keyboard_interrupt_exits_zero(
-    monkeypatch, tmp_home, capsys
-):
+def test_cmd_commit_w_choice_keyboard_interrupt_exits_zero(monkeypatch, tmp_home, capsys):
     """Ctrl-C during the free-text read aborts without crashing."""
     _force_tty(monkeypatch)
     calls = iter(["w"])
@@ -751,9 +743,7 @@ def test_cmd_commit_w_choice_keyboard_interrupt_exits_zero(
     assert code == 0
 
 
-def test_cmd_commit_non_w_choice_does_not_open_free_text(
-    monkeypatch, tmp_home, capsys
-):
+def test_cmd_commit_non_w_choice_does_not_open_free_text(monkeypatch, tmp_home, capsys):
     """Selecting '1' or 'k' does not trigger the free-text reader."""
     _force_tty(monkeypatch)
     inputs = iter(["1"])
@@ -883,9 +873,7 @@ def test_build_user_chosen_follow_up_free_text_uses_sentinel():
     assert fu.target_metric == "free_text"
     assert fu.user_chosen == 1
     assert fu.outcome == "pending"
-    assert fu.display_text == (
-        "Ask 'list every table this writes' before each migration."
-    )
+    assert fu.display_text == ("Ask 'list every table this writes' before each migration.")
     assert fu.commitment_text == fu.display_text
 
 
@@ -990,8 +978,7 @@ def test_insert_follow_up_allows_second_row_after_first_is_superseded(tmp_home):
     first_id = store.insert_follow_up(first)
     with sqlite3.connect(store.db_path) as conn:
         conn.execute(
-            "UPDATE follow_ups SET superseded_by = ?, outcome = 'superseded' "
-            "WHERE id = ?",
+            "UPDATE follow_ups SET superseded_by = ?, outcome = 'superseded' WHERE id = ?",
             (first_id + 1, first_id),
         )
         conn.commit()
@@ -1053,9 +1040,7 @@ def test_cmd_commit_free_text_persists_row_with_user_chosen_and_display_text(
     assert loaded.outcome == "pending"
 
 
-def test_cmd_commit_numbered_choice_persists_drill_with_dim_key(
-    monkeypatch, tmp_home, capsys
-):
+def test_cmd_commit_numbered_choice_persists_drill_with_dim_key(monkeypatch, tmp_home, capsys):
     """Selecting '1' on a drill suggestion writes a row with that dim_key."""
     _force_tty(monkeypatch)
     store = ProfileStore()
@@ -1081,9 +1066,7 @@ def test_cmd_commit_numbered_choice_persists_drill_with_dim_key(
     assert loaded.outcome == "pending"
 
 
-def test_cmd_commit_keep_last_persists_using_prior_baseline(
-    monkeypatch, tmp_home, capsys
-):
+def test_cmd_commit_keep_last_persists_using_prior_baseline(monkeypatch, tmp_home, capsys):
     """Selecting 'k' writes a new row that reuses the prior baseline."""
     _force_tty(monkeypatch)
     store = ProfileStore()
@@ -1099,6 +1082,7 @@ def test_cmd_commit_keep_last_persists_using_prior_baseline(
     )
 
     from praxis.cli import __main__ as cli_main
+
     monkeypatch.setattr(cli_main, "current_iso_week", lambda: "2026-W21")
     inputs = iter(["k"])
     monkeypatch.setattr(builtins, "input", lambda *_a, **_kw: next(inputs))
@@ -1147,9 +1131,7 @@ def test_cmd_commit_second_insert_with_active_pending_catches_integrity_error(
     assert loaded.display_text == "first commitment for this week"
 
 
-def test_cmd_commit_invalid_choice_does_not_persist(
-    monkeypatch, tmp_home, capsys
-):
+def test_cmd_commit_invalid_choice_does_not_persist(monkeypatch, tmp_home, capsys):
     """Unknown input (e.g. ``'q'``) leaves the DB untouched."""
     _force_tty(monkeypatch)
     inputs = iter(["q"])
@@ -1211,8 +1193,7 @@ def test_active_follow_up_for_week_ignores_superseded_rows(tmp_home):
     row_id = store.insert_follow_up(fu)
     with sqlite3.connect(store.db_path) as conn:
         conn.execute(
-            "UPDATE follow_ups SET outcome = 'superseded', superseded_by = ? "
-            "WHERE id = ?",
+            "UPDATE follow_ups SET outcome = 'superseded', superseded_by = ? WHERE id = ?",
             (row_id + 999, row_id),
         )
         conn.commit()
@@ -1265,9 +1246,7 @@ def test_supersede_and_insert_marks_prior_superseded_and_inserts_new(tmp_home):
         user_chosen=1,
         display_text="new commitment",
     )
-    new_id = store.supersede_and_insert_follow_up(
-        prior_id=prior_id, new_follow_up=new_fu
-    )
+    new_id = store.supersede_and_insert_follow_up(prior_id=prior_id, new_follow_up=new_fu)
     assert new_id != prior_id
 
     with sqlite3.connect(store.db_path) as conn:
@@ -1348,9 +1327,7 @@ def test_supersede_and_insert_rolls_back_on_missing_prior_id(tmp_home):
         display_text="ghost",
     )
     with pytest.raises(RuntimeError):
-        store.supersede_and_insert_follow_up(
-            prior_id=99999, new_follow_up=new_fu
-        )
+        store.supersede_and_insert_follow_up(prior_id=99999, new_follow_up=new_fu)
     with sqlite3.connect(store.db_path) as conn:
         count = conn.execute("SELECT COUNT(*) FROM follow_ups").fetchone()[0]
     assert count == 1  # only the unrelated seed row
@@ -1387,9 +1364,7 @@ def test_format_replace_keep_cancel_preamble_quotes_display_text():
     rendered = format_replace_keep_cancel_preamble(
         "ask for source links before accepting any claim"
     )
-    assert (
-        '"ask for source links before accepting any claim"' in rendered
-    )
+    assert '"ask for source links before accepting any claim"' in rendered
     assert "[r]eplace" in rendered
     assert "[k]eep" in rendered
     assert "[c]ancel" in rendered
@@ -1427,9 +1402,7 @@ def test_cmd_commit_shows_replace_prompt_when_active_commitment_exists(
     assert "Pick a commitment for this week" not in out
 
 
-def test_cmd_commit_keep_writes_nothing_and_exits_zero(
-    monkeypatch, tmp_home, capsys
-):
+def test_cmd_commit_keep_writes_nothing_and_exits_zero(monkeypatch, tmp_home, capsys):
     """[k]eep is a no-op: existing row stays, no new row is inserted."""
     _force_tty(monkeypatch)
     store = ProfileStore()
@@ -1453,6 +1426,7 @@ def test_cmd_commit_keep_writes_nothing_and_exits_zero(
     assert code == 0
 
     import sqlite3
+
     with sqlite3.connect(store.db_path) as conn:
         rows = conn.execute(
             "SELECT COUNT(*) FROM follow_ups WHERE week_iso = ?",
@@ -1464,9 +1438,7 @@ def test_cmd_commit_keep_writes_nothing_and_exits_zero(
     assert active.display_text == "keep me"
 
 
-def test_cmd_commit_cancel_writes_nothing_and_exits_zero(
-    monkeypatch, tmp_home, capsys
-):
+def test_cmd_commit_cancel_writes_nothing_and_exits_zero(monkeypatch, tmp_home, capsys):
     """[c]ancel is a no-op: same as [k]eep but the explicit "leave" branch."""
     _force_tty(monkeypatch)
     store = ProfileStore()
@@ -1490,6 +1462,7 @@ def test_cmd_commit_cancel_writes_nothing_and_exits_zero(
     assert code == 0
 
     import sqlite3
+
     with sqlite3.connect(store.db_path) as conn:
         rows = conn.execute(
             "SELECT COUNT(*) FROM follow_ups WHERE week_iso = ?",
@@ -1498,9 +1471,7 @@ def test_cmd_commit_cancel_writes_nothing_and_exits_zero(
     assert rows[0] == 1
 
 
-def test_cmd_commit_replace_supersedes_prior_and_inserts_new(
-    monkeypatch, tmp_home, capsys
-):
+def test_cmd_commit_replace_supersedes_prior_and_inserts_new(monkeypatch, tmp_home, capsys):
     """[r]eplace path: prior row flipped to 'superseded', new row inserted."""
     _force_tty(monkeypatch)
     store = ProfileStore()
@@ -1527,6 +1498,7 @@ def test_cmd_commit_replace_supersedes_prior_and_inserts_new(
     assert '"new free-text commitment"' in out
 
     import sqlite3
+
     with sqlite3.connect(store.db_path) as conn:
         conn.row_factory = sqlite3.Row
         prior = conn.execute(
@@ -1572,6 +1544,7 @@ def test_cmd_commit_replace_followed_by_invalid_choice_leaves_db_unchanged(
     assert code == 0
 
     import sqlite3
+
     with sqlite3.connect(store.db_path) as conn:
         count = conn.execute(
             "SELECT COUNT(*) FROM follow_ups WHERE week_iso = ?",
@@ -1608,9 +1581,7 @@ def test_cmd_commit_replace_prompt_non_tty_exits_zero(tmp_home, capsys):
     assert "Pick a commitment for this week" not in out
 
 
-def test_cmd_commit_replace_unknown_choice_treated_as_keep(
-    monkeypatch, tmp_home, capsys
-):
+def test_cmd_commit_replace_unknown_choice_treated_as_keep(monkeypatch, tmp_home, capsys):
     """Unknown letter at the replace prompt is a no-op (treated as do-nothing)."""
     _force_tty(monkeypatch)
     store = ProfileStore()
@@ -1634,10 +1605,9 @@ def test_cmd_commit_replace_unknown_choice_treated_as_keep(
     assert code == 0
 
     import sqlite3
+
     with sqlite3.connect(store.db_path) as conn:
-        count = conn.execute(
-            "SELECT COUNT(*) FROM follow_ups"
-        ).fetchone()[0]
+        count = conn.execute("SELECT COUNT(*) FROM follow_ups").fetchone()[0]
     assert count == 1
     active = store.active_follow_up_for_week(current_iso_week())
     assert active is not None

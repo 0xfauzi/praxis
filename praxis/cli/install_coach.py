@@ -83,6 +83,7 @@ Copilot installer (US-031):
     abort with :class:`InstallCoachError`; the file is never
     overwritten.
 """
+
 from __future__ import annotations
 
 import json
@@ -93,7 +94,6 @@ import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
-
 
 TOOL_CLAUDE_CODE = "claude-code"
 TOOL_CODEX = "codex"
@@ -462,9 +462,7 @@ def install_codex(home: Path | None = None) -> Path:
         )
 
     preserved: list[Any] = [
-        entry
-        for entry in entries
-        if not (isinstance(entry, dict) and entry.get(SENTINEL) is True)
+        entry for entry in entries if not (isinstance(entry, dict) and entry.get(SENTINEL) is True)
     ]
     for event, command in CODEX_HOOK_COMMANDS.items():
         preserved.append(_build_codex_entry(event, command))
@@ -576,9 +574,7 @@ def install_copilot_workspace(cwd: Path | None = None) -> Path:
     """
     target = copilot_workspace_path(cwd)
     existing = target.read_text(encoding="utf-8") if target.exists() else ""
-    new_content = _replace_or_append_copilot_block(
-        existing, _build_copilot_block_content()
-    )
+    new_content = _replace_or_append_copilot_block(existing, _build_copilot_block_content())
     _atomic_write_text(target, new_content)
     return target
 
@@ -701,9 +697,7 @@ def install_for_tool(tool: str, *, assume_yes: bool = False) -> None:
         # --yes does NOT opt into it: the AC says the user must confirm.
         if assume_yes:
             return
-        prompts_file = (
-            vscode_user_dir() / "prompts" / COPILOT_INSTRUCTION_FILENAME
-        )
+        prompts_file = vscode_user_dir() / "prompts" / COPILOT_INSTRUCTION_FILENAME
         if _prompt_yes_text(
             (
                 f"Also write a user-level prompt file at {prompts_file} "
@@ -813,9 +807,7 @@ def run_install_coach(
 # ---------------------------------------------------------------------------
 
 
-def _read_json_settings(
-    path: Path, *, tool_label: str
-) -> dict[str, Any] | None:
+def _read_json_settings(path: Path, *, tool_label: str) -> dict[str, Any] | None:
     """Read a JSON settings file or return ``None`` if absent/empty.
 
     Raises :class:`InstallCoachError` with a clear message when the file
@@ -1042,9 +1034,7 @@ def uninstall_copilot_user_level(home: Path | None = None) -> bool:
             pass
 
     settings_path = user_dir / "settings.json"
-    settings_data = _read_json_settings(
-        settings_path, tool_label="Copilot user-level"
-    )
+    settings_data = _read_json_settings(settings_path, tool_label="Copilot user-level")
     if settings_data is None:
         return removed
 
@@ -1123,9 +1113,7 @@ def detect_managed_codex(home: Path | None = None) -> bool:
     return False
 
 
-def detect_managed_copilot(
-    home: Path | None = None, cwd: Path | None = None
-) -> bool:
+def detect_managed_copilot(home: Path | None = None, cwd: Path | None = None) -> bool:
     """Return True when any Praxis-managed Copilot artifact is present.
 
     Checks (a) the workspace copilot-instructions.md for the begin/end
@@ -1161,9 +1149,7 @@ def detect_managed_copilot(
     return False
 
 
-def detect_managed_tools(
-    home: Path | None = None, cwd: Path | None = None
-) -> list[str]:
+def detect_managed_tools(home: Path | None = None, cwd: Path | None = None) -> list[str]:
     """Return tools that have any Praxis-managed content, in canonical order."""
     found: list[str] = []
     if detect_managed_claude_code(home):
@@ -1270,9 +1256,8 @@ def run_uninstall_coach(
 
     any_removed = False
     for t in targets:
-        if assume_yes or _prompt_uninstall_yes(display_name(t)):
-            if uninstall_for_tool(t):
-                any_removed = True
+        if (assume_yes or _prompt_uninstall_yes(display_name(t))) and uninstall_for_tool(t):
+            any_removed = True
 
     if not any_removed:
         print("Nothing to uninstall.")

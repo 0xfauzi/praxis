@@ -12,6 +12,7 @@ has no arrays or nested tables, so a small regex pass preserves user
 comments and other keys without pulling in a third-party serializer
 (tomllib in stdlib is read-only).
 """
+
 from __future__ import annotations
 
 import os
@@ -31,7 +32,6 @@ from praxis.config import (
     ensure_config_file,
     load_config,
 )
-
 
 SECTION_TYPES: dict[str, type] = {
     "schedule": ScheduleConfig,
@@ -59,8 +59,7 @@ def _split_dotted_key(key: str) -> tuple[str, str]:
     """
     if "." not in key:
         raise ConfigCLIError(
-            f"Invalid key {key!r}: expected dotted form 'section.field' "
-            f"(e.g., schedule.day)."
+            f"Invalid key {key!r}: expected dotted form 'section.field' (e.g., schedule.day)."
         )
     parts = key.split(".")
     if len(parts) != 2 or not parts[0] or not parts[1]:
@@ -71,15 +70,12 @@ def _split_dotted_key(key: str) -> tuple[str, str]:
     section, field_name = parts
     if section not in SECTION_TYPES:
         valid = ", ".join(sorted(SECTION_TYPES.keys()))
-        raise ConfigCLIError(
-            f"Unknown section {section!r}. Valid sections: {valid}."
-        )
+        raise ConfigCLIError(f"Unknown section {section!r}. Valid sections: {valid}.")
     valid_fields = {f.name for f in fields(SECTION_TYPES[section])}
     if field_name not in valid_fields:
         valid = ", ".join(sorted(valid_fields))
         raise ConfigCLIError(
-            f"Unknown field {field_name!r} in section {section!r}. "
-            f"Valid fields: {valid}."
+            f"Unknown field {field_name!r} in section {section!r}. Valid fields: {valid}."
         )
     return section, field_name
 
@@ -130,16 +126,14 @@ def _coerce(section: str, field_name: str, raw: str) -> Any:
         if low in {"false", "no", "0", "off"}:
             return False
         raise ConfigCLIError(
-            f"Invalid bool {raw!r} for {section}.{field_name}: "
-            f"expected true/false."
+            f"Invalid bool {raw!r} for {section}.{field_name}: expected true/false."
         )
     if t is int:
         try:
             return int(raw)
         except ValueError:
             raise ConfigCLIError(
-                f"Invalid int {raw!r} for {section}.{field_name}: "
-                f"expected an integer."
+                f"Invalid int {raw!r} for {section}.{field_name}: expected an integer."
             ) from None
     return raw
 
@@ -153,7 +147,7 @@ def _toml_literal(value: Any) -> str:
     return f'"{escaped}"'
 
 
-_SECTION_HEADER = re.compile(r'^\s*\[\s*([^\]\s]+)\s*\]\s*(?:#.*)?$')
+_SECTION_HEADER = re.compile(r"^\s*\[\s*([^\]\s]+)\s*\]\s*(?:#.*)?$")
 
 
 def _rewrite_toml(text: str, section: str, field_name: str, value: Any) -> str:
@@ -188,15 +182,12 @@ def _rewrite_toml(text: str, section: str, field_name: str, value: Any) -> str:
         separator = "\n" if text != "" else ""
         return f"{text}{prefix}{separator}[{section}]\n{field_name} = {new_literal}\n"
 
-    field_re = re.compile(rf'^\s*{re.escape(field_name)}\s*=')
+    field_re = re.compile(rf"^\s*{re.escape(field_name)}\s*=")
     assert section_end is not None
     for i in range(section_start + 1, section_end):
         if field_re.match(lines[i]):
             ends_with_newline = lines[i].endswith("\n")
-            lines[i] = (
-                f"{field_name} = {new_literal}"
-                + ("\n" if ends_with_newline else "")
-            )
+            lines[i] = f"{field_name} = {new_literal}" + ("\n" if ends_with_newline else "")
             return "".join(lines)
 
     insert_at = section_end
@@ -229,8 +220,8 @@ def open_editor(home: Path | None = None) -> int:
 
 
 __all__ = [
-    "ConfigCLIError",
     "SECTION_TYPES",
+    "ConfigCLIError",
     "config_path",
     "get_value",
     "open_editor",

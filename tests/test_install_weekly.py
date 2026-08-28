@@ -18,6 +18,7 @@ Subprocess is monkeypatched: real ``launchctl`` is not invoked. The
 tmp_home fixture patches ``Path.home()`` so the plist lands inside
 ``tmp_path / Library / LaunchAgents``.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -41,7 +42,6 @@ from praxis.cli.install_weekly import (
     write_non_macos_snippet,
 )
 from praxis.config import ScheduleConfig
-
 
 # ---------------------------------------------------------------------------
 # build_plist -- pure function, no subprocess.
@@ -111,7 +111,7 @@ def fake_launchctl(monkeypatch):
     """
     calls: list[list[str]] = []
 
-    def _run(cmd, *args, **kwargs):  # noqa: ARG001
+    def _run(cmd, *args, **kwargs):
         calls.append(list(cmd))
         return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
@@ -190,7 +190,7 @@ def test_install_weekly_is_idempotent_on_re_run(tmp_home, fake_launchctl):
     assert second == first
     assert second.exists()
     # Re-run added an unload (because the plist already existed) and a load.
-    new_calls = fake_launchctl[len(initial_calls):]
+    new_calls = fake_launchctl[len(initial_calls) :]
     assert len(new_calls) == 2
     assert new_calls[0][1] == "unload"
     assert new_calls[1][1] == "load"
@@ -199,7 +199,7 @@ def test_install_weekly_is_idempotent_on_re_run(tmp_home, fake_launchctl):
 def test_install_weekly_returns_exit_4_when_launchctl_fails(tmp_home, monkeypatch):
     """A non-zero launchctl exit code surfaces as InstallWeeklyError + CLI exit 4."""
 
-    def _run(cmd, *args, **kwargs):  # noqa: ARG001
+    def _run(cmd, *args, **kwargs):
         return subprocess.CompletedProcess(
             cmd, returncode=1, stdout="", stderr="boom: not permitted"
         )
@@ -221,9 +221,7 @@ def test_cli_install_weekly_exits_0_on_success(tmp_home, capsys, monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(
         "praxis.cli.install_weekly.subprocess.run",
-        lambda cmd, *a, **kw: subprocess.CompletedProcess(
-            cmd, returncode=0, stdout="", stderr=""
-        ),
+        lambda cmd, *a, **kw: subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr=""),
     )
     code = main(["install-weekly"])
     out = capsys.readouterr().out
@@ -303,9 +301,7 @@ def test_uninstall_weekly_tolerates_launchctl_failure(tmp_home, monkeypatch):
     # half-detached job.
     monkeypatch.setattr(
         "praxis.cli.install_weekly.subprocess.run",
-        lambda cmd, *a, **kw: subprocess.CompletedProcess(
-            cmd, returncode=0, stdout="", stderr=""
-        ),
+        lambda cmd, *a, **kw: subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr=""),
     )
     installed = install_weekly_macos()
     assert installed.exists()
@@ -327,9 +323,7 @@ def test_cli_uninstall_weekly_exits_0_after_removal(tmp_home, capsys, monkeypatc
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(
         "praxis.cli.install_weekly.subprocess.run",
-        lambda cmd, *a, **kw: subprocess.CompletedProcess(
-            cmd, returncode=0, stdout="", stderr=""
-        ),
+        lambda cmd, *a, **kw: subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr=""),
     )
     installed = install_weekly_macos()
     assert installed.exists()
@@ -343,16 +337,12 @@ def test_cli_uninstall_weekly_exits_0_after_removal(tmp_home, capsys, monkeypatc
     assert not installed.exists()
 
 
-def test_cli_uninstall_weekly_exits_0_when_nothing_installed(
-    tmp_home, capsys, monkeypatch
-):
+def test_cli_uninstall_weekly_exits_0_when_nothing_installed(tmp_home, capsys, monkeypatch):
     """``praxis uninstall-weekly`` exits 0 even when there is no plist to remove."""
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(
         "praxis.cli.install_weekly.subprocess.run",
-        lambda cmd, *a, **kw: subprocess.CompletedProcess(
-            cmd, returncode=0, stdout="", stderr=""
-        ),
+        lambda cmd, *a, **kw: subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr=""),
     )
     assert not plist_path().exists()
 
@@ -480,16 +470,14 @@ def test_write_non_macos_snippet_unknown_unix_falls_back_to_systemd(tmp_home):
     assert "[Timer]" in content
 
 
-def test_cli_install_weekly_non_macos_prints_snippet_to_stdout(
-    tmp_home, capsys, monkeypatch
-):
+def test_cli_install_weekly_non_macos_prints_snippet_to_stdout(tmp_home, capsys, monkeypatch):
     """``praxis install-weekly`` on Linux prints the snippet to stdout and exits 0."""
     monkeypatch.setattr(sys, "platform", "linux")
 
     # Tripwire: this code path must not shell out to anything. If a
     # future refactor reintroduces a subprocess call here, the test
     # will fail loudly.
-    def _fail(*args, **kwargs):  # noqa: ARG001
+    def _fail(*args, **kwargs):
         raise AssertionError("install-weekly on non-macOS must not call subprocess.")
 
     monkeypatch.setattr("praxis.cli.install_weekly.subprocess.run", _fail)
@@ -506,16 +494,12 @@ def test_cli_install_weekly_non_macos_prints_snippet_to_stdout(
     assert "install-weekly-snippet.txt" in captured.out
 
 
-def test_cli_install_weekly_non_macos_saves_snippet_to_disk(
-    tmp_home, capsys, monkeypatch
-):
+def test_cli_install_weekly_non_macos_saves_snippet_to_disk(tmp_home, capsys, monkeypatch):
     """The snippet is persisted to ~/.praxis/install-weekly-snippet.txt."""
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(
         "praxis.cli.install_weekly.subprocess.run",
-        lambda *a, **kw: (_ for _ in ()).throw(
-            AssertionError("must not shell out on non-macOS")
-        ),
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not shell out on non-macOS")),
     )
 
     code = main(["install-weekly"])
@@ -529,9 +513,7 @@ def test_cli_install_weekly_non_macos_saves_snippet_to_disk(
     assert "OnCalendar=" in saved
 
 
-def test_cli_install_weekly_windows_saves_task_scheduler_xml(
-    tmp_home, capsys, monkeypatch
-):
+def test_cli_install_weekly_windows_saves_task_scheduler_xml(tmp_home, capsys, monkeypatch):
     """On Windows, the saved snippet is Task Scheduler XML (not systemd)."""
     monkeypatch.setattr(sys, "platform", "win32")
     # Real shutil.which calls into _winapi on a "win32" sys.platform,

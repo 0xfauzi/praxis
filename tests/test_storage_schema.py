@@ -5,6 +5,7 @@ with the right columns, CHECK constraints, and FK references. Migration
 behavior (drop daily_consolidations, schema_version=2, one-shot detection,
 backup) lives in US-002/003/004.
 """
+
 from __future__ import annotations
 
 import re
@@ -54,14 +55,13 @@ def test_moments_table_columns(tmp_home):
 
 def test_moments_severity_check_rejects_unknown_value(tmp_home):
     ProfileStore(home=resolve_home())
-    with _open_db() as conn:
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute(
-                "INSERT INTO moments (moment_id, session_stable_id, dim_key, turn_index, "
-                "quoted_excerpt, why_it_lost_score, suggested_alternative, severity, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("m1", "s1", "verification", 0, "q", "why", "alt", "catastrophic", "2026-05-26"),
-            )
+    with _open_db() as conn, pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO moments (moment_id, session_stable_id, dim_key, turn_index, "
+            "quoted_excerpt, why_it_lost_score, suggested_alternative, severity, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("m1", "s1", "verification", 0, "q", "why", "alt", "catastrophic", "2026-05-26"),
+        )
 
 
 def test_moments_severity_check_accepts_valid_values(tmp_home):
@@ -113,13 +113,12 @@ def test_tasks_table_columns(tmp_home):
 
 def test_tasks_label_source_check_rejects_unknown_value(tmp_home):
     ProfileStore(home=resolve_home())
-    with _open_db() as conn:
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute(
-                "INSERT INTO tasks (task_id, label, task_type, started_at, ended_at, "
-                "session_count, label_source) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("t1", "label", "debugging", "2026-05-26", "2026-05-26", 1, "manual"),
-            )
+    with _open_db() as conn, pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO tasks (task_id, label, task_type, started_at, ended_at, "
+            "session_count, label_source) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("t1", "label", "debugging", "2026-05-26", "2026-05-26", 1, "manual"),
+        )
 
 
 def test_tasks_label_source_check_accepts_llm_and_fallback(tmp_home):
@@ -145,8 +144,7 @@ def test_task_members_has_composite_pk_and_fk_to_tasks(tmp_home):
     assert cols["task_id"]["pk"] == 1
     assert cols["session_stable_id"]["pk"] == 2
     matching = [
-        f for f in fks
-        if f["table"] == "tasks" and f["from"] == "task_id" and f["to"] == "task_id"
+        f for f in fks if f["table"] == "tasks" and f["from"] == "task_id" and f["to"] == "task_id"
     ]
     assert len(matching) == 1, "task_members must have FK task_id -> tasks(task_id)"
     assert matching[0]["on_delete"] == "CASCADE"
@@ -196,10 +194,9 @@ def test_weekly_digests_table_columns_and_fk(tmp_home):
     assert cols["snapshot_json"]["notnull"] == 1
     assert cols["html_path"]["notnull"] == 0
     matching = [
-        f for f in fks
-        if f["table"] == "moments"
-        and f["from"] == "headline_moment_id"
-        and f["to"] == "moment_id"
+        f
+        for f in fks
+        if f["table"] == "moments" and f["from"] == "headline_moment_id" and f["to"] == "moment_id"
     ]
     assert len(matching) == 1, "weekly_digests must reference moments(moment_id)"
 
@@ -237,13 +234,12 @@ def test_follow_ups_table_columns(tmp_home):
 
 def test_follow_ups_outcome_check_rejects_unknown_value(tmp_home):
     ProfileStore(home=resolve_home())
-    with _open_db() as conn:
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute(
-                "INSERT INTO follow_ups (week_iso, dim_key, commitment_text, target_metric, "
-                "baseline_value, outcome) VALUES (?, ?, ?, ?, ?, ?)",
-                ("2026-W21", "verification", "ask before running", "verification_rate", 5.0, "tbd"),
-            )
+    with _open_db() as conn, pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO follow_ups (week_iso, dim_key, commitment_text, target_metric, "
+            "baseline_value, outcome) VALUES (?, ?, ?, ?, ?, ?)",
+            ("2026-W21", "verification", "ask before running", "verification_rate", 5.0, "tbd"),
+        )
 
 
 def test_follow_ups_outcome_check_accepts_all_four_values(tmp_home):
@@ -305,10 +301,9 @@ def test_follow_ups_has_superseded_by_column_with_self_fk(tmp_home):
     assert cols["superseded_by"]["type"] == "INTEGER"
     assert cols["superseded_by"]["notnull"] == 0
     matching = [
-        f for f in fks
-        if f["table"] == "follow_ups"
-        and f["from"] == "superseded_by"
-        and f["to"] == "id"
+        f
+        for f in fks
+        if f["table"] == "follow_ups" and f["from"] == "superseded_by" and f["to"] == "id"
     ]
     assert len(matching) == 1, "superseded_by must FK-reference follow_ups(id)"
 
@@ -352,8 +347,7 @@ def test_second_active_row_succeeds_after_first_is_superseded(tmp_home):
         new_id = _insert_active_pending(conn, "2026-W21", commitment="replacement")
         conn.commit()
         rows = conn.execute(
-            "SELECT id, outcome, superseded_by FROM follow_ups "
-            "WHERE week_iso = ? ORDER BY id ASC",
+            "SELECT id, outcome, superseded_by FROM follow_ups WHERE week_iso = ? ORDER BY id ASC",
             ("2026-W21",),
         ).fetchall()
     assert [r["id"] for r in rows] == [first_id, new_id]
@@ -461,8 +455,15 @@ def test_cold_open_of_v0_2_db_with_legacy_follow_ups_upgrades_cleanly(tmp_home):
         )
         conn.execute(
             "INSERT INTO follow_ups VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("2026-W20", "verification", "old commitment",
-             "verification_rate", 0.42, None, "pending"),
+            (
+                "2026-W20",
+                "verification",
+                "old commitment",
+                "verification_rate",
+                0.42,
+                None,
+                "pending",
+            ),
         )
         conn.commit()
     finally:
@@ -471,13 +472,13 @@ def test_cold_open_of_v0_2_db_with_legacy_follow_ups_upgrades_cleanly(tmp_home):
     # First open must NOT raise; tables and partial index must end up at v4.
     ProfileStore(home=resolve_home())
     with _open_db() as conn:
-        cols = {r["name"] for r in conn.execute(
-            "PRAGMA table_info(follow_ups)"
-        ).fetchall()}
-        indexes = {r["name"] for r in conn.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='index' AND tbl_name='follow_ups'"
-        ).fetchall()}
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(follow_ups)").fetchall()}
+        indexes = {
+            r["name"]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='follow_ups'"
+            ).fetchall()
+        }
         seeded = conn.execute(
             "SELECT week_iso, dim_key, commitment_text, target_metric, "
             "baseline_value, measured_value, outcome, "
@@ -487,8 +488,9 @@ def test_cold_open_of_v0_2_db_with_legacy_follow_ups_upgrades_cleanly(tmp_home):
         ).fetchone()
 
     # v4 columns added by _ensure_follow_ups_v4 / migration 001
-    assert {"id", "week_iso", "user_chosen", "display_text",
-            "superseded_by"} <= cols, f"missing v4 cols, got {cols}"
+    assert {"id", "week_iso", "user_chosen", "display_text", "superseded_by"} <= cols, (
+        f"missing v4 cols, got {cols}"
+    )
     # Partial-unique index must exist (this is what the SCHEMA inline
     # version crashed on against the legacy table).
     assert "idx_follow_ups_one_active_per_week" in indexes
@@ -561,8 +563,7 @@ def test_moments_coach_line_column_added_on_open(tmp_home):
     ProfileStore(home=resolve_home())
     with _open_db() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(moments)").fetchall()}
-        row = conn.execute(
-            "SELECT coach_line FROM moments WHERE moment_id='m1'").fetchone()
+        row = conn.execute("SELECT coach_line FROM moments WHERE moment_id='m1'").fetchone()
     assert "coach_line" in cols, "coach_line column must be added on open"
     assert row["coach_line"] is None, "existing rows keep coach_line NULL"
 
@@ -640,8 +641,18 @@ def test_v4_columns_with_narrow_outcome_check_is_widened_on_open(tmp_home):
             "(id, week_iso, dim_key, commitment_text, target_metric, "
             " baseline_value, measured_value, outcome, user_chosen, display_text) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (7, "2026-W22", "verification", "run the tests",
-             "verification_rate", 0.5, None, "pending", 1, "run the tests"),
+            (
+                7,
+                "2026-W22",
+                "verification",
+                "run the tests",
+                "verification_rate",
+                0.5,
+                None,
+                "pending",
+                1,
+                "run the tests",
+            ),
         )
         conn.commit()
     finally:
@@ -651,12 +662,10 @@ def test_v4_columns_with_narrow_outcome_check_is_widened_on_open(tmp_home):
     store = ProfileStore(home=resolve_home())
     with _open_db() as conn:
         table_sql = conn.execute(
-            "SELECT sql FROM sqlite_master "
-            "WHERE type='table' AND name='follow_ups'"
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='follow_ups'"
         ).fetchone()["sql"]
         row = conn.execute(
-            "SELECT id, outcome, display_text FROM follow_ups "
-            "WHERE week_iso='2026-W22'"
+            "SELECT id, outcome, display_text FROM follow_ups WHERE week_iso='2026-W22'"
         ).fetchone()
 
     assert "superseded" in table_sql, "outcome CHECK must now allow 'superseded'"
@@ -726,8 +735,15 @@ def test_existing_follow_ups_rows_preserved_through_migration(tmp_home):
         )
         conn.execute(
             "INSERT INTO follow_ups VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("2026-W14", "verification", "old commitment", "verification_rate",
-             0.4, 0.7, "improved"),
+            (
+                "2026-W14",
+                "verification",
+                "old commitment",
+                "verification_rate",
+                0.4,
+                0.7,
+                "improved",
+            ),
         )
         # Remove the schema_migrations row so the runner re-applies US-002.
         conn.execute(
@@ -903,10 +919,20 @@ def test_session_scores_schema_unchanged_across_v0_2_migration(tmp_home):
     with _open_db() as conn:
         cols = _table_columns(conn, "session_scores")
     assert set(cols.keys()) == {
-        "stable_id", "provider", "started_at", "scored_at", "overall",
-        "dimension_scores_json", "judge_result_json",
-        "features_json", "source_path", "judge_model", "judge_pass",
-        "signals_json", "aug_auto_classification", "aug_auto_confidence",
+        "stable_id",
+        "provider",
+        "started_at",
+        "scored_at",
+        "overall",
+        "dimension_scores_json",
+        "judge_result_json",
+        "features_json",
+        "source_path",
+        "judge_model",
+        "judge_pass",
+        "signals_json",
+        "aug_auto_classification",
+        "aug_auto_confidence",
     }
     # Composite PK on (stable_id, judge_pass): pk indices reflect column order.
     assert cols["stable_id"]["pk"] == 1
@@ -924,8 +950,7 @@ def test_run_log_rows_preserved_across_v0_2_migration(tmp_home):
         rows = [
             dict(r)
             for r in conn.execute(
-                "SELECT * FROM run_log WHERE kind != 'schema_version' "
-                "ORDER BY run_id ASC"
+                "SELECT * FROM run_log WHERE kind != 'schema_version' ORDER BY run_id ASC"
             ).fetchall()
         ]
     assert len(rows) == len(seeded["run_log"])
@@ -939,7 +964,12 @@ def test_run_log_schema_unchanged_across_v0_2_migration(tmp_home):
     with _open_db() as conn:
         cols = _table_columns(conn, "run_log")
     assert set(cols.keys()) == {
-        "run_id", "run_at", "kind", "sessions_seen", "sessions_new", "notes",
+        "run_id",
+        "run_at",
+        "kind",
+        "sessions_seen",
+        "sessions_new",
+        "notes",
     }
     assert cols["run_id"]["pk"] == 1
 
@@ -1040,9 +1070,7 @@ def test_marker_absent_on_v0_1_db_triggers_migration(tmp_home):
     db_path = tmp_home / ".praxis" / "profile.db"
     conn = sqlite3.connect(db_path)
     try:
-        rows_before = conn.execute(
-            "SELECT 1 FROM run_log WHERE kind = 'schema_version'"
-        ).fetchall()
+        rows_before = conn.execute("SELECT 1 FROM run_log WHERE kind = 'schema_version'").fetchall()
     finally:
         conn.close()
     assert rows_before == []
@@ -1077,9 +1105,7 @@ def test_backup_created_before_v0_1_to_v0_2_migration(tmp_home):
     try:
         tables = {
             r[0]
-            for r in bconn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            ).fetchall()
+            for r in bconn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
         }
         consolidation_rows = bconn.execute(
             "SELECT consolidation_date FROM daily_consolidations"
@@ -1096,9 +1122,9 @@ def test_backup_filename_is_timestamped(tmp_home):
     backups = _list_backups(tmp_home)
     assert len(backups) == 1
     # Format: profile.db.backup-YYYYMMDDTHHMMSS<microseconds>Z
-    assert re.fullmatch(
-        r"profile\.db\.backup-\d{8}T\d{6}\d+Z", backups[0].name
-    ), f"unexpected backup name: {backups[0].name}"
+    assert re.fullmatch(r"profile\.db\.backup-\d{8}T\d{6}\d+Z", backups[0].name), (
+        f"unexpected backup name: {backups[0].name}"
+    )
 
 
 def test_no_backup_when_marker_already_present(tmp_home):
@@ -1170,9 +1196,7 @@ def test_db_restored_from_backup_on_migration_failure(tmp_home, monkeypatch):
     try:
         tables = {
             r[0]
-            for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            ).fetchall()
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
         }
         consolidations = conn.execute(
             "SELECT consolidation_date FROM daily_consolidations"
@@ -1312,14 +1336,11 @@ def test_session_reflections_table_columns(tmp_home):
 def test_session_reflections_has_fk_to_follow_ups(tmp_home):
     ProfileStore(home=resolve_home())
     with _open_db() as conn:
-        fks = conn.execute(
-            "PRAGMA foreign_key_list(session_reflections)"
-        ).fetchall()
+        fks = conn.execute("PRAGMA foreign_key_list(session_reflections)").fetchall()
     matching = [
-        f for f in fks
-        if f["table"] == "follow_ups"
-        and f["from"] == "follow_up_id"
-        and f["to"] == "id"
+        f
+        for f in fks
+        if f["table"] == "follow_ups" and f["from"] == "follow_up_id" and f["to"] == "id"
     ]
     assert len(matching) == 1, "session_reflections must FK-reference follow_ups(id)"
 
@@ -1362,9 +1383,7 @@ def test_session_reflections_self_report_check_accepts_all_four_values(tmp_home)
                 (f"s{i}", fid, val, None, "2026-05-26T10:00:00+00:00"),
             )
         conn.commit()
-        count = conn.execute(
-            "SELECT COUNT(*) AS c FROM session_reflections"
-        ).fetchone()["c"]
+        count = conn.execute("SELECT COUNT(*) AS c FROM session_reflections").fetchone()["c"]
     assert count == 4
 
 

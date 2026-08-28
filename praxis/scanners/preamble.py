@@ -22,10 +22,10 @@ a question) is NOT marked tool_injected here; the regex extractors
 will see the real prompt content too. We only flag turns where the
 entire visible content is synthetic.
 """
+
 from __future__ import annotations
 
 import re
-
 
 # Codex injects the project's AGENTS.md (and the CLI's own
 # ``<INSTRUCTIONS>`` block) into the first user turn of every session.

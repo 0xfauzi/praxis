@@ -10,11 +10,13 @@ two renderers (terminal + HTML) branch on identity rather than falling
 back to an empty rollup, so the masthead's commitment block is omitted
 cleanly rather than rendered with zero/empty fields.
 """
+
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from praxis.follow_up import FollowUp
@@ -67,9 +69,7 @@ class CommitmentRollup:
     gap_prose: str | None = None
 
 
-def fetch_self_report_tally(
-    store: "ProfileStore | None", week_iso: str
-) -> dict[str, int]:
+def fetch_self_report_tally(store: ProfileStore | None, week_iso: str) -> dict[str, int]:
     """Aggregate self_report counts for one ISO week's commitment.
 
     Joins `session_reflections` to `follow_ups` via `follow_up_id` and
@@ -111,8 +111,8 @@ def fetch_self_report_tally(
 
 def build_commitment_rollup(
     *,
-    follow_up: "FollowUp | None",
-    snapshot: "ProfileSnapshot",
+    follow_up: FollowUp | None,
+    snapshot: ProfileSnapshot,
     prior_week_means: Mapping[str, float] | None,
     sessions_this_week: int,
     sessions_prior_week: int,
@@ -130,9 +130,7 @@ def build_commitment_rollup(
         return None
     dim_after = {key: float(value) for key, value in snapshot.dimension_means.items()}
     dim_before: dict[str, float] = (
-        {key: float(value) for key, value in prior_week_means.items()}
-        if prior_week_means
-        else {}
+        {key: float(value) for key, value in prior_week_means.items()} if prior_week_means else {}
     )
     if self_report_tally is None:
         tally = _zero_tally()

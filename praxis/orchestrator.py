@@ -8,6 +8,7 @@ The continuous part comes from being scheduled (cron / launchd / systemd
 timer / Task Scheduler), with deduplication via session stable IDs so
 re-runs are idempotent and cheap.
 """
+
 from __future__ import annotations
 
 import json
@@ -16,7 +17,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _parse_started_at(value: str) -> datetime:
@@ -38,16 +39,23 @@ def _parse_started_at(value: str) -> datetime:
     """
     dt = datetime.fromisoformat(value)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt
+
+
+from pathlib import Path
 
 from praxis.behavior import (
     BehavioralSignals,
     TrajectoryAssessment,
     TrajectoryLabel,
-    assess as assess_trajectory,
-    extract as extract_signals,
     iso_week_tag,
+)
+from praxis.behavior import (
+    assess as assess_trajectory,
+)
+from praxis.behavior import (
+    extract as extract_signals,
 )
 from praxis.behavior.aug_auto import (
     AugAutoError,
@@ -56,15 +64,14 @@ from praxis.behavior.aug_auto import (
     AugAutoUnavailableError,
     classify_session,
 )
+from praxis.models import Moment as JudgeMoment
+from praxis.models import Session
+from praxis.models_advisor import ModelUsageProfile, build_profiles
 from praxis.reports.commitment_rollup import (
     build_commitment_rollup,
     fetch_self_report_tally,
 )
 from praxis.reports.gap_judge import apply_gap_prose
-from pathlib import Path
-
-from praxis.models import Moment as JudgeMoment, Session
-from praxis.models_advisor import ModelUsageProfile, build_profiles
 from praxis.scanners import ALL_SCANNERS
 from praxis.scoring.aggregate import (
     ProfileSnapshot,
@@ -78,16 +85,16 @@ from praxis.scoring.cost_ledger import estimate_session_cost_usd
 from praxis.scoring.judge import JudgeResult, verify_moment_substrings
 from praxis.scoring.moment_selector import (
     Moment as SelectorMoment,
+)
+from praxis.scoring.moment_selector import (
     MomentCandidate,
     MomentSelection,
     select_moments_with_fallback,
 )
 from praxis.storage.profile_store import ProfileStore
 
-
 NO_API_KEY_MESSAGE = (
-    "No API key configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY "
-    "in your environment and retry."
+    "No API key configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY in your environment and retry."
 )
 
 
@@ -170,6 +177,7 @@ class RunSummary:
 def _task_id_for(task) -> str:
     """sha256(sorted session ids)[:16] - matches the spec section 14 contract."""
     import hashlib
+
     sids = sorted(task.session_ids)
     return hashlib.sha256("|".join(sids).encode("utf-8")).hexdigest()[:16]
 
@@ -177,8 +185,11 @@ def _task_id_for(task) -> str:
 def _task_project_hint(task, sessions) -> str | None:
     """Pick the most-common project_hint across the task's sessions."""
     by_id = {s.stable_id: s for s in sessions}
-    hints = [by_id[sid].project_hint for sid in task.session_ids
-             if sid in by_id and by_id[sid].project_hint]
+    hints = [
+        by_id[sid].project_hint
+        for sid in task.session_ids
+        if sid in by_id and by_id[sid].project_hint
+    ]
     if not hints:
         return None
     # Most common (small lists, no need for Counter)
@@ -209,7 +220,7 @@ class _SummaryView:
     cost_total_usd: float | None
     cost_baseline_usd: float | None
     last_week_means: dict[str, float] | None
-    commitment_rollup: "CommitmentRollup | None" = None
+    commitment_rollup: CommitmentRollup | None = None
 
 
 def _gather_sessions(since_days: int | None = None) -> list[Session]:
@@ -222,10 +233,11 @@ def _gather_sessions(since_days: int | None = None) -> list[Session]:
     for scanner_cls in ALL_SCANNERS:
         scanner = scanner_cls()
         try:
-            for session in scanner.scan(since=since_ts):
-                sessions.append(session)
+            sessions.extend(scanner.scan(since=since_ts))
         except Exception as exc:  # noqa: BLE001
-            print(f"[orchestrator] {scanner.provider_name} scanner failed: {exc!r}", file=sys.stderr)
+            print(
+                f"[orchestrator] {scanner.provider_name} scanner failed: {exc!r}", file=sys.stderr
+            )
     return sessions
 
 
@@ -272,12 +284,8 @@ def run(
     # pass-1 prompt - pass 2 always re-judges fresh.
     rolling = store.recent_pass1_confidence(weeks=4)
     rolling_total = rolling["low"] + rolling["medium"] + rolling["high"]
-    sharpen_calibration = (
-        rolling_total > 0 and rolling["high"] / rolling_total > 0.9
-    )
-    stricter_low = (
-        rolling_total > 0 and rolling["low"] / rolling_total > 0.7
-    )
+    sharpen_calibration = rolling_total > 0 and rolling["high"] / rolling_total > 0.9
+    stricter_low = rolling_total > 0 and rolling["low"] / rolling_total > 0.7
     calibration_notice: str | None = (
         "calibration was off; re-tuned" if sharpen_calibration else None
     )
@@ -330,8 +338,7 @@ def run(
                 # Moments come from the winning judgment (pass 2 when escalation
                 # happened, pass 1 otherwise). Only one set of moments per
                 # session is persisted to avoid duplicate coaching items.
-                store.save_moments(
-                    session.stable_id, winning_score.judge_result.moments)
+                store.save_moments(session.stable_id, winning_score.judge_result.moments)
             scored_count += 1
         except Exception as exc:  # noqa: BLE001 -- one bad session must not abort the batch
             skipped_count += 1
@@ -355,9 +362,7 @@ def run(
     # weekly digest (see run_weekly). The legacy `run()` keeps the
     # snapshot + coaching computation so `praxis scan` still produces
     # a one-line summary, but no longer writes a daily row.
-    rows = store.load_session_scores(
-        since=_utcnow() - timedelta(days=since_days or 30)
-    )
+    rows = store.load_session_scores(since=_utcnow() - timedelta(days=since_days or 30))
     snapshot = _snapshot_from_rows(rows)
     coaching = generate_coaching(snapshot)
     consolidated_for = None
@@ -366,9 +371,9 @@ def run(
     # objects (not just persisted score rows), so we extract signals from
     # the freshly-scanned sessions in this run's window.
     sessions_in_window = [
-        s for s in sessions
-        if (_utcnow() - timedelta(days=since_days or 30)).timestamp()
-        <= s.started_at.timestamp()
+        s
+        for s in sessions
+        if (_utcnow() - timedelta(days=since_days or 30)).timestamp() <= s.started_at.timestamp()
     ]
     sessions_with_signals: list[tuple[Session, BehavioralSignals]] = [
         (s, extract_signals(s)) for s in sessions_in_window
@@ -389,8 +394,8 @@ def run(
         sessions_seen=len(sessions),
         sessions_new=len(new_sessions),
         notes=f"scored={scored_count}, skipped={skipped_count}, "
-              f"trajectory={trajectory.label.value}, "
-              f"models={len(model_profiles)}",
+        f"trajectory={trajectory.label.value}, "
+        f"models={len(model_profiles)}",
     )
 
     return RunSummary(
@@ -492,7 +497,7 @@ class WeeklyRunSummary:
     # commitment's status for the masthead. None when no follow-up
     # exists for the rendered week so the masthead's commitment block
     # is omitted rather than rendered with empty data.
-    commitment_rollup: "CommitmentRollup | None" = None
+    commitment_rollup: CommitmentRollup | None = None
 
 
 def _step_scan(since_days: int) -> list[Session]:
@@ -559,21 +564,17 @@ def _classify_and_persist(
         return
     except AugAutoParseError as exc:
         print(
-            f"[orchestrator] aug_auto classifier parse error "
-            f"for {session.stable_id}: {exc}",
+            f"[orchestrator] aug_auto classifier parse error for {session.stable_id}: {exc}",
             file=sys.stderr,
         )
         return
     except AugAutoError as exc:
         print(
-            f"[orchestrator] aug_auto classifier error "
-            f"for {session.stable_id}: {exc!r}",
+            f"[orchestrator] aug_auto classifier error for {session.stable_id}: {exc!r}",
             file=sys.stderr,
         )
         return
-    store.save_session_aug_auto(
-        session.stable_id, result.classification, result.confidence
-    )
+    store.save_session_aug_auto(session.stable_id, result.classification, result.confidence)
 
 
 def _step_pass1(
@@ -659,6 +660,7 @@ def _step_pass1(
         return Pass1Output(results=results, low_confidence_session_ids=low_confidence)
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
     # 5 workers matches PASS1_BATCH_SIZE = 5 from the spec. Each thread
     # holds one in-flight OpenAI/Anthropic HTTP request; the SDK's own
     # connection pool handles concurrency safely.
@@ -668,6 +670,7 @@ def _step_pass1(
     # weekly-bucketed trajectory model (spec §7).
     signals_by_id = {s.stable_id: extract_signals(s) for s in to_score}
     from dataclasses import asdict as _dc_asdict
+
     # Mutable one-element list so the per-session classifier helper can
     # flip the "already logged?" gate without needing a nonlocal.
     aug_auto_unavailable_logged: list[bool] = [False]
@@ -699,9 +702,7 @@ def _step_pass1(
     return Pass1Output(results=results, low_confidence_session_ids=low_confidence)
 
 
-def _step_pass2(
-    sessions: list[Session], pass1: Pass1Output
-) -> dict[str, JudgeResult]:
+def _step_pass2(sessions: list[Session], pass1: Pass1Output) -> dict[str, JudgeResult]:
     """Step 4: frontier judge re-scores low-confidence sessions only.
 
     Per spec 9.1 the frontier judge sees nothing of pass 1's output; only
@@ -740,7 +741,9 @@ def _step_validate_moments(
     by_id = {s.stable_id: s for s in sessions}
     survivors: list[JudgeMoment] = []
     from dataclasses import replace as _replace
+
     from praxis.models import compute_moment_id
+
     for sid, judge in final_results.items():
         session = by_id.get(sid)
         if session is None:
@@ -751,11 +754,13 @@ def _step_validate_moments(
         # them here so downstream consumers (selector, save_moments,
         # follow-up engine) have stable identifiers to work with.
         for m in verified:
-            survivors.append(_replace(
-                m,
-                session_stable_id=sid,
-                moment_id=compute_moment_id(sid, m.dim_key, m.turn_index),
-            ))
+            survivors.append(
+                _replace(
+                    m,
+                    session_stable_id=sid,
+                    moment_id=compute_moment_id(sid, m.dim_key, m.turn_index),
+                )
+            )
     return survivors
 
 
@@ -825,9 +830,7 @@ def _step_select_moments(
             minutes_impact_estimate=jm.minutes_impact_estimate,
         )
         # Count how many prior weeks had a headline with the same alt text.
-        recurrence_count = sum(
-            1 for alt in past_alts if alt == jm.suggested_alternative
-        )
+        recurrence_count = sum(1 for alt in past_alts if alt == jm.suggested_alternative)
         candidates.append(
             MomentCandidate(
                 moment=selector_moment,
@@ -855,7 +858,7 @@ def _step_follow_up(
     week_iso: str,
     verification_rate: float = 0.0,
     delegation_rate: float = 0.0,
-) -> "FollowUp | None":
+) -> FollowUp | None:
     """Step 7: build this week's commitment from the headline moment.
 
     `verification_rate` and `delegation_rate` capture this week's actual
@@ -869,11 +872,7 @@ def _step_follow_up(
     from praxis.follow_up import FollowUp, HeadlineMoment, build_follow_up  # noqa: F401
 
     headline = next(
-        (
-            m
-            for m in moments
-            if m.moment_id == selection.headline_moment_id
-        ),
+        (m for m in moments if m.moment_id == selection.headline_moment_id),
         None,
     )
     if headline is None:
@@ -917,12 +916,12 @@ def assess_trajectory_weekly(
     signals_json migration). That preserves a useful headline for
     week one until the weekly model has 4+ buckets.
     """
+    from praxis.behavior.labels import label_trajectory_with_hysteresis
+    from praxis.behavior.trajectory import assess_trajectory_heuristic
     from praxis.behavior.weekly import (
         WeeklySessionInput,
         bucket_sessions_by_iso_week,
     )
-    from praxis.behavior.labels import label_trajectory_with_hysteresis
-    from praxis.behavior.trajectory import assess_trajectory_heuristic
 
     # Read 90-day window
     since_dt = _utcnow() - timedelta(days=90)
@@ -936,13 +935,15 @@ def assess_trajectory_weekly(
             sig = json.loads(raw_signals)
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
-        inputs.append(WeeklySessionInput(
-            started_at=_parse_started_at(row["started_at"]),
-            engagement_rate=float(sig.get("engagement_rate", 0.0)),
-            delegation_rate=float(sig.get("delegation_rate", 0.0)),
-            independence_rate=float(sig.get("independence_rate", 0.0)),
-            dim_scores=row.get("dimension_scores") or {},
-        ))
+        inputs.append(
+            WeeklySessionInput(
+                started_at=_parse_started_at(row["started_at"]),
+                engagement_rate=float(sig.get("engagement_rate", 0.0)),
+                delegation_rate=float(sig.get("delegation_rate", 0.0)),
+                independence_rate=float(sig.get("independence_rate", 0.0)),
+                dim_scores=row.get("dimension_scores") or {},
+            )
+        )
 
     # Always run legacy heuristic for engagement/delegation slope + headline.
     legacy = assess_trajectory_heuristic(sessions_with_signals)
@@ -957,6 +958,7 @@ def assess_trajectory_weekly(
     if prior_digest:
         prior_label_str = prior_digest.get("trajectory_label")
     from praxis.behavior.labels import WeeklyTrajectoryLabel as _WTL
+
     prior_wlabel = None
     if prior_label_str:
         try:
@@ -986,6 +988,7 @@ def _compute_week_rates(sessions: list[Session]) -> tuple[float, float]:
     feed the FollowUp baseline so we can measure improvement next week.
     """
     from praxis.scoring.features import extract as extract_features
+
     if not sessions:
         return 0.0, 0.0
     total_user_turns = 0
@@ -999,12 +1002,8 @@ def _compute_week_rates(sessions: list[Session]) -> tuple[float, float]:
             total_verify_hits += f.marker_hit_counts.get("verification", 0)
         sig = extract_signals(s)
         delegation_rates.append(sig.delegation_rate)
-    verification_rate = (
-        total_verify_hits / total_user_turns if total_user_turns else 0.0
-    )
-    delegation_rate = (
-        sum(delegation_rates) / len(delegation_rates) if delegation_rates else 0.0
-    )
+    verification_rate = total_verify_hits / total_user_turns if total_user_turns else 0.0
+    delegation_rate = sum(delegation_rates) / len(delegation_rates) if delegation_rates else 0.0
     return verification_rate, delegation_rate
 
 
@@ -1020,13 +1019,10 @@ def _count_sessions_in_iso_week(store: ProfileStore, week_iso: str) -> int:
         week_start, week_end = parse_iso_week(week_iso)
     except InvalidWeekError:
         return 0
-    since_dt = datetime.combine(week_start, datetime.min.time(), tzinfo=timezone.utc)
-    until_dt = datetime.combine(week_end, datetime.min.time(), tzinfo=timezone.utc)
+    since_dt = datetime.combine(week_start, datetime.min.time(), tzinfo=UTC)
+    until_dt = datetime.combine(week_end, datetime.min.time(), tzinfo=UTC)
     rows = store.load_session_scores(since=since_dt)
-    return sum(
-        1 for row in rows
-        if _parse_started_at(row["started_at"]) < until_dt
-    )
+    return sum(1 for row in rows if _parse_started_at(row["started_at"]) < until_dt)
 
 
 def _close_prior_follow_up(
@@ -1072,7 +1068,7 @@ def _step_render(
     judge_results: dict[str, JudgeResult] | None = None,
     moments: list[JudgeMoment] | None = None,
     last_week_means: dict[str, float] | None = None,
-    commitment_rollup: "CommitmentRollup | None" = None,
+    commitment_rollup: CommitmentRollup | None = None,
 ) -> tuple[str, str]:
     """Step 8: produce HTML + terminal renderings of the digest.
 
@@ -1170,13 +1166,10 @@ def run_weekly(
         week_start, week_end = parse_iso_week(week_iso)
         if store is None:
             store = ProfileStore()
-        since_dt = datetime.combine(week_start, datetime.min.time(), tzinfo=timezone.utc)
-        until_dt = datetime.combine(week_end, datetime.min.time(), tzinfo=timezone.utc)
+        since_dt = datetime.combine(week_start, datetime.min.time(), tzinfo=UTC)
+        until_dt = datetime.combine(week_end, datetime.min.time(), tzinfo=UTC)
         all_rows = store.load_session_scores(since=since_dt)
-        rows = [
-            row for row in all_rows
-            if _parse_started_at(row["started_at"]) < until_dt
-        ]
+        rows = [row for row in all_rows if _parse_started_at(row["started_at"]) < until_dt]
         snapshot = _snapshot_from_rows(rows)
         past_sessions = _reconstruct_sessions_from_score_rows(rows)
         past_follow_up = store.load_follow_up(week_iso)
@@ -1189,20 +1182,23 @@ def run_weekly(
             hmid = past_digest["headline_moment_id"]
             m_row = store.load_moment_by_id(hmid)
             if m_row is not None:
-                past_moments.append(JudgeMoment(
-                    dim_key=m_row["dim_key"],
-                    turn_index=int(m_row["turn_index"]),
-                    quoted_excerpt=m_row["quoted_excerpt"],
-                    why_it_lost_score=m_row["why_it_lost_score"],
-                    suggested_alternative=m_row["suggested_alternative"],
-                    severity=m_row["severity"],
-                    moment_id=m_row["moment_id"],
-                    session_stable_id=m_row["session_stable_id"],
-                    created_at=datetime.fromisoformat(m_row["created_at"])
-                        if m_row.get("created_at") else None,
-                    dollar_impact_estimate=m_row.get("dollar_impact_estimate"),
-                    minutes_impact_estimate=m_row.get("minutes_impact_estimate"),
-                ))
+                past_moments.append(
+                    JudgeMoment(
+                        dim_key=m_row["dim_key"],
+                        turn_index=int(m_row["turn_index"]),
+                        quoted_excerpt=m_row["quoted_excerpt"],
+                        why_it_lost_score=m_row["why_it_lost_score"],
+                        suggested_alternative=m_row["suggested_alternative"],
+                        severity=m_row["severity"],
+                        moment_id=m_row["moment_id"],
+                        session_stable_id=m_row["session_stable_id"],
+                        created_at=datetime.fromisoformat(m_row["created_at"])
+                        if m_row.get("created_at")
+                        else None,
+                        dollar_impact_estimate=m_row.get("dollar_impact_estimate"),
+                        minutes_impact_estimate=m_row.get("minutes_impact_estimate"),
+                    )
+                )
                 past_selection = MomentSelection(
                     headline_moment_id=hmid,
                     headline_reason="",
@@ -1268,7 +1264,11 @@ def run_weekly(
         past_rollup = apply_gap_prose(past_rollup)
 
         rendered_html, rendered_terminal = _step_render(
-            past_sessions, past_tasks, past_selection, past_follow_up, snapshot,
+            past_sessions,
+            past_tasks,
+            past_selection,
+            past_follow_up,
+            snapshot,
             dry_run=True,
             week_iso=week_iso,
             trajectory=past_trajectory,
@@ -1306,9 +1306,7 @@ def run_weekly(
     tasks = _step_cluster(sessions)
     steps.append("cluster")
 
-    pass1 = _step_pass1(
-        sessions, tasks, frontier_only=frontier_only, max_new=max_new
-    )
+    pass1 = _step_pass1(sessions, tasks, frontier_only=frontier_only, max_new=max_new)
     steps.append("pass1")
 
     pass2_results = _step_pass2(sessions, pass1)
@@ -1337,18 +1335,15 @@ def run_weekly(
         _prior_store = ProfileStore()
     elif _prior_store is None and dry_run:
         from praxis.storage.profile_store import resolve_home as _rh
+
         if (_rh() / "profile.db").exists():
             _prior_store = ProfileStore()
     if _prior_store is not None:
         try:
-            recurrence_alts = _recent_headline_alternatives(
-                _prior_store, iso_week_tag(_utcnow())
-            )
+            recurrence_alts = _recent_headline_alternatives(_prior_store, iso_week_tag(_utcnow()))
         except Exception:  # noqa: BLE001
             recurrence_alts = []
-    selection = _step_select_moments(
-        sessions, moments, recurrence_alternatives=recurrence_alts
-    )
+    selection = _step_select_moments(sessions, moments, recurrence_alternatives=recurrence_alts)
     steps.append("select")
 
     final_results: dict[str, JudgeResult] = dict(pass1.results)
@@ -1365,14 +1360,15 @@ def run_weekly(
     # the file, so dry-run must check existence first.
     current_week_iso = iso_week_tag(_utcnow())
     cw_start, cw_end = parse_iso_week(current_week_iso)
-    cw_since_dt = datetime.combine(cw_start, datetime.min.time(), tzinfo=timezone.utc)
-    cw_until_dt = datetime.combine(cw_end, datetime.min.time(), tzinfo=timezone.utc)
+    cw_since_dt = datetime.combine(cw_start, datetime.min.time(), tzinfo=UTC)
+    cw_until_dt = datetime.combine(cw_end, datetime.min.time(), tzinfo=UTC)
     snapshot_store: ProfileStore | None
     if dry_run:
         if store is not None:
             snapshot_store = store
         else:
             from praxis.storage.profile_store import resolve_home
+
             if (resolve_home() / "profile.db").exists():
                 snapshot_store = ProfileStore()
             else:
@@ -1381,10 +1377,7 @@ def run_weekly(
         snapshot_store = store if store is not None else ProfileStore()
     if snapshot_store is not None:
         cw_rows_all = snapshot_store.load_session_scores(since=cw_since_dt)
-        cw_rows = [
-            row for row in cw_rows_all
-            if _parse_started_at(row["started_at"]) < cw_until_dt
-        ]
+        cw_rows = [row for row in cw_rows_all if _parse_started_at(row["started_at"]) < cw_until_dt]
         snapshot = _snapshot_from_rows(cw_rows) if cw_rows else ProfileSnapshot.from_scores([])
     else:
         snapshot = ProfileSnapshot.from_scores([])
@@ -1392,7 +1385,10 @@ def run_weekly(
     week_iso = current_week_iso
     verification_rate, delegation_rate = _compute_week_rates(sessions)
     follow_up = _step_follow_up(
-        selection, moments, snapshot, week_iso,
+        selection,
+        moments,
+        snapshot,
+        week_iso,
         verification_rate=verification_rate,
         delegation_rate=delegation_rate,
     )
@@ -1409,9 +1405,7 @@ def run_weekly(
     elif snapshot_store is not None:
         _traj_store = snapshot_store
     if _traj_store is not None:
-        trajectory = assess_trajectory_weekly(
-            _traj_store, week_iso, sessions_with_signals
-        )
+        trajectory = assess_trajectory_weekly(_traj_store, week_iso, sessions_with_signals)
     else:
         trajectory = assess_trajectory(sessions_with_signals)
 
@@ -1449,10 +1443,7 @@ def run_weekly(
             if not task.session_ids:
                 continue
             task_id = _task_id_for(task)
-            session_started = [
-                s.started_at for s in sessions
-                if s.stable_id in task.session_ids
-            ]
+            session_started = [s.started_at for s in sessions if s.stable_id in task.session_ids]
             t_start = min(session_started) if session_started else _utcnow()
             t_end = max(session_started) if session_started else _utcnow()
             project_hint = _task_project_hint(task, sessions)
@@ -1480,8 +1471,11 @@ def run_weekly(
         # Close last week's commitment (spec 6.3) BEFORE saving this
         # week's row, so latest_follow_up() reliably finds the prior one.
         _close_prior_follow_up(
-            store, week_iso, snapshot,
-            verification_rate, delegation_rate,
+            store,
+            week_iso,
+            snapshot,
+            verification_rate,
+            delegation_rate,
         )
 
         # Persist this week's follow-up commitment (spec 6.3).
@@ -1493,8 +1487,10 @@ def run_weekly(
     # prior week is on file - the renderer treats that as "baseline forming".
     last_week_means: dict[str, float] | None = None
     if not dry_run or snapshot_store is not None:
-        ws = snapshot_store if snapshot_store is not None else (
-            store if store is not None else ProfileStore()
+        ws = (
+            snapshot_store
+            if snapshot_store is not None
+            else (store if store is not None else ProfileStore())
         )
         prior_week_iso = _prior_iso_week(week_iso)
         prior_digest = ws.load_weekly_digest(prior_week_iso)
@@ -1509,16 +1505,12 @@ def run_weekly(
     # last_week_means, session counts) so no fresh I/O is needed beyond
     # the optional session_reflections tally. None when no commitment
     # exists for the week so the masthead's block is omitted.
-    rollup_store: ProfileStore | None = (
-        store if store is not None else snapshot_store
-    )
+    rollup_store: ProfileStore | None = store if store is not None else snapshot_store
     if rollup_store is None and not dry_run:
         rollup_store = ProfileStore()
     sessions_prior_week = 0
     if rollup_store is not None:
-        sessions_prior_week = _count_sessions_in_iso_week(
-            rollup_store, _prior_iso_week(week_iso)
-        )
+        sessions_prior_week = _count_sessions_in_iso_week(rollup_store, _prior_iso_week(week_iso))
     self_report_tally = fetch_self_report_tally(rollup_store, week_iso)
     commitment_rollup = build_commitment_rollup(
         follow_up=follow_up,
@@ -1536,7 +1528,11 @@ def run_weekly(
 
     # Render last - now that trajectory, cost, and persistence are settled.
     rendered_html, rendered_terminal = _step_render(
-        sessions, tasks, selection, follow_up, snapshot,
+        sessions,
+        tasks,
+        selection,
+        follow_up,
+        snapshot,
         dry_run=dry_run,
         week_iso=week_iso,
         trajectory=trajectory,
@@ -1551,9 +1547,7 @@ def run_weekly(
 
     if not dry_run:
         # Now that we have the rendered HTML, write the weekly_digests row.
-        headline_moment_id = (
-            selection.headline_moment_id if selection is not None else None
-        )
+        headline_moment_id = selection.headline_moment_id if selection is not None else None
         store.save_weekly_digest(
             week_iso=week_iso,
             trajectory_label=trajectory.label.value,
@@ -1595,15 +1589,17 @@ def _snapshot_from_rows(rows: list[dict]) -> ProfileSnapshot:
         return ProfileSnapshot.from_scores([])
 
     scores: list[SessionScore] = []
-    from praxis.scoring.features import SessionFeatures
-    from praxis.scoring.judge import JudgeResult
-
     # SessionFeatures was renamed/reshaped in the features-module component
     # (heuristics.py -> features.py); pre-rename rows carry extra/legacy
     # keys in features_json. Filter to current fields AND back-fill any
     # required fields that older snapshots did not record so a v0.1/v0.2
     # mixed DB still loads instead of crashing with TypeError.
-    from dataclasses import MISSING, fields as _dc_fields
+    from dataclasses import MISSING
+    from dataclasses import fields as _dc_fields
+
+    from praxis.scoring.features import SessionFeatures
+    from praxis.scoring.judge import JudgeResult
+
     _CURRENT_FEATURE_FIELDS = {f.name for f in _dc_fields(SessionFeatures)}
     _REQUIRED_FEATURE_DEFAULTS = {
         f.name: 0 if f.type is int else 0.0
@@ -1662,17 +1658,14 @@ def parse_iso_week(week_iso: str) -> tuple[date, date]:
     match = _ISO_WEEK_RE.match(week_iso)
     if match is None:
         raise InvalidWeekError(
-            f"invalid --week value {week_iso!r}: expected 'YYYY-Www' "
-            f"(for example, 2026-W21)."
+            f"invalid --week value {week_iso!r}: expected 'YYYY-Www' (for example, 2026-W21)."
         )
     year = int(match.group(1))
     week = int(match.group(2))
     try:
         week_start = date.fromisocalendar(year, week, 1)
     except ValueError as exc:
-        raise InvalidWeekError(
-            f"invalid --week value {week_iso!r}: {exc}."
-        ) from exc
+        raise InvalidWeekError(f"invalid --week value {week_iso!r}: {exc}.") from exc
     return week_start, week_start + timedelta(days=7)
 
 
@@ -1761,7 +1754,7 @@ def _reconstruct_sessions_from_score_rows(rows: list[dict[str, Any]]) -> list[Se
             continue
         aug_auto_label = row.get("aug_auto_classification")
         if isinstance(aug_auto_label, str):
-            setattr(session, "aug_auto_classification", aug_auto_label)
+            session.aug_auto_classification = aug_auto_label
         sessions.append(session)
         seen.add(stable_id)
     return sessions
@@ -1809,8 +1802,7 @@ def re_score_session(session_stable_id: str) -> SessionScore:
     if score is None:
         raise ReScoreError(
             "no_judge",
-            "no frontier judge available "
-            "(set ANTHROPIC_API_KEY or OPENAI_API_KEY and retry).",
+            "no frontier judge available (set ANTHROPIC_API_KEY or OPENAI_API_KEY and retry).",
         )
     store.save_session_score(score)
     if score.judge_result is not None:

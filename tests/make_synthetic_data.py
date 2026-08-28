@@ -9,7 +9,7 @@ By default writes to a sandbox (`./synthetic_chat_home/`) and prints
 the env vars to point the scanners at it. Pass `--in-real-home` to
 write to the real `~/.claude/projects` and `~/.codex/sessions` paths
 (only if you genuinely want synthetic sessions to appear alongside
-your real history — usually you don't).
+your real history - usually you don't).
 
 The sandboxed mode is the safe default. The script never deletes any
 existing chat data; it only adds new files with random UUIDs.
@@ -18,14 +18,14 @@ Usage:
     python tests/make_synthetic_data.py                  # safe sandbox
     python tests/make_synthetic_data.py --in-real-home   # real ~/.claude/...
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-
 
 PRACTITIONER_PROMPT = (
     "Goal: refactor our auth middleware to use JWT instead of session cookies.\n\n"
@@ -46,21 +46,33 @@ def make_engaged_session() -> list[tuple[str, str]]:
     return [
         ("user", PRACTITIONER_PROMPT),
         ("assistant", "Here's the migration plan: {phases: [...]}"),
-        ("user",
-         "Wait — explain why you chose RS256 over HS256. I want to understand "
-         "the security trade-off before we lock that in. Also, what does the "
-         "refresh token rotation pattern look like and why do we need it?"),
+        (
+            "user",
+            (
+                "Wait. Explain why you chose RS256 over HS256. I want to understand "
+                "the security trade-off before we lock that in. Also, what does the "
+                "refresh token rotation pattern look like and why do we need it?"
+            ),
+        ),
         ("assistant", "RS256 uses asymmetric crypto, HS256 uses shared secret..."),
-        ("user",
-         "So if I understand: HS256 uses a shared secret, RS256 uses public/"
-         "private keys. If we ever need to distribute verification without "
-         "trusting other services with signing, RS256 is required. Am I right "
-         "that this is the main reason we'd pay the perf cost?"),
+        (
+            "user",
+            (
+                "So if I understand: HS256 uses a shared secret, RS256 uses public/"
+                "private keys. If we ever need to distribute verification without "
+                "trusting other services with signing, RS256 is required. Am I right "
+                "that this is the main reason we'd pay the perf cost?"
+            ),
+        ),
         ("assistant", "Exactly right. Should I proceed with phase 1?"),
-        ("user",
-         "Approved. After each file change, run the test suite and show me "
-         "the diff. What's your source for the 15-minute JWT expiry default? "
-         "I want to verify before we commit."),
+        (
+            "user",
+            (
+                "Approved. After each file change, run the test suite and show me "
+                "the diff. What's your source for the 15-minute JWT expiry default? "
+                "I want to verify before we commit."
+            ),
+        ),
     ]
 
 
@@ -79,14 +91,22 @@ def make_delegating_session() -> list[tuple[str, str]]:
 
 def make_middling_session() -> list[tuple[str, str]]:
     return [
-        ("user",
-         "I'm seeing 'Each child should have a unique key' in my React app.\n"
-         "```jsx\nfunction MyList({items}) {\n  return items.map(i => <li>{i}</li>);\n}\n```\n"
-         "What's happening?"),
+        (
+            "user",
+            (
+                "I'm seeing 'Each child should have a unique key' in my React app.\n"
+                "```jsx\nfunction MyList({items}) {\n  return items.map(i => <li>{i}</li>);\n}\n```\n"
+                "What's happening?"
+            ),
+        ),
         ("assistant", "React needs a key prop for list reconciliation..."),
-        ("user",
-         "Got it, that makes sense. So basically React uses keys to figure out "
-         "what changed. What happens if I use the array index as the key?"),
+        (
+            "user",
+            (
+                "Got it, that makes sense. So basically React uses keys to figure out "
+                "what changed. What happens if I use the array index as the key?"
+            ),
+        ),
         ("assistant", "Index as key works when the list is static..."),
         ("user", "thanks!"),
     ]
@@ -115,10 +135,15 @@ def write_claude_session(
     project_dir.mkdir(parents=True, exist_ok=True)
     session_id = str(uuid.uuid4())
     path = project_dir / f"{session_id}.jsonl"
-    start = when or (datetime.now(timezone.utc) - timedelta(hours=2))
+    start = when or (datetime.now(UTC) - timedelta(hours=2))
     with path.open("w", encoding="utf-8") as f:
         for i, (role, content) in enumerate(turns):
-            f.write(json.dumps(_claude_event(role, content, start + timedelta(minutes=i * 2), model=model)) + "\n")
+            f.write(
+                json.dumps(
+                    _claude_event(role, content, start + timedelta(minutes=i * 2), model=model)
+                )
+                + "\n"
+            )
     return path
 
 
@@ -128,29 +153,41 @@ def write_codex_session(
     when: datetime | None = None,
     model: str = "gpt-5",
 ) -> Path:
-    when = when or datetime.now(timezone.utc)
+    when = when or datetime.now(UTC)
     day_dir = codex_root / f"{when.year:04d}" / f"{when.month:02d}" / f"{when.day:02d}"
     day_dir.mkdir(parents=True, exist_ok=True)
     sid = uuid.uuid4().hex[:12]
     path = day_dir / f"rollout-{when.strftime('%Y-%m-%dT%H-%M-%S')}-{sid}.jsonl"
     with path.open("w", encoding="utf-8") as f:
-        f.write(json.dumps({
-            "type": "session_meta",
-            "timestamp": when.isoformat().replace("+00:00", "Z"),
-            "payload": {"model": model, "cwd": "/Users/test/repo"},
-        }) + "\n")
+        f.write(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "timestamp": when.isoformat().replace("+00:00", "Z"),
+                    "payload": {"model": model, "cwd": "/Users/test/repo"},
+                }
+            )
+            + "\n"
+        )
         for i, (role, content) in enumerate(turns):
-            f.write(json.dumps({
-                "type": "message",
-                "timestamp": (when + timedelta(minutes=i)).isoformat().replace("+00:00", "Z"),
-                "payload": {"role": role, "content": content},
-            }) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        "type": "message",
+                        "timestamp": (when + timedelta(minutes=i))
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                        "payload": {"role": role, "content": content},
+                    }
+                )
+                + "\n"
+            )
     return path
 
 
 def generate_corpus(claude_root: Path, codex_root: Path) -> tuple[int, int, int]:
     """Write a 14-day learning trajectory across multiple models. Returns (total, claude, codex)."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     factories = {
         "engaged": make_engaged_session,
         "delegating": make_delegating_session,
@@ -165,16 +202,30 @@ def generate_corpus(claude_root: Path, codex_root: Path) -> tuple[int, int, int]
         if days_ago >= 9:
             plan.append(("codex", "delegating", when, "gpt-5"))
             if days_ago % 2 == 0:
-                plan.append(("claude", "delegating", when + timedelta(hours=3),
-                             "claude-haiku-4-5", "-Users-test-quick"))
+                plan.append(
+                    (
+                        "claude",
+                        "delegating",
+                        when + timedelta(hours=3),
+                        "claude-haiku-4-5",
+                        "-Users-test-quick",
+                    )
+                )
         elif days_ago >= 5:
             plan.append(("claude", "middling", when, "claude-sonnet-4-6", "-Users-test-app"))
             plan.append(("codex", "middling", when + timedelta(hours=4), "gpt-5"))
         else:
             plan.append(("claude", "engaged", when, "claude-opus-4-7", "-Users-test-auth"))
             if days_ago < 3:
-                plan.append(("claude", "engaged", when + timedelta(hours=5),
-                             "claude-sonnet-4-6", "-Users-test-auth"))
+                plan.append(
+                    (
+                        "claude",
+                        "engaged",
+                        when + timedelta(hours=5),
+                        "claude-sonnet-4-6",
+                        "-Users-test-auth",
+                    )
+                )
 
     claude_count = 0
     codex_count = 0
@@ -198,7 +249,7 @@ def main() -> int:
     parser.add_argument(
         "--in-real-home",
         action="store_true",
-        help="Write to real ~/.claude/projects and ~/.codex/sessions (DANGEROUS — only if you want synthetic sessions mixed with real history).",
+        help="Write to real ~/.claude/projects and ~/.codex/sessions (DANGEROUS: only if you want synthetic sessions mixed with real history).",
     )
     parser.add_argument(
         "--out",
@@ -226,8 +277,10 @@ def main() -> int:
         print(f"Sandbox: {sandbox}")
 
     total, claude_count, codex_count = generate_corpus(claude_root, codex_root)
-    print(f"Generated {total} synthetic sessions across 14 days "
-          f"({claude_count} Claude, {codex_count} Codex)")
+    print(
+        f"Generated {total} synthetic sessions across 14 days "
+        f"({claude_count} Claude, {codex_count} Codex)"
+    )
 
     if scorecard_home is not None:
         print()

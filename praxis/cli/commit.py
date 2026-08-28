@@ -29,17 +29,18 @@ commitment from stdin, trims it, and re-prompts on empty or oversize
 input. The 280-character cap matches Twitter's limit and the per-spec
 budget for SessionStart hook payloads / Copilot instruction files.
 """
+
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Literal
+from typing import Literal
 
 from praxis.follow_up import FollowUp, target_metric_for
 from praxis.scoring.coach import drills_for_dim
 from praxis.scoring.rubric import RUBRIC
 from praxis.storage.profile_store import ProfileStore
-
 
 _RUBRIC_KEYS: frozenset[str] = frozenset(d.key for d in RUBRIC)
 _FREE_TEXT_SENTINEL = "free_text"
@@ -129,9 +130,7 @@ def build_commit_suggestions(ctx: CommitContext) -> list[CommitSuggestion]:
             # Dedup against the headline: skip this dim entirely so the
             # slot can be filled by the next-weakest dim (US-020 AC #2).
             continue
-        suggestions.append(
-            CommitSuggestion(kind="drill", text=first_drill, dim_key=dim_key)
-        )
+        suggestions.append(CommitSuggestion(kind="drill", text=first_drill, dim_key=dim_key))
         seen_texts.add(first_drill)
         drills_added += 1
 
@@ -145,9 +144,7 @@ def build_commit_suggestions(ctx: CommitContext) -> list[CommitSuggestion]:
 
     # Always last so the menu never collapses to zero choices when the
     # snapshot/headline/prior data are all empty (US-020 AC #3).
-    suggestions.append(
-        CommitSuggestion(kind="free_text", text="Write your own")
-    )
+    suggestions.append(CommitSuggestion(kind="free_text", text="Write your own"))
     return suggestions
 
 
@@ -190,18 +187,11 @@ def load_commit_context(store: ProfileStore, *, week_iso: str) -> CommitContext:
     if isinstance(snapshot_source, dict):
         dim_means = snapshot_source.get("dimension_means")
         if isinstance(dim_means, dict) and dim_means:
-            weakest_dim_keys = [
-                key
-                for key, _ in sorted(dim_means.items(), key=lambda kv: kv[1])
-            ]
+            weakest_dim_keys = [key for key, _ in sorted(dim_means.items(), key=lambda kv: kv[1])]
 
     open_prior_text: str | None = None
     prior = store.latest_follow_up()
-    if (
-        prior is not None
-        and prior.outcome == "pending"
-        and prior.week_iso != week_iso
-    ):
+    if prior is not None and prior.outcome == "pending" and prior.week_iso != week_iso:
         # Only show "Keep last week" when the pending commitment is from
         # a prior ISO week. A still-active row for the current week is
         # handled by the mid-week replace gate (US-023) in ``cmd_commit``,
@@ -227,9 +217,7 @@ def format_commit_prompt(suggestions: list[CommitSuggestion]) -> str:
     with a single newline so the caller can ``print()`` it directly.
     """
     lines: list[str] = ["", "Pick a commitment for this week:", ""]
-    numbered = [
-        s for s in suggestions if s.kind in ("headline", "drill")
-    ]
+    numbered = [s for s in suggestions if s.kind in ("headline", "drill")]
     for idx, s in enumerate(numbered, start=1):
         lines.append(f"  {idx}) {s.text}")
     keep = next((s for s in suggestions if s.kind == "keep_last"), None)
@@ -237,7 +225,7 @@ def format_commit_prompt(suggestions: list[CommitSuggestion]) -> str:
     if keep is not None or free is not None:
         lines.append("")
         if keep is not None:
-            lines.append(f"  k) Keep last week's: \"{keep.text}\"")
+            lines.append(f'  k) Keep last week\'s: "{keep.text}"')
         if free is not None:
             lines.append(f"  w) {free.text}")
     choice_keys = [str(i) for i in range(1, len(numbered) + 1)]
@@ -250,9 +238,7 @@ def format_commit_prompt(suggestions: list[CommitSuggestion]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def resolve_choice(
-    raw: str, suggestions: list[CommitSuggestion]
-) -> CommitSuggestion | None:
+def resolve_choice(raw: str, suggestions: list[CommitSuggestion]) -> CommitSuggestion | None:
     """Map the user's typed choice to a :class:`CommitSuggestion`.
 
     Accepts (case-insensitive, whitespace-trimmed):
@@ -317,11 +303,7 @@ def build_user_chosen_follow_up(
             display_text=display_text,
         )
     dim_key = suggestion.dim_key
-    if (
-        suggestion.kind in ("headline", "drill")
-        and dim_key is not None
-        and dim_key in _RUBRIC_KEYS
-    ):
+    if suggestion.kind in ("headline", "drill") and dim_key is not None and dim_key in _RUBRIC_KEYS:
         return FollowUp(
             week_iso=week_iso,
             dim_key=dim_key,
@@ -366,8 +348,10 @@ def format_replace_keep_cancel_preamble(existing_display_text: str) -> str:
         "You already have an active commitment this week:",
         f'  "{existing_display_text}"',
         "",
-        "  [r]eplace      Pick a new focus (the existing one is marked "
-        "'superseded' and kept in history)",
+        (
+            "  [r]eplace      Pick a new focus (the existing one is marked "
+            "'superseded' and kept in history)"
+        ),
         "  [k]eep         No change; the existing commitment stays active",
         "  [c]ancel       Exit without writing",
         "",
@@ -428,9 +412,7 @@ def prompt_free_text(
     can drive the loop deterministically without touching real
     stdin/stderr.
     """
-    read: Callable[[str], str] = (
-        input_fn if input_fn is not None else _default_input_reader
-    )
+    read: Callable[[str], str] = input_fn if input_fn is not None else _default_input_reader
     write_error: Callable[[str], None] = (
         error_writer if error_writer is not None else _default_stderr_writer
     )
@@ -442,8 +424,7 @@ def prompt_free_text(
             continue
         if len(trimmed) > MAX_COMMITMENT_CHARS:
             write_error(
-                f"Keep it under {MAX_COMMITMENT_CHARS} characters "
-                f"(current: {len(trimmed)})."
+                f"Keep it under {MAX_COMMITMENT_CHARS} characters (current: {len(trimmed)})."
             )
             continue
         return trimmed

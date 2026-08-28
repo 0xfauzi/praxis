@@ -6,7 +6,7 @@
   "tier": "balanced",
   "context_window_tokens": 128000,
   "strengths": [
-    "Native multimodal — text, vision, audio",
+    "Native multimodal: text, vision, audio",
     "Mature tool use and JSON mode"
   ],
   "weaknesses": [
@@ -21,7 +21,7 @@
     "Existing pipelines built around 4o where migration cost is high"
   ],
   "avoid_for": [
-    "New projects — GPT-5 mini is usually a better starting point"
+    "New projects: GPT-5 mini is usually a better starting point"
   ],
   "notes": "Still useful for vision and existing pipelines.",
   "sources": [

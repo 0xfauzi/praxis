@@ -20,8 +20,8 @@ sentence ("Do not present these as invoiced costs.") drives a
 companion contract enforced by the renderer tests: no dollar amount
 in either surface is presented as an invoice.
 """
-from __future__ import annotations
 
+from __future__ import annotations
 
 COST_LEDGER_DISCLAIMER = "rough estimate from token volume + tier pricing"
 
@@ -49,8 +49,4 @@ def format_cost_disclaimer_html() -> str:
     headline. The literal text inside the span is the same constant
     used by the terminal renderer.
     """
-    return (
-        f'<span class="{COST_DISCLAIMER_HTML_CLASS}">'
-        f"{COST_LEDGER_DISCLAIMER}"
-        f"</span>"
-    )
+    return f'<span class="{COST_DISCLAIMER_HTML_CLASS}">{COST_LEDGER_DISCLAIMER}</span>'

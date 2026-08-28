@@ -8,10 +8,11 @@ Anthropic/OpenAI client codepaths are stubbed via monkeypatch.
 The aggregate_for_week tests (US-011) seed real session_scores rows via
 ProfileStore (no LLM call) and exercise the per-week roll-up directly.
 """
+
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -105,9 +106,7 @@ def test_parse_response_raises_on_missing_classification() -> None:
 
 
 def test_parse_response_raises_on_non_numeric_confidence() -> None:
-    bad = json.dumps(
-        {"classification": "augmentation", "confidence": "high", "rationale": "x"}
-    )
+    bad = json.dumps({"classification": "augmentation", "confidence": "high", "rationale": "x"})
     with pytest.raises(AugAutoParseError):
         _parse_response(bad)
 
@@ -126,9 +125,7 @@ def test_parse_response_raises_on_negative_confidence() -> None:
 
 
 def test_parse_response_raises_on_non_string_rationale() -> None:
-    bad = json.dumps(
-        {"classification": "automation", "confidence": 0.7, "rationale": 123}
-    )
+    bad = json.dumps({"classification": "automation", "confidence": 0.7, "rationale": 123})
     with pytest.raises(AugAutoParseError):
         _parse_response(bad)
 
@@ -150,15 +147,11 @@ def test_classify_uses_haiku_when_anthropic_key_present(monkeypatch) -> None:
         seen["transcript"] = transcript_text
         return _good_payload(classification="augmentation")
 
-    def _fake_openai(transcript_text: str) -> str:  # noqa: ARG001
+    def _fake_openai(transcript_text: str) -> str:
         raise AssertionError("OpenAI path should not be called when ANTHROPIC_API_KEY is set")
 
-    monkeypatch.setattr(
-        "praxis.behavior.aug_auto._classify_with_anthropic", _fake_anthropic
-    )
-    monkeypatch.setattr(
-        "praxis.behavior.aug_auto._classify_with_openai", _fake_openai
-    )
+    monkeypatch.setattr("praxis.behavior.aug_auto._classify_with_anthropic", _fake_anthropic)
+    monkeypatch.setattr("praxis.behavior.aug_auto._classify_with_openai", _fake_openai)
 
     result = classify_session("user: do a thing\nassistant: ok\n")
     assert seen["called"] is True
@@ -171,19 +164,15 @@ def test_classify_falls_back_to_openai_when_only_openai_key(monkeypatch) -> None
     monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
     seen: dict[str, object] = {"called": False}
 
-    def _fake_anthropic(transcript_text: str) -> str:  # noqa: ARG001
+    def _fake_anthropic(transcript_text: str) -> str:
         raise AssertionError("Anthropic path should not be called without ANTHROPIC_API_KEY")
 
     def _fake_openai(transcript_text: str) -> str:
         seen["called"] = True
         return _good_payload(classification="automation", confidence=0.4)
 
-    monkeypatch.setattr(
-        "praxis.behavior.aug_auto._classify_with_anthropic", _fake_anthropic
-    )
-    monkeypatch.setattr(
-        "praxis.behavior.aug_auto._classify_with_openai", _fake_openai
-    )
+    monkeypatch.setattr("praxis.behavior.aug_auto._classify_with_anthropic", _fake_anthropic)
+    monkeypatch.setattr("praxis.behavior.aug_auto._classify_with_openai", _fake_openai)
 
     result = classify_session("short session")
     assert seen["called"] is True
@@ -221,9 +210,7 @@ def test_classify_propagates_parse_error_from_openai(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
     monkeypatch.setattr(
         "praxis.behavior.aug_auto._classify_with_openai",
-        lambda _t: json.dumps(
-            {"classification": "garbage", "confidence": 0.5, "rationale": "x"}
-        ),
+        lambda _t: json.dumps({"classification": "garbage", "confidence": 0.5, "rationale": "x"}),
     )
     with pytest.raises(AugAutoParseError):
         classify_session("session text")
@@ -312,7 +299,7 @@ def _wed_in_week(week_iso: str) -> datetime:
         12,
         0,
         0,
-        tzinfo=timezone.utc,
+        tzinfo=UTC,
     ) + timedelta(days=2)
 
 

@@ -7,9 +7,11 @@ Acceptance criteria (PRD US-046, spec section 7.3):
   - The label is not invented by the LLM: the prose is constrained
     to paraphrase the supplied label.
 """
+
 from __future__ import annotations
 
 import inspect
+from dataclasses import FrozenInstanceError
 
 import pytest  # type: ignore[import-not-found]
 
@@ -21,13 +23,12 @@ from praxis.behavior import (
 )
 from praxis.behavior import headline as headline_mod
 from praxis.behavior.headline import (
-    _HeadlineContext,
     _build_prompt,
+    _HeadlineContext,
     _other_labels,
     _truncate,
     _violates_label_constraint,
 )
-
 
 # ---- constants -------------------------------------------------------------
 
@@ -91,9 +92,7 @@ def test_generate_headline_truncates_long_llm_output(monkeypatch, tmp_home):
     """If the LLM rambles, the output is clipped to 180 chars."""
     long_text = "Engagement is rising and delegation is falling. " * 20
     assert len(long_text) > HEADLINE_MAX_CHARS
-    monkeypatch.setattr(
-        headline_mod, "_call_llm", lambda system, user: long_text
-    )
+    monkeypatch.setattr(headline_mod, "_call_llm", lambda system, user: long_text)
     out = generate_headline(WeeklyTrajectoryLabel.LEARNING, 0.18, -0.11, 8)
     assert len(out) == HEADLINE_MAX_CHARS
 
@@ -161,10 +160,7 @@ def test_violates_label_constraint_allows_supplied_label(
 def test_violates_label_constraint_is_case_insensitive():
     # Even with weird casing, an OTHER label is rejected.
     sentence = "your behaviour is LEARNING fast"
-    assert (
-        _violates_label_constraint(sentence, WeeklyTrajectoryLabel.STEADY)
-        is True
-    )
+    assert _violates_label_constraint(sentence, WeeklyTrajectoryLabel.STEADY) is True
 
 
 def test_violates_label_constraint_uses_word_boundaries():
@@ -177,29 +173,20 @@ def test_violates_label_constraint_uses_word_boundaries():
     sentence = "You are improving steadily and unsteady habits are gone."
     # Supplied label != STEADY: substring 'steady' appears inside
     # 'steadily' / 'unsteady', but the whole word is not present.
-    assert (
-        _violates_label_constraint(sentence, WeeklyTrajectoryLabel.LEARNING)
-        is False
-    )
+    assert _violates_label_constraint(sentence, WeeklyTrajectoryLabel.LEARNING) is False
 
 
 def test_violates_label_constraint_catches_multiword_label():
     # 'Growing autonomy' is two words and is matched as a phrase.
     sentence = "Your trajectory shows growing autonomy this week."
-    assert (
-        _violates_label_constraint(sentence, WeeklyTrajectoryLabel.STEADY)
-        is True
-    )
+    assert _violates_label_constraint(sentence, WeeklyTrajectoryLabel.STEADY) is True
 
 
 def test_violates_label_constraint_clean_sentence_passes():
     sentence = "Engagement up, delegation down. You're learning the hard parts."
     # Supplied label is LEARNING - 'learning' is the supplied label
     # word, not a different label. Other label words absent.
-    assert (
-        _violates_label_constraint(sentence, WeeklyTrajectoryLabel.LEARNING)
-        is False
-    )
+    assert _violates_label_constraint(sentence, WeeklyTrajectoryLabel.LEARNING) is False
 
 
 @pytest.mark.parametrize("label", list(WeeklyTrajectoryLabel))
@@ -224,21 +211,15 @@ def test_generate_headline_no_api_uses_fallback(tmp_home):
     assert out == expected
 
 
-def test_generate_headline_uses_llm_response_when_available(
-    monkeypatch, tmp_home
-):
+def test_generate_headline_uses_llm_response_when_available(monkeypatch, tmp_home):
     """When _call_llm returns valid prose, generate_headline uses it as-is (after truncate)."""
     response = "Engagement up sharply; delegation down. Hands on the keyboard."
-    monkeypatch.setattr(
-        headline_mod, "_call_llm", lambda system, user: response
-    )
+    monkeypatch.setattr(headline_mod, "_call_llm", lambda system, user: response)
     out = generate_headline(WeeklyTrajectoryLabel.LEARNING, 0.18, -0.11, 8)
     assert out == response
 
 
-def test_generate_headline_strips_whitespace_from_llm_output(
-    monkeypatch, tmp_home
-):
+def test_generate_headline_strips_whitespace_from_llm_output(monkeypatch, tmp_home):
     monkeypatch.setattr(
         headline_mod,
         "_call_llm",
@@ -256,9 +237,7 @@ def test_generate_headline_empty_llm_falls_back(monkeypatch, tmp_home):
 
 
 def test_generate_headline_whitespace_only_llm_falls_back(monkeypatch, tmp_home):
-    monkeypatch.setattr(
-        headline_mod, "_call_llm", lambda system, user: "   \n\t  "
-    )
+    monkeypatch.setattr(headline_mod, "_call_llm", lambda system, user: "   \n\t  ")
     out = generate_headline(WeeklyTrajectoryLabel.STEADY, 0.0, 0.0, 5)
     expected = fallback_headline(WeeklyTrajectoryLabel.STEADY, 0.0, 0.0, 5)
     assert out == expected
@@ -279,16 +258,12 @@ def test_generate_headline_rejects_other_label_mention(monkeypatch, tmp_home):
 def test_generate_headline_accepts_supplied_label_mention(monkeypatch, tmp_home):
     """If the LLM uses the supplied label word, that's allowed."""
     response = "Steady week: habits are locked in, for better or worse."
-    monkeypatch.setattr(
-        headline_mod, "_call_llm", lambda system, user: response
-    )
+    monkeypatch.setattr(headline_mod, "_call_llm", lambda system, user: response)
     out = generate_headline(WeeklyTrajectoryLabel.STEADY, 0.0, 0.0, 5)
     assert out == response
 
 
-def test_generate_headline_llm_call_receives_label_in_prompt(
-    monkeypatch, tmp_home
-):
+def test_generate_headline_llm_call_receives_label_in_prompt(monkeypatch, tmp_home):
     """The LLM call must receive the supplied label so it can paraphrase it."""
     seen: dict[str, str] = {}
 
@@ -303,9 +278,7 @@ def test_generate_headline_llm_call_receives_label_in_prompt(
     assert WeeklyTrajectoryLabel.LEARNING.value in seen["system"]
 
 
-def test_generate_headline_llm_call_receives_slope_numbers_in_prompt(
-    monkeypatch, tmp_home
-):
+def test_generate_headline_llm_call_receives_slope_numbers_in_prompt(monkeypatch, tmp_home):
     """Slopes are passed to the LLM so the sentence can name the magnitudes."""
     seen: dict[str, str] = {}
 
@@ -320,9 +293,7 @@ def test_generate_headline_llm_call_receives_slope_numbers_in_prompt(
     assert "8" in seen["user"]
 
 
-def test_generate_headline_llm_call_forbids_other_labels_in_prompt(
-    monkeypatch, tmp_home
-):
+def test_generate_headline_llm_call_forbids_other_labels_in_prompt(monkeypatch, tmp_home):
     """The system prompt must explicitly list the other labels as forbidden."""
     seen: dict[str, str] = {}
 
@@ -403,9 +374,7 @@ def test_fallback_steady_mentions_bucket_count_only():
 
 
 def test_fallback_growing_autonomy_mentions_delegation_slope():
-    out = fallback_headline(
-        WeeklyTrajectoryLabel.GROWING_AUTONOMY, 0.0, -0.11, 7
-    )
+    out = fallback_headline(WeeklyTrajectoryLabel.GROWING_AUTONOMY, 0.0, -0.11, 7)
     assert "0.11" in out
     assert "7" in out
 
@@ -426,10 +395,8 @@ def test_fallback_reading_mentions_bucket_count():
 
 
 def test_headline_context_is_frozen():
-    ctx = _HeadlineContext(
-        engagement_slope=0.1, delegation_slope=-0.1, bucket_count=8
-    )
-    with pytest.raises(Exception):
+    ctx = _HeadlineContext(engagement_slope=0.1, delegation_slope=-0.1, bucket_count=8)
+    with pytest.raises(FrozenInstanceError):
         ctx.engagement_slope = 0.5  # type: ignore[misc]
 
 
@@ -437,17 +404,13 @@ def test_headline_context_is_frozen():
 
 
 def test_build_prompt_returns_system_and_user():
-    system, user = _build_prompt(
-        WeeklyTrajectoryLabel.LEARNING, 0.18, -0.11, 8
-    )
+    system, user = _build_prompt(WeeklyTrajectoryLabel.LEARNING, 0.18, -0.11, 8)
     assert isinstance(system, str) and system
     assert isinstance(user, str) and user
 
 
 def test_build_prompt_user_contains_all_inputs():
-    _system, user = _build_prompt(
-        WeeklyTrajectoryLabel.LEARNING, 0.18, -0.11, 8
-    )
+    _system, user = _build_prompt(WeeklyTrajectoryLabel.LEARNING, 0.18, -0.11, 8)
     assert WeeklyTrajectoryLabel.LEARNING.value in user
     assert "0.1800" in user
     assert "-0.1100" in user
@@ -455,7 +418,5 @@ def test_build_prompt_user_contains_all_inputs():
 
 
 def test_build_prompt_system_states_180_char_limit():
-    system, _user = _build_prompt(
-        WeeklyTrajectoryLabel.LEARNING, 0.18, -0.11, 8
-    )
+    system, _user = _build_prompt(WeeklyTrajectoryLabel.LEARNING, 0.18, -0.11, 8)
     assert str(HEADLINE_MAX_CHARS) in system

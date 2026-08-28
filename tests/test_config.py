@@ -7,6 +7,7 @@ overwritten), and the resolved path.
 Also covers US-006: typed ``load_config()`` exposing all five
 sections with documented defaults filling in for any missing field.
 """
+
 from __future__ import annotations
 
 import sys
@@ -177,12 +178,12 @@ def test_load_config_reads_user_edits(tmp_home):
     path = ensure_config_file()
     path.write_text(
         '[schedule]\nday = "monday"\nhour = 9\nminute = 30\n'
-        '[scan]\nsince_days = 14\nmax_new = 50\n'
+        "[scan]\nsince_days = 14\nmax_new = 50\n"
         '[judge]\nprimary_provider = "openai"\n'
         'frontier_model = "gpt-5"\n'
         'cheap_model = "gpt-5-mini"\n'
         '[notification]\nenabled = false\nsound = "ping"\n'
-        '[privacy]\nredact_secrets = false\n',
+        "[privacy]\nredact_secrets = false\n",
         encoding="utf-8",
     )
     cfg = load_config()
@@ -204,10 +205,10 @@ def test_load_config_missing_fields_fall_back_to_defaults(tmp_home):
     path = ensure_config_file()
     path.write_text(
         '[schedule]\nday = "friday"\n'  # hour and minute missing
-        '[scan]\n'  # both keys missing
+        "[scan]\n"  # both keys missing
         # judge section missing entirely
         '[notification]\nsound = "ping"\n'  # enabled missing
-        '[privacy]\n',  # redact_secrets missing
+        "[privacy]\n",  # redact_secrets missing
         encoding="utf-8",
     )
     cfg = load_config()
@@ -238,8 +239,7 @@ def test_load_config_unknown_keys_are_ignored(tmp_home):
     # must not raise; the known fields still resolve correctly.
     path = ensure_config_file()
     path.write_text(
-        '[schedule]\nday = "tuesday"\nunknown_field = "ignored"\n'
-        '[future_section]\nfoo = "bar"\n',
+        '[schedule]\nday = "tuesday"\nunknown_field = "ignored"\n[future_section]\nfoo = "bar"\n',
         encoding="utf-8",
     )
     cfg = load_config()

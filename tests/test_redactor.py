@@ -3,6 +3,7 @@
 Each provider regex is exercised with a representative key, plus
 checks that surrounding prose is preserved.
 """
+
 from __future__ import annotations
 
 from praxis.redactor import PLACEHOLDER, redact_secrets

@@ -30,9 +30,9 @@ A retrospective dashboard produces awareness but rarely produces behavior change
 | Self-reflection (user names what happened) | Kolb (1984) experiential learning; Schraw / Flavell metacognition | Less contentious. |
 | Visible loop closure (user sees "I said X, here is what happened") | Ryan & Deci (2000), *American Psychologist* 55(1) self-determination theory; Carver & Scheier control theory | SDT replicates well; cite Ryan & Deci 2000 as canonical, Ryan & Deci (2017) book for depth. |
 
-**Frameworks we explicitly do NOT invoke:** ego depletion / willpower depletion (Hagger et al. 2016 multilab replication, N=2,141 across 23 labs, found d=0.04 — essentially null); the "10,000 hours" popularization of Ericsson; Fogg's B=MAP as a tested causal model (it's a design heuristic, not validated theory). The Praxis differentiator is evidence over claims, so we keep the citations honest.
+**Frameworks we explicitly do NOT invoke:** ego depletion / willpower depletion (Hagger et al. 2016 multilab replication, N=2,141 across 23 labs, found d=0.04 - essentially null); the "10,000 hours" popularization of Ericsson; Fogg's B=MAP as a tested causal model (it's a design heuristic, not validated theory). The Praxis differentiator is evidence over claims, so we keep the citations honest.
 
-**Fogg B = MAP** is the right framing for our cue layer **as a design heuristic** — cite Fogg (2009), *Persuasive Technology Conference Proceedings* (ACM), not the *Tiny Habits* book. Wood & Rünger (2016), *Annual Review of Psychology* 67, "Psychology of Habit," is the academic anchor for habit formation; Duhigg's "cue, routine, reward" is popular metaphor, not Wood's framework (her terms: context, repetition, reward).
+**Fogg B = MAP** is the right framing for our cue layer **as a design heuristic**: cite Fogg (2009), *Persuasive Technology Conference Proceedings* (ACM), not the *Tiny Habits* book. Wood & Rünger (2016), *Annual Review of Psychology* 67, "Psychology of Habit," is the academic anchor for habit formation; Duhigg's "cue, routine, reward" is popular metaphor, not Wood's framework (her terms: context, repetition, reward).
 
 Praxis today does practice-with-feedback well (the judge layer) and has the structural kernel of loop closure (the `follow_up` engine computes outcome from pure data, no LLM in the loop). The three missing pieces are agency, mid-session cue, and self-reflection.
 
@@ -41,7 +41,7 @@ This plan adds those three pieces using infrastructure that mostly already exist
   - The headline moment with `suggested_alternative` is the seed of the commitment.
   - The `follow_ups` table already carries baseline + measured + outcome.
   - The `shell-nudge` surface already proves an external tool can install ambient reminders.
-  - Claude Code, Codex CLI, and Copilot all expose either `SessionStart` hooks or auto-loaded instruction files — verified via documentation research on 2026-05-27.
+  - Claude Code, Codex CLI, and Copilot all expose either `SessionStart` hooks or auto-loaded instruction files. Verified via documentation research on 2026-05-27.
 
 ### Decisions taken on 2026-05-27
 

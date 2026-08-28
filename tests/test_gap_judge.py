@@ -13,6 +13,7 @@ deterministically. The ``tmp_home`` conftest fixture already deletes
 ``ANTHROPIC_API_KEY`` and ``OPENAI_API_KEY`` from the env so tests
 that opt into a provider must re-set the matching key.
 """
+
 from __future__ import annotations
 
 import sys
@@ -93,9 +94,7 @@ def test_truncate_caps_three_sentences_with_ellipsis():
     the ellipsis marker so the reader sees "...,. Two..." rather than
     "...,. Two...." (four-dot tail).
     """
-    out = truncate_to_two_sentences(
-        "One sentence. Two sentence. Three sentence."
-    )
+    out = truncate_to_two_sentences("One sentence. Two sentence. Three sentence.")
     assert out == "One sentence. Two sentence..."
 
 
@@ -105,9 +104,7 @@ def test_truncate_caps_many_sentences():
     Defense in depth against a model that ignores the <= 2-sentence
     prompt rule.
     """
-    out = truncate_to_two_sentences(
-        "A. B. C. D. E. F. G. H."
-    )
+    out = truncate_to_two_sentences("A. B. C. D. E. F. G. H.")
     assert out == "A. B..."
 
 
@@ -232,9 +229,7 @@ def test_user_prompt_includes_self_report_counts():
     field). The structured key-value format also makes it less
     likely the model regurgitates the count verbatim into the prose.
     """
-    rollup = _rollup(
-        self_report_tally={"yes": 3, "no": 1, "partial": 2, "skip": 1}
-    )
+    rollup = _rollup(self_report_tally={"yes": 3, "no": 1, "partial": 2, "skip": 1})
     prompt = _build_user_prompt(rollup)
     assert "3 yes" in prompt
     assert "1 no" in prompt
@@ -249,9 +244,7 @@ def test_user_prompt_includes_before_after_per_dim_values():
     prompt format puts them in a single line so the model parses the
     "-> this week" arrow as the comparison axis.
     """
-    rollup = _rollup(
-        dim_before={"verification": 6.5}, dim_after={"verification": 4.8}
-    )
+    rollup = _rollup(dim_before={"verification": 6.5}, dim_after={"verification": 4.8})
     prompt = _build_user_prompt(rollup)
     assert "6.5" in prompt
     assert "4.8" in prompt
@@ -378,7 +371,9 @@ class _FakeAnthropicMessage:
         self.content = [type("Block", (), {"type": "text", "text": text})()]
 
 
-def _install_fake_anthropic(monkeypatch, *, returns: str = "", raises: Exception | None = None) -> list[dict]:
+def _install_fake_anthropic(
+    monkeypatch, *, returns: str = "", raises: Exception | None = None
+) -> list[dict]:
     """Install a fake `anthropic` module and return the call-args log.
 
     The fake captures each call's args so tests can assert on the
@@ -405,7 +400,9 @@ def _install_fake_anthropic(monkeypatch, *, returns: str = "", raises: Exception
     return calls
 
 
-def _install_fake_openai(monkeypatch, *, returns: str = "", raises: Exception | None = None) -> list[dict]:
+def _install_fake_openai(
+    monkeypatch, *, returns: str = "", raises: Exception | None = None
+) -> list[dict]:
     """Install a fake `openai` module and return the call-args log."""
     calls: list[dict] = []
 
@@ -456,9 +453,7 @@ def test_generate_calls_claude_when_anthropic_key_present(tmp_home, monkeypatch)
         returns="The numbers and your check-ins disagree this week. Worth a closer look.",
     )
     out = generate_gap_prose(_rollup())
-    assert out == (
-        "The numbers and your check-ins disagree this week. Worth a closer look."
-    )
+    assert out == ("The numbers and your check-ins disagree this week. Worth a closer look.")
 
 
 def test_generate_passes_cheap_model_and_system_prompt(tmp_home, monkeypatch):
@@ -486,9 +481,7 @@ def test_generate_falls_back_to_openai_when_claude_raises(tmp_home, monkeypatch)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-anth")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-oai")
     _install_fake_anthropic(monkeypatch, raises=RuntimeError("503"))
-    openai_calls = _install_fake_openai(
-        monkeypatch, returns="OpenAI wrote this one."
-    )
+    openai_calls = _install_fake_openai(monkeypatch, returns="OpenAI wrote this one.")
     out = generate_gap_prose(_rollup())
     assert out == "OpenAI wrote this one."
     assert len(openai_calls) == 1
@@ -542,12 +535,8 @@ def test_generate_prefer_openai_uses_openai_first(tmp_home, monkeypatch):
     """`prefer="openai"` flips the dispatch order without changing fallbacks."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-anth")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-oai")
-    anth_calls = _install_fake_anthropic(
-        monkeypatch, returns="Claude prose."
-    )
-    openai_calls = _install_fake_openai(
-        monkeypatch, returns="OpenAI prose."
-    )
+    anth_calls = _install_fake_anthropic(monkeypatch, returns="Claude prose.")
+    openai_calls = _install_fake_openai(monkeypatch, returns="OpenAI prose.")
     out = generate_gap_prose(_rollup(), prefer="openai")
     assert out == "OpenAI prose."
     assert len(openai_calls) == 1
@@ -587,9 +576,7 @@ def test_apply_returns_input_unchanged_when_no_api_key(tmp_home):
     assert rollup.gap_prose is None
 
 
-def test_apply_attaches_prose_when_disagreement_and_judge_succeeds(
-    tmp_home, monkeypatch
-):
+def test_apply_attaches_prose_when_disagreement_and_judge_succeeds(tmp_home, monkeypatch):
     """Happy path: disagreement + judge succeeds => prose attached."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     _install_fake_anthropic(
@@ -599,9 +586,7 @@ def test_apply_attaches_prose_when_disagreement_and_judge_succeeds(
     rollup = _rollup()  # disagree-shaped by default
     out = apply_gap_prose(rollup)
     assert out is not None
-    assert out.gap_prose == (
-        "The numbers and your reflections diverged this week."
-    )
+    assert out.gap_prose == ("The numbers and your reflections diverged this week.")
     # The other fields are preserved.
     assert out.display_text == rollup.display_text
     assert out.target_dim_key == rollup.target_dim_key

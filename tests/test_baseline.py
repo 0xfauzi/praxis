@@ -8,18 +8,22 @@ Acceptance criteria (US-033, spec sections 8.1 / 8.4):
   - Sessions are weighted equally regardless of length.
   - Each session's `overall` is clipped to [1.0, 9.0] before contributing.
 """
+
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from dataclasses import FrozenInstanceError
+from datetime import UTC, datetime, timedelta
+
+import pytest
 
 from praxis.scoring.baseline import (
     BASELINE_WINDOW_DAYS,
-    Baseline,
-    BaselineInputSession,
-    LastWeekMean,
     MIN_DAYS_FOR_BASELINE,
     OVERALL_CLIP_HIGH,
     OVERALL_CLIP_LOW,
+    Baseline,
+    BaselineInputSession,
+    LastWeekMean,
     _iso_week_start,
     compute_baseline,
     compute_last_week_mean,
@@ -29,10 +33,9 @@ from praxis.scoring.baseline import (
 )
 from praxis.scoring.rubric import RUBRIC
 
-
 # A Wednesday so the current-week start is unambiguous (Monday 2 days prior).
-AS_OF = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
-CURRENT_WEEK_MONDAY = datetime(2026, 5, 25, tzinfo=timezone.utc).date()
+AS_OF = datetime(2026, 5, 27, 12, 0, tzinfo=UTC)
+CURRENT_WEEK_MONDAY = datetime(2026, 5, 25, tzinfo=UTC).date()
 
 
 def _all_dims(value: float) -> dict[str, float]:
@@ -89,7 +92,7 @@ def test_sessions_in_current_iso_week_are_excluded():
     """Sessions on/after Monday of as_of's week must not contribute."""
     in_window = _session(days_ago=10, overall=6.0, dim_value=6.0)
     in_current_week = _session(days_ago=1, overall=2.0, dim_value=2.0)  # Tuesday
-    on_monday = _session(days_ago=2, overall=2.0, dim_value=2.0)        # Monday boundary
+    on_monday = _session(days_ago=2, overall=2.0, dim_value=2.0)  # Monday boundary
     baseline = compute_baseline([in_window, in_current_week, on_monday], as_of=AS_OF)
     assert baseline.session_count == 1
     assert baseline.overall_mean == 6.0
@@ -130,8 +133,14 @@ def test_dimension_scores_are_NOT_clipped():
     s = BaselineInputSession(
         started_at=AS_OF - timedelta(days=10),
         overall=6.0,
-        dimension_scores={"planning": 9.5, "context": 9.5, "iteration": 9.5,
-                          "tools": 9.5, "fit": 9.5, "verification": 9.5},
+        dimension_scores={
+            "planning": 9.5,
+            "context": 9.5,
+            "iteration": 9.5,
+            "tools": 9.5,
+            "fit": 9.5,
+            "verification": 9.5,
+        },
         engagement_rate=0.0,
         delegation_rate=0.0,
         independence_rate=0.0,
@@ -145,8 +154,14 @@ def test_all_six_dims_are_averaged():
     a = BaselineInputSession(
         started_at=a.started_at,
         overall=a.overall,
-        dimension_scores={"planning": 4.0, "context": 5.0, "iteration": 6.0,
-                          "tools": 7.0, "fit": 8.0, "verification": 9.0},
+        dimension_scores={
+            "planning": 4.0,
+            "context": 5.0,
+            "iteration": 6.0,
+            "tools": 7.0,
+            "fit": 8.0,
+            "verification": 9.0,
+        },
         engagement_rate=0.0,
         delegation_rate=0.0,
         independence_rate=0.0,
@@ -154,8 +169,14 @@ def test_all_six_dims_are_averaged():
     b = BaselineInputSession(
         started_at=AS_OF - timedelta(days=20),
         overall=6.0,
-        dimension_scores={"planning": 6.0, "context": 7.0, "iteration": 8.0,
-                          "tools": 9.0, "fit": 4.0, "verification": 5.0},
+        dimension_scores={
+            "planning": 6.0,
+            "context": 7.0,
+            "iteration": 8.0,
+            "tools": 9.0,
+            "fit": 4.0,
+            "verification": 5.0,
+        },
         engagement_rate=0.0,
         delegation_rate=0.0,
         independence_rate=0.0,
@@ -200,7 +221,7 @@ def test_sessions_weighted_equally_regardless_of_length():
 def test_default_as_of_uses_now():
     """Smoke test: when as_of is None, window is anchored to today."""
     baseline = compute_baseline([])
-    today_iso_week_start = _iso_week_start(datetime.now(timezone.utc).date())
+    today_iso_week_start = _iso_week_start(datetime.now(UTC).date())
     assert baseline.window_end == today_iso_week_start
 
 
@@ -208,14 +229,12 @@ def test_baseline_is_immutable():
     """Frozen dataclass guards against accidental mutation downstream."""
     baseline = compute_baseline([], as_of=AS_OF)
     assert isinstance(baseline, Baseline)
-    try:
+    with pytest.raises(FrozenInstanceError):
         baseline.overall_mean = 99.0  # type: ignore[misc]
-    except Exception:
-        return
-    raise AssertionError("Baseline should be frozen")
 
 
 # ---------------------------------------------------------------------- US-035
+
 
 def test_min_days_for_baseline_matches_spec():
     """Spec section 8.4: under 14 days of data, baseline is 'forming'."""
@@ -330,8 +349,8 @@ def test_forming_and_prior_week_can_both_be_true():
 # Last-week mean (the immediately prior ISO week, Monday-to-Sunday).
 # Last week of AS_OF (Wed 2026-05-27): Mon 2026-05-18 .. Sun 2026-05-24.
 
-LAST_WEEK_MONDAY = datetime(2026, 5, 18, tzinfo=timezone.utc).date()
-LAST_WEEK_SUNDAY = datetime(2026, 5, 24, tzinfo=timezone.utc).date()
+LAST_WEEK_MONDAY = datetime(2026, 5, 18, tzinfo=UTC).date()
+LAST_WEEK_SUNDAY = datetime(2026, 5, 24, tzinfo=UTC).date()
 
 
 def test_compute_last_week_mean_empty_returns_none():
@@ -361,8 +380,14 @@ def test_compute_last_week_mean_only_older_than_last_week_returns_none():
 def test_compute_last_week_mean_single_prior_week_session():
     """One session in the prior ISO week -> returns its values."""
     # days_ago=3 from Wed -> Sun 2026-05-24 (last week).
-    s = _session(days_ago=3, overall=7.0, dim_value=7.0,
-                 engagement_rate=0.3, delegation_rate=0.5, independence_rate=0.2)
+    s = _session(
+        days_ago=3,
+        overall=7.0,
+        dim_value=7.0,
+        engagement_rate=0.3,
+        delegation_rate=0.5,
+        independence_rate=0.2,
+    )
     result = compute_last_week_mean([s], as_of=AS_OF)
     assert result is not None
     assert isinstance(result, LastWeekMean)
@@ -377,9 +402,9 @@ def test_compute_last_week_mean_single_prior_week_session():
 def test_compute_last_week_mean_multiple_sessions_averaged():
     """Multiple prior-week sessions are averaged with equal weight."""
     # All days_ago values 3..9 fall within Mon 2026-05-18 .. Sun 2026-05-24.
-    a = _session(days_ago=3, overall=4.0, dim_value=4.0)   # Sun
-    b = _session(days_ago=6, overall=6.0, dim_value=6.0)   # Thu
-    c = _session(days_ago=9, overall=8.0, dim_value=8.0)   # Mon
+    a = _session(days_ago=3, overall=4.0, dim_value=4.0)  # Sun
+    b = _session(days_ago=6, overall=6.0, dim_value=6.0)  # Thu
+    c = _session(days_ago=9, overall=8.0, dim_value=8.0)  # Mon
     result = compute_last_week_mean([a, b, c], as_of=AS_OF)
     assert result is not None
     assert result.session_count == 3
@@ -421,7 +446,7 @@ def test_compute_last_week_mean_week_boundaries():
     "this week" Monday is NOT.
     """
     last_week_monday_session = BaselineInputSession(
-        started_at=datetime(2026, 5, 18, 0, 0, tzinfo=timezone.utc),
+        started_at=datetime(2026, 5, 18, 0, 0, tzinfo=UTC),
         overall=5.0,
         dimension_scores=_all_dims(5.0),
         engagement_rate=0.0,
@@ -429,7 +454,7 @@ def test_compute_last_week_mean_week_boundaries():
         independence_rate=0.0,
     )
     this_week_monday_session = BaselineInputSession(
-        started_at=datetime(2026, 5, 25, 0, 0, tzinfo=timezone.utc),
+        started_at=datetime(2026, 5, 25, 0, 0, tzinfo=UTC),
         overall=5.0,
         dimension_scores=_all_dims(5.0),
         engagement_rate=0.0,
@@ -477,8 +502,14 @@ def test_compute_last_week_mean_dim_means_are_NOT_clipped():
     s = BaselineInputSession(
         started_at=AS_OF - timedelta(days=3),
         overall=6.0,
-        dimension_scores={"planning": 9.5, "context": 9.5, "iteration": 9.5,
-                          "tools": 9.5, "fit": 9.5, "verification": 9.5},
+        dimension_scores={
+            "planning": 9.5,
+            "context": 9.5,
+            "iteration": 9.5,
+            "tools": 9.5,
+            "fit": 9.5,
+            "verification": 9.5,
+        },
         engagement_rate=0.0,
         delegation_rate=0.0,
         independence_rate=0.0,
@@ -493,8 +524,5 @@ def test_compute_last_week_mean_is_immutable():
     s = _session(days_ago=3)
     result = compute_last_week_mean([s], as_of=AS_OF)
     assert result is not None
-    try:
+    with pytest.raises(FrozenInstanceError):
         result.overall_mean = 99.0  # type: ignore[misc]
-    except Exception:
-        return
-    raise AssertionError("LastWeekMean should be frozen")

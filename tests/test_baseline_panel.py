@@ -9,6 +9,7 @@ Acceptance criteria:
     exists (covered alongside US-036 wiring; the data-state predicates
     are tested in ``test_baseline.py::test_forming_and_prior_week_*``).
 """
+
 from __future__ import annotations
 
 from praxis.reports.baseline_panel import (
@@ -64,9 +65,7 @@ def test_format_baseline_value_purity():
     """Same input, same output -- no hidden state."""
     for value in [0.0, 3.14, 6.5, 9.0]:
         for forming in (True, False):
-            assert format_baseline_value(value, forming) == format_baseline_value(
-                value, forming
-            )
+            assert format_baseline_value(value, forming) == format_baseline_value(value, forming)
 
 
 def test_forming_flag_overrides_value():

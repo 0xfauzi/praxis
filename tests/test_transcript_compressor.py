@@ -15,10 +15,11 @@ each assistant tool call is rendered as ``name(args)`` with args
 trimmed to the first 80 chars. On a 50-turn fixture the compressed
 length is at most 30% of the original.
 """
+
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from praxis.models import Provider, Role, Session, Turn
@@ -33,7 +34,7 @@ def _session(turns: list[Turn]) -> Session:
     return Session(
         provider=Provider.CLAUDE,
         session_id="test-session",
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
         turns=turns,
         source_path="/tmp/test.jsonl",
     )
@@ -63,13 +64,15 @@ def test_user_turn_order_preserved_across_other_roles():
     first = "UNIQUE_FIRST_MARKER_alpha"
     second = "UNIQUE_SECOND_MARKER_beta"
     third = "UNIQUE_THIRD_MARKER_gamma"
-    session = _session([
-        Turn(role=Role.USER, content=first),
-        Turn(role=Role.ASSISTANT, content="some assistant reply"),
-        Turn(role=Role.USER, content=second),
-        Turn(role=Role.TOOL, content="some tool result"),
-        Turn(role=Role.USER, content=third),
-    ])
+    session = _session(
+        [
+            Turn(role=Role.USER, content=first),
+            Turn(role=Role.ASSISTANT, content="some assistant reply"),
+            Turn(role=Role.USER, content=second),
+            Turn(role=Role.TOOL, content="some tool result"),
+            Turn(role=Role.USER, content=third),
+        ]
+    )
     out = compress_transcript(session)
     assert out.index(first) < out.index(second) < out.index(third)
 
@@ -101,10 +104,12 @@ def test_session_with_no_user_turns_returns_string_without_user_content():
     # Session contains only non-user roles; the user-verbatim contract
     # is vacuously true. The output is still a string. Future stories
     # (US-013/US-014) will populate this with assistant/tool material.
-    session = _session([
-        Turn(role=Role.ASSISTANT, content="assistant only"),
-        Turn(role=Role.TOOL, content="tool only"),
-    ])
+    session = _session(
+        [
+            Turn(role=Role.ASSISTANT, content="assistant only"),
+            Turn(role=Role.TOOL, content="tool only"),
+        ]
+    )
     out = compress_transcript(session)
     assert isinstance(out, str)
 
@@ -159,9 +164,13 @@ def test_long_assistant_turn_marker_reports_tool_call_count():
         {"name": "Edit", "input": {"path": "a.py", "old": "x", "new": "y"}},
         {"name": "Bash", "input": {"command": "pytest"}},
     ]
-    out = compress_transcript(_session([
-        Turn(role=Role.ASSISTANT, content=content, tool_calls=tool_calls),
-    ]))
+    out = compress_transcript(
+        _session(
+            [
+                Turn(role=Role.ASSISTANT, content=content, tool_calls=tool_calls),
+            ]
+        )
+    )
     assert "...[+300 more chars, 3 tool calls]" in out
 
 
@@ -170,9 +179,13 @@ def test_short_assistant_turn_with_tool_calls_stays_verbatim():
     # `M tool calls` marker only appears on the truncated branch.
     content = "Calling read."
     tool_calls = [{"name": "Read", "input": {"path": "x.py"}}]
-    out = compress_transcript(_session([
-        Turn(role=Role.ASSISTANT, content=content, tool_calls=tool_calls),
-    ]))
+    out = compress_transcript(
+        _session(
+            [
+                Turn(role=Role.ASSISTANT, content=content, tool_calls=tool_calls),
+            ]
+        )
+    )
     assert content in out
     assert "tool calls]" not in out
     assert "more chars" not in out
@@ -184,11 +197,15 @@ def test_assistant_truncation_does_not_disturb_user_order():
     first = "USER_FIRST_alpha"
     second = "USER_SECOND_beta"
     long_assistant = "z" * 1000
-    out = compress_transcript(_session([
-        Turn(role=Role.USER, content=first),
-        Turn(role=Role.ASSISTANT, content=long_assistant),
-        Turn(role=Role.USER, content=second),
-    ]))
+    out = compress_transcript(
+        _session(
+            [
+                Turn(role=Role.USER, content=first),
+                Turn(role=Role.ASSISTANT, content=long_assistant),
+                Turn(role=Role.USER, content=second),
+            ]
+        )
+    )
     assert first in out
     assert second in out
     assert out.index(first) < out.index(second)
@@ -214,11 +231,13 @@ def test_role_tool_turn_is_absent_from_output():
     # Role.TOOL turns represent tool-result blocks. They must be dropped
     # entirely from the compressed transcript.
     marker = "UNIQUE_TOOL_RESULT_should_not_appear_omega"
-    session = _session([
-        Turn(role=Role.USER, content="user question"),
-        Turn(role=Role.TOOL, content=marker),
-        Turn(role=Role.USER, content="follow-up"),
-    ])
+    session = _session(
+        [
+            Turn(role=Role.USER, content="user question"),
+            Turn(role=Role.TOOL, content=marker),
+            Turn(role=Role.USER, content="follow-up"),
+        ]
+    )
     out = compress_transcript(session)
     assert marker not in out
 
@@ -227,10 +246,12 @@ def test_long_role_tool_turn_is_absent_from_output():
     # Even a large tool-result block (the noisiest part of a real
     # transcript) must contribute zero characters to the output.
     big = "x" * 5000
-    session = _session([
-        Turn(role=Role.USER, content="user"),
-        Turn(role=Role.TOOL, content=big),
-    ])
+    session = _session(
+        [
+            Turn(role=Role.USER, content="user"),
+            Turn(role=Role.TOOL, content=big),
+        ]
+    )
     out = compress_transcript(session)
     assert big not in out
     # And no fragment of the big blob leaks through (no run of 200+ x's).
@@ -243,9 +264,13 @@ def test_tool_call_renders_as_name_with_args():
     tool_calls: list[dict[str, Any]] = [
         {"name": "Read", "input": {"path": "auth.py"}},
     ]
-    out = compress_transcript(_session([
-        Turn(role=Role.ASSISTANT, content="Reading file.", tool_calls=tool_calls),
-    ]))
+    out = compress_transcript(
+        _session(
+            [
+                Turn(role=Role.ASSISTANT, content="Reading file.", tool_calls=tool_calls),
+            ]
+        )
+    )
     # Compact JSON has no spaces between key/value separators.
     expected = 'Read({"path":"auth.py"})'
     assert expected in out
@@ -257,9 +282,13 @@ def test_multiple_tool_calls_all_render():
         {"name": "Edit", "input": {"path": "b.py"}},
         {"name": "Bash", "input": {"command": "pytest"}},
     ]
-    out = compress_transcript(_session([
-        Turn(role=Role.ASSISTANT, content="Doing work.", tool_calls=tool_calls),
-    ]))
+    out = compress_transcript(
+        _session(
+            [
+                Turn(role=Role.ASSISTANT, content="Doing work.", tool_calls=tool_calls),
+            ]
+        )
+    )
     assert 'Read({"path":"a.py"})' in out
     assert 'Edit({"path":"b.py"})' in out
     assert 'Bash({"command":"pytest"})' in out
@@ -271,9 +300,13 @@ def test_tool_call_args_truncated_to_80_chars():
     tool_calls: list[dict[str, Any]] = [
         {"name": "Read", "input": {"path": long_value}},
     ]
-    out = compress_transcript(_session([
-        Turn(role=Role.ASSISTANT, content="Short.", tool_calls=tool_calls),
-    ]))
+    out = compress_transcript(
+        _session(
+            [
+                Turn(role=Role.ASSISTANT, content="Short.", tool_calls=tool_calls),
+            ]
+        )
+    )
     full_args = json.dumps({"path": long_value}, ensure_ascii=False, separators=(",", ":"))
     assert len(full_args) > TOOL_ARGS_LIMIT
     # The full args must NOT be present.
@@ -287,9 +320,13 @@ def test_short_tool_call_args_preserved_verbatim():
     tool_calls: list[dict[str, Any]] = [
         {"name": "Bash", "input": {"command": "echo hi"}},
     ]
-    out = compress_transcript(_session([
-        Turn(role=Role.ASSISTANT, content="Running.", tool_calls=tool_calls),
-    ]))
+    out = compress_transcript(
+        _session(
+            [
+                Turn(role=Role.ASSISTANT, content="Running.", tool_calls=tool_calls),
+            ]
+        )
+    )
     assert 'Bash({"command":"echo hi"})' in out
 
 
@@ -299,9 +336,13 @@ def test_tool_call_with_codex_arguments_key():
     tool_calls: list[dict[str, Any]] = [
         {"name": "shell", "arguments": '{"cmd":"pytest"}'},
     ]
-    out = compress_transcript(_session([
-        Turn(role=Role.ASSISTANT, content="Running tests.", tool_calls=tool_calls),
-    ]))
+    out = compress_transcript(
+        _session(
+            [
+                Turn(role=Role.ASSISTANT, content="Running tests.", tool_calls=tool_calls),
+            ]
+        )
+    )
     assert 'shell({"cmd":"pytest"})' in out
 
 
@@ -313,9 +354,13 @@ def test_tool_call_rendering_does_not_count_against_assistant_limit():
     tool_calls: list[dict[str, Any]] = [
         {"name": "Read", "input": {"path": f"file_{i}.py"}} for i in range(10)
     ]
-    out = compress_transcript(_session([
-        Turn(role=Role.ASSISTANT, content=content, tool_calls=tool_calls),
-    ]))
+    out = compress_transcript(
+        _session(
+            [
+                Turn(role=Role.ASSISTANT, content=content, tool_calls=tool_calls),
+            ]
+        )
+    )
     # Body stays verbatim, no truncation marker.
     assert content in out
     assert "more chars" not in out
@@ -331,10 +376,14 @@ def test_tool_call_lines_appear_inside_assistant_block():
     tool_calls: list[dict[str, Any]] = [
         {"name": "Read", "input": {"path": "x.py"}},
     ]
-    out = compress_transcript(_session([
-        Turn(role=Role.ASSISTANT, content="Body.", tool_calls=tool_calls),
-        Turn(role=Role.USER, content="next user turn"),
-    ]))
+    out = compress_transcript(
+        _session(
+            [
+                Turn(role=Role.ASSISTANT, content="Body.", tool_calls=tool_calls),
+                Turn(role=Role.USER, content="next user turn"),
+            ]
+        )
+    )
     assistant_open = out.index("<assistant>")
     assistant_close = out.index("</assistant>")
     tool_call_pos = out.index('Read({"path":"x.py"})')
@@ -344,9 +393,13 @@ def test_tool_call_lines_appear_inside_assistant_block():
 def test_tool_call_args_none_renders_as_empty_parens():
     # A tool call with no args at all must still render its name.
     tool_calls: list[dict[str, Any]] = [{"name": "Compact"}]
-    out = compress_transcript(_session([
-        Turn(role=Role.ASSISTANT, content="Calling.", tool_calls=tool_calls),
-    ]))
+    out = compress_transcript(
+        _session(
+            [
+                Turn(role=Role.ASSISTANT, content="Calling.", tool_calls=tool_calls),
+            ]
+        )
+    )
     assert "Compact()" in out
 
 
@@ -370,23 +423,30 @@ def test_50_turn_fixture_compressed_to_at_most_30_percent():
     # assistant interaction; tool-result turns are extra noise.
     turns: list[Turn] = []
     for i in range(25):
-        turns.append(Turn(
-            role=Role.USER,
-            content=f"Question {i}: please walk me through the next step.",
-        ))
-        turns.append(Turn(
-            role=Role.ASSISTANT,
-            content=("Here is a long explanation. " * 80)[:2000],
-            tool_calls=[
-                {"name": "Read", "input": {"path": f"src/module_{i}.py"}},
-                {"name": "Edit", "input": {
-                    "path": f"src/module_{i}.py",
-                    "old": "old_line_of_code",
-                    "new": "new_line_of_code",
-                }},
-                {"name": "Bash", "input": {"command": "pytest -q"}},
-            ],
-        ))
+        turns.append(
+            Turn(
+                role=Role.USER,
+                content=f"Question {i}: please walk me through the next step.",
+            )
+        )
+        turns.append(
+            Turn(
+                role=Role.ASSISTANT,
+                content=("Here is a long explanation. " * 80)[:2000],
+                tool_calls=[
+                    {"name": "Read", "input": {"path": f"src/module_{i}.py"}},
+                    {
+                        "name": "Edit",
+                        "input": {
+                            "path": f"src/module_{i}.py",
+                            "old": "old_line_of_code",
+                            "new": "new_line_of_code",
+                        },
+                    },
+                    {"name": "Bash", "input": {"command": "pytest -q"}},
+                ],
+            )
+        )
         # Tool-result noise that the compressor must drop.
         turns.append(Turn(role=Role.TOOL, content="tool result blob " * 200))
     session = _session(turns)
@@ -413,9 +473,13 @@ def test_tool_call_count_in_marker_still_matches_with_rendered_calls():
         {"name": "Read", "input": {"path": "x.py"}},
         {"name": "Edit", "input": {"path": "x.py"}},
     ]
-    out = compress_transcript(_session([
-        Turn(role=Role.ASSISTANT, content=content, tool_calls=tool_calls),
-    ]))
+    out = compress_transcript(
+        _session(
+            [
+                Turn(role=Role.ASSISTANT, content=content, tool_calls=tool_calls),
+            ]
+        )
+    )
     assert "...[+300 more chars, 2 tool calls]" in out
     assert 'Read({"path":"x.py"})' in out
     assert 'Edit({"path":"x.py"})' in out

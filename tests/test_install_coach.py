@@ -7,6 +7,7 @@ user-level prompt-file/settings.json patcher (US-031), and the
 symmetric uninstall-coach surface that strips only Praxis-authored
 content (US-032).
 """
+
 from __future__ import annotations
 
 import json
@@ -52,7 +53,6 @@ from praxis.cli.install_coach import (
     uninstall_copilot_workspace,
     vscode_user_dir,
 )
-
 
 # ---------------------------------------------------------------------------
 # Detection: Claude Code (~/.claude/settings.json OR ~/.claude/projects/).
@@ -145,16 +145,12 @@ def test_detect_all_returns_in_canonical_order(tmp_home, monkeypatch):
     (tmp_home / ".claude" / "projects").mkdir(parents=True)
     # Force Copilot off so the test focuses on ordering of the two file-rooted
     # detectors regardless of host VS Code data.
-    monkeypatch.setattr(
-        "praxis.cli.install_coach.detect_copilot", lambda: False
-    )
+    monkeypatch.setattr("praxis.cli.install_coach.detect_copilot", lambda: False)
     assert detect_all() == [TOOL_CLAUDE_CODE, TOOL_CODEX]
 
 
 def test_detect_all_empty_on_clean_home(tmp_home, monkeypatch):
-    monkeypatch.setattr(
-        "praxis.cli.install_coach.detect_copilot", lambda: False
-    )
+    monkeypatch.setattr("praxis.cli.install_coach.detect_copilot", lambda: False)
     assert detect_all() == []
 
 
@@ -185,9 +181,7 @@ def stub_install(monkeypatch):
     def _record(tool: str, **_kwargs) -> None:
         installed.append(tool)
 
-    monkeypatch.setattr(
-        "praxis.cli.install_coach.install_for_tool", _record
-    )
+    monkeypatch.setattr("praxis.cli.install_coach.install_for_tool", _record)
     return installed
 
 
@@ -199,23 +193,17 @@ def no_copilot(monkeypatch):
     machine the test runs on. The other two detectors are home-rooted and
     therefore already isolated by ``tmp_home``.
     """
-    monkeypatch.setattr(
-        "praxis.cli.install_coach.detect_copilot", lambda: False
-    )
+    monkeypatch.setattr("praxis.cli.install_coach.detect_copilot", lambda: False)
 
 
-def test_no_tools_detected_prints_message_and_exits_zero(
-    tmp_home, capsys, no_copilot
-):
+def test_no_tools_detected_prints_message_and_exits_zero(tmp_home, capsys, no_copilot):
     code = main(["install-coach"])
     out = capsys.readouterr().out
     assert code == 0
     assert "No supported AI tools detected. Pass --all to install anyway." in out
 
 
-def test_yes_flag_skips_prompts_for_detected_tools(
-    tmp_home, capsys, stub_install, no_copilot
-):
+def test_yes_flag_skips_prompts_for_detected_tools(tmp_home, capsys, stub_install, no_copilot):
     (tmp_home / ".claude" / "projects").mkdir(parents=True)
     (tmp_home / ".codex").mkdir(parents=True)
     code = main(["install-coach", "--yes"])
@@ -237,9 +225,7 @@ def test_default_prompt_proceeds_on_empty_input(
     assert stub_install == [TOOL_CLAUDE_CODE]
 
 
-def test_explicit_no_skips_install(
-    tmp_home, monkeypatch, capsys, stub_install, no_copilot
-):
+def test_explicit_no_skips_install(tmp_home, monkeypatch, capsys, stub_install, no_copilot):
     (tmp_home / ".claude" / "projects").mkdir(parents=True)
     monkeypatch.setattr("builtins.input", lambda _prompt: "n")
     code = main(["install-coach"])
@@ -248,9 +234,7 @@ def test_explicit_no_skips_install(
     assert stub_install == []
 
 
-def test_prompt_uses_found_tool_format(
-    tmp_home, monkeypatch, capsys, stub_install, no_copilot
-):
+def test_prompt_uses_found_tool_format(tmp_home, monkeypatch, capsys, stub_install, no_copilot):
     """The exact AC string: 'Found <Tool>. Install the Praxis coaching hook? [Y/n]:'."""
     (tmp_home / ".claude" / "projects").mkdir(parents=True)
     seen_prompts: list[str] = []
@@ -268,9 +252,7 @@ def test_prompt_uses_found_tool_format(
     assert "Install the Praxis coaching hook? [Y/n]:" in seen_prompts[0]
 
 
-def test_tool_flag_restricts_to_named_tool_only(
-    tmp_home, capsys, stub_install, no_copilot
-):
+def test_tool_flag_restricts_to_named_tool_only(tmp_home, capsys, stub_install, no_copilot):
     """--tool overrides detection and dispatches only the named tool."""
     # Claude is detected, Codex is not -- but --tool codex says: do Codex only.
     (tmp_home / ".claude" / "projects").mkdir(parents=True)
@@ -291,9 +273,7 @@ def test_tool_flag_rejects_unknown_tool(tmp_home, capsys, no_copilot):
     assert "copilot" in err
 
 
-def test_all_flag_iterates_every_tool_regardless_of_detection(
-    tmp_home, capsys, stub_install
-):
+def test_all_flag_iterates_every_tool_regardless_of_detection(tmp_home, capsys, stub_install):
     """--all bypasses detection: every tool is offered/installed."""
     # No detection state at all; --all + --yes -> every tool installed.
     code = main(["install-coach", "--all", "--yes"])
@@ -316,9 +296,7 @@ def test_all_and_tool_are_mutually_exclusive(tmp_home, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_run_install_coach_assume_yes_iterates_detected(
-    tmp_home, capsys, stub_install, no_copilot
-):
+def test_run_install_coach_assume_yes_iterates_detected(tmp_home, capsys, stub_install, no_copilot):
     (tmp_home / ".codex").mkdir(parents=True)
     code = run_install_coach(assume_yes=True)
     capsys.readouterr()
@@ -326,9 +304,7 @@ def test_run_install_coach_assume_yes_iterates_detected(
     assert stub_install == [TOOL_CODEX]
 
 
-def test_run_install_coach_no_detection_returns_zero(
-    tmp_home, capsys, stub_install, no_copilot
-):
+def test_run_install_coach_no_detection_returns_zero(tmp_home, capsys, stub_install, no_copilot):
     code = run_install_coach()
     out = capsys.readouterr().out
     assert code == 0
@@ -336,9 +312,7 @@ def test_run_install_coach_no_detection_returns_zero(
     assert stub_install == []
 
 
-def test_prompt_eof_treated_as_no(
-    tmp_home, monkeypatch, capsys, stub_install, no_copilot
-):
+def test_prompt_eof_treated_as_no(tmp_home, monkeypatch, capsys, stub_install, no_copilot):
     """If stdin closes mid-prompt, the user is treated as declining."""
     (tmp_home / ".claude" / "projects").mkdir(parents=True)
 
@@ -358,9 +332,7 @@ def test_prompt_eof_treated_as_no(
 
 
 def _read_settings(tmp_home: Path) -> dict:
-    return json.loads(
-        (tmp_home / ".claude" / "settings.json").read_text(encoding="utf-8")
-    )
+    return json.loads((tmp_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
 
 
 def test_install_claude_code_creates_settings_on_clean_home(tmp_home):
@@ -411,9 +383,7 @@ def test_install_claude_code_preserves_unrelated_top_level_keys(tmp_home):
     """Any top-level key that isn't 'hooks' must survive a merge."""
     settings = tmp_home / ".claude" / "settings.json"
     settings.parent.mkdir(parents=True, exist_ok=True)
-    settings.write_text(
-        json.dumps({"theme": "dark", "telemetry": False}), encoding="utf-8"
-    )
+    settings.write_text(json.dumps({"theme": "dark", "telemetry": False}), encoding="utf-8")
 
     install_claude_code()
 
@@ -602,9 +572,7 @@ def test_claude_settings_path_uses_path_home(tmp_home):
 # ---------------------------------------------------------------------------
 
 
-def test_cli_install_coach_claude_writes_settings_and_prints_path(
-    tmp_home, capsys, no_copilot
-):
+def test_cli_install_coach_claude_writes_settings_and_prints_path(tmp_home, capsys, no_copilot):
     """`praxis install-coach --tool claude-code --yes` writes the file."""
     code = main(["install-coach", "--tool", "claude-code", "--yes"])
     out = capsys.readouterr().out
@@ -618,9 +586,7 @@ def test_cli_install_coach_claude_writes_settings_and_prints_path(
     assert data["hooks"]["Stop"][0][SENTINEL] is True
 
 
-def test_cli_install_coach_claude_unparseable_prints_error_continues(
-    tmp_home, capsys, no_copilot
-):
+def test_cli_install_coach_claude_unparseable_prints_error_continues(tmp_home, capsys, no_copilot):
     """Unparseable settings.json prints to stderr and CLI still exits 0."""
     settings = tmp_home / ".claude" / "settings.json"
     settings.parent.mkdir(parents=True, exist_ok=True)
@@ -656,9 +622,7 @@ def test_cli_install_coach_default_path_writes_when_claude_detected(
 
 
 def _read_codex_hooks(tmp_home: Path) -> dict:
-    return json.loads(
-        (tmp_home / ".codex" / "hooks.json").read_text(encoding="utf-8")
-    )
+    return json.loads((tmp_home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
 
 
 def test_install_codex_creates_hooks_file_on_clean_codex_dir(tmp_home):
@@ -726,9 +690,7 @@ def test_install_codex_replaces_stale_managed_entries(tmp_home):
         "command": "praxis nudge --old-flag",
         SENTINEL: True,
     }
-    (codex_dir / "hooks.json").write_text(
-        json.dumps({"hooks": [stale]}), encoding="utf-8"
-    )
+    (codex_dir / "hooks.json").write_text(json.dumps({"hooks": [stale]}), encoding="utf-8")
 
     install_codex()
 
@@ -745,9 +707,7 @@ def test_install_codex_preserves_user_authored_entries(tmp_home):
     codex_dir = tmp_home / ".codex"
     codex_dir.mkdir(parents=True)
     user_entry = {"event": "SessionStart", "command": "echo user-on-start"}
-    (codex_dir / "hooks.json").write_text(
-        json.dumps({"hooks": [user_entry]}), encoding="utf-8"
-    )
+    (codex_dir / "hooks.json").write_text(json.dumps({"hooks": [user_entry]}), encoding="utf-8")
 
     install_codex()
 
@@ -809,9 +769,7 @@ def test_install_codex_aborts_when_hooks_not_list(tmp_home):
     """Existing 'hooks' key with a non-array value is a structural error."""
     codex_dir = tmp_home / ".codex"
     codex_dir.mkdir(parents=True)
-    (codex_dir / "hooks.json").write_text(
-        json.dumps({"hooks": "broken"}), encoding="utf-8"
-    )
+    (codex_dir / "hooks.json").write_text(json.dumps({"hooks": "broken"}), encoding="utf-8")
 
     with pytest.raises(InstallCoachError) as exc_info:
         install_codex()
@@ -819,9 +777,7 @@ def test_install_codex_aborts_when_hooks_not_list(tmp_home):
     assert "'hooks'" in str(exc_info.value)
     assert "JSON array" in str(exc_info.value)
     # File untouched.
-    assert json.loads(
-        (codex_dir / "hooks.json").read_text(encoding="utf-8")
-    ) == {"hooks": "broken"}
+    assert json.loads((codex_dir / "hooks.json").read_text(encoding="utf-8")) == {"hooks": "broken"}
 
 
 def test_install_codex_empty_file_treated_as_fresh(tmp_home):
@@ -870,9 +826,7 @@ def test_install_codex_permission_denied_raises_clear_error(tmp_home, monkeypatc
     def _raise(_path, _data):
         raise PermissionError("permission denied")
 
-    monkeypatch.setattr(
-        "praxis.cli.install_coach._atomic_write_json", _raise
-    )
+    monkeypatch.setattr("praxis.cli.install_coach._atomic_write_json", _raise)
 
     with pytest.raises(InstallCoachError) as exc_info:
         install_codex()
@@ -895,9 +849,7 @@ def test_codex_hooks_path_uses_path_home(tmp_home):
 # ---------------------------------------------------------------------------
 
 
-def test_cli_install_coach_codex_writes_hooks_and_prints_path(
-    tmp_home, capsys, no_copilot
-):
+def test_cli_install_coach_codex_writes_hooks_and_prints_path(tmp_home, capsys, no_copilot):
     """`praxis install-coach --tool codex --yes` writes the hooks file."""
     code = main(["install-coach", "--tool", "codex", "--yes"])
     out = capsys.readouterr().out
@@ -910,9 +862,7 @@ def test_cli_install_coach_codex_writes_hooks_and_prints_path(
     assert len(managed) == 2
 
 
-def test_cli_install_coach_codex_unparseable_prints_error_continues(
-    tmp_home, capsys, no_copilot
-):
+def test_cli_install_coach_codex_unparseable_prints_error_continues(tmp_home, capsys, no_copilot):
     """Unparseable hooks.json prints to stderr and CLI still exits 0."""
     codex_dir = tmp_home / ".codex"
     codex_dir.mkdir(parents=True)
@@ -928,9 +878,7 @@ def test_cli_install_coach_codex_unparseable_prints_error_continues(
     assert (codex_dir / "hooks.json").read_text(encoding="utf-8") == "not-json"
 
 
-def test_cli_install_coach_default_path_writes_when_codex_detected(
-    tmp_home, capsys, no_copilot
-):
+def test_cli_install_coach_default_path_writes_when_codex_detected(tmp_home, capsys, no_copilot):
     """With Codex detected, default flow (auto-yes via --yes) installs it."""
     (tmp_home / ".codex").mkdir(parents=True)
 
@@ -962,10 +910,7 @@ def test_copilot_workspace_path_uses_cwd(tmp_path, monkeypatch):
 def test_copilot_workspace_path_respects_explicit_cwd(tmp_path):
     other = tmp_path / "alt"
     other.mkdir()
-    assert (
-        copilot_workspace_path(cwd=other)
-        == other / ".github" / "copilot-instructions.md"
-    )
+    assert copilot_workspace_path(cwd=other) == other / ".github" / "copilot-instructions.md"
 
 
 def test_install_copilot_workspace_creates_file_on_clean_cwd(tmp_path):
@@ -1036,12 +981,7 @@ def test_install_copilot_workspace_preserves_surrounding_content_byte_level(
         "Prefer composition over inheritance.\n"
         "\n"
     )
-    trailing = (
-        "\n"
-        "## Style Guide\n"
-        "- 80-char line limit\n"
-        "- Two newlines between functions\n"
-    )
+    trailing = "\n## Style Guide\n- 80-char line limit\n- Two newlines between functions\n"
     block = f"{COPILOT_MARKER_BEGIN}\nOLD STALE CONTENT\n{COPILOT_MARKER_END}"
     original_bytes = (leading + block + trailing).encode("utf-8")
     target.write_bytes(original_bytes)
@@ -1104,9 +1044,7 @@ def test_install_copilot_workspace_atomic_write_leaves_no_tmp_file(tmp_path):
     install_copilot_workspace(cwd=tmp_path)
     install_copilot_workspace(cwd=tmp_path)
     github_dir = tmp_path / ".github"
-    leftovers = [
-        p.name for p in github_dir.iterdir() if p.name != "copilot-instructions.md"
-    ]
+    leftovers = [p.name for p in github_dir.iterdir() if p.name != "copilot-instructions.md"]
     assert leftovers == []
 
 
@@ -1117,27 +1055,21 @@ def test_install_copilot_workspace_atomic_write_leaves_no_tmp_file(tmp_path):
 
 def test_vscode_user_dir_darwin(tmp_path, monkeypatch):
     """macOS path is ~/Library/Application Support/Code/User."""
-    monkeypatch.setattr(
-        "praxis.cli.install_coach.platform.system", lambda: "Darwin"
-    )
+    monkeypatch.setattr("praxis.cli.install_coach.platform.system", lambda: "Darwin")
     path = vscode_user_dir(home=tmp_path)
     assert path == tmp_path / "Library" / "Application Support" / "Code" / "User"
 
 
 def test_vscode_user_dir_linux(tmp_path, monkeypatch):
     """Linux path is ~/.config/Code/User."""
-    monkeypatch.setattr(
-        "praxis.cli.install_coach.platform.system", lambda: "Linux"
-    )
+    monkeypatch.setattr("praxis.cli.install_coach.platform.system", lambda: "Linux")
     path = vscode_user_dir(home=tmp_path)
     assert path == tmp_path / ".config" / "Code" / "User"
 
 
 def test_vscode_user_dir_windows_uses_appdata(tmp_path, monkeypatch):
     """Windows path honors APPDATA env var."""
-    monkeypatch.setattr(
-        "praxis.cli.install_coach.platform.system", lambda: "Windows"
-    )
+    monkeypatch.setattr("praxis.cli.install_coach.platform.system", lambda: "Windows")
     fake_appdata = tmp_path / "fake_appdata"
     fake_appdata.mkdir()
     monkeypatch.setenv("APPDATA", str(fake_appdata))
@@ -1145,13 +1077,9 @@ def test_vscode_user_dir_windows_uses_appdata(tmp_path, monkeypatch):
     assert path == fake_appdata / "Code" / "User"
 
 
-def test_vscode_user_dir_windows_falls_back_when_appdata_unset(
-    tmp_path, monkeypatch
-):
+def test_vscode_user_dir_windows_falls_back_when_appdata_unset(tmp_path, monkeypatch):
     """Windows without APPDATA falls back to ~/AppData/Roaming/Code/User."""
-    monkeypatch.setattr(
-        "praxis.cli.install_coach.platform.system", lambda: "Windows"
-    )
+    monkeypatch.setattr("praxis.cli.install_coach.platform.system", lambda: "Windows")
     monkeypatch.delenv("APPDATA", raising=False)
     path = vscode_user_dir(home=tmp_path)
     assert path == tmp_path / "AppData" / "Roaming" / "Code" / "User"
@@ -1169,14 +1097,10 @@ def _darwin_user_dir(home: Path) -> Path:
 @pytest.fixture
 def force_darwin(monkeypatch):
     """Pin platform.system() to 'Darwin' so user-level paths are deterministic."""
-    monkeypatch.setattr(
-        "praxis.cli.install_coach.platform.system", lambda: "Darwin"
-    )
+    monkeypatch.setattr("praxis.cli.install_coach.platform.system", lambda: "Darwin")
 
 
-def test_install_copilot_user_level_writes_prompt_file_and_patches_settings(
-    tmp_home, force_darwin
-):
+def test_install_copilot_user_level_writes_prompt_file_and_patches_settings(tmp_home, force_darwin):
     prompt_path, settings_path = install_copilot_user_level()
 
     user_dir = _darwin_user_dir(tmp_home)
@@ -1205,9 +1129,7 @@ def test_install_copilot_user_level_creates_parent_dirs(tmp_home, force_darwin):
     assert (user_dir / "settings.json").exists()
 
 
-def test_install_copilot_user_level_preserves_existing_settings(
-    tmp_home, force_darwin
-):
+def test_install_copilot_user_level_preserves_existing_settings(tmp_home, force_darwin):
     """Unrelated top-level keys + existing chat.instructionsFilesLocations entries survive."""
     user_dir = _darwin_user_dir(tmp_home)
     user_dir.mkdir(parents=True)
@@ -1218,15 +1140,11 @@ def test_install_copilot_user_level_preserves_existing_settings(
             "/Users/other/prompts": True,
         },
     }
-    (user_dir / "settings.json").write_text(
-        json.dumps(existing), encoding="utf-8"
-    )
+    (user_dir / "settings.json").write_text(json.dumps(existing), encoding="utf-8")
 
     install_copilot_user_level()
 
-    data = json.loads(
-        (user_dir / "settings.json").read_text(encoding="utf-8")
-    )
+    data = json.loads((user_dir / "settings.json").read_text(encoding="utf-8"))
     assert data["editor.fontSize"] == 14
     assert data["files.autoSave"] == "onFocusChange"
     locations = data[COPILOT_SETTINGS_KEY]
@@ -1243,18 +1161,14 @@ def test_install_copilot_user_level_is_idempotent(tmp_home, force_darwin):
     install_copilot_user_level()
 
     user_dir = _darwin_user_dir(tmp_home)
-    data = json.loads(
-        (user_dir / "settings.json").read_text(encoding="utf-8")
-    )
+    data = json.loads((user_dir / "settings.json").read_text(encoding="utf-8"))
     locations = data[COPILOT_SETTINGS_KEY]
     # Exactly one entry pointing at the praxis prompts dir.
     matching = [k for k in locations if k == str(user_dir / "prompts")]
     assert matching == [str(user_dir / "prompts")]
 
 
-def test_install_copilot_user_level_aborts_on_unparseable_settings(
-    tmp_home, force_darwin
-):
+def test_install_copilot_user_level_aborts_on_unparseable_settings(tmp_home, force_darwin):
     """Unparseable user settings.json -> InstallCoachError + file untouched."""
     user_dir = _darwin_user_dir(tmp_home)
     user_dir.mkdir(parents=True)
@@ -1283,14 +1197,10 @@ def test_install_copilot_user_level_aborts_when_settings_top_level_not_object(
         install_copilot_user_level()
 
     assert "JSON object" in str(exc_info.value)
-    assert (
-        (user_dir / "settings.json").read_text(encoding="utf-8") == "[1, 2]"
-    )
+    assert (user_dir / "settings.json").read_text(encoding="utf-8") == "[1, 2]"
 
 
-def test_install_copilot_user_level_empty_settings_treated_as_fresh(
-    tmp_home, force_darwin
-):
+def test_install_copilot_user_level_empty_settings_treated_as_fresh(tmp_home, force_darwin):
     """Whitespace-only settings.json is treated as {}."""
     user_dir = _darwin_user_dir(tmp_home)
     user_dir.mkdir(parents=True)
@@ -1298,15 +1208,11 @@ def test_install_copilot_user_level_empty_settings_treated_as_fresh(
 
     install_copilot_user_level()
 
-    data = json.loads(
-        (user_dir / "settings.json").read_text(encoding="utf-8")
-    )
+    data = json.loads((user_dir / "settings.json").read_text(encoding="utf-8"))
     assert COPILOT_SETTINGS_KEY in data
 
 
-def test_install_copilot_user_level_overwrites_non_dict_locations(
-    tmp_home, force_darwin
-):
+def test_install_copilot_user_level_overwrites_non_dict_locations(tmp_home, force_darwin):
     """When 'chat.instructionsFilesLocations' is not a dict, install replaces it.
 
     A user with a malformed entry (e.g., a list or string) shouldn't cause
@@ -1322,9 +1228,7 @@ def test_install_copilot_user_level_overwrites_non_dict_locations(
 
     install_copilot_user_level()
 
-    data = json.loads(
-        (user_dir / "settings.json").read_text(encoding="utf-8")
-    )
+    data = json.loads((user_dir / "settings.json").read_text(encoding="utf-8"))
     locations = data[COPILOT_SETTINGS_KEY]
     assert isinstance(locations, dict)
     assert locations[str(user_dir / "prompts")] is True
@@ -1335,9 +1239,7 @@ def test_install_copilot_user_level_home_override(tmp_path, force_darwin):
     other = tmp_path / "alt-home"
     other.mkdir()
     prompt_path, settings_path = install_copilot_user_level(home=other)
-    assert (
-        prompt_path == _darwin_user_dir(other) / "prompts" / COPILOT_INSTRUCTION_FILENAME
-    )
+    assert prompt_path == _darwin_user_dir(other) / "prompts" / COPILOT_INSTRUCTION_FILENAME
     assert settings_path == _darwin_user_dir(other) / "settings.json"
 
 
@@ -1346,9 +1248,7 @@ def test_install_copilot_user_level_home_override(tmp_path, force_darwin):
 # ---------------------------------------------------------------------------
 
 
-def test_cli_install_coach_copilot_workspace_with_yes(
-    tmp_home, tmp_cwd, capsys, no_copilot
-):
+def test_cli_install_coach_copilot_workspace_with_yes(tmp_home, tmp_cwd, capsys, no_copilot):
     """`praxis install-coach --tool copilot --yes` writes only the workspace surface.
 
     Per AC: --yes does NOT opt into the user-level surface (explicit
@@ -1554,9 +1454,7 @@ def test_uninstall_claude_code_preserves_unrelated_top_level_keys(tmp_home):
     """Top-level keys outside ``hooks`` survive the uninstall."""
     settings = tmp_home / ".claude" / "settings.json"
     settings.parent.mkdir(parents=True, exist_ok=True)
-    settings.write_text(
-        json.dumps({"theme": "dark", "telemetry": False}), encoding="utf-8"
-    )
+    settings.write_text(json.dumps({"theme": "dark", "telemetry": False}), encoding="utf-8")
     install_claude_code()
     uninstall_claude_code()
     data = json.loads(settings.read_text(encoding="utf-8"))
@@ -1668,15 +1566,11 @@ def test_uninstall_claude_code_atomic_write_leaves_no_tmp_file(tmp_home):
     """When the file is partially cleaned (not deleted), no stray tmp file remains."""
     settings = tmp_home / ".claude" / "settings.json"
     settings.parent.mkdir(parents=True, exist_ok=True)
-    settings.write_text(
-        json.dumps({"theme": "dark"}), encoding="utf-8"
-    )
+    settings.write_text(json.dumps({"theme": "dark"}), encoding="utf-8")
     install_claude_code()
     uninstall_claude_code()
     claude_dir = tmp_home / ".claude"
-    leftovers = [
-        p.name for p in claude_dir.iterdir() if p.name != "settings.json"
-    ]
+    leftovers = [p.name for p in claude_dir.iterdir() if p.name != "settings.json"]
     assert leftovers == []
 
 
@@ -1709,9 +1603,7 @@ def test_uninstall_codex_preserves_user_authored_entries(tmp_home):
     codex_dir = tmp_home / ".codex"
     codex_dir.mkdir(parents=True)
     user_entry = {"event": "SessionStart", "command": "echo user-on-start"}
-    (codex_dir / "hooks.json").write_text(
-        json.dumps({"hooks": [user_entry]}), encoding="utf-8"
-    )
+    (codex_dir / "hooks.json").write_text(json.dumps({"hooks": [user_entry]}), encoding="utf-8")
     install_codex()
     uninstall_codex()
 
@@ -1771,9 +1663,7 @@ def test_uninstall_codex_no_op_when_hooks_missing(tmp_home):
     """hooks.json with unrelated keys but no 'hooks' key -> False, no writes."""
     codex_dir = tmp_home / ".codex"
     codex_dir.mkdir(parents=True)
-    (codex_dir / "hooks.json").write_text(
-        json.dumps({"model": "gpt-5"}), encoding="utf-8"
-    )
+    (codex_dir / "hooks.json").write_text(json.dumps({"model": "gpt-5"}), encoding="utf-8")
     original_bytes = (codex_dir / "hooks.json").read_bytes()
     assert uninstall_codex() is False
     assert (codex_dir / "hooks.json").read_bytes() == original_bytes
@@ -1837,16 +1727,8 @@ def test_uninstall_copilot_workspace_preserves_surrounding_content_byte_level(
     target_dir = tmp_path / ".github"
     target_dir.mkdir()
     target = target_dir / "copilot-instructions.md"
-    leading = (
-        "# Project Instructions\n"
-        "\n"
-        "Be concise. Use type hints.\n"
-    )
-    trailing = (
-        "\n"
-        "## Style Guide\n"
-        "- 80-char line limit\n"
-    )
+    leading = "# Project Instructions\n\nBe concise. Use type hints.\n"
+    trailing = "\n## Style Guide\n- 80-char line limit\n"
     target.write_text(leading + trailing, encoding="utf-8")
 
     install_copilot_workspace(cwd=tmp_path)
@@ -1881,9 +1763,7 @@ def test_uninstall_copilot_workspace_preserves_user_block_at_start(tmp_path):
     install_copilot_workspace(cwd=tmp_path)
     block_content = target.read_text(encoding="utf-8")
     # Append some user-authored content.
-    target.write_text(
-        block_content + "## User notes\nBe nice.\n", encoding="utf-8"
-    )
+    target.write_text(block_content + "## User notes\nBe nice.\n", encoding="utf-8")
 
     assert uninstall_copilot_workspace(cwd=tmp_path) is True
 
@@ -1898,9 +1778,7 @@ def test_uninstall_copilot_workspace_preserves_user_block_at_start(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_uninstall_copilot_user_level_returns_false_on_clean_home(
-    tmp_home, force_darwin
-):
+def test_uninstall_copilot_user_level_returns_false_on_clean_home(tmp_home, force_darwin):
     """No prompt file and no settings entry -> False, no writes."""
     user_dir = _darwin_user_dir(tmp_home)
     assert not user_dir.exists()
@@ -1908,16 +1786,12 @@ def test_uninstall_copilot_user_level_returns_false_on_clean_home(
     assert not user_dir.exists()
 
 
-def test_uninstall_copilot_user_level_after_install_returns_true(
-    tmp_home, force_darwin
-):
+def test_uninstall_copilot_user_level_after_install_returns_true(tmp_home, force_darwin):
     install_copilot_user_level()
     assert uninstall_copilot_user_level() is True
 
 
-def test_uninstall_copilot_user_level_deletes_prompt_file(
-    tmp_home, force_darwin
-):
+def test_uninstall_copilot_user_level_deletes_prompt_file(tmp_home, force_darwin):
     install_copilot_user_level()
     user_dir = _darwin_user_dir(tmp_home)
     prompt_path = user_dir / "prompts" / COPILOT_INSTRUCTION_FILENAME
@@ -1927,9 +1801,7 @@ def test_uninstall_copilot_user_level_deletes_prompt_file(
     assert not prompt_path.exists()
 
 
-def test_uninstall_copilot_user_level_removes_settings_entry(
-    tmp_home, force_darwin
-):
+def test_uninstall_copilot_user_level_removes_settings_entry(tmp_home, force_darwin):
     """The praxis prompts-dir entry is dropped from chat.instructionsFilesLocations."""
     install_copilot_user_level()
     user_dir = _darwin_user_dir(tmp_home)
@@ -1942,18 +1814,14 @@ def test_uninstall_copilot_user_level_removes_settings_entry(
     assert COPILOT_SETTINGS_KEY not in data
 
 
-def test_uninstall_copilot_user_level_preserves_other_locations(
-    tmp_home, force_darwin
-):
+def test_uninstall_copilot_user_level_preserves_other_locations(tmp_home, force_darwin):
     """Existing entries in chat.instructionsFilesLocations survive uninstall."""
     user_dir = _darwin_user_dir(tmp_home)
     user_dir.mkdir(parents=True)
     existing = {
         COPILOT_SETTINGS_KEY: {"/Users/other/prompts": True},
     }
-    (user_dir / "settings.json").write_text(
-        json.dumps(existing), encoding="utf-8"
-    )
+    (user_dir / "settings.json").write_text(json.dumps(existing), encoding="utf-8")
     install_copilot_user_level()
     uninstall_copilot_user_level()
 
@@ -1963,9 +1831,7 @@ def test_uninstall_copilot_user_level_preserves_other_locations(
     assert locations == {"/Users/other/prompts": True}
 
 
-def test_uninstall_copilot_user_level_preserves_other_settings_keys(
-    tmp_home, force_darwin
-):
+def test_uninstall_copilot_user_level_preserves_other_settings_keys(tmp_home, force_darwin):
     """Unrelated settings (editor, files, etc.) survive uninstall."""
     user_dir = _darwin_user_dir(tmp_home)
     user_dir.mkdir(parents=True)
@@ -1973,9 +1839,7 @@ def test_uninstall_copilot_user_level_preserves_other_settings_keys(
         "editor.fontSize": 14,
         "files.autoSave": "onFocusChange",
     }
-    (user_dir / "settings.json").write_text(
-        json.dumps(existing), encoding="utf-8"
-    )
+    (user_dir / "settings.json").write_text(json.dumps(existing), encoding="utf-8")
     install_copilot_user_level()
     uninstall_copilot_user_level()
 
@@ -1985,9 +1849,7 @@ def test_uninstall_copilot_user_level_preserves_other_settings_keys(
     assert COPILOT_SETTINGS_KEY not in data
 
 
-def test_uninstall_copilot_user_level_keeps_settings_file_when_empty(
-    tmp_home, force_darwin
-):
+def test_uninstall_copilot_user_level_keeps_settings_file_when_empty(tmp_home, force_darwin):
     """settings.json is NOT deleted even when our entry was the only key.
 
     Reason: the user-level VS Code settings file may be expected to
@@ -2013,9 +1875,7 @@ def test_uninstall_copilot_user_level_idempotent(tmp_home, force_darwin):
     assert uninstall_copilot_user_level() is False
 
 
-def test_uninstall_copilot_user_level_aborts_on_unparseable_settings(
-    tmp_home, force_darwin
-):
+def test_uninstall_copilot_user_level_aborts_on_unparseable_settings(tmp_home, force_darwin):
     """Unparseable user settings.json -> InstallCoachError + settings untouched."""
     user_dir = _darwin_user_dir(tmp_home)
     user_dir.mkdir(parents=True)
@@ -2058,9 +1918,7 @@ def test_detect_managed_claude_code_false_when_only_user_blocks(tmp_home):
     settings = tmp_home / ".claude" / "settings.json"
     settings.parent.mkdir(parents=True, exist_ok=True)
     settings.write_text(
-        json.dumps(
-            {"hooks": {"SessionStart": [{"matcher": "*", "hooks": []}]}}
-        ),
+        json.dumps({"hooks": {"SessionStart": [{"matcher": "*", "hooks": []}]}}),
         encoding="utf-8",
     )
     assert detect_managed_claude_code() is False
@@ -2090,29 +1948,21 @@ def test_detect_managed_codex_true_after_install(tmp_home):
     assert detect_managed_codex() is True
 
 
-def test_detect_managed_copilot_false_when_nothing_present(
-    tmp_home, tmp_cwd, force_darwin
-):
+def test_detect_managed_copilot_false_when_nothing_present(tmp_home, tmp_cwd, force_darwin):
     assert detect_managed_copilot() is False
 
 
-def test_detect_managed_copilot_true_when_workspace_block_present(
-    tmp_home, tmp_cwd, force_darwin
-):
+def test_detect_managed_copilot_true_when_workspace_block_present(tmp_home, tmp_cwd, force_darwin):
     install_copilot_workspace()
     assert detect_managed_copilot() is True
 
 
-def test_detect_managed_copilot_true_when_user_prompt_file_present(
-    tmp_home, tmp_cwd, force_darwin
-):
+def test_detect_managed_copilot_true_when_user_prompt_file_present(tmp_home, tmp_cwd, force_darwin):
     install_copilot_user_level()
     assert detect_managed_copilot() is True
 
 
-def test_detect_managed_tools_returns_canonical_order(
-    tmp_home, tmp_cwd, force_darwin
-):
+def test_detect_managed_tools_returns_canonical_order(tmp_home, tmp_cwd, force_darwin):
     install_codex()
     install_claude_code()
     install_copilot_workspace()
@@ -2123,9 +1973,7 @@ def test_detect_managed_tools_returns_canonical_order(
     ]
 
 
-def test_detect_managed_tools_empty_on_clean_home(
-    tmp_home, tmp_cwd, force_darwin
-):
+def test_detect_managed_tools_empty_on_clean_home(tmp_home, tmp_cwd, force_darwin):
     assert detect_managed_tools() == []
 
 
@@ -2168,9 +2016,7 @@ def test_symmetry_copilot_workspace_install_uninstall_install(tmp_path):
     assert target.read_bytes() == fresh_bytes
 
 
-def test_symmetry_copilot_user_level_install_uninstall_install(
-    tmp_home, force_darwin
-):
+def test_symmetry_copilot_user_level_install_uninstall_install(tmp_home, force_darwin):
     install_copilot_user_level()
     user_dir = _darwin_user_dir(tmp_home)
     prompt_path = user_dir / "prompts" / COPILOT_INSTRUCTION_FILENAME
@@ -2231,9 +2077,7 @@ def test_cli_uninstall_coach_nothing_to_uninstall_when_never_installed(
     assert not (tmp_cwd / ".github" / "copilot-instructions.md").exists()
 
 
-def test_cli_uninstall_coach_removes_claude_with_tool_flag(
-    tmp_home, capsys, no_copilot
-):
+def test_cli_uninstall_coach_removes_claude_with_tool_flag(tmp_home, capsys, no_copilot):
     install_claude_code()
     assert (tmp_home / ".claude" / "settings.json").exists()
 
@@ -2244,9 +2088,7 @@ def test_cli_uninstall_coach_removes_claude_with_tool_flag(
     assert not (tmp_home / ".claude" / "settings.json").exists()
 
 
-def test_cli_uninstall_coach_removes_codex_with_tool_flag(
-    tmp_home, capsys, no_copilot
-):
+def test_cli_uninstall_coach_removes_codex_with_tool_flag(tmp_home, capsys, no_copilot):
     install_codex()
     assert (tmp_home / ".codex" / "hooks.json").exists()
 
@@ -2275,9 +2117,7 @@ def test_cli_uninstall_coach_removes_copilot_with_tool_flag(
     assert not (user_dir / "prompts" / COPILOT_INSTRUCTION_FILENAME).exists()
 
 
-def test_cli_uninstall_coach_default_flow_only_prompts_managed_tools(
-    tmp_home, capsys, no_copilot
-):
+def test_cli_uninstall_coach_default_flow_only_prompts_managed_tools(tmp_home, capsys, no_copilot):
     """Default flow only prompts for tools that actually have Praxis content."""
     install_claude_code()
     # Codex was never installed; default flow should not prompt for it.
@@ -2290,9 +2130,7 @@ def test_cli_uninstall_coach_default_flow_only_prompts_managed_tools(
     assert "Removed Codex coaching hook." not in out
 
 
-def test_cli_uninstall_coach_prompts_per_tool(
-    tmp_home, monkeypatch, capsys, no_copilot
-):
+def test_cli_uninstall_coach_prompts_per_tool(tmp_home, monkeypatch, capsys, no_copilot):
     """Without --yes, the per-tool prompt is shown for each managed tool."""
     install_claude_code()
     seen: list[str] = []
@@ -2310,9 +2148,7 @@ def test_cli_uninstall_coach_prompts_per_tool(
     assert "Remove? [Y/n]:" in seen[0]
 
 
-def test_cli_uninstall_coach_prompt_default_yes(
-    tmp_home, monkeypatch, capsys, no_copilot
-):
+def test_cli_uninstall_coach_prompt_default_yes(tmp_home, monkeypatch, capsys, no_copilot):
     """Empty input at the uninstall prompt is treated as YES (default-Y)."""
     install_claude_code()
     monkeypatch.setattr("builtins.input", lambda _prompt: "")
@@ -2322,9 +2158,7 @@ def test_cli_uninstall_coach_prompt_default_yes(
     assert not (tmp_home / ".claude" / "settings.json").exists()
 
 
-def test_cli_uninstall_coach_explicit_no_skips_removal(
-    tmp_home, monkeypatch, capsys, no_copilot
-):
+def test_cli_uninstall_coach_explicit_no_skips_removal(tmp_home, monkeypatch, capsys, no_copilot):
     install_claude_code()
     monkeypatch.setattr("builtins.input", lambda _prompt: "n")
     code = main(["uninstall-coach"])
@@ -2336,9 +2170,7 @@ def test_cli_uninstall_coach_explicit_no_skips_removal(
     assert "Nothing to uninstall." in out
 
 
-def test_cli_uninstall_coach_eof_treated_as_no(
-    tmp_home, monkeypatch, capsys, no_copilot
-):
+def test_cli_uninstall_coach_eof_treated_as_no(tmp_home, monkeypatch, capsys, no_copilot):
     install_claude_code()
 
     def _eof(_prompt):
@@ -2352,9 +2184,7 @@ def test_cli_uninstall_coach_eof_treated_as_no(
     assert (tmp_home / ".claude" / "settings.json").exists()
 
 
-def test_cli_uninstall_coach_yes_flag_skips_prompts(
-    tmp_home, monkeypatch, capsys, no_copilot
-):
+def test_cli_uninstall_coach_yes_flag_skips_prompts(tmp_home, monkeypatch, capsys, no_copilot):
     install_claude_code()
     install_codex()
 
@@ -2369,9 +2199,7 @@ def test_cli_uninstall_coach_yes_flag_skips_prompts(
     assert not (tmp_home / ".codex" / "hooks.json").exists()
 
 
-def test_cli_uninstall_coach_all_flag_iterates_all_tools(
-    tmp_home, capsys, no_copilot
-):
+def test_cli_uninstall_coach_all_flag_iterates_all_tools(tmp_home, capsys, no_copilot):
     """--all attempts uninstall on every tool, even those not detected."""
     install_codex()  # only Codex; Claude and Copilot are absent.
 
@@ -2441,9 +2269,7 @@ def test_cli_uninstall_coach_nothing_to_uninstall_when_user_declines(
 # ---------------------------------------------------------------------------
 
 
-def test_run_uninstall_coach_assume_yes_iterates_detected(
-    tmp_home, capsys, no_copilot
-):
+def test_run_uninstall_coach_assume_yes_iterates_detected(tmp_home, capsys, no_copilot):
     install_codex()
     code = run_uninstall_coach(assume_yes=True)
     out = capsys.readouterr().out

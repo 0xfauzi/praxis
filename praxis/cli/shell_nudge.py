@@ -24,10 +24,10 @@ Two integration paths:
   * ``praxis install-shell-nudge`` / ``praxis uninstall-shell-nudge``
     let the user manage it manually without re-running install-weekly.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
-
 
 # The literal one-liner that gets appended to ~/.zshrc / ~/.bashrc. Kept
 # as a module constant so install + uninstall + idempotency checks all
@@ -105,7 +105,9 @@ def install_into_rc(rc_path: Path) -> bool:
         return False
     # Append with a leading blank line and the comment marker so a
     # later `tail -5` reads cleanly and an uninstall has an anchor.
-    appended = existing.rstrip("\n") + "\n\n" + PRAXIS_NUDGE_COMMENT + "\n" + PRAXIS_NUDGE_LINE + "\n"
+    appended = (
+        existing.rstrip("\n") + "\n\n" + PRAXIS_NUDGE_COMMENT + "\n" + PRAXIS_NUDGE_LINE + "\n"
+    )
     rc_path.write_text(appended, encoding="utf-8")
     return True
 

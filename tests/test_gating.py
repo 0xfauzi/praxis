@@ -8,6 +8,7 @@ Acceptance criteria:
     (locked in here by asserting there is exactly one source of
     truth -- the function in praxis.reports.gating).
 """
+
 from __future__ import annotations
 
 from praxis.reports.gating import (
@@ -130,5 +131,6 @@ def test_gating_helper_is_shared_across_renderers():
     # logic inside html_report.py or terminal.py, code review should
     # catch it; this test guards the entry point itself.
     from praxis.reports import gating
+
     assert callable(gating.format_delta)
     assert callable(gating.is_significant)

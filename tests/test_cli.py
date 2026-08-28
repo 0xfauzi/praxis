@@ -52,13 +52,14 @@ US-078 acceptance criteria (removed commands and flags are gone):
 Tests go through the argparse entry point (`praxis.cli.__main__.main`) so
 the subparser registration is exercised end-to-end, not just the handler.
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import sys
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -291,7 +292,7 @@ def test_week_subcommand_handler_is_renamed():
 
 def test_review_with_data_renders_and_exits_zero(tmp_home, capsys, fake_api_key):
     """`praxis review` renders the digest masthead when sessions exist in the window."""
-    _seed_score("sess-current", datetime.now(timezone.utc))
+    _seed_score("sess-current", datetime.now(UTC))
     code = main(["review"])
     out = capsys.readouterr().out
     assert code == 0
@@ -306,9 +307,9 @@ def test_review_iso_filters_to_target_week(tmp_home, capsys):
     count must reflect the single one that lives in 2026-W21.
     """
     # 2026-W21 spans Mon May 18 - Sun May 24, 2026.
-    in_week = datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc)
-    before_week = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
-    after_week = datetime(2026, 5, 30, 12, 0, tzinfo=timezone.utc)
+    in_week = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    before_week = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
+    after_week = datetime(2026, 5, 30, 12, 0, tzinfo=UTC)
     _seed_score("sess-in", in_week)
     _seed_score("sess-before", before_week)
     _seed_score("sess-after", after_week)
@@ -333,7 +334,7 @@ def test_review_rejects_malformed_iso(tmp_home, capsys):
 
 def test_review_write_html_creates_file(tmp_home, capsys):
     """--write-html writes to ~/.praxis/weeks/<iso>.html."""
-    in_week = datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc)
+    in_week = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
     _seed_score("sess-html", in_week)
     code = main(["review", "--week", "2026-W21", "--write-html"])
     capsys.readouterr()  # flush captured output
@@ -350,7 +351,7 @@ def test_review_dry_run_does_not_create_html(tmp_home, capsys):
     point (otherwise US-077's zero-session gate short-circuits to exit 3
     and the assertion would be vacuous).
     """
-    _seed_score("sess-dry", datetime.now(timezone.utc))
+    _seed_score("sess-dry", datetime.now(UTC))
     code = main(["review", "--dry-run"])
     capsys.readouterr()
     assert code == 0
@@ -363,7 +364,7 @@ def test_review_explain_judging_prints_explainer(tmp_home, capsys, fake_api_key)
     Seeds one current-week session so the digest renders past the
     US-077 zero-session gate and the explainer block is printed.
     """
-    _seed_score("sess-explain", datetime.now(timezone.utc))
+    _seed_score("sess-explain", datetime.now(UTC))
     code = main(["review", "--explain-judging"])
     out = capsys.readouterr().out
     assert code == 0
@@ -377,7 +378,7 @@ def test_review_explain_judging_notes_frontier_only(tmp_home, capsys, fake_api_k
     Seeds one current-week session so the digest renders past the
     US-077 zero-session gate.
     """
-    _seed_score("sess-frontier", datetime.now(timezone.utc))
+    _seed_score("sess-frontier", datetime.now(UTC))
     code = main(["review", "--frontier-only", "--explain-judging"])
     out = capsys.readouterr().out
     assert code == 0
@@ -399,7 +400,7 @@ def _write_minimal_claude_session(tmp_home: Path, session_id: str) -> Path:
     root = tmp_home / ".claude" / "projects" / "rescore-test"
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{session_id}.jsonl"
-    when = datetime.now(timezone.utc) - timedelta(hours=1)
+    when = datetime.now(UTC) - timedelta(hours=1)
     events = [
         {
             "type": "user",
@@ -434,7 +435,7 @@ def fake_frontier_judge(monkeypatch):
     itself is stubbed.
     """
 
-    def _fake(session, prefer="claude", **kwargs):  # noqa: ARG001
+    def _fake(session, prefer="claude", **kwargs):
         return JudgeResult(
             dimension_scores={d.key: 7.5 for d in RUBRIC},
             rationale={d.key: "re-scored fixture" for d in RUBRIC},
@@ -584,7 +585,7 @@ def test_baseline_on_empty_data_exits_zero(tmp_home, capsys):
 def test_baseline_with_data_prints_overall_and_dims(tmp_home, capsys):
     """With 14+ days of data, baseline prints numeric overall + every dim."""
     # Seed 20 days ago so the data span is >= 14 (baseline is not forming).
-    when = datetime.now(timezone.utc) - timedelta(days=20)
+    when = datetime.now(UTC) - timedelta(days=20)
     _seed_score("base-1", when, overall=6.4)
     _seed_score("base-2", when + timedelta(days=1), overall=7.0)
 
@@ -609,9 +610,9 @@ def test_history_with_no_data_exits_zero(tmp_home, capsys):
 def test_history_lists_iso_weeks_newest_first(tmp_home, capsys):
     """history groups session_scores by ISO week, newest first."""
     # Two sessions in 2026-W21, one in 2026-W19.
-    _seed_score("h1", datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc))
-    _seed_score("h2", datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc))
-    _seed_score("h3", datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc))
+    _seed_score("h1", datetime(2026, 5, 20, 12, 0, tzinfo=UTC))
+    _seed_score("h2", datetime(2026, 5, 21, 12, 0, tzinfo=UTC))
+    _seed_score("h3", datetime(2026, 5, 6, 12, 0, tzinfo=UTC))
 
     code = main(["history"])
     out = capsys.readouterr().out
@@ -624,7 +625,7 @@ def test_history_lists_iso_weeks_newest_first(tmp_home, capsys):
 
 def test_show_renders_past_week_and_exits_zero(tmp_home, capsys):
     """show <week_iso> renders the persisted snapshot for that week."""
-    in_week = datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc)
+    in_week = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
     _seed_score("show-1", in_week)
 
     code = main(["show", "2026-W21"])
@@ -739,9 +740,7 @@ def test_week_iso_bypasses_api_key_check(tmp_home, capsys):
     assert code != 2
 
 
-def test_week_iso_current_week_does_not_warn_about_missing_judges(
-    tmp_home, capsys, monkeypatch
-):
+def test_week_iso_current_week_does_not_warn_about_missing_judges(tmp_home, capsys, monkeypatch):
     """`--week <current>` is a historical read even if the ISO tag is current."""
     from praxis.cli import __main__ as cli_main
     from praxis.orchestrator import WeeklyRunSummary, current_iso_week
@@ -820,9 +819,7 @@ def test_history_does_not_gate_on_api_key(tmp_home, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_week_current_window_with_no_sessions_exits_3(
-    tmp_home, capsys, fake_api_key
-):
+def test_week_current_window_with_no_sessions_exits_3(tmp_home, capsys, fake_api_key):
     """`praxis review` on an empty DB exits 3 with a clear message.
 
     With an API key set the exit-2 gate is bypassed; the exit-3 gate
@@ -884,20 +881,16 @@ def test_no_api_key_trumps_no_sessions(tmp_home, capsys):
     assert "ANTHROPIC_API_KEY" in err
 
 
-def test_week_with_seeded_session_does_not_exit_3(
-    tmp_home, capsys, fake_api_key
-):
+def test_week_with_seeded_session_does_not_exit_3(tmp_home, capsys, fake_api_key):
     """Positive case: a seeded session in the current window yields exit 0."""
-    _seed_score("sess-positive", datetime.now(timezone.utc))
+    _seed_score("sess-positive", datetime.now(UTC))
     code = main(["review"])
     out = capsys.readouterr().out
     assert code == 0
     assert "PRAXIS" in out
 
 
-def test_scan_with_no_sessions_does_not_exit_3(
-    tmp_home, capsys, fake_api_key
-):
+def test_scan_with_no_sessions_does_not_exit_3(tmp_home, capsys, fake_api_key):
     """`praxis scan` is the cron-driven data-mover, not a digest renderer.
 
     With zero sessions in the window scan still exits 0 (so the launchd /
@@ -1003,7 +996,7 @@ def fake_osascript(monkeypatch):
 
     calls: list[list[str]] = []
 
-    def _run(cmd, *args, **kwargs):  # noqa: ARG001
+    def _run(cmd, *args, **kwargs):
         calls.append(list(cmd))
         return _subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
@@ -1021,7 +1014,7 @@ def test_notify_calls_osascript_after_writing_html(
     if the digest never landed) and that osascript was invoked once.
     """
     monkeypatch.setattr(sys, "platform", "darwin")
-    _seed_score("sess-notify", datetime.now(timezone.utc))
+    _seed_score("sess-notify", datetime.now(UTC))
 
     code = main(["review", "--notify"])
     capsys.readouterr()
@@ -1037,16 +1030,14 @@ def test_notify_calls_osascript_after_writing_html(
     assert "display notification" in cmd[2]
 
 
-def test_notify_title_is_fixed_string(
-    tmp_home, capsys, monkeypatch, fake_api_key, fake_osascript
-):
+def test_notify_title_is_fixed_string(tmp_home, capsys, monkeypatch, fake_api_key, fake_osascript):
     """The notification title is exactly 'Praxis weekly read is ready'.
 
     Per spec section 13.2 / AC US-081, the title is a fixed string. The
     trajectory label (US-082) lives in the body, not the title.
     """
     monkeypatch.setattr(sys, "platform", "darwin")
-    _seed_score("sess-title", datetime.now(timezone.utc))
+    _seed_score("sess-title", datetime.now(UTC))
 
     code = main(["review", "--notify"])
     capsys.readouterr()
@@ -1066,7 +1057,7 @@ def test_notify_body_mentions_latest_html(
     location to open regardless of which ISO week was just rendered.
     """
     monkeypatch.setattr(sys, "platform", "darwin")
-    _seed_score("sess-body", datetime.now(timezone.utc))
+    _seed_score("sess-body", datetime.now(UTC))
 
     code = main(["review", "--notify"])
     capsys.readouterr()
@@ -1075,9 +1066,7 @@ def test_notify_body_mentions_latest_html(
     assert "~/.praxis/latest.html" in script
 
 
-def test_notify_is_noop_on_non_darwin(
-    tmp_home, capsys, monkeypatch, fake_api_key, fake_osascript
-):
+def test_notify_is_noop_on_non_darwin(tmp_home, capsys, monkeypatch, fake_api_key, fake_osascript):
     """On non-macOS, --notify is a silent no-op: osascript is not invoked.
 
     The spec keeps the same flag portable across platforms (spec 13.2);
@@ -1085,7 +1074,7 @@ def test_notify_is_noop_on_non_darwin(
     the digest + HTML normally.
     """
     monkeypatch.setattr(sys, "platform", "linux")
-    _seed_score("sess-non-darwin", datetime.now(timezone.utc))
+    _seed_score("sess-non-darwin", datetime.now(UTC))
 
     code = main(["review", "--notify"])
     capsys.readouterr()
@@ -1111,7 +1100,7 @@ def test_notify_body_includes_trajectory_label(
     string must appear in the AppleScript ``display notification`` body.
     """
     monkeypatch.setattr(sys, "platform", "darwin")
-    _seed_score("sess-traj", datetime.now(timezone.utc))
+    _seed_score("sess-traj", datetime.now(UTC))
 
     code = main(["review", "--notify"])
     capsys.readouterr()
@@ -1140,7 +1129,7 @@ def test_notify_body_uses_user_facing_trajectory_label(
     from praxis.scoring.aggregate import ProfileSnapshot
 
     monkeypatch.setattr(sys, "platform", "darwin")
-    _seed_score("sess-engaged", datetime.now(timezone.utc))
+    _seed_score("sess-engaged", datetime.now(UTC))
 
     # Stub run_weekly to return a summary with a known non-INSUFFICIENT_DATA
     # trajectory. Build a minimal snapshot that satisfies the exit-3 gate
@@ -1183,9 +1172,7 @@ def test_notify_body_uses_user_facing_trajectory_label(
     assert "Stable_Engaged" not in script
 
 
-def test_notify_survives_osascript_filenotfound(
-    tmp_home, capsys, monkeypatch, fake_api_key
-):
+def test_notify_survives_osascript_filenotfound(tmp_home, capsys, monkeypatch, fake_api_key):
     """`osascript` binary missing must not crash the run (AC US-082).
 
     Sandboxed CI runners may not have ``osascript`` on PATH;
@@ -1194,9 +1181,9 @@ def test_notify_survives_osascript_filenotfound(
     digest is already rendered and the HTML is already written.
     """
     monkeypatch.setattr(sys, "platform", "darwin")
-    _seed_score("sess-nofile", datetime.now(timezone.utc))
+    _seed_score("sess-nofile", datetime.now(UTC))
 
-    def _missing(cmd, *args, **kwargs):  # noqa: ARG001
+    def _missing(cmd, *args, **kwargs):
         raise FileNotFoundError("osascript")
 
     monkeypatch.setattr("praxis.cli.__main__.subprocess.run", _missing)
@@ -1208,9 +1195,7 @@ def test_notify_survives_osascript_filenotfound(
     assert "osascript notification failed" in captured.err
 
 
-def test_notify_survives_osascript_nonzero_exit(
-    tmp_home, capsys, monkeypatch, fake_api_key
-):
+def test_notify_survives_osascript_nonzero_exit(tmp_home, capsys, monkeypatch, fake_api_key):
     """osascript returning non-zero must not crash the run (AC US-082).
 
     Notification Center can refuse to display (locked screen, focus
@@ -1220,9 +1205,9 @@ def test_notify_survives_osascript_nonzero_exit(
     import subprocess as _subprocess
 
     monkeypatch.setattr(sys, "platform", "darwin")
-    _seed_score("sess-nonzero", datetime.now(timezone.utc))
+    _seed_score("sess-nonzero", datetime.now(UTC))
 
-    def _failing(cmd, *args, **kwargs):  # noqa: ARG001
+    def _failing(cmd, *args, **kwargs):
         return _subprocess.CompletedProcess(
             cmd, returncode=1, stdout="", stderr="permission denied"
         )
@@ -1236,9 +1221,7 @@ def test_notify_survives_osascript_nonzero_exit(
     assert "permission denied" in captured.err
 
 
-def test_notify_survives_unexpected_exception(
-    tmp_home, capsys, monkeypatch, fake_api_key
-):
+def test_notify_survives_unexpected_exception(tmp_home, capsys, monkeypatch, fake_api_key):
     """Any exception from subprocess.run is caught (AC US-082).
 
     Defends the broad ``except Exception`` clause: even when something
@@ -1247,9 +1230,9 @@ def test_notify_survives_unexpected_exception(
     logged to stderr.
     """
     monkeypatch.setattr(sys, "platform", "darwin")
-    _seed_score("sess-oserror", datetime.now(timezone.utc))
+    _seed_score("sess-oserror", datetime.now(UTC))
 
-    def _explode(cmd, *args, **kwargs):  # noqa: ARG001
+    def _explode(cmd, *args, **kwargs):
         raise PermissionError("operation not permitted")
 
     monkeypatch.setattr("praxis.cli.__main__.subprocess.run", _explode)
@@ -1317,9 +1300,7 @@ def test_nudge_silent_when_only_resolved_rows_exist(tmp_home, capsys, monkeypatc
     it no longer counts as the active commitment -- the user has already
     seen its outcome in their weekly digest.
     """
-    monkeypatch.setattr(
-        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
-    )
+    monkeypatch.setattr("praxis.cli.__main__.current_iso_week", lambda: "2026-W21")
     _seed_follow_up(
         "2026-W21",
         commitment_text="resolved last week",
@@ -1332,18 +1313,14 @@ def test_nudge_silent_when_only_resolved_rows_exist(tmp_home, capsys, monkeypatc
     assert captured.out == ""
 
 
-def test_nudge_silent_when_pending_row_is_for_a_different_week(
-    tmp_home, capsys, monkeypatch
-):
+def test_nudge_silent_when_pending_row_is_for_a_different_week(tmp_home, capsys, monkeypatch):
     """A pending row from a prior week is not active for THIS week.
 
     Active = pending AND week_iso == current. Stale pending rows (e.g.,
     if the close-the-loop step didn't run) must not leak into the current
     week's nudge surface.
     """
-    monkeypatch.setattr(
-        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
-    )
+    monkeypatch.setattr("praxis.cli.__main__.current_iso_week", lambda: "2026-W21")
     _seed_follow_up("2026-W19", commitment_text="stale pending")
     code = main(["nudge"])
     captured = capsys.readouterr()
@@ -1351,17 +1328,13 @@ def test_nudge_silent_when_pending_row_is_for_a_different_week(
     assert captured.out == ""
 
 
-def test_nudge_prints_active_commitment_for_current_week(
-    tmp_home, capsys, monkeypatch
-):
+def test_nudge_prints_active_commitment_for_current_week(tmp_home, capsys, monkeypatch):
     """A pending row for the current week is the active commitment.
 
     Output is single-line so SessionStart hooks can pipe it straight to
     the user without further parsing.
     """
-    monkeypatch.setattr(
-        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
-    )
+    monkeypatch.setattr("praxis.cli.__main__.current_iso_week", lambda: "2026-W21")
     _seed_follow_up(
         "2026-W21",
         commitment_text="ask 'what would falsify this answer?' before applying",
@@ -1384,9 +1357,7 @@ def test_nudge_uses_current_iso_week_resolver(tmp_home, capsys, monkeypatch):
     _seed_follow_up("2026-W19", commitment_text="week 19 commitment")
     _seed_follow_up("2026-W21", commitment_text="week 21 commitment")
 
-    monkeypatch.setattr(
-        "praxis.cli.__main__.current_iso_week", lambda: "2026-W19"
-    )
+    monkeypatch.setattr("praxis.cli.__main__.current_iso_week", lambda: "2026-W19")
     code = main(["nudge"])
     captured = capsys.readouterr()
     assert code == 0
@@ -1403,9 +1374,7 @@ def test_nudge_exits_nonzero_with_clear_error_on_multiple_active_rows(
     unique index both prevent this case; the test injects two rows via
     monkeypatch since the schema makes the case unreachable in practice.
     """
-    monkeypatch.setattr(
-        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
-    )
+    monkeypatch.setattr("praxis.cli.__main__.current_iso_week", lambda: "2026-W21")
     fakes = [
         FollowUp(
             week_iso="2026-W21",
@@ -1424,7 +1393,7 @@ def test_nudge_exits_nonzero_with_clear_error_on_multiple_active_rows(
     ]
     monkeypatch.setattr(
         "praxis.cli.__main__.ProfileStore.load_active_commitments",
-        lambda self, week_iso: fakes,  # noqa: ARG005
+        lambda self, week_iso: fakes,
     )
 
     code = main(["nudge"])
@@ -1449,9 +1418,7 @@ def test_nudge_default_format_is_text(tmp_home, capsys, monkeypatch):
     straight to the prompt; introducing a JSON-by-default would break
     every existing shell-startup wiring.
     """
-    monkeypatch.setattr(
-        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
-    )
+    monkeypatch.setattr("praxis.cli.__main__.current_iso_week", lambda: "2026-W21")
     _seed_follow_up("2026-W21", commitment_text="explain the failing test first")
     code = main(["nudge"])
     captured = capsys.readouterr()
@@ -1459,13 +1426,9 @@ def test_nudge_default_format_is_text(tmp_home, capsys, monkeypatch):
     assert captured.out == "[Praxis] This week: explain the failing test first\n"
 
 
-def test_nudge_format_text_prints_single_line_with_newline(
-    tmp_home, capsys, monkeypatch
-):
+def test_nudge_format_text_prints_single_line_with_newline(tmp_home, capsys, monkeypatch):
     """`--format text` prints exactly `[Praxis] This week: <text>` + newline."""
-    monkeypatch.setattr(
-        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
-    )
+    monkeypatch.setattr("praxis.cli.__main__.current_iso_week", lambda: "2026-W21")
     _seed_follow_up(
         "2026-W21",
         commitment_text="ask 'what would falsify this answer?' first",
@@ -1473,24 +1436,17 @@ def test_nudge_format_text_prints_single_line_with_newline(
     code = main(["nudge", "--format", "text"])
     captured = capsys.readouterr()
     assert code == 0
-    assert (
-        captured.out
-        == "[Praxis] This week: ask 'what would falsify this answer?' first\n"
-    )
+    assert captured.out == "[Praxis] This week: ask 'what would falsify this answer?' first\n"
     assert captured.err == ""
 
 
-def test_nudge_format_claude_code_emits_single_line_json(
-    tmp_home, capsys, monkeypatch
-):
+def test_nudge_format_claude_code_emits_single_line_json(tmp_home, capsys, monkeypatch):
     """`--format claude-code` prints exactly the spec section 5 JSON envelope.
 
     The envelope is single-line JSON with no whitespace between tokens so
     Claude Code's SessionStart hook reader sees one stdin line.
     """
-    monkeypatch.setattr(
-        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
-    )
+    monkeypatch.setattr("praxis.cli.__main__.current_iso_week", lambda: "2026-W21")
     _seed_follow_up(
         "2026-W21",
         commitment_text="run the linter before requesting review",
@@ -1513,13 +1469,9 @@ def test_nudge_format_claude_code_emits_single_line_json(
     assert " " not in captured.out.split('"additionalContext"')[0]
 
 
-def test_nudge_format_codex_emits_same_envelope_as_claude_code(
-    tmp_home, capsys, monkeypatch
-):
+def test_nudge_format_codex_emits_same_envelope_as_claude_code(tmp_home, capsys, monkeypatch):
     """`--format codex` shares the additionalContext shape (spec section 5)."""
-    monkeypatch.setattr(
-        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
-    )
+    monkeypatch.setattr("praxis.cli.__main__.current_iso_week", lambda: "2026-W21")
     _seed_follow_up(
         "2026-W21",
         commitment_text="state your assumptions before generating code",
@@ -1537,18 +1489,14 @@ def test_nudge_format_codex_emits_same_envelope_as_claude_code(
     }
 
 
-def test_nudge_format_silent_when_no_active_commitment(
-    tmp_home, capsys, monkeypatch
-):
+def test_nudge_format_silent_when_no_active_commitment(tmp_home, capsys, monkeypatch):
     """Empty stdout (no JSON envelope at all) when no active commitment exists.
 
     Hooks must remain silent on a fresh DB regardless of which surface
     they request; emitting an envelope with an empty additionalContext
     would surface noise on every shell start.
     """
-    monkeypatch.setattr(
-        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
-    )
+    monkeypatch.setattr("praxis.cli.__main__.current_iso_week", lambda: "2026-W21")
     for fmt in ("text", "claude-code", "codex"):
         code = main(["nudge", "--format", fmt])
         captured = capsys.readouterr()
@@ -1557,9 +1505,7 @@ def test_nudge_format_silent_when_no_active_commitment(
         assert captured.err == "", f"format={fmt!r} must produce empty stderr"
 
 
-def test_nudge_format_html_exits_nonzero_and_lists_accepted_values(
-    tmp_home, capsys
-):
+def test_nudge_format_html_exits_nonzero_and_lists_accepted_values(tmp_home, capsys):
     """Unsupported `--format html` exits non-zero with the choices listed.
 
     argparse's `choices=` machinery prints a usage-style line plus the
@@ -1620,16 +1566,12 @@ def test_nudge_surface_argument_parses_with_default_cli(tmp_home, monkeypatch):
     assert args_override.surface == "claude-code"
 
 
-def test_nudge_records_fire_timestamp_after_successful_surface(
-    tmp_home, capsys, monkeypatch
-):
+def test_nudge_records_fire_timestamp_after_successful_surface(tmp_home, capsys, monkeypatch):
     """A successful nudge writes an ISO-8601 timestamp into ~/.praxis/.last_nudge.
 
     The JSON object is keyed by ``f"{surface}:{sha1(cwd)}"`` (US-018 AC #1).
     """
-    monkeypatch.setattr(
-        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
-    )
+    monkeypatch.setattr("praxis.cli.__main__.current_iso_week", lambda: "2026-W21")
     monkeypatch.chdir(tmp_home)
     _seed_follow_up("2026-W21", commitment_text="stay literal")
     code = main(["nudge"])
@@ -1657,9 +1599,7 @@ def test_nudge_throttled_within_window_returns_empty_without_db_touch(
     Verifies AC #2: the throttle short-circuits before any commitment
     resolution so the second call never opens profile.db.
     """
-    monkeypatch.setattr(
-        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
-    )
+    monkeypatch.setattr("praxis.cli.__main__.current_iso_week", lambda: "2026-W21")
     monkeypatch.chdir(tmp_home)
     _seed_follow_up("2026-W21", commitment_text="first fire only")
 
@@ -1671,13 +1611,9 @@ def test_nudge_throttled_within_window_returns_empty_without_db_touch(
     # Booby-trap the DB resolver: if the second call reaches it, the
     # test fails loudly. The throttle must short-circuit beforehand.
     def _explode(_week_iso: str) -> None:
-        raise AssertionError(
-            "throttled call must not reach the active-commitment resolver"
-        )
+        raise AssertionError("throttled call must not reach the active-commitment resolver")
 
-    monkeypatch.setattr(
-        "praxis.cli.__main__._resolve_active_commitment", _explode
-    )
+    monkeypatch.setattr("praxis.cli.__main__._resolve_active_commitment", _explode)
     second = main(["nudge"])
     second_out = capsys.readouterr()
     assert second == 0
@@ -1685,20 +1621,16 @@ def test_nudge_throttled_within_window_returns_empty_without_db_touch(
     assert second_out.err == ""
 
 
-def test_nudge_throttle_releases_after_window_elapses(
-    tmp_home, capsys, monkeypatch
-):
+def test_nudge_throttle_releases_after_window_elapses(tmp_home, capsys, monkeypatch):
     """After throttle_minutes have passed, the surface fires again."""
     from praxis.cli import nudge_throttle
 
-    monkeypatch.setattr(
-        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
-    )
+    monkeypatch.setattr("praxis.cli.__main__.current_iso_week", lambda: "2026-W21")
     monkeypatch.chdir(tmp_home)
     _seed_follow_up("2026-W21", commitment_text="time-travel cue")
 
     # Prime the throttle file with a fire 31 minutes ago (default window is 30).
-    past = datetime.now(timezone.utc) - timedelta(minutes=31)
+    past = datetime.now(UTC) - timedelta(minutes=31)
     nudge_throttle.record_fire("cli", now=past)
 
     code = main(["nudge"])
@@ -1707,15 +1639,11 @@ def test_nudge_throttle_releases_after_window_elapses(
     assert "time-travel cue" in captured.out
 
 
-def test_nudge_throttle_minutes_honors_config_override(
-    tmp_home, capsys, monkeypatch
-):
+def test_nudge_throttle_minutes_honors_config_override(tmp_home, capsys, monkeypatch):
     """User-set [nudge] throttle_minutes overrides the default 30."""
     from praxis.cli import nudge_throttle
 
-    monkeypatch.setattr(
-        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
-    )
+    monkeypatch.setattr("praxis.cli.__main__.current_iso_week", lambda: "2026-W21")
     monkeypatch.chdir(tmp_home)
     _seed_follow_up("2026-W21", commitment_text="user-config cue")
 
@@ -1725,7 +1653,7 @@ def test_nudge_throttle_minutes_honors_config_override(
     config = tmp_home / ".praxis" / "config.toml"
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text("[nudge]\nthrottle_minutes = 60\n", encoding="utf-8")
-    past = datetime.now(timezone.utc) - timedelta(minutes=45)
+    past = datetime.now(UTC) - timedelta(minutes=45)
     nudge_throttle.record_fire("cli", now=past)
 
     code = main(["nudge"])
@@ -1742,9 +1670,7 @@ def test_nudge_throttle_keyed_by_surface_so_different_surfaces_fire_independentl
     Per US-018 AC #1 the key is (surface, sha1(cwd)); two distinct
     surfaces in the same cwd therefore have independent throttle state.
     """
-    monkeypatch.setattr(
-        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
-    )
+    monkeypatch.setattr("praxis.cli.__main__.current_iso_week", lambda: "2026-W21")
     monkeypatch.chdir(tmp_home)
     _seed_follow_up("2026-W21", commitment_text="per-surface cue")
 
@@ -1762,13 +1688,9 @@ def test_nudge_throttle_keyed_by_surface_so_different_surfaces_fire_independentl
     assert surfaces == {"claude-code", "codex"}
 
 
-def test_nudge_throttle_corrupt_json_renames_to_corrupt_and_proceeds(
-    tmp_home, capsys, monkeypatch
-):
+def test_nudge_throttle_corrupt_json_renames_to_corrupt_and_proceeds(tmp_home, capsys, monkeypatch):
     """Malformed JSON quarantines to ``.last_nudge.corrupt`` and proceeds (AC #3)."""
-    monkeypatch.setattr(
-        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
-    )
+    monkeypatch.setattr("praxis.cli.__main__.current_iso_week", lambda: "2026-W21")
     monkeypatch.chdir(tmp_home)
     _seed_follow_up("2026-W21", commitment_text="recovered cue")
 
@@ -1795,18 +1717,14 @@ def test_nudge_throttle_corrupt_json_renames_to_corrupt_and_proceeds(
     assert any(k.startswith("cli:") for k in new_state)
 
 
-def test_nudge_no_active_commitment_does_not_record_fire(
-    tmp_home, capsys, monkeypatch
-):
+def test_nudge_no_active_commitment_does_not_record_fire(tmp_home, capsys, monkeypatch):
     """Silent runs (no commitment) must NOT touch the throttle file.
 
     Recording a fire when nothing was surfaced would block the next
     legitimate cue (after the user finally commits) for 30 minutes.
     The throttle file should remain unchanged across no-op calls.
     """
-    monkeypatch.setattr(
-        "praxis.cli.__main__.current_iso_week", lambda: "2026-W21"
-    )
+    monkeypatch.setattr("praxis.cli.__main__.current_iso_week", lambda: "2026-W21")
     monkeypatch.chdir(tmp_home)
     # No `_seed_follow_up` -- the resolver returns None.
 
@@ -1817,13 +1735,18 @@ def test_nudge_no_active_commitment_does_not_record_fire(
 
     throttle_file = tmp_home / ".praxis" / ".last_nudge"
     assert not throttle_file.exists()
+
+
 # US-036: HTML masthead + interactive prompt gating
 # ---------------------------------------------------------------------------
 
 
-def _seed_commitment(week_iso: str, *, dim_key: str = "verification",
-                     commitment_text: str = "ask 'list the tables this writes' before running",
-                     ) -> FollowUp:
+def _seed_commitment(
+    week_iso: str,
+    *,
+    dim_key: str = "verification",
+    commitment_text: str = "ask 'list the tables this writes' before running",
+) -> FollowUp:
     """Seed one follow_ups row so the rollup builder finds an active commitment.
 
     Returns the FollowUp the helper saved so the test can assert against
@@ -1845,7 +1768,9 @@ def _seed_commitment(week_iso: str, *, dim_key: str = "verification",
 
 
 def _stub_run_weekly_with_rollup(
-    monkeypatch, *, week_iso: str | None = None,
+    monkeypatch,
+    *,
+    week_iso: str | None = None,
     commitment_text: str = "ask 'list the tables this writes' before running",
     dim_key: str = "verification",
 ) -> str:
@@ -1917,7 +1842,7 @@ def test_review_notify_non_interactive_renders_without_prompt(
     the prompt must still stay quiet under the combined flag pair.
     """
     monkeypatch.setattr(sys, "platform", "darwin")
-    _seed_score("sess-notify-noprompt", datetime.now(timezone.utc))
+    _seed_score("sess-notify-noprompt", datetime.now(UTC))
     _seed_commitment(_current_week_iso())
     _stub_run_weekly_with_rollup(monkeypatch)
 
@@ -1940,7 +1865,7 @@ def test_review_notify_alone_suppresses_prompt_even_at_tty(
     monkeypatch.setattr(sys, "platform", "darwin")
     # Force stdin.isatty() True so the only gate that should fire is --notify.
     monkeypatch.setattr("praxis.cli.__main__.sys.stdin.isatty", lambda: True)
-    _seed_score("sess-notify-tty", datetime.now(timezone.utc))
+    _seed_score("sess-notify-tty", datetime.now(UTC))
     _seed_commitment(_current_week_iso())
     _stub_run_weekly_with_rollup(monkeypatch)
 
@@ -1952,9 +1877,7 @@ def test_review_notify_alone_suppresses_prompt_even_at_tty(
     assert "[d]igest" not in captured.out
 
 
-def test_review_skips_prompt_when_stdin_not_a_tty(
-    tmp_home, capsys, monkeypatch, fake_api_key
-):
+def test_review_skips_prompt_when_stdin_not_a_tty(tmp_home, capsys, monkeypatch, fake_api_key):
     """No TTY -> no prompt (scripted runs through pipes / docker / CI).
 
     Even with a commitment on file, the prompt only fires when the
@@ -1962,7 +1885,7 @@ def test_review_skips_prompt_when_stdin_not_a_tty(
     captured stdout to prove the prompt prefix never lands.
     """
     monkeypatch.setattr("praxis.cli.__main__.sys.stdin.isatty", lambda: False)
-    _seed_score("sess-pipe", datetime.now(timezone.utc))
+    _seed_score("sess-pipe", datetime.now(UTC))
     _seed_commitment(_current_week_iso())
     _stub_run_weekly_with_rollup(monkeypatch)
 
@@ -1972,21 +1895,19 @@ def test_review_skips_prompt_when_stdin_not_a_tty(
     assert "[k]eep" not in captured.out
 
 
-def test_review_skips_prompt_when_no_commitment_rollup(
-    tmp_home, capsys, monkeypatch, fake_api_key
-):
+def test_review_skips_prompt_when_no_commitment_rollup(tmp_home, capsys, monkeypatch, fake_api_key):
     """No rollup -> no commitment to keep/new, so the prompt is
     suppressed entirely. The masthead's commitment block is the
     precondition for the prompt; renderer omits the block when the
     rollup is None and the CLI does the same.
     """
     monkeypatch.setattr("praxis.cli.__main__.sys.stdin.isatty", lambda: True)
-    _seed_score("sess-no-commitment", datetime.now(timezone.utc))
+    _seed_score("sess-no-commitment", datetime.now(UTC))
     # Note: no _stub_run_weekly_with_rollup call; the real run_weekly
     # leaves commitment_rollup=None when no follow_up was built.
     fake_calls: list[str] = []
 
-    def _fake_input(prompt: str) -> str:  # noqa: ARG001
+    def _fake_input(prompt: str) -> str:
         fake_calls.append(prompt)
         return "d"
 
@@ -2009,13 +1930,12 @@ def test_review_prompt_keep_inserts_followup_for_next_week(
     """
     monkeypatch.setattr("praxis.cli.__main__.sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda prompt="": "k")
-    _seed_score("sess-keep", datetime.now(timezone.utc))
+    _seed_score("sess-keep", datetime.now(UTC))
     current_week = _current_week_iso()
-    seeded = _seed_commitment(
-        current_week, commitment_text="state the goal before prompting"
-    )
+    seeded = _seed_commitment(current_week, commitment_text="state the goal before prompting")
     _stub_run_weekly_with_rollup(
-        monkeypatch, week_iso=current_week,
+        monkeypatch,
+        week_iso=current_week,
         commitment_text=seeded.commitment_text,
         dim_key=seeded.dim_key,
     )
@@ -2026,6 +1946,7 @@ def test_review_prompt_keep_inserts_followup_for_next_week(
 
     # Compute the next ISO week the same way the CLI does.
     from praxis.cli.__main__ import _next_iso_week
+
     next_week = _next_iso_week(current_week)
     store = ProfileStore()
     next_row = store.load_follow_up(next_week)
@@ -2039,13 +1960,11 @@ def test_review_prompt_keep_inserts_followup_for_next_week(
     assert next_week in captured.out
 
 
-def test_review_prompt_digest_branch_is_a_noop(
-    tmp_home, capsys, monkeypatch, fake_api_key
-):
+def test_review_prompt_digest_branch_is_a_noop(tmp_home, capsys, monkeypatch, fake_api_key):
     """[d]igest exits 0 without inserting a follow-up row for next week."""
     monkeypatch.setattr("praxis.cli.__main__.sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda prompt="": "d")
-    _seed_score("sess-digest", datetime.now(timezone.utc))
+    _seed_score("sess-digest", datetime.now(UTC))
     current_week = _current_week_iso()
     _seed_commitment(current_week)
     _stub_run_weekly_with_rollup(monkeypatch, week_iso=current_week)
@@ -2055,6 +1974,7 @@ def test_review_prompt_digest_branch_is_a_noop(
     assert code == 0
 
     from praxis.cli.__main__ import _next_iso_week
+
     next_week = _next_iso_week(current_week)
     store = ProfileStore()
     assert store.load_follow_up(next_week) is None
@@ -2072,18 +1992,21 @@ def test_review_prompt_digest_branch_is_a_noop(
 def test_next_iso_week_handles_year_boundary():
     """ISO weeks wrap at year boundaries: 2025-W52 -> 2026-W01."""
     from praxis.cli.__main__ import _next_iso_week
+
     assert _next_iso_week("2025-W52") == "2026-W01"
 
 
 def test_next_iso_week_increments_within_year():
     """Within a year the next week is +1 in ISO numbering."""
     from praxis.cli.__main__ import _next_iso_week
+
     assert _next_iso_week("2026-W21") == "2026-W22"
 
 
 def _current_week_iso() -> str:
     """Return the current ISO-week tag (matches what run_weekly sees)."""
     from praxis.orchestrator import current_iso_week
+
     return current_iso_week()
 
 
@@ -2091,14 +2014,17 @@ def _current_week_iso() -> str:
 # Top-level guard in main(): a real user must never see a raw traceback.
 # ---------------------------------------------------------------------------
 
+
 def _raiser(exc):
     def _f(*_a, **_k):
         raise exc
+
     return _f
 
 
 def test_main_catches_unexpected_exception_and_exits_1(tmp_home, monkeypatch, capsys):
     import praxis.cli.__main__ as m
+
     monkeypatch.delenv("PRAXIS_DEBUG", raising=False)
     monkeypatch.setattr(m, "ensure_config_file", _raiser(RuntimeError("kaboom")))
     code = main(["status"])
@@ -2111,6 +2037,7 @@ def test_main_catches_unexpected_exception_and_exits_1(tmp_home, monkeypatch, ca
 
 def test_main_reraises_full_traceback_under_debug(tmp_home, monkeypatch):
     import praxis.cli.__main__ as m
+
     monkeypatch.setenv("PRAXIS_DEBUG", "1")
     monkeypatch.setattr(m, "ensure_config_file", _raiser(RuntimeError("kaboom")))
     with pytest.raises(RuntimeError, match="kaboom"):
@@ -2119,6 +2046,7 @@ def test_main_reraises_full_traceback_under_debug(tmp_home, monkeypatch):
 
 def test_main_handles_keyboard_interrupt_cleanly(tmp_home, monkeypatch, capsys):
     import praxis.cli.__main__ as m
+
     monkeypatch.setattr(m, "ensure_config_file", _raiser(KeyboardInterrupt()))
     code = main(["status"])
     assert code == 130
@@ -2136,9 +2064,12 @@ def test_main_lets_systemexit_pass_through(tmp_home):
 # Non-interactive loop commands (scripts + the menu-bar app).
 # ---------------------------------------------------------------------------
 
+
 def test_reflect_set_records_non_interactively(tmp_home, capsys):
     import sqlite3
+
     from praxis.storage.profile_store import resolve_home
+
     wk = _current_week_iso()
     _seed_commitment(wk)
     code = main(["reflect", "--set", "yes", "--note", "felt good"])
@@ -2147,13 +2078,16 @@ def test_reflect_set_records_non_interactively(tmp_home, capsys):
     con = sqlite3.connect(resolve_home() / "profile.db")
     row = con.execute(
         "SELECT self_report, note FROM session_reflections "
-        "WHERE session_stable_id LIKE 'manual:%' ORDER BY id DESC LIMIT 1").fetchone()
+        "WHERE session_stable_id LIKE 'manual:%' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
     assert row == ("yes", "felt good")
 
 
 def test_commit_text_writes_non_interactively(tmp_home, capsys):
     import sqlite3
+
     from praxis.storage.profile_store import resolve_home
+
     wk = _current_week_iso()
     code = main(["commit", "--text", "my own focus this week"])
     assert code == 0
@@ -2161,13 +2095,17 @@ def test_commit_text_writes_non_interactively(tmp_home, capsys):
     con = sqlite3.connect(resolve_home() / "profile.db")
     row = con.execute(
         "SELECT outcome, user_chosen, display_text FROM follow_ups "
-        "WHERE week_iso=? ORDER BY id DESC LIMIT 1", (wk,)).fetchone()
+        "WHERE week_iso=? ORDER BY id DESC LIMIT 1",
+        (wk,),
+    ).fetchone()
     assert row[0] == "pending" and row[1] == 1 and row[2] == "my own focus this week"
 
 
 def test_commit_text_replaces_active_with_history(tmp_home, capsys):
     import sqlite3
+
     from praxis.storage.profile_store import resolve_home
+
     wk = _current_week_iso()
     _seed_commitment(wk, commitment_text="old focus")
     code = main(["commit", "--text", "a new focus"])
@@ -2175,7 +2113,9 @@ def test_commit_text_replaces_active_with_history(tmp_home, capsys):
     con = sqlite3.connect(resolve_home() / "profile.db")
     active = con.execute(
         "SELECT COUNT(*) FROM follow_ups WHERE week_iso=? AND outcome='pending' "
-        "AND superseded_by IS NULL", (wk,)).fetchone()[0]
+        "AND superseded_by IS NULL",
+        (wk,),
+    ).fetchone()[0]
     assert active == 1  # old superseded, new pending; exactly one active
 
 
@@ -2194,6 +2134,7 @@ def test_commit_text_empty_errors(tmp_home, capsys):
 
 def test_status_json_is_valid_and_has_expected_keys(tmp_home, capsys):
     import json as _json
+
     code = main(["status", "--json"])
     assert code == 0
     data = _json.loads(capsys.readouterr().out)
@@ -2209,11 +2150,13 @@ def test_last_json_error_path_when_no_digest(tmp_home, capsys):
 
 def test_main_friendly_message_on_locked_db(tmp_home, monkeypatch, capsys):
     import sqlite3
+
     import praxis.cli.__main__ as m
+
     monkeypatch.delenv("PRAXIS_DEBUG", raising=False)
     monkeypatch.setattr(
-        m, "ensure_config_file",
-        _raiser(sqlite3.OperationalError("database is locked")))
+        m, "ensure_config_file", _raiser(sqlite3.OperationalError("database is locked"))
+    )
     code = main(["status"])
     err = capsys.readouterr().err
     assert code == 1
@@ -2223,11 +2166,13 @@ def test_main_friendly_message_on_locked_db(tmp_home, monkeypatch, capsys):
 
 def test_main_friendly_message_on_corrupt_db(tmp_home, monkeypatch, capsys):
     import sqlite3
+
     import praxis.cli.__main__ as m
+
     monkeypatch.delenv("PRAXIS_DEBUG", raising=False)
     monkeypatch.setattr(
-        m, "ensure_config_file",
-        _raiser(sqlite3.DatabaseError("file is not a database")))
+        m, "ensure_config_file", _raiser(sqlite3.DatabaseError("file is not a database"))
+    )
     code = main(["status"])
     err = capsys.readouterr().err
     assert code == 1
@@ -2253,6 +2198,7 @@ def test_doctor_flags_no_api_key_and_no_focus(tmp_home, monkeypatch, capsys):
 
 def test_global_debug_flag_reraises_traceback(tmp_home, monkeypatch):
     import praxis.cli.__main__ as m
+
     monkeypatch.delenv("PRAXIS_DEBUG", raising=False)
     monkeypatch.setattr(m, "ensure_config_file", _raiser(RuntimeError("kaboom")))
     with pytest.raises(RuntimeError, match="kaboom"):

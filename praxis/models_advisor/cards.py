@@ -16,6 +16,7 @@ Pricing values are documented in each card with a `pricing_source` URL
 and `pricing_last_verified` date so you can re-check vendor pages
 before relying on dashboard cost estimates.
 """
+
 from __future__ import annotations
 
 import json
@@ -32,29 +33,29 @@ from praxis.storage.profile_store import resolve_home
 class ModelCard:
     """One model's profile."""
 
-    id: str                              # canonical: e.g. "claude-opus-4-7"
-    family: str                          # "claude" | "gpt" | "gemini" | "copilot" | ...
+    id: str  # canonical: e.g. "claude-opus-4-7"
+    family: str  # "claude" | "gpt" | "gemini" | "copilot" | ...
     display_name: str
     vendor: str
-    tier: str                            # "frontier" | "balanced" | "fast" | "specialized"
+    tier: str  # "frontier" | "balanced" | "fast" | "specialized"
     context_window_tokens: int
-    strengths: list[str]                 # tasks this model excels at
-    weaknesses: list[str]                # known failure modes
-    prompting_quirks: list[str]          # vendor-specific best practices
-    best_for: list[str]                  # use cases where this model is the right pick
-    avoid_for: list[str]                 # use cases where another model is better
-    notes: str                           # free-form context
+    strengths: list[str]  # tasks this model excels at
+    weaknesses: list[str]  # known failure modes
+    prompting_quirks: list[str]  # vendor-specific best practices
+    best_for: list[str]  # use cases where this model is the right pick
+    avoid_for: list[str]  # use cases where another model is better
+    notes: str  # free-form context
     sources: list[str] = field(default_factory=list)  # citations (URLs preferred)
     aliases: list[str] = field(default_factory=list)  # alt names found in session metadata
     version: str = "1.0"
 
-    # Pricing — populated where the vendor publishes per-token rates.
+    # Pricing: populated where the vendor publishes per-token rates.
     # None on subscription-only products (e.g. Copilot).
     input_per_million_usd: float | None = None
     output_per_million_usd: float | None = None
-    pricing_last_verified: str | None = None   # ISO date string, e.g. "2026-01-15"
-    pricing_source: str | None = None          # URL to the vendor pricing page
-    pricing_notes: str | None = None           # caveats (e.g. tiered context-window pricing)
+    pricing_last_verified: str | None = None  # ISO date string, e.g. "2026-01-15"
+    pricing_source: str | None = None  # URL to the vendor pricing page
+    pricing_notes: str | None = None  # caveats (e.g. tiered context-window pricing)
 
 
 def _builtin_cards_dir() -> Path:
@@ -92,6 +93,7 @@ def builtin_cards() -> list[ModelCard]:
 # Built-in cards are shipped as JSON files under data/builtin_cards/ and
 # loaded via builtin_cards(). The BUILTIN_CARDS module-level alias is kept
 # for back-compat with code (and tests) that imports it directly.
+
 
 class _BuiltinCardsList(list):
     """list[ModelCard] that lazy-loads from JSON files on first access."""
@@ -148,7 +150,7 @@ def find_card_for_model_hint(model_hint: str | None) -> ModelCard | None:
 
     Note on prefix matching: the match is one-way only. The hint must be
     longer than (or equal to) the alias. We do NOT match a short hint to
-    a longer alias — that would silently route "claude" to whichever
+    a longer alias: that would silently route "claude" to whichever
     Claude card happens to sort first, which is worse than returning None.
     """
     if not model_hint:

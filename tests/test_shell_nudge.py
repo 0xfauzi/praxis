@@ -1,4 +1,5 @@
 """Tests for the shell-startup reminder snippet and install/uninstall helpers."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -146,12 +147,7 @@ def test_uninstall_from_rc_preserves_surrounding_content(tmp_path: Path):
     """Lines before and after the nudge block must survive untouched."""
     rc = tmp_path / ".zshrc"
     rc.write_text(
-        "export EDITOR=nvim\n"
-        "\n"
-        f"{PRAXIS_NUDGE_COMMENT}\n"
-        f"{PRAXIS_NUDGE_LINE}\n"
-        "\n"
-        "alias ll='ls -la'\n",
+        f"export EDITOR=nvim\n\n{PRAXIS_NUDGE_COMMENT}\n{PRAXIS_NUDGE_LINE}\n\nalias ll='ls -la'\n",
         encoding="utf-8",
     )
     uninstall_from_rc(rc)

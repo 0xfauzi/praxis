@@ -6,10 +6,11 @@ these guards the bugs could silently return. Grouped by the criterion each
 defends: F1 parse safety, F3 scoring robustness, F4 statistical honesty,
 F5 time correctness, F6 data integrity, N1 privacy.
 """
+
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from praxis.behavior.signals import extract
 from praxis.models import Provider, Role, Session, Turn
@@ -23,7 +24,7 @@ def _session(turns: list[Turn]) -> Session:
     return Session(
         provider=Provider.CLAUDE,
         session_id="regression",
-        started_at=datetime(2026, 5, 28, tzinfo=timezone.utc),
+        started_at=datetime(2026, 5, 28, tzinfo=UTC),
         turns=turns,
         source_path="/tmp/regression.jsonl",
         model_hint="claude-haiku-4-5",
@@ -32,13 +33,14 @@ def _session(turns: list[Turn]) -> Session:
 
 # --- F1: one malformed file must never abort a provider's whole scan -------
 
+
 def test_claude_non_object_json_line_does_not_abort_scan(synthetic_claude_session):
     """A line that is valid JSON but not an object (bare array/number/
     string/bool/null) used to raise AttributeError out of parse() -- not a
     JSONDecodeError -- aborting the scan and silently dropping every other
     session for the provider."""
     with synthetic_claude_session.open("a", encoding="utf-8") as f:
-        f.write("[1, 2, 3]\n42\n\"bare\"\nnull\ntrue\n")
+        f.write('[1, 2, 3]\n42\n"bare"\nnull\ntrue\n')
     sessions = list(ClaudeScanner().scan())
     assert len(sessions) == 1
     assert sessions[0].turn_count == 3  # the real events still parsed
@@ -57,6 +59,7 @@ def test_codex_non_object_and_string_action_do_not_abort_scan(synthetic_codex_se
 
 # --- F5: a missing-zone timestamp coerces to UTC (no naive/aware crash) ----
 
+
 def test_claude_naive_timestamp_coerced_to_utc(synthetic_claude_session):
     """A timestamp with no 'Z' and no offset parsed to a naive datetime,
     which later crashed the week-window filters (naive vs aware compare)."""
@@ -71,6 +74,7 @@ def test_claude_naive_timestamp_coerced_to_utc(synthetic_claude_session):
 
 
 # --- F3: hostile LLM output shapes must not crash or fabricate -------------
+
 
 def test_parse_response_tolerates_wrong_container_types():
     for payload in (
@@ -105,11 +109,14 @@ def test_parse_response_non_finite_scores_become_neutral():
 
 # --- N1: secrets must be redacted before the transcript leaves the machine -
 
+
 def test_transcript_to_llm_and_corpus_are_redacted():
-    s = _session([
-        Turn(role=Role.USER, content="key sk-ant-" + "A" * 28 + " and AKIA1234567890ABCDEF"),
-        Turn(role=Role.ASSISTANT, content="pat github_pat_" + "A" * 82),
-    ])
+    s = _session(
+        [
+            Turn(role=Role.USER, content="key sk-ant-" + "A" * 28 + " and AKIA1234567890ABCDEF"),
+            Turn(role=Role.ASSISTANT, content="pat github_pat_" + "A" * 82),
+        ]
+    )
     for blob in (_compact_transcript(s), _session_corpus(s)):
         assert "sk-ant-AAAA" not in blob
         assert "AKIA1234567890ABCDEF" not in blob
@@ -139,20 +146,26 @@ def test_redactor_covers_google_slack_and_pem():
 
 # --- F4: a pure-delegator verdict needs enough turns to be real ------------
 
+
 def test_pure_delegator_needs_minimum_turns():
     """One terse "fix this" trips three atrophy patterns at once and used to
     flag a pure delegator on a single turn, driving a user-facing headline."""
     one = extract(_session([Turn(role=Role.USER, content="fix this")]))
     assert one.user_turn_count == 1
     assert one.is_pure_delegator is False
-    two = extract(_session([
-        Turn(role=Role.USER, content="fix this"),
-        Turn(role=Role.USER, content="just make it work"),
-    ]))
+    two = extract(
+        _session(
+            [
+                Turn(role=Role.USER, content="fix this"),
+                Turn(role=Role.USER, content="just make it work"),
+            ]
+        )
+    )
     assert two.is_pure_delegator is False
 
 
 # --- F6: a lost migration ledger must not re-run a destructive migration ----
+
 
 def test_migration_ledger_loss_preserves_follow_up_columns():
     """If schema_migrations is lost while follow_ups is already v4-shape, the

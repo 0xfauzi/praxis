@@ -18,18 +18,18 @@ This module is intentionally testable: the plist text is built by a
 pure function (:func:`build_plist`) and the launchctl calls go through
 ``subprocess.run`` so tests can monkeypatch them.
 """
+
 from __future__ import annotations
 
 import shlex
 import shutil
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 
 from praxis.config import ScheduleConfig, load_config
-
 
 PLIST_LABEL = "co.praxis.weekly"
 
@@ -60,25 +60,19 @@ def _normalize_day(day: str) -> int:
     key = day.strip().lower()
     if key not in _WEEKDAY_BY_NAME:
         valid = ", ".join(_WEEKDAY_BY_NAME.keys())
-        raise InstallWeeklyError(
-            f"Invalid schedule.day {day!r}: expected one of {valid}."
-        )
+        raise InstallWeeklyError(f"Invalid schedule.day {day!r}: expected one of {valid}.")
     return _WEEKDAY_BY_NAME[key]
 
 
 def _normalize_hour(hour: int) -> int:
     if not (0 <= hour <= 23):
-        raise InstallWeeklyError(
-            f"Invalid schedule.hour {hour}: must be 0-23."
-        )
+        raise InstallWeeklyError(f"Invalid schedule.hour {hour}: must be 0-23.")
     return hour
 
 
 def _normalize_minute(minute: int) -> int:
     if not (0 <= minute <= 59):
-        raise InstallWeeklyError(
-            f"Invalid schedule.minute {minute}: must be 0-59."
-        )
+        raise InstallWeeklyError(f"Invalid schedule.minute {minute}: must be 0-59.")
     return minute
 
 
@@ -108,11 +102,7 @@ def _resolve_praxis_command() -> list[str]:
 
 
 def _xml_escape(value: str) -> str:
-    return (
-        value.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 @dataclass(frozen=True)
@@ -123,6 +113,7 @@ class PlistContext:
     known values and assert on :func:`build_plist` output without going
     through the full installer.
     """
+
     program_arguments: Sequence[str]
     weekday: int
     hour: int
@@ -242,8 +233,7 @@ def install_weekly_macos(
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()
         raise InstallWeeklyError(
-            f"launchctl load failed (exit {result.returncode}): "
-            f"{stderr or 'no stderr output'}"
+            f"launchctl load failed (exit {result.returncode}): {stderr or 'no stderr output'}"
         )
     return plist_file
 
@@ -322,9 +312,7 @@ def _normalize_systemd_day(day: str) -> str:
     key = day.strip().lower()
     if key not in _SYSTEMD_DAY_BY_NAME:
         valid = ", ".join(_SYSTEMD_DAY_BY_NAME.keys())
-        raise InstallWeeklyError(
-            f"Invalid schedule.day {day!r}: expected one of {valid}."
-        )
+        raise InstallWeeklyError(f"Invalid schedule.day {day!r}: expected one of {valid}.")
     return _SYSTEMD_DAY_BY_NAME[key]
 
 
@@ -332,9 +320,7 @@ def _normalize_taskscheduler_day(day: str) -> str:
     key = day.strip().lower()
     if key not in _TASKSCHEDULER_DAY_BY_NAME:
         valid = ", ".join(_TASKSCHEDULER_DAY_BY_NAME.keys())
-        raise InstallWeeklyError(
-            f"Invalid schedule.day {day!r}: expected one of {valid}."
-        )
+        raise InstallWeeklyError(f"Invalid schedule.day {day!r}: expected one of {valid}.")
     return _TASKSCHEDULER_DAY_BY_NAME[key]
 
 

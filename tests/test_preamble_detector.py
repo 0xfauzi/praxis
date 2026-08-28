@@ -10,18 +10,17 @@ These tests pin down exactly what counts as tool-injected and what
 does not -- in particular, mixed-content turns (wrapper followed by a
 real user prompt) must NOT be flagged.
 """
+
 from __future__ import annotations
 
 from praxis.scanners.preamble import is_tool_injected_content
-
 
 # ----- positive cases: turns we expect to be flagged --------------------
 
 
 def test_codex_agents_md_preamble_is_flagged():
     content = (
-        "# AGENTS.md\n\nThis project follows these conventions...\n"
-        "<INSTRUCTIONS>...</INSTRUCTIONS>"
+        "# AGENTS.md\n\nThis project follows these conventions...\n<INSTRUCTIONS>...</INSTRUCTIONS>"
     )
     assert is_tool_injected_content(content) is True
 
@@ -119,8 +118,7 @@ def test_mixed_wrapper_then_real_prompt_is_not_flagged():
 
 def test_system_reminder_followed_by_real_prompt_is_not_flagged():
     content = (
-        "<system-reminder>auto mode</system-reminder>\n"
-        "What is the time complexity of quicksort?"
+        "<system-reminder>auto mode</system-reminder>\nWhat is the time complexity of quicksort?"
     )
     assert is_tool_injected_content(content) is False
 

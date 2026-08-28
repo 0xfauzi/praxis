@@ -5,9 +5,10 @@ Acceptance criteria (PRD US-044, spec section 7.2):
     are assigned exactly according to the table in Section 7.2.
   - Reading is returned when fewer than 4 weekly buckets have data.
 """
+
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from praxis.behavior import (
     MIN_BUCKETS_FOR_LABEL,
@@ -23,7 +24,6 @@ from praxis.behavior import (
     label_trajectory,
 )
 from praxis.scoring.rubric import RUBRIC
-
 
 RUBRIC_KEYS = [d.key for d in RUBRIC]
 
@@ -74,9 +74,9 @@ def _fit(
 
 # Significant slopes use exact-in-float values so the 1.5*stderr boundary
 # is unambiguous (see test_slope.py for the rationale).
-_UP = SlopeFit(slope=0.75, stderr=0.5, n=4)        # significant up
-_DOWN = SlopeFit(slope=-0.75, stderr=0.5, n=4)     # significant down
-_FLAT = SlopeFit(slope=0.0, stderr=0.0, n=4)       # not significant (flat)
+_UP = SlopeFit(slope=0.75, stderr=0.5, n=4)  # significant up
+_DOWN = SlopeFit(slope=-0.75, stderr=0.5, n=4)  # significant down
+_FLAT = SlopeFit(slope=0.0, stderr=0.0, n=4)  # not significant (flat)
 _FLAT_NOISY = SlopeFit(slope=0.10, stderr=0.5, n=4)  # |slope| < 1.5*stderr -> flat
 
 
@@ -256,8 +256,7 @@ def test_label_trajectory_steady_end_to_end():
     monday = date(2026, 5, 4)
     # Flat on both axes - 5 buckets all identical.
     buckets = [
-        _bucket(monday + timedelta(weeks=i), eng=0.30, deleg=0.30, count=2)
-        for i in range(5)
+        _bucket(monday + timedelta(weeks=i), eng=0.30, deleg=0.30, count=2) for i in range(5)
     ]
     assert label_trajectory(buckets) is WeeklyTrajectoryLabel.STEADY
 
@@ -295,7 +294,7 @@ def test_label_trajectory_growing_autonomy_end_to_end():
 def test_label_trajectory_via_bucket_pipeline_end_to_end():
     # Builds sessions, buckets them, then labels - confirms the v0.2 stack
     # (US-042 -> US-043 -> US-044) composes without glue.
-    now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 27, 12, 0, tzinfo=UTC)
     sessions: list[WeeklySessionInput] = []
     for week_index in range(5):
         week_anchor = now - timedelta(days=28 - 7 * week_index)

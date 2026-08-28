@@ -7,4 +7,4 @@ from praxis.scanners.copilot import CopilotScanner
 
 ALL_SCANNERS: list[type[BaseScanner]] = [ClaudeScanner, CodexScanner, CopilotScanner]
 
-__all__ = ["BaseScanner", "ClaudeScanner", "CodexScanner", "CopilotScanner", "ALL_SCANNERS"]
+__all__ = ["ALL_SCANNERS", "BaseScanner", "ClaudeScanner", "CodexScanner", "CopilotScanner"]
