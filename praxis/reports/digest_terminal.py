@@ -15,6 +15,7 @@ placeholder degradation, US-068 added the compact cost ledger and
 'Where The Week Went' task breakdown, and US-069 landed the full
 six-dim panel as the digest's footer.
 """
+
 from __future__ import annotations
 
 import re
@@ -210,7 +211,7 @@ class WeeklyDigest:
     # Spec section 2 (coaching-reposition): masthead's commitment block
     # reads this. None means no follow-up exists for the week so the
     # masthead omits the block rather than rendering placeholder copy.
-    commitment_rollup: "CommitmentRollup | None" = None
+    commitment_rollup: CommitmentRollup | None = None
     # v0.3 expansion panels (US-038..042). Optional; None preserves
     # the pre-expansion document shape so older fixtures still render.
     panel_inputs: PanelInputs | None = None
@@ -232,9 +233,7 @@ def _wrap(text: str, width: int = CONTENT_WIDTH) -> list[str]:
     """
     if not text:
         return []
-    return textwrap.wrap(
-        text, width=width, break_long_words=False, break_on_hyphens=False
-    )
+    return textwrap.wrap(text, width=width, break_long_words=False, break_on_hyphens=False)
 
 
 def _section_rule(title: str) -> list[str]:
@@ -297,9 +296,7 @@ def _self_report_signals_progress(tally: dict[str, int]) -> bool | None:
     return None
 
 
-def _dim_movement_signal(
-    dim_before: float | None, dim_after: float
-) -> bool | None:
+def _dim_movement_signal(dim_before: float | None, dim_after: float) -> bool | None:
     """Classify the dim's week-over-week movement against the noise band.
 
     Returns True when the dim improved by at least
@@ -400,9 +397,7 @@ def _format_data_says_line(
         annotation = "worse"
     else:
         annotation = "unchanged"
-    return (
-        f"{dim_title}  {dim_before:.1f} -> {dim_after:.1f}  ({annotation})"
-    )
+    return f"{dim_title}  {dim_before:.1f} -> {dim_after:.1f}  ({annotation})"
 
 
 def _format_sessions_line(this_week: int, prior_week: int) -> str:
@@ -426,7 +421,7 @@ def _field_line(label: str, value: str) -> str:
     return f"{label:<{_FIELD_LABEL_WIDTH}} {value}"
 
 
-def _commitment_block(rollup: "CommitmentRollup | None") -> list[str]:
+def _commitment_block(rollup: CommitmentRollup | None) -> list[str]:
     """Render the masthead's commitment block (spec section 2).
 
     When ``rollup`` is None there is no active commitment for the week
@@ -452,7 +447,7 @@ def _commitment_block(rollup: "CommitmentRollup | None") -> list[str]:
     lines: list[str] = [""]
     # Focus quote section ----------------------------------------------
     lines.append(f"{INDENT}{_FOCUS_HEADER}")
-    quote = f"\"{rollup.display_text}\""
+    quote = f'"{rollup.display_text}"'
     for wrapped in _wrap(quote, width=_BODY_WIDTH):
         lines.append(_body_line(wrapped, ansi=ITALIC))
     lines.append("")
@@ -464,9 +459,7 @@ def _commitment_block(rollup: "CommitmentRollup | None") -> list[str]:
         # line keeps the masthead readable without a divide-by-zero.
         lines.append(_body_line(_NO_SESSIONS_LOGGED, ansi=DIM))
         return lines
-    sessions_line = _format_sessions_line(
-        rollup.sessions_this_week, rollup.sessions_prior_week
-    )
+    sessions_line = _format_sessions_line(rollup.sessions_this_week, rollup.sessions_prior_week)
     lines.append(_body_line(_field_line("Sessions:", sessions_line)))
     you_said_line = _format_self_report_tally(rollup.self_report_tally)
     lines.append(_body_line(_field_line("You said:", you_said_line)))
@@ -514,21 +507,12 @@ _BODY_WIDTH = CONTENT_WIDTH - len(INDENT)  # 75 visible chars after the
 # sessions to surface patterns") to stay editorially consistent.
 _TRAJECTORY_PLACEHOLDER = "Not enough sessions yet to call a trajectory."
 _HEADLINE_MOMENT_PLACEHOLDER = (
-    "No coachable moment surfaced this week. Run more sessions to "
-    "surface one."
+    "No coachable moment surfaced this week. Run more sessions to surface one."
 )
-_FOLLOW_UP_PLACEHOLDER = (
-    "No commitment in flight yet. Next week's digest will open one."
-)
-_COST_LEDGER_PLACEHOLDER = (
-    "Cost ledger pending. Pricing data fills in after the first run."
-)
-_TASKS_PLACEHOLDER = (
-    "No task breakdown yet. Clustering surfaces tasks once it runs."
-)
-_DIMENSIONS_PLACEHOLDER = (
-    "Dim panel pending. Run a session to populate per-dim scores."
-)
+_FOLLOW_UP_PLACEHOLDER = "No commitment in flight yet. Next week's digest will open one."
+_COST_LEDGER_PLACEHOLDER = "Cost ledger pending. Pricing data fills in after the first run."
+_TASKS_PLACEHOLDER = "No task breakdown yet. Clustering surfaces tasks once it runs."
+_DIMENSIONS_PLACEHOLDER = "Dim panel pending. Run a session to populate per-dim scores."
 
 # Spec section 10.1: spend, baseline, biggest (model, task) line, and
 # tier-fit savings. The literal "--" stands in for the baseline when
@@ -557,9 +541,7 @@ _CADENCE_NO_ACTIVITY = "No substantive sessions this week."
 # blank table) and the verification-calibration panel (used when zero
 # sessions categorize into any bucket this week).
 _REPEAT_TASK_EMPTY = "No repeat tasks detected this week."
-_VERIFICATION_CALIBRATION_NO_SESSIONS = (
-    "No sessions to calibrate verification against this week."
-)
+_VERIFICATION_CALIBRATION_NO_SESSIONS = "No sessions to calibrate verification against this week."
 
 # US-041: empty-state copy for the specification-adoption panel (when
 # the week had no sessions to measure), the context-engineering-depth
@@ -567,12 +549,8 @@ _VERIFICATION_CALIBRATION_NO_SESSIONS = (
 # the knowledge-gap distribution panel (when every category is zero).
 # All three literals are asserted verbatim by tests; copy changes are
 # one audit point per renderer.
-_SPECIFICATION_ADOPTION_NO_SESSIONS = (
-    "No sessions to measure specification adoption this week."
-)
-_CONTEXT_ENGINEERING_NO_ARTIFACTS = (
-    "No scaffolding artifacts referenced this week."
-)
+_SPECIFICATION_ADOPTION_NO_SESSIONS = "No sessions to measure specification adoption this week."
+_CONTEXT_ENGINEERING_NO_ARTIFACTS = "No scaffolding artifacts referenced this week."
 _KNOWLEDGE_GAP_EMPTY = "No knowledge gaps detected this week."
 
 # US-042: empty-state copy for the tool/agent ladder (when the week has
@@ -580,9 +558,7 @@ _KNOWLEDGE_GAP_EMPTY = "No knowledge gaps detected this week."
 # effectiveness panel (when the cost ledger has no priced entries this
 # week; per AC the panel must NOT render "$0 overspend" which would
 # falsely imply optimality).
-_TOOL_AGENT_LADDER_NO_ACTIVITY = (
-    "No tool/agent usage observed this week."
-)
+_TOOL_AGENT_LADDER_NO_ACTIVITY = "No tool/agent usage observed this week."
 _COST_EFFECTIVENESS_NO_COST_DATA = "No cost data this week."
 
 
@@ -598,9 +574,7 @@ _GAP_AGREE_LINE = "your self-report and the data agree this week."
 # constrained-judge prose when an API key is available; here we ship
 # the documented neutral phrasing so the renderer never emits an empty
 # gap line and never crashes when the judge is unreachable.
-_GAP_DISAGREE_LINE = (
-    "Self-report and data differ this week. Worth a moment of curiosity."
-)
+_GAP_DISAGREE_LINE = "Self-report and data differ this week. Worth a moment of curiosity."
 
 # Width of the "Sessions:" / "You said:" / "Data says:" / "Gap:" label
 # column so the four field values left-align under each other inside
@@ -727,13 +701,9 @@ def _follow_up(follow_up: FollowUpView | None) -> list[str]:
     if follow_up is None:
         lines.extend(_placeholder_lines(_FOLLOW_UP_PLACEHOLDER))
         return lines
-    for wrapped in _wrap(
-        f"Commit: {follow_up.commitment_text}", width=_BODY_WIDTH
-    ):
+    for wrapped in _wrap(f"Commit: {follow_up.commitment_text}", width=_BODY_WIDTH):
         lines.append(_body_line(wrapped))
-    for wrapped in _wrap(
-        _format_follow_up_tracking(follow_up), width=_BODY_WIDTH
-    ):
+    for wrapped in _wrap(_format_follow_up_tracking(follow_up), width=_BODY_WIDTH):
         lines.append(_body_line(wrapped, ansi=DIM))
     return lines
 
@@ -805,10 +775,7 @@ def _cost_ledger(ledger: CostLedgerView | None) -> list[str]:
     biggest_lead = f"Biggest: {ledger.biggest_model} on {ledger.biggest_task_label}"
     for wrapped in _wrap(biggest_lead, width=_BODY_WIDTH):
         lines.append(_body_line(wrapped))
-    biggest_meta = (
-        f"${ledger.biggest_line_usd:.2f} over "
-        f"{ledger.biggest_line_sessions} sessions"
-    )
+    biggest_meta = f"${ledger.biggest_line_usd:.2f} over {ledger.biggest_line_sessions} sessions"
     # Continuation indent ("  ") lines the meta row up with the words
     # that follow "Biggest: " on the previous row.
     for wrapped in _wrap(biggest_meta, width=_BODY_WIDTH - 2):
@@ -829,8 +796,7 @@ def _format_task_meta(task: TaskRowView) -> str:
     """One-line metadata for a task row: sessions, cost, worst dim."""
     plural = "session" if task.sessions == 1 else "sessions"
     return (
-        f"{task.sessions} {plural}, ${task.total_usd:.2f}, "
-        f"worst: {_dim_title(task.worst_dim_key)}"
+        f"{task.sessions} {plural}, ${task.total_usd:.2f}, worst: {_dim_title(task.worst_dim_key)}"
     )
 
 
@@ -864,9 +830,7 @@ def _where_the_week_went(tasks: list[TaskRowView] | None) -> list[str]:
         lines.append(_body_line(prefix + wrapped_label[0]))
         for cont in wrapped_label[1:]:
             lines.append(_body_line("   " + cont))
-        for wrapped in _wrap(
-            _format_task_meta(task), width=_BODY_WIDTH - 3
-        ):
+        for wrapped in _wrap(_format_task_meta(task), width=_BODY_WIDTH - 3):
             lines.append(_body_line("   " + wrapped, ansi=DIM))
     return lines
 
@@ -943,9 +907,7 @@ def _behavioral_patterns(
         first = False
         plural = "time" if row.count == 1 else "times"
         lines.append(_body_line(f"{row.label}: {row.count} {plural}"))
-        for wrapped in _wrap(
-            f"Source: {row.citation}", width=_BODY_WIDTH - 2
-        ):
+        for wrapped in _wrap(f"Source: {row.citation}", width=_BODY_WIDTH - 2):
             lines.append(_body_line("  " + wrapped, ansi=DIM))
     return lines
 
@@ -969,22 +931,20 @@ def _aug_auto_balance(panel: AugAutoBalancePanel | None) -> list[str]:
     if panel.classified_total == 0:
         lines.extend(_placeholder_lines(_AUG_AUTO_BALANCE_NO_SESSIONS))
         return lines
-    aug_pct = int(round(panel.augmentation_share * 100))
-    auto_pct = int(round(panel.automation_share * 100))
-    mixed_pct = int(round(panel.mixed_share * 100))
-    lines.append(_body_line(
-        f"Augmentation: {aug_pct}%  Automation: {auto_pct}%  Mixed: {mixed_pct}%"
-    ))
+    aug_pct = round(panel.augmentation_share * 100)
+    auto_pct = round(panel.automation_share * 100)
+    mixed_pct = round(panel.mixed_share * 100)
+    lines.append(
+        _body_line(f"Augmentation: {aug_pct}%  Automation: {auto_pct}%  Mixed: {mixed_pct}%")
+    )
     industry = (
-        f"Industry anchor: {int(round(panel.industry_augmentation_share * 100))}% "
-        f"augmentation / {int(round(panel.industry_automation_share * 100))}% "
+        f"Industry anchor: {round(panel.industry_augmentation_share * 100)}% "
+        f"augmentation / {round(panel.industry_automation_share * 100)}% "
         f"automation"
     )
     for wrapped in _wrap(industry, width=_BODY_WIDTH):
         lines.append(_body_line(wrapped, ansi=DIM))
-    for wrapped in _wrap(
-        f"Source: {panel.industry_anchor_citation}", width=_BODY_WIDTH
-    ):
+    for wrapped in _wrap(f"Source: {panel.industry_anchor_citation}", width=_BODY_WIDTH):
         lines.append(_body_line(wrapped, ansi=DIM))
     return lines
 
@@ -1007,15 +967,13 @@ def _cadence(panel: CadencePanel | None) -> list[str]:
         lines.extend(_placeholder_lines(_CADENCE_NO_ACTIVITY))
         return lines
     plural = "day" if panel.weekday_streak == 1 else "days"
-    lines.append(_body_line(
-        f"Weekday streak: {panel.weekday_streak} of {panel.window_days} {plural}"
-    ))
+    lines.append(
+        _body_line(f"Weekday streak: {panel.weekday_streak} of {panel.window_days} {plural}")
+    )
     position_label = panel.position_label
     if position_label:
         lines.append(_body_line(f"Spectrum: {position_label}"))
-    for wrapped in _wrap(
-        f"Source: {panel.citation}", width=_BODY_WIDTH
-    ):
+    for wrapped in _wrap(f"Source: {panel.citation}", width=_BODY_WIDTH):
         lines.append(_body_line(wrapped, ansi=DIM))
     return lines
 
@@ -1030,7 +988,7 @@ def _format_minutes(minutes: float) -> str:
     seconds) so "12.6" still renders, "30.0" renders as "30".
     """
     if abs(minutes - round(minutes)) < 0.05:
-        return f"{int(round(minutes))}"
+        return f"{round(minutes)}"
     return f"{minutes:.1f}"
 
 
@@ -1066,9 +1024,7 @@ def _repeat_task_radar(panel: RepeatTaskRadarPanel | None) -> list[str]:
         )
         for wrapped in _wrap(meta, width=_BODY_WIDTH):
             lines.append(_body_line(wrapped, ansi=DIM))
-    for wrapped in _wrap(
-        f"Source: {panel.citation}", width=_BODY_WIDTH
-    ):
+    for wrapped in _wrap(f"Source: {panel.citation}", width=_BODY_WIDTH):
         lines.append(_body_line(wrapped, ansi=DIM))
     return lines
 
@@ -1099,9 +1055,7 @@ def _verification_calibration(
         count = panel.count_for(kind)
         plural = "session" if count == 1 else "sessions"
         lines.append(_body_line(f"{label}: {count} {plural}"))
-    for wrapped in _wrap(
-        f"Source: {panel.citation}", width=_BODY_WIDTH
-    ):
+    for wrapped in _wrap(f"Source: {panel.citation}", width=_BODY_WIDTH):
         lines.append(_body_line(wrapped, ansi=DIM))
     return lines
 
@@ -1124,15 +1078,15 @@ def _specification_adoption(
     if panel is None or not panel.has_sessions:
         lines.extend(_placeholder_lines(_SPECIFICATION_ADOPTION_NO_SESSIONS))
         return lines
-    pct = int(round(panel.adoption_share * 100))
+    pct = round(panel.adoption_share * 100)
     session_word = "session" if panel.total_sessions == 1 else "sessions"
-    lines.append(_body_line(
-        f"Opened with a spec block: {pct}% "
-        f"({panel.sessions_with_spec} of {panel.total_sessions} {session_word})"
-    ))
-    for wrapped in _wrap(
-        f"Source: {panel.citation}", width=_BODY_WIDTH
-    ):
+    lines.append(
+        _body_line(
+            f"Opened with a spec block: {pct}% "
+            f"({panel.sessions_with_spec} of {panel.total_sessions} {session_word})"
+        )
+    )
+    for wrapped in _wrap(f"Source: {panel.citation}", width=_BODY_WIDTH):
         lines.append(_body_line(wrapped, ansi=DIM))
     return lines
 
@@ -1158,15 +1112,9 @@ def _context_engineering(
     for row in panel.rows:
         if row.sessions_with_artifact <= 0:
             continue
-        session_word = (
-            "session" if row.sessions_with_artifact == 1 else "sessions"
-        )
-        lines.append(_body_line(
-            f"{row.label}: {row.sessions_with_artifact} {session_word}"
-        ))
-    for wrapped in _wrap(
-        f"Source: {panel.citation}", width=_BODY_WIDTH
-    ):
+        session_word = "session" if row.sessions_with_artifact == 1 else "sessions"
+        lines.append(_body_line(f"{row.label}: {row.sessions_with_artifact} {session_word}"))
+    for wrapped in _wrap(f"Source: {panel.citation}", width=_BODY_WIDTH):
         lines.append(_body_line(wrapped, ansi=DIM))
     return lines
 
@@ -1195,9 +1143,7 @@ def _knowledge_gap_distribution(
     for row in panel.rows:
         turn_word = "turn" if row.count == 1 else "turns"
         lines.append(_body_line(f"{row.label}: {row.count} {turn_word}"))
-    for wrapped in _wrap(
-        f"Source: {panel.citation}", width=_BODY_WIDTH
-    ):
+    for wrapped in _wrap(f"Source: {panel.citation}", width=_BODY_WIDTH):
         lines.append(_body_line(wrapped, ansi=DIM))
     return lines
 
@@ -1224,12 +1170,8 @@ def _tool_agent_ladder(panel: ToolAgentLadderPanel | None) -> list[str]:
     lines.append(_body_line(f"Max rung: {panel.max_rung_label}"))
     for row in panel.rows:
         session_word = "session" if row.session_count == 1 else "sessions"
-        lines.append(_body_line(
-            f"{row.label}: {row.session_count} {session_word}"
-        ))
-    for wrapped in _wrap(
-        f"Source: {panel.citation}", width=_BODY_WIDTH
-    ):
+        lines.append(_body_line(f"{row.label}: {row.session_count} {session_word}"))
+    for wrapped in _wrap(f"Source: {panel.citation}", width=_BODY_WIDTH):
         lines.append(_body_line(wrapped, ansi=DIM))
     return lines
 
@@ -1263,9 +1205,7 @@ def _refined_cost_effectiveness(
             width=_BODY_WIDTH,
         ):
             lines.append(_body_line(wrapped))
-        for wrapped in _wrap(
-            f"Source: {panel.citation}", width=_BODY_WIDTH
-        ):
+        for wrapped in _wrap(f"Source: {panel.citation}", width=_BODY_WIDTH):
             lines.append(_body_line(wrapped, ansi=DIM))
         return lines
     sentence = (
@@ -1276,16 +1216,14 @@ def _refined_cost_effectiveness(
     )
     for wrapped in _wrap(sentence, width=_BODY_WIDTH):
         lines.append(_body_line(wrapped))
-    session_word = (
-        "session" if panel.qualifying_session_count == 1 else "sessions"
+    session_word = "session" if panel.qualifying_session_count == 1 else "sessions"
+    lines.append(
+        _body_line(
+            f"Across {panel.qualifying_session_count} qualifying {session_word}.",
+            ansi=DIM,
+        )
     )
-    lines.append(_body_line(
-        f"Across {panel.qualifying_session_count} qualifying {session_word}.",
-        ansi=DIM,
-    ))
-    for wrapped in _wrap(
-        f"Source: {panel.citation}", width=_BODY_WIDTH
-    ):
+    for wrapped in _wrap(f"Source: {panel.citation}", width=_BODY_WIDTH):
         lines.append(_body_line(wrapped, ansi=DIM))
     return lines
 
@@ -1355,9 +1293,7 @@ def render(digest: WeeklyDigest) -> str:
     # so the reader sees the structural /10 read first and then the
     # raw-pattern evidence (counts + excerpts) that informs it.
     behavioral_panel = (
-        digest.panel_inputs.behavioral_signals
-        if digest.panel_inputs is not None
-        else None
+        digest.panel_inputs.behavioral_signals if digest.panel_inputs is not None else None
     )
     parts.extend(_behavioral_patterns(behavioral_panel))
     # US-039: aug/auto balance and cadence panels follow the behavioral
@@ -1366,16 +1302,10 @@ def render(digest: WeeklyDigest) -> str:
     # and sit close to the behavioral-patterns evidence so the reader
     # reads the "what kind of user" story in one editorial run.
     aug_auto_panel = (
-        digest.panel_inputs.aug_auto_balance
-        if digest.panel_inputs is not None
-        else None
+        digest.panel_inputs.aug_auto_balance if digest.panel_inputs is not None else None
     )
     parts.extend(_aug_auto_balance(aug_auto_panel))
-    cadence_panel = (
-        digest.panel_inputs.cadence
-        if digest.panel_inputs is not None
-        else None
-    )
+    cadence_panel = digest.panel_inputs.cadence if digest.panel_inputs is not None else None
     parts.extend(_cadence(cadence_panel))
     # US-040: repeat-task radar + verification-calibration panel.
     # The radar surfaces tasks the user has worked on 3+ times this
@@ -1386,15 +1316,11 @@ def render(digest: WeeklyDigest) -> str:
     # cadence + aug-auto pair so the document reads habit-shape first
     # and then drills into repeat work + verification rigor.
     repeat_task_panel = (
-        digest.panel_inputs.repeat_task_radar
-        if digest.panel_inputs is not None
-        else None
+        digest.panel_inputs.repeat_task_radar if digest.panel_inputs is not None else None
     )
     parts.extend(_repeat_task_radar(repeat_task_panel))
     verification_panel = (
-        digest.panel_inputs.verification_calibration
-        if digest.panel_inputs is not None
-        else None
+        digest.panel_inputs.verification_calibration if digest.panel_inputs is not None else None
     )
     parts.extend(_verification_calibration(verification_panel))
     # US-041: specification adoption, context engineering, and
@@ -1404,21 +1330,15 @@ def render(digest: WeeklyDigest) -> str:
     # then how you opened sessions, what scaffolding you used, and
     # which knowledge-gap categories appeared most.
     specification_panel = (
-        digest.panel_inputs.specification_adoption
-        if digest.panel_inputs is not None
-        else None
+        digest.panel_inputs.specification_adoption if digest.panel_inputs is not None else None
     )
     parts.extend(_specification_adoption(specification_panel))
     context_engineering_panel = (
-        digest.panel_inputs.context_engineering
-        if digest.panel_inputs is not None
-        else None
+        digest.panel_inputs.context_engineering if digest.panel_inputs is not None else None
     )
     parts.extend(_context_engineering(context_engineering_panel))
     knowledge_gap_panel = (
-        digest.panel_inputs.knowledge_gap_distribution
-        if digest.panel_inputs is not None
-        else None
+        digest.panel_inputs.knowledge_gap_distribution if digest.panel_inputs is not None else None
     )
     parts.extend(_knowledge_gap_distribution(knowledge_gap_panel))
     # US-042: tool/agent ladder + refined cost-effectiveness panel.
@@ -1429,15 +1349,11 @@ def render(digest: WeeklyDigest) -> str:
     # of the document because they close the editorial arc: scaffolding
     # readiness then dollar consequences of the week's choices.
     ladder_panel = (
-        digest.panel_inputs.tool_agent_ladder
-        if digest.panel_inputs is not None
-        else None
+        digest.panel_inputs.tool_agent_ladder if digest.panel_inputs is not None else None
     )
     parts.extend(_tool_agent_ladder(ladder_panel))
     cost_effectiveness_panel = (
-        digest.panel_inputs.refined_cost_effectiveness
-        if digest.panel_inputs is not None
-        else None
+        digest.panel_inputs.refined_cost_effectiveness if digest.panel_inputs is not None else None
     )
     parts.extend(_refined_cost_effectiveness(cost_effectiveness_panel))
     # Trailing newline so terminals that print the next prompt without

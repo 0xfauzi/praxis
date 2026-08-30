@@ -6,12 +6,13 @@ Claude Code stores each conversation as a JSONL file at:
 Each line is one event. Relevant types include 'user' and 'assistant'
 messages, plus tool_use / tool_result entries.
 """
+
 from __future__ import annotations
 
 import json
 import os
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from praxis.models import Provider, Role, Session, Turn
@@ -23,7 +24,7 @@ def _parse_ts(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(value)
     except (ValueError, TypeError):
         return None
     # A timestamp with no 'Z' and no offset parses to a naive datetime.
@@ -31,7 +32,7 @@ def _parse_ts(value: str | None) -> datetime | None:
     # a naive value would raise "can't compare offset-naive and aware".
     # Treat a missing zone as UTC at the parse boundary.
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt
 
 
@@ -169,10 +170,7 @@ class ClaudeScanner(BaseScanner):
                             timestamp=ts,
                             tool_calls=tool_calls,
                             meta={"model": message.get("model")},
-                            tool_injected=(
-                                role == Role.USER
-                                and is_tool_injected_content(text)
-                            ),
+                            tool_injected=(role == Role.USER and is_tool_injected_content(text)),
                         )
                     )
         except OSError:
@@ -184,7 +182,7 @@ class ClaudeScanner(BaseScanner):
         return Session(
             provider=Provider.CLAUDE,
             session_id=session_id,
-            started_at=started_at or datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc),
+            started_at=started_at or datetime.fromtimestamp(path.stat().st_mtime, tz=UTC),
             turns=turns,
             source_path=str(path),
             project_hint=project_hint,

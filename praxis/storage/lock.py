@@ -5,6 +5,7 @@ app can run concurrently; letting two of them score + write the same SQLite
 profile at the same time risks lost work and lock contention. This guards the
 write-heavy scoring path with a non-blocking advisory lock.
 """
+
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -31,17 +32,12 @@ def scan_lock(home: Path):
         return
 
     home.mkdir(parents=True, exist_ok=True)
-    handle = open(home / ".scan.lock", "w")
-    try:
+    with open(home / ".scan.lock", "w") as handle:
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
-            raise ScanLockError(
-                "another praxis scan or review is already running"
-            ) from exc
+            raise ScanLockError("another praxis scan or review is already running") from exc
         try:
             yield
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    finally:
-        handle.close()

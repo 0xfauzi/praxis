@@ -13,6 +13,7 @@ Covers:
     is implemented in US-035/036; here we only assert the data shape is
     plumbed through cleanly).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -184,9 +185,7 @@ def test_rollup_self_report_tally_normalizes_provided_counts():
 
 
 def test_fetch_self_report_tally_returns_zeros_with_no_store():
-    assert fetch_self_report_tally(None, "2026-W21") == {
-        key: 0 for key in SELF_REPORT_KEYS
-    }
+    assert fetch_self_report_tally(None, "2026-W21") == {key: 0 for key in SELF_REPORT_KEYS}
 
 
 def test_fetch_self_report_tally_returns_zeros_when_table_missing(tmp_home):

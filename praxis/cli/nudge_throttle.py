@@ -21,12 +21,13 @@ be parsed (or is not an object), the file is renamed to
 call proceeds as if no prior fire had been recorded. We never crash
 the hot path on bad disk state.
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from praxis.storage.profile_store import resolve_home
@@ -153,8 +154,8 @@ def is_throttled(
     if last_fire.tzinfo is None:
         # Older entries (or external tooling) may have written naive
         # timestamps; assume UTC so comparisons are at least consistent.
-        last_fire = last_fire.replace(tzinfo=timezone.utc)
-    current = now if now is not None else datetime.now(timezone.utc)
+        last_fire = last_fire.replace(tzinfo=UTC)
+    current = now if now is not None else datetime.now(UTC)
     return (current - last_fire) < timedelta(minutes=throttle_minutes)
 
 
@@ -178,7 +179,7 @@ def record_fire(
     path.parent.mkdir(parents=True, exist_ok=True)
     state = _load_state(path)
     key = _throttle_key(surface, cwd)
-    current = now if now is not None else datetime.now(timezone.utc)
+    current = now if now is not None else datetime.now(UTC)
     state[key] = current.isoformat()
     # Atomic write so a concurrent reader -- or another surface's near-
     # simultaneous record_fire, the exact multi-surface case this module

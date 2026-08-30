@@ -17,6 +17,7 @@ The `HeadlineMoment` here is the smallest object the engine needs. When
 the broader v0.2 `Moment` dataclass (spec 4.1) lands via the moments-engine
 PRD, it is a superset and satisfies the same call sites.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
@@ -24,7 +25,6 @@ from typing import Literal
 
 from praxis.scoring.aggregate import ProfileSnapshot
 from praxis.scoring.rubric import RUBRIC
-
 
 Outcome = Literal["improved", "unchanged", "worse", "pending", "superseded"]
 
@@ -128,9 +128,7 @@ def build_follow_up(
     write can reproduce it without paraphrasing.
     """
     metric = target_metric_for(headline_moment.dim_key)
-    baseline = compute_baseline_value(
-        metric, snapshot, verification_rate, delegation_rate
-    )
+    baseline = compute_baseline_value(metric, snapshot, verification_rate, delegation_rate)
     return FollowUp(
         week_iso=week_iso,
         dim_key=headline_moment.dim_key,
@@ -191,7 +189,5 @@ def close_follow_up(
     measured = compute_baseline_value(
         follow_up.target_metric, snapshot, verification_rate, delegation_rate
     )
-    outcome = compute_outcome(
-        follow_up.target_metric, follow_up.baseline_value, measured
-    )
+    outcome = compute_outcome(follow_up.target_metric, follow_up.baseline_value, measured)
     return replace(follow_up, measured_value=measured, outcome=outcome)

@@ -84,5 +84,3 @@ CONTEXT (provided by the user)
 
 ## Constraints
 <!-- Limitations, performance requirements, non-functional requirements. -->
-
-

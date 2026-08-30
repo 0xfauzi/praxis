@@ -10,6 +10,7 @@ Covers:
     clear error message on stderr.
   * Bare ``praxis config`` launches ``$EDITOR`` on the config path.
 """
+
 from __future__ import annotations
 
 import tomllib
@@ -51,7 +52,7 @@ def test_get_bool_value_true(tmp_home):
 def test_get_bool_value_false_after_edit(tmp_home):
     path = ensure_config_file()
     path.write_text(
-        "[notification]\nenabled = false\nsound = \"default\"\n",
+        '[notification]\nenabled = false\nsound = "default"\n',
         encoding="utf-8",
     )
     assert get_value("notification.enabled") == "false"
@@ -216,7 +217,7 @@ def test_set_overwrites_existing_user_edit(tmp_home):
 def test_set_inserts_missing_field_at_end_of_section(tmp_home):
     path = ensure_config_file()
     path.write_text(
-        "[schedule]\nday = \"monday\"\n",
+        '[schedule]\nday = "monday"\n',
         encoding="utf-8",
     )
     set_value("schedule.hour", "9")
@@ -229,7 +230,7 @@ def test_set_appends_missing_section(tmp_home):
     path = ensure_config_file()
     # Strip out the [scan] section entirely so set_value must append it.
     path.write_text(
-        "[schedule]\nday = \"sunday\"\n",
+        '[schedule]\nday = "sunday"\n',
         encoding="utf-8",
     )
     set_value("scan.since_days", "14")
@@ -320,7 +321,7 @@ def test_open_editor_uses_env_editor(tmp_home, monkeypatch):
     class FakeResult:
         returncode = 0
 
-    def fake_run(cmd, check=False):  # noqa: ARG001
+    def fake_run(cmd, check=False):
         calls.append(list(cmd))
         return FakeResult()
 
@@ -363,7 +364,7 @@ def test_open_editor_falls_back_to_vi_when_env_unset(tmp_home, monkeypatch):
 
 
 def test_open_editor_missing_binary_raises(tmp_home, monkeypatch):
-    def fake_run(cmd, check=False):  # noqa: ARG001
+    def fake_run(cmd, check=False):
         raise FileNotFoundError(cmd[0])
 
     monkeypatch.setenv("EDITOR", "definitely-not-an-editor")
@@ -380,7 +381,7 @@ def test_bare_config_via_cli_launches_editor(tmp_home, monkeypatch, capsys):
     class FakeResult:
         returncode = 0
 
-    def fake_run(cmd, check=False):  # noqa: ARG001
+    def fake_run(cmd, check=False):
         calls.append(list(cmd))
         return FakeResult()
 
@@ -396,7 +397,7 @@ def test_bare_config_via_cli_launches_editor(tmp_home, monkeypatch, capsys):
 
 
 def test_bare_config_via_cli_propagates_editor_failure(tmp_home, monkeypatch, capsys):
-    def fake_run(cmd, check=False):  # noqa: ARG001
+    def fake_run(cmd, check=False):
         raise FileNotFoundError(cmd[0])
 
     monkeypatch.setenv("EDITOR", "definitely-not-an-editor")

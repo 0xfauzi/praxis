@@ -11,14 +11,16 @@ These tests exercise:
     model returns
   - empty candidates short-circuits to None with no LLM call
 """
+
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
 from praxis.scoring.moment_selector import (
+    _SYSTEM_PROMPT,
     PRIMARY_CHEAP_MODELS,
     InvalidMomentSelectionError,
     Moment,
@@ -30,7 +32,6 @@ from praxis.scoring.moment_selector import (
     _invalid_ids,
     _parse_selection,
     _retry_user_prompt,
-    _SYSTEM_PROMPT,
     cheap_model_for,
     select_moments,
     select_moments_with_fallback,
@@ -52,7 +53,7 @@ def _moment(
         why_it_lost_score="accepted the SQL block without listing affected tables",
         suggested_alternative="ask: list every table this migration writes to",
         severity=severity,  # type: ignore[arg-type]
-        created_at=datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 20, 12, 0, tzinfo=UTC),
         dollar_impact_estimate=dollar_impact_estimate,
         minutes_impact_estimate=8,
     )
@@ -73,8 +74,7 @@ def _candidate(
             severity=severity,
             dollar_impact_estimate=dollar_impact_estimate,
         ),
-        session_started_at=session_started_at
-        or datetime(2026, 5, 20, 11, 30, tzinfo=timezone.utc),
+        session_started_at=session_started_at or datetime(2026, 5, 20, 11, 30, tzinfo=UTC),
         recurrence_count=recurrence_count,
     )
 
@@ -107,7 +107,7 @@ def test_candidate_payload_carries_moment_id_for_reference():
 
 
 def test_candidate_payload_serializes_session_started_at_as_iso():
-    when = datetime(2026, 5, 18, 9, 15, tzinfo=timezone.utc)
+    when = datetime(2026, 5, 18, 9, 15, tzinfo=UTC)
     payload = _candidate_payload(_candidate(session_started_at=when))
     assert payload["session_started_at"] == when.isoformat()
 
@@ -269,15 +269,12 @@ def test_parses_response_wrapped_in_markdown_fences():
 
 
 def test_parses_response_with_preamble():
-    text = (
-        "Sure, here is the selection:\n"
-        + json.dumps(
-            {
-                "headline_moment_id": "abc",
-                "headline_reason": "y.",
-                "supporting_moment_ids": [],
-            }
-        )
+    text = "Sure, here is the selection:\n" + json.dumps(
+        {
+            "headline_moment_id": "abc",
+            "headline_reason": "y.",
+            "supporting_moment_ids": [],
+        }
     )
     out = _parse_selection(text)
     assert out.headline_moment_id == "abc"
@@ -654,17 +651,17 @@ def test_fallback_selection_picks_most_recent_major_by_session_time():
     older_major = _candidate(
         moment_id="OLD",
         severity="major",
-        session_started_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        session_started_at=datetime(2026, 5, 18, 10, 0, tzinfo=UTC),
     )
     newer_major = _candidate(
         moment_id="NEW",
         severity="major",
-        session_started_at=datetime(2026, 5, 20, 10, 0, tzinfo=timezone.utc),
+        session_started_at=datetime(2026, 5, 20, 10, 0, tzinfo=UTC),
     )
     moderate_more_recent = _candidate(
         moment_id="MODERATE_RECENT",
         severity="moderate",
-        session_started_at=datetime(2026, 5, 21, 10, 0, tzinfo=timezone.utc),
+        session_started_at=datetime(2026, 5, 21, 10, 0, tzinfo=UTC),
     )
     out = _fallback_selection([older_major, newer_major, moderate_more_recent])
     assert out is not None
@@ -679,17 +676,17 @@ def test_fallback_selection_falls_through_to_moderate_when_no_major():
     older_moderate = _candidate(
         moment_id="OLD_MOD",
         severity="moderate",
-        session_started_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        session_started_at=datetime(2026, 5, 18, 10, 0, tzinfo=UTC),
     )
     newer_moderate = _candidate(
         moment_id="NEW_MOD",
         severity="moderate",
-        session_started_at=datetime(2026, 5, 21, 10, 0, tzinfo=timezone.utc),
+        session_started_at=datetime(2026, 5, 21, 10, 0, tzinfo=UTC),
     )
     minor = _candidate(
         moment_id="MINOR",
         severity="minor",
-        session_started_at=datetime(2026, 5, 22, 10, 0, tzinfo=timezone.utc),
+        session_started_at=datetime(2026, 5, 22, 10, 0, tzinfo=UTC),
     )
     out = _fallback_selection([older_moderate, newer_moderate, minor])
     assert out is not None
@@ -718,6 +715,7 @@ def test_fallback_selection_has_empty_supporting_and_reason():
 def test_select_moments_with_fallback_passes_through_on_success():
     """If the LLM succeeds (any path inside select_moments), the
     fallback wrapper just returns that selection unchanged."""
+
     def stub(system: str, user: str, model: str) -> str:
         return json.dumps(
             {
@@ -733,9 +731,7 @@ def test_select_moments_with_fallback_passes_through_on_success():
         _candidate(moment_id="m1", severity="major"),
         _candidate(moment_id="m2", severity="moderate"),
     ]
-    out = select_moments_with_fallback(
-        cands, primary_provider="anthropic", llm_caller=stub
-    )
+    out = select_moments_with_fallback(cands, primary_provider="anthropic", llm_caller=stub)
     assert out is not None
     assert out.headline_moment_id == "m1"
     assert out.headline_reason == "the LLM was happy."
@@ -749,22 +745,20 @@ def test_select_moments_with_fallback_recovers_when_llm_fails_twice():
         _candidate(
             moment_id="oldMajor",
             severity="major",
-            session_started_at=datetime(2026, 5, 17, 9, 0, tzinfo=timezone.utc),
+            session_started_at=datetime(2026, 5, 17, 9, 0, tzinfo=UTC),
         ),
         _candidate(
             moment_id="newMajor",
             severity="major",
-            session_started_at=datetime(2026, 5, 22, 9, 0, tzinfo=timezone.utc),
+            session_started_at=datetime(2026, 5, 22, 9, 0, tzinfo=UTC),
         ),
         _candidate(
             moment_id="oldModerate",
             severity="moderate",
-            session_started_at=datetime(2026, 5, 23, 9, 0, tzinfo=timezone.utc),
+            session_started_at=datetime(2026, 5, 23, 9, 0, tzinfo=UTC),
         ),
     ]
-    out = select_moments_with_fallback(
-        cands, primary_provider="anthropic", llm_caller=_bad_stub
-    )
+    out = select_moments_with_fallback(cands, primary_provider="anthropic", llm_caller=_bad_stub)
     assert out is not None
     assert out.headline_moment_id == "newMajor"
     assert out.supporting_moment_ids == []
@@ -778,17 +772,15 @@ def test_select_moments_with_fallback_uses_moderate_when_no_major():
         _candidate(
             moment_id="modA",
             severity="moderate",
-            session_started_at=datetime(2026, 5, 17, 9, 0, tzinfo=timezone.utc),
+            session_started_at=datetime(2026, 5, 17, 9, 0, tzinfo=UTC),
         ),
         _candidate(
             moment_id="modB",
             severity="moderate",
-            session_started_at=datetime(2026, 5, 25, 9, 0, tzinfo=timezone.utc),
+            session_started_at=datetime(2026, 5, 25, 9, 0, tzinfo=UTC),
         ),
     ]
-    out = select_moments_with_fallback(
-        cands, primary_provider="anthropic", llm_caller=_bad_stub
-    )
+    out = select_moments_with_fallback(cands, primary_provider="anthropic", llm_caller=_bad_stub)
     assert out is not None
     assert out.headline_moment_id == "modB"
     assert out.supporting_moment_ids == []
@@ -807,9 +799,7 @@ def test_select_moments_with_fallback_reraises_when_no_major_or_moderate():
         _candidate(moment_id="minB", severity="minor"),
     ]
     with pytest.raises(InvalidMomentSelectionError):
-        select_moments_with_fallback(
-            cands, primary_provider="anthropic", llm_caller=_bad_stub
-        )
+        select_moments_with_fallback(cands, primary_provider="anthropic", llm_caller=_bad_stub)
 
 
 def test_select_moments_with_fallback_makes_at_most_two_llm_calls():
@@ -848,9 +838,7 @@ def test_select_moments_with_fallback_returns_none_for_empty_candidates():
         calls.append((system, user, model))
         return "{}"
 
-    out = select_moments_with_fallback(
-        [], primary_provider="anthropic", llm_caller=tracking_stub
-    )
+    out = select_moments_with_fallback([], primary_provider="anthropic", llm_caller=tracking_stub)
     assert out is None
     assert calls == []
 
@@ -863,12 +851,12 @@ def test_select_moments_with_fallback_prefers_major_over_more_recent_moderate():
     older_major = _candidate(
         moment_id="OLDMAJ",
         severity="major",
-        session_started_at=datetime(2026, 5, 10, 0, 0, tzinfo=timezone.utc),
+        session_started_at=datetime(2026, 5, 10, 0, 0, tzinfo=UTC),
     )
     newer_moderate = _candidate(
         moment_id="NEWMOD",
         severity="moderate",
-        session_started_at=datetime(2026, 5, 25, 0, 0, tzinfo=timezone.utc),
+        session_started_at=datetime(2026, 5, 25, 0, 0, tzinfo=UTC),
     )
     out = select_moments_with_fallback(
         [older_major, newer_moderate],
@@ -978,6 +966,7 @@ def test_select_moments_hard_caps_total_moments_at_three():
     digest never exceeds 3.' Verified through the public select_moments
     API (not just _parse_selection) so the cap survives any future
     refactor that moves parsing around."""
+
     def stub(system: str, user: str, model: str) -> str:
         return json.dumps(
             {
@@ -987,9 +976,7 @@ def test_select_moments_hard_caps_total_moments_at_three():
             }
         )
 
-    cands = [
-        _candidate(moment_id=f"m{i}") for i in range(1, 7)
-    ]  # m1..m6 all valid
+    cands = [_candidate(moment_id=f"m{i}") for i in range(1, 7)]  # m1..m6 all valid
     out = select_moments(cands, primary_provider="anthropic", llm_caller=stub)
     assert out is not None
     assert out.headline_moment_id == "m1"
@@ -1003,6 +990,7 @@ def test_select_moments_with_fallback_hard_caps_at_three():
     """Same cap via the fallback wrapper, which is the entry point the
     digest pipeline actually uses. Even a chatty LLM cannot push more
     than two supporting moments through."""
+
     def stub(system: str, user: str, model: str) -> str:
         return json.dumps(
             {
@@ -1013,9 +1001,7 @@ def test_select_moments_with_fallback_hard_caps_at_three():
         )
 
     cands = [_candidate(moment_id=f"m{i}") for i in range(1, 6)]
-    out = select_moments_with_fallback(
-        cands, primary_provider="anthropic", llm_caller=stub
-    )
+    out = select_moments_with_fallback(cands, primary_provider="anthropic", llm_caller=stub)
     assert out is not None
     assert len(out.supporting_moment_ids) <= 2
     assert 1 + len(out.supporting_moment_ids) <= 3

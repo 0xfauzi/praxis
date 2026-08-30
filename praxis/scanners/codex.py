@@ -6,12 +6,13 @@ Codex CLI stores sessions as JSONL rollout files at:
 Each line has a 'type' (session_meta, message, function_call, ...) and a
 'payload' that varies by type.
 """
+
 from __future__ import annotations
 
 import json
 import os
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from praxis.models import Provider, Role, Session, Turn
@@ -30,13 +31,13 @@ def _parse_ts(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(value)
     except (ValueError, TypeError):
         return None
     # Missing zone -> treat as UTC so downstream aware-UTC comparisons
     # (week-window filters) never hit naive-vs-aware TypeErrors.
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt
 
 
@@ -126,8 +127,10 @@ class CodexScanner(BaseScanner):
                             text = content
                         elif isinstance(content, list):
                             text = "\n".join(
-                                b.get("text", "") for b in content
-                                if isinstance(b, dict) and b.get("type") in {"text", "input_text", "output_text"}
+                                b.get("text", "")
+                                for b in content
+                                if isinstance(b, dict)
+                                and b.get("type") in {"text", "input_text", "output_text"}
                             )
                         if not text.strip():
                             continue
@@ -138,8 +141,7 @@ class CodexScanner(BaseScanner):
                                 timestamp=ts,
                                 meta={"model": model_hint},
                                 tool_injected=(
-                                    role == Role.USER
-                                    and is_tool_injected_content(text)
+                                    role == Role.USER and is_tool_injected_content(text)
                                 ),
                             )
                         )
@@ -156,7 +158,11 @@ class CodexScanner(BaseScanner):
                             or (action.get("type") if isinstance(action, dict) else None)
                             or entry_type
                         )
-                        args = payload.get("arguments") or payload.get("input") or payload.get("action")
+                        args = (
+                            payload.get("arguments")
+                            or payload.get("input")
+                            or payload.get("action")
+                        )
                         # Attach tool call info to the previous assistant turn if one exists,
                         # otherwise create a marker turn so the scorer sees agentic behavior.
                         if turns and turns[-1].role == Role.ASSISTANT:
@@ -177,7 +183,7 @@ class CodexScanner(BaseScanner):
             return None
 
         if started_at is None:
-            started_at = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            started_at = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
 
         return Session(
             provider=Provider.CODEX,

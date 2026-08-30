@@ -8,6 +8,7 @@ Spec section 4.4 requires this to run BEFORE any moment is persisted
 or rendered. Running it more than once is fine; running it zero
 times is not.
 """
+
 from __future__ import annotations
 
 import re
@@ -32,9 +33,7 @@ _AWS_ACCESS_KEY = re.compile(r"\b(?:AKIA|ASIA|AROA|AIDA)[0-9A-Z]{16}\b")
 # GitHub personal access tokens.
 #   Classic / OAuth / user / server / refresh: `gh[oprsu]_` + 36 chars
 #   Fine-grained: `github_pat_` + 82 chars (with underscores allowed)
-_GITHUB_PAT = re.compile(
-    r"\b(?:gh[oprsu]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})\b"
-)
+_GITHUB_PAT = re.compile(r"\b(?:gh[oprsu]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})\b")
 
 # JWTs: three base64url segments separated by dots. We require the
 # leading `eyJ` (which is base64 for the `{"` that starts every JWT

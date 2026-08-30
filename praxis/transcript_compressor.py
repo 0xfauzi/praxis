@@ -14,6 +14,7 @@ Moment substring checks (spec section 4.4) verify against the full
 Session in storage, not this output, so compression never weakens that
 check.
 """
+
 from __future__ import annotations
 
 import json
@@ -55,8 +56,7 @@ def _format_assistant(turn: Turn) -> str:
         extra = len(content) - ASSISTANT_TRUNCATE_LIMIT
         tool_calls = len(turn.tool_calls)
         body = (
-            f"{content[:ASSISTANT_TRUNCATE_LIMIT]}"
-            f"...[+{extra} more chars, {tool_calls} tool calls]"
+            f"{content[:ASSISTANT_TRUNCATE_LIMIT]}...[+{extra} more chars, {tool_calls} tool calls]"
         )
     lines = [body]
     for tc in turn.tool_calls:

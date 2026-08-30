@@ -22,14 +22,14 @@ CostLedger value. Resolving model_hint -> cost lives in
 `estimate_session_cost_usd` so the aggregator stays decoupled from
 disk I/O and the model-card system.
 """
+
 from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from praxis.models_advisor.cards import ModelCard, find_card_for_model_hint, load_all_cards
-
 
 # 90 days mirrors the engagement baseline (spec section 8.2): long
 # enough to be a real anchor, short enough to reflect the user's
@@ -166,8 +166,8 @@ class CostLedger:
     weekly_session_count: int
     baseline_session_count: int
     baseline_week_count: int
-    window_start: date    # inclusive: as_of_date - 90 days
-    window_end: date      # exclusive: Monday of current ISO week
+    window_start: date  # inclusive: as_of_date - 90 days
+    window_end: date  # exclusive: Monday of current ISO week
     current_week_start: date  # = window_end
 
 
@@ -215,7 +215,7 @@ def compute_cost_ledger(
     logic as `praxis.scoring.baseline.compute_baseline`).
     """
     if as_of is None:
-        as_of = datetime.now(timezone.utc)
+        as_of = datetime.now(UTC)
     as_of_date = as_of.date()
     current_week_start = _iso_week_start(as_of_date)
     window_start = as_of_date - timedelta(days=COST_BASELINE_WINDOW_DAYS)
@@ -291,7 +291,7 @@ def compute_biggest_line(
     are unlikely in practice but the test suite locks the rule in.
     """
     if as_of is None:
-        as_of = datetime.now(timezone.utc)
+        as_of = datetime.now(UTC)
     current_week_start = _iso_week_start(as_of.date())
 
     spend_by_pair: dict[tuple[str, str], float] = defaultdict(float)
@@ -441,7 +441,8 @@ def compute_moment_dollar_impact_usd(
         if session_total_input_chars is None:
             return None
         return estimate_tier_fit_savings_for_session(
-            model_hint, session_total_input_chars,
+            model_hint,
+            session_total_input_chars,
         )
     return None
 
@@ -471,7 +472,7 @@ def compute_tier_fit_savings(
     lives on `CostLedger`.
     """
     if as_of is None:
-        as_of = datetime.now(timezone.utc)
+        as_of = datetime.now(UTC)
     current_week_start = _iso_week_start(as_of.date())
 
     qualifying_count = 0

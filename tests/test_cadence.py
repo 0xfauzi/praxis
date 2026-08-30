@@ -5,10 +5,11 @@ Covers:
   - compute_weekday_streak over an empty/sparse/dense profile_store.
   - high_adopter_position thresholds, boundaries, and invariant checks.
 """
+
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -26,7 +27,6 @@ from praxis.scoring.aggregate import SessionScore
 from praxis.scoring.features import SessionFeatures
 from praxis.scoring.judge import JudgeResult
 from praxis.storage.profile_store import ProfileStore
-
 
 # ----- module-level constants -----------------------------------------------
 
@@ -52,15 +52,16 @@ def test_is_substantive_session_returns_false_for_empty_mapping():
 def test_is_substantive_session_true_at_thresholds():
     """Boundary: user_turns == 2 and elapsed_seconds == 60 both qualify."""
     assert (
-        is_substantive_session({"user_turns": MIN_USER_TURNS, "elapsed_seconds": MIN_ELAPSED_SECONDS})
+        is_substantive_session(
+            {"user_turns": MIN_USER_TURNS, "elapsed_seconds": MIN_ELAPSED_SECONDS}
+        )
         is True
     )
 
 
 def test_is_substantive_session_false_below_user_turns_threshold():
     assert (
-        is_substantive_session({"user_turns": MIN_USER_TURNS - 1, "elapsed_seconds": 600})
-        is False
+        is_substantive_session({"user_turns": MIN_USER_TURNS - 1, "elapsed_seconds": 600}) is False
     )
 
 
@@ -152,18 +153,15 @@ def test_compute_weekday_streak_empty_store_returns_zero(tmp_home):
 
 def test_compute_weekday_streak_single_substantive_session(tmp_home):
     store = ProfileStore()
-    when = datetime(2026, 5, 25, 14, 0, tzinfo=timezone.utc)
+    when = datetime(2026, 5, 25, 14, 0, tzinfo=UTC)
     _seed(store, when=when, user_turns=4, elapsed_seconds=300, suffix="a")
-    assert (
-        compute_weekday_streak(store, ending_on_date=date(2026, 5, 28))
-        == 1
-    )
+    assert compute_weekday_streak(store, ending_on_date=date(2026, 5, 28)) == 1
 
 
 def test_compute_weekday_streak_non_substantive_session_excluded(tmp_home):
     """A session with <2 user turns OR <60s elapsed does not count."""
     store = ProfileStore()
-    base = datetime(2026, 5, 25, 14, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 25, 14, 0, tzinfo=UTC)
     # Below user_turns threshold.
     _seed(store, when=base, user_turns=1, elapsed_seconds=300, suffix="few-turns")
     # Below elapsed threshold (different day, so it would otherwise count).
@@ -179,7 +177,7 @@ def test_compute_weekday_streak_non_substantive_session_excluded(tmp_home):
 
 def test_compute_weekday_streak_multiple_distinct_days(tmp_home):
     store = ProfileStore()
-    base = datetime(2026, 5, 20, 10, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 20, 10, 0, tzinfo=UTC)
     for offset in range(5):
         _seed(
             store,
@@ -195,8 +193,8 @@ def test_compute_weekday_streak_multiple_distinct_days(tmp_home):
 def test_compute_weekday_streak_dedupes_within_same_day(tmp_home):
     """Two substantive sessions on one day count as 1 distinct weekday."""
     store = ProfileStore()
-    morning = datetime(2026, 5, 27, 9, 0, tzinfo=timezone.utc)
-    evening = datetime(2026, 5, 27, 21, 0, tzinfo=timezone.utc)
+    morning = datetime(2026, 5, 27, 9, 0, tzinfo=UTC)
+    evening = datetime(2026, 5, 27, 21, 0, tzinfo=UTC)
     _seed(store, when=morning, user_turns=3, elapsed_seconds=200, suffix="am")
     _seed(store, when=evening, user_turns=4, elapsed_seconds=400, suffix="pm")
     assert compute_weekday_streak(store, ending_on_date=date(2026, 5, 28)) == 1
@@ -207,9 +205,7 @@ def test_compute_weekday_streak_excludes_sessions_before_window(tmp_home):
     store = ProfileStore()
     end = date(2026, 5, 28)
     # 22 days before end (inclusive window of 21 means earliest in-window day is end - 20).
-    out_of_window = datetime.combine(
-        end - timedelta(days=22), datetime.min.time(), tzinfo=timezone.utc
-    )
+    out_of_window = datetime.combine(end - timedelta(days=22), datetime.min.time(), tzinfo=UTC)
     _seed(store, when=out_of_window, user_turns=5, elapsed_seconds=600, suffix="ancient")
     assert compute_weekday_streak(store, ending_on_date=end) == 0
 
@@ -217,7 +213,7 @@ def test_compute_weekday_streak_excludes_sessions_before_window(tmp_home):
 def test_compute_weekday_streak_excludes_sessions_after_ending_on_date(tmp_home):
     store = ProfileStore()
     end = date(2026, 5, 20)
-    future = datetime(2026, 5, 25, 10, 0, tzinfo=timezone.utc)
+    future = datetime(2026, 5, 25, 10, 0, tzinfo=UTC)
     _seed(store, when=future, user_turns=5, elapsed_seconds=600, suffix="future")
     assert compute_weekday_streak(store, ending_on_date=end) == 0
 
@@ -227,7 +223,7 @@ def test_compute_weekday_streak_window_days_configurable(tmp_home):
     store = ProfileStore()
     end = date(2026, 5, 28)
     # Day inside the 21-day default window, outside a 7-day window.
-    older = datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc)
+    older = datetime(2026, 5, 18, 10, 0, tzinfo=UTC)
     _seed(store, when=older, user_turns=3, elapsed_seconds=300, suffix="old")
     assert compute_weekday_streak(store, ending_on_date=end) == 1
     assert compute_weekday_streak(store, ending_on_date=end, window_days=7) == 0
@@ -236,7 +232,7 @@ def test_compute_weekday_streak_window_days_configurable(tmp_home):
 def test_compute_weekday_streak_non_positive_window_returns_zero(tmp_home):
     """Defensive: window_days<=0 returns 0 rather than negative or raising."""
     store = ProfileStore()
-    when = datetime(2026, 5, 25, 14, 0, tzinfo=timezone.utc)
+    when = datetime(2026, 5, 25, 14, 0, tzinfo=UTC)
     _seed(store, when=when, user_turns=4, elapsed_seconds=300, suffix="a")
     end = date(2026, 5, 28)
     assert compute_weekday_streak(store, ending_on_date=end, window_days=0) == 0
@@ -247,9 +243,7 @@ def test_compute_weekday_streak_handles_rows_without_signals_json(tmp_home):
     """Sessions persisted before signals_json was added must not crash; they
     just don't qualify as substantive (user_turns = 0 by default)."""
     store = ProfileStore()
-    score = _make_score(
-        started_at=datetime(2026, 5, 25, 14, 0, tzinfo=timezone.utc), stable_suffix="legacy"
-    )
+    score = _make_score(started_at=datetime(2026, 5, 25, 14, 0, tzinfo=UTC), stable_suffix="legacy")
     store.save_session_score(score)  # signals=None
     assert compute_weekday_streak(store, ending_on_date=date(2026, 5, 28)) == 0
 
@@ -258,11 +252,12 @@ def test_compute_weekday_streak_handles_malformed_signals_json(tmp_home, monkeyp
     """A signals_json that isn't valid JSON falls back to 0 without crashing."""
     store = ProfileStore()
     score = _make_score(
-        started_at=datetime(2026, 5, 25, 14, 0, tzinfo=timezone.utc), stable_suffix="garbage"
+        started_at=datetime(2026, 5, 25, 14, 0, tzinfo=UTC), stable_suffix="garbage"
     )
     store.save_session_score(score, signals={"user_turn_count": 5, "elapsed_seconds": 300})
     # Stomp the column with invalid JSON to simulate corruption.
     import sqlite3
+
     conn = sqlite3.connect(store.db_path)
     conn.execute(
         "UPDATE session_scores SET signals_json = 'not-json' WHERE stable_id = ?",
@@ -276,12 +271,11 @@ def test_compute_weekday_streak_handles_malformed_signals_json(tmp_home, monkeyp
 def test_compute_weekday_streak_uses_features_elapsed_seconds_fallback(tmp_home):
     """If signals_json lacks elapsed_seconds, features.elapsed_seconds is used."""
     store = ProfileStore()
-    score = _make_score(
-        started_at=datetime(2026, 5, 25, 14, 0, tzinfo=timezone.utc), stable_suffix="feat"
-    )
+    score = _make_score(started_at=datetime(2026, 5, 25, 14, 0, tzinfo=UTC), stable_suffix="feat")
     store.save_session_score(score, signals={"user_turn_count": 5})
-    # Stomp features_json to add elapsed_seconds — the adapter should pick it up.
+    # Stomp features_json to add elapsed_seconds. The adapter should pick it up.
     import sqlite3
+
     conn = sqlite3.connect(store.db_path)
     enriched = json.dumps(
         {
@@ -312,7 +306,7 @@ def test_compute_weekday_streak_inclusive_of_ending_on_date(tmp_home):
     """A substantive session on the ending date itself is counted."""
     store = ProfileStore()
     end = date(2026, 5, 28)
-    today = datetime.combine(end, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=15)
+    today = datetime.combine(end, datetime.min.time(), tzinfo=UTC) + timedelta(hours=15)
     _seed(store, when=today, user_turns=3, elapsed_seconds=200, suffix="today")
     assert compute_weekday_streak(store, ending_on_date=end) == 1
 
@@ -339,31 +333,31 @@ def test_high_adopter_position_ratio_constants_match_paper_quartiles():
     [
         # window=20: exact-integer boundaries.
         (0, 20, "low"),
-        (4, 20, "low"),                # just below LOW (0.20)
-        (5, 20, "moderate"),           # exactly at LOW (0.25)
-        (14, 20, "moderate"),          # just below HIGH (0.70)
-        (15, 20, "high"),              # exactly at HIGH (0.75)
-        (20, 20, "high"),              # full window
+        (4, 20, "low"),  # just below LOW (0.20)
+        (5, 20, "moderate"),  # exactly at LOW (0.25)
+        (14, 20, "moderate"),  # just below HIGH (0.70)
+        (15, 20, "high"),  # exactly at HIGH (0.75)
+        (20, 20, "high"),  # full window
         # window=4: smallest window where boundaries are exact integers.
         (0, 4, "low"),
-        (1, 4, "moderate"),            # exactly at LOW (0.25)
+        (1, 4, "moderate"),  # exactly at LOW (0.25)
         (2, 4, "moderate"),
-        (3, 4, "high"),                # exactly at HIGH (0.75)
-        (4, 4, "high"),                # full window
+        (3, 4, "high"),  # exactly at HIGH (0.75)
+        (4, 4, "high"),  # full window
         # window=21 (DEFAULT_STREAK_WINDOW_DAYS): non-integer boundaries.
         (0, 21, "low"),
-        (5, 21, "low"),                # 5/21 = 0.238 < 0.25
-        (6, 21, "moderate"),           # 6/21 = 0.286 >= 0.25
-        (15, 21, "moderate"),          # 15/21 = 0.714 < 0.75
-        (16, 21, "high"),              # 16/21 = 0.762 >= 0.75
-        (21, 21, "high"),              # full window
+        (5, 21, "low"),  # 5/21 = 0.238 < 0.25
+        (6, 21, "moderate"),  # 6/21 = 0.286 >= 0.25
+        (15, 21, "moderate"),  # 15/21 = 0.714 < 0.75
+        (16, 21, "high"),  # 16/21 = 0.762 >= 0.75
+        (21, 21, "high"),  # full window
         # window=7 (one-week look-back).
         (0, 7, "low"),
-        (1, 7, "low"),                 # 1/7 = 0.143 < 0.25
-        (2, 7, "moderate"),            # 2/7 = 0.286 >= 0.25
-        (5, 7, "moderate"),            # 5/7 = 0.714 < 0.75
-        (6, 7, "high"),                # 6/7 = 0.857 >= 0.75
-        (7, 7, "high"),                # full window
+        (1, 7, "low"),  # 1/7 = 0.143 < 0.25
+        (2, 7, "moderate"),  # 2/7 = 0.286 >= 0.25
+        (5, 7, "moderate"),  # 5/7 = 0.714 < 0.75
+        (6, 7, "high"),  # 6/7 = 0.857 >= 0.75
+        (7, 7, "high"),  # full window
     ],
 )
 def test_high_adopter_position_threshold_boundaries(streak, window_days, expected):
@@ -413,5 +407,5 @@ def test_high_adopter_position_is_deterministic():
 def test_high_adopter_position_return_value_is_in_literal_set():
     """AC: returns an enum-like literal in {'low','moderate','high'}."""
     valid = {"low", "moderate", "high"}
-    for streak in range(0, 22):
+    for streak in range(22):
         assert high_adopter_position(streak, 21) in valid

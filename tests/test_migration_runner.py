@@ -7,6 +7,7 @@ order, wrapping the body + the ``schema_migrations`` insert in one
 transaction so failures rollback cleanly and the next init re-attempts the
 same version.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -48,9 +49,7 @@ def test_schema_migrations_table_created_on_first_init(tmp_home, tmp_path, monke
     with _open_db(store) as conn:
         cols = {
             row["name"]: row
-            for row in conn.execute(
-                "PRAGMA table_info(schema_migrations)"
-            ).fetchall()
+            for row in conn.execute("PRAGMA table_info(schema_migrations)").fetchall()
         }
     assert "version" in cols
     assert "applied_at" in cols
@@ -90,9 +89,7 @@ def test_pending_migrations_applied_in_lexical_order(tmp_home, tmp_path, monkeyp
     with _open_db(store) as conn:
         tables = {
             r["name"]
-            for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
     assert {"first", "second", "third"}.issubset(tables)
 
@@ -104,9 +101,7 @@ def test_migration_records_inserted_with_iso_timestamp(tmp_home, tmp_path, monke
 
     store = ProfileStore(home=resolve_home())
     with _open_db(store) as conn:
-        row = conn.execute(
-            "SELECT version, applied_at FROM schema_migrations"
-        ).fetchone()
+        row = conn.execute("SELECT version, applied_at FROM schema_migrations").fetchone()
     assert row["version"] == "001_init.sql"
     # ISO-8601 with timezone marker (Python's datetime.isoformat() default).
     assert "T" in row["applied_at"]
@@ -160,14 +155,11 @@ def test_new_migration_added_later_is_applied_on_next_init(tmp_home, tmp_path, m
 
     with _open_db(ProfileStore(home=resolve_home())) as conn:
         versions = {
-            r["version"]
-            for r in conn.execute("SELECT version FROM schema_migrations").fetchall()
+            r["version"] for r in conn.execute("SELECT version FROM schema_migrations").fetchall()
         }
         tables = {
             r["name"]
-            for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
     assert versions == {"001_init.sql", "002_later.sql"}
     assert {"first", "later"}.issubset(tables)
@@ -176,9 +168,7 @@ def test_new_migration_added_later_is_applied_on_next_init(tmp_home, tmp_path, m
 # ---- transactional rollback on failure --------------------------------------
 
 
-def test_failing_migration_rolls_back_and_leaves_marker_absent(
-    tmp_home, tmp_path, monkeypatch
-):
+def test_failing_migration_rolls_back_and_leaves_marker_absent(tmp_home, tmp_path, monkeypatch):
     migrations_dir = tmp_path / "migrations"
     # The first statement creates a side-effect table; the second statement
     # fails because the same table is created again without IF NOT EXISTS.
@@ -186,8 +176,7 @@ def test_failing_migration_rolls_back_and_leaves_marker_absent(
     _write_migration(
         migrations_dir,
         "001_partial.sql",
-        "CREATE TABLE will_rollback (x INTEGER);\n"
-        "CREATE TABLE will_rollback (x INTEGER);",
+        "CREATE TABLE will_rollback (x INTEGER);\nCREATE TABLE will_rollback (x INTEGER);",
     )
     _patch_migrations_dir(monkeypatch, migrations_dir)
 
@@ -209,14 +198,9 @@ def test_failing_migration_rolls_back_and_leaves_marker_absent(
     assert side_effect is None, "rolled-back migration must leave no DDL side effects"
 
 
-def test_failed_migration_is_re_attempted_on_next_init(
-    tmp_home, tmp_path, monkeypatch
-):
+def test_failed_migration_is_re_attempted_on_next_init(tmp_home, tmp_path, monkeypatch):
     migrations_dir = tmp_path / "migrations"
-    bad_sql = (
-        "CREATE TABLE temp (x INTEGER);\n"
-        "CREATE TABLE temp (x INTEGER);"
-    )
+    bad_sql = "CREATE TABLE temp (x INTEGER);\nCREATE TABLE temp (x INTEGER);"
     sql_path = _write_migration(migrations_dir, "001_fix_me.sql", bad_sql)
     _patch_migrations_dir(monkeypatch, migrations_dir)
 
@@ -238,9 +222,7 @@ def test_failed_migration_is_re_attempted_on_next_init(
     assert present is not None
 
 
-def test_failure_in_later_migration_does_not_undo_earlier_ones(
-    tmp_home, tmp_path, monkeypatch
-):
+def test_failure_in_later_migration_does_not_undo_earlier_ones(tmp_home, tmp_path, monkeypatch):
     migrations_dir = tmp_path / "migrations"
     _write_migration(migrations_dir, "001_ok.sql", "CREATE TABLE ok (x INTEGER);")
     _write_migration(
@@ -258,14 +240,11 @@ def test_failure_in_later_migration_does_not_undo_earlier_ones(
     conn.row_factory = sqlite3.Row
     try:
         versions = {
-            r["version"]
-            for r in conn.execute("SELECT version FROM schema_migrations").fetchall()
+            r["version"] for r in conn.execute("SELECT version FROM schema_migrations").fetchall()
         }
         tables = {
             r["name"]
-            for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
     finally:
         conn.close()
@@ -291,9 +270,7 @@ def test_missing_migrations_directory_is_a_noop(tmp_home, tmp_path, monkeypatch)
     assert rows == []
 
 
-def test_empty_migrations_directory_creates_table_but_no_rows(
-    tmp_home, tmp_path, monkeypatch
-):
+def test_empty_migrations_directory_creates_table_but_no_rows(tmp_home, tmp_path, monkeypatch):
     migrations_dir = tmp_path / "migrations"
     migrations_dir.mkdir()
     _patch_migrations_dir(monkeypatch, migrations_dir)
@@ -307,9 +284,7 @@ def test_empty_migrations_directory_creates_table_but_no_rows(
     assert present is not None
 
 
-def test_non_sql_files_in_migrations_dir_are_ignored(
-    tmp_home, tmp_path, monkeypatch
-):
+def test_non_sql_files_in_migrations_dir_are_ignored(tmp_home, tmp_path, monkeypatch):
     migrations_dir = tmp_path / "migrations"
     migrations_dir.mkdir()
     (migrations_dir / "README.md").write_text("notes for the migration set")
@@ -320,7 +295,6 @@ def test_non_sql_files_in_migrations_dir_are_ignored(
     store = ProfileStore(home=resolve_home())
     with _open_db(store) as conn:
         versions = [
-            r["version"]
-            for r in conn.execute("SELECT version FROM schema_migrations").fetchall()
+            r["version"] for r in conn.execute("SELECT version FROM schema_migrations").fetchall()
         ]
     assert versions == ["001_init.sql"]

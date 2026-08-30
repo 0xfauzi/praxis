@@ -12,7 +12,7 @@
     "Self-critique and iterative refinement when asked"
   ],
   "weaknesses": [
-    "Can over-explain — may produce more prose than needed without instruction",
+    "Can over-explain: may produce more prose than needed without instruction",
     "Higher cost per token; not the right pick for high-volume cheap calls",
     "Tendency toward thoroughness can slow latency-sensitive flows"
   ],
@@ -24,7 +24,7 @@
   ],
   "best_for": [
     "Architecture decisions and system design reviews",
-    "Agentic coding (Claude Code) — multi-file refactors, debugging at scale",
+    "Agentic coding (Claude Code): multi-file refactors, debugging at scale",
     "Long-document analysis (RFCs, contracts, research papers)",
     "Tasks where being wrong has high cost"
   ],

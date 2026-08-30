@@ -12,12 +12,12 @@
   ],
   "weaknesses": [
     "Can be overconfident; verification habits matter more, not less",
-    "Stylistic defaults trend formal — needs prompting for conversational tone"
+    "Stylistic defaults trend formal: needs prompting for conversational tone"
   ],
   "prompting_quirks": [
     "Use `response_format` with JSON schemas instead of asking for JSON in prose",
     "Function calling is preferred over prompt-only tool descriptions",
-    "Reasoning-effort parameters available — use them for hard problems"
+    "Reasoning-effort parameters available: use them for hard problems"
   ],
   "best_for": [
     "Tasks requiring structured outputs with strict schemas",

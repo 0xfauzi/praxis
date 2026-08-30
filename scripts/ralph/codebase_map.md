@@ -43,4 +43,3 @@ Edit this list to match your repo. During the understanding loop, mark items as 
 ## Iteration Notes
 
 (New notes append below; keep older notes for history.)
-

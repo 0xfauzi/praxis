@@ -9,8 +9,9 @@ two formats in the wild:
      (SQLite; older versions stored chat in the workspace key-value store)
 
 We try (1) first, then fall back to (2). Format is undocumented and
-volatile — we parse defensively.
+volatile: we parse defensively.
 """
+
 from __future__ import annotations
 
 import json
@@ -19,7 +20,7 @@ import shutil
 import sqlite3
 import tempfile
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from praxis.models import Provider, Role, Session, Turn
@@ -53,7 +54,7 @@ def _vscode_user_paths() -> list[Path]:
 
 
 # Some platforms need os imported lazily for Windows path; import at top:
-import os  # noqa: E402
+import os
 
 
 class CopilotScanner(BaseScanner):
@@ -119,7 +120,7 @@ class CopilotScanner(BaseScanner):
         return Session(
             provider=Provider.COPILOT,
             session_id=path.stem,
-            started_at=datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc),
+            started_at=datetime.fromtimestamp(path.stat().st_mtime, tz=UTC),
             turns=turns,
             source_path=str(path),
             project_hint=path.parent.parent.name,
@@ -141,7 +142,11 @@ class CopilotScanner(BaseScanner):
                     if not value:
                         continue
                     try:
-                        data = json.loads(value) if isinstance(value, str) else json.loads(value.decode("utf-8"))
+                        data = (
+                            json.loads(value)
+                            if isinstance(value, str)
+                            else json.loads(value.decode("utf-8"))
+                        )
                     except (json.JSONDecodeError, AttributeError, UnicodeDecodeError):
                         continue
                     turns.extend(self._mine_turns(data))
@@ -150,7 +155,7 @@ class CopilotScanner(BaseScanner):
                 return Session(
                     provider=Provider.COPILOT,
                     session_id=path.parent.name,
-                    started_at=datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc),
+                    started_at=datetime.fromtimestamp(path.stat().st_mtime, tz=UTC),
                     turns=turns,
                     source_path=str(path),
                     project_hint=path.parent.name,
@@ -176,9 +181,7 @@ class CopilotScanner(BaseScanner):
                     Turn(
                         role=Role(role),
                         content=content,
-                        tool_injected=(
-                            role == "user" and is_tool_injected_content(content)
-                        ),
+                        tool_injected=(role == "user" and is_tool_injected_content(content)),
                     )
                 )
             for v in blob.values():

@@ -15,9 +15,11 @@ Acceptance criteria (spec section 8.1):
 These tests build a minimal RunSummary by hand rather than going
 through the full orchestrator pipeline, so they stay fast and pure.
 """
+
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 from praxis.orchestrator import RunSummary
 from praxis.reports import html_report, terminal
@@ -96,7 +98,9 @@ def test_html_omits_last_week_annotation_when_none():
     """
     out = html_report.render(_make_summary(last_week_means=None))
     assert f'class="{LAST_WEEK_HTML_CLASS}"' not in out
-    assert ">last-week " not in out  # span body for the annotation  # the "last-week 6.5" annotation text
+    assert (
+        ">last-week " not in out
+    )  # span body for the annotation  # the "last-week 6.5" annotation text
 
 
 def test_html_omits_last_week_annotation_when_empty_dict():
@@ -163,7 +167,8 @@ def test_terminal_module_does_not_import_last_week_helpers():
     the formatter into a renderer-agnostic core plus an HTML wrapper.
     """
     import praxis.reports.terminal as term_mod
-    src = open(term_mod.__file__).read()
+
+    src = Path(term_mod.__file__).read_text()
     assert "format_last_week_annotation" not in src
     assert "last_week_means" not in src
 

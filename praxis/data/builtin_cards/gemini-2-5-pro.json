@@ -6,7 +6,7 @@
   "tier": "frontier",
   "context_window_tokens": 1000000,
   "strengths": [
-    "Very large context window — strong for whole-codebase or long-document reads",
+    "Very large context window: strong for whole-codebase or long-document reads",
     "Native multimodal across text, image, audio, video"
   ],
   "weaknesses": [
@@ -14,7 +14,7 @@
     "Less mature ecosystem of structured-output libraries"
   ],
   "prompting_quirks": [
-    "Lean into the long context — feed whole repos, full transcripts",
+    "Lean into the long context: feed whole repos, full transcripts",
     "Function calling syntax differs; check Google AI docs",
     "Performance on very long contexts is the differentiator"
   ],

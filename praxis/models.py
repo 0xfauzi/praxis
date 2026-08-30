@@ -4,6 +4,7 @@ Every provider scanner emits Sessions in this shape, so the rest of the
 pipeline doesn't need to know whether a turn came from Claude, Codex,
 or Copilot.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -11,7 +12,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
-
 
 Severity = Literal["minor", "moderate", "major"]
 Confidence = Literal["low", "medium", "high"]
@@ -54,12 +54,12 @@ class Session:
     """A normalized conversation. One Session = one chat thread."""
 
     provider: Provider
-    session_id: str          # provider-native id
+    session_id: str  # provider-native id
     started_at: datetime
     turns: list[Turn]
-    source_path: str         # absolute path on disk, for traceability
+    source_path: str  # absolute path on disk, for traceability
     project_hint: str | None = None  # e.g. cwd or workspace name if known
-    model_hint: str | None = None    # e.g. "claude-opus-4-7" if known
+    model_hint: str | None = None  # e.g. "claude-opus-4-7" if known
 
     @property
     def stable_id(self) -> str:
@@ -88,9 +88,7 @@ class Session:
         slash-command caveat blocks, etc. -- so regex-based signal
         extractors don't count the tool's content against the user.
         """
-        return [
-            t for t in self.turns if t.role == Role.USER and not t.tool_injected
-        ]
+        return [t for t in self.turns if t.role == Role.USER and not t.tool_injected]
 
     @property
     def assistant_turns(self) -> list[Turn]:

@@ -8,17 +8,17 @@ started_at.
 US-032 (this file) covers the call-shape contract. Validation, retry,
 and singleton fallback are covered by later stories.
 """
+
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
 from praxis.models import Provider, Role, Session, Turn
 from praxis.scoring import clustering
-
 
 # --- helpers -----------------------------------------------------------------
 
@@ -29,7 +29,7 @@ def _make_session(
     project_hint: str | None = None,
     started_at: datetime | None = None,
 ) -> Session:
-    when = started_at or datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc)
+    when = started_at or datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
     return Session(
         provider=Provider.CLAUDE,
         session_id=session_id,
@@ -173,7 +173,7 @@ def test_first_user_turn_at_exactly_400_chars_is_unchanged():
 
 def test_first_user_turn_uses_only_the_first_user_turn():
     # Multiple user turns: only the first should be sent.
-    when = datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc)
+    when = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
     s = Session(
         provider=Provider.CLAUDE,
         session_id="multi",
@@ -202,7 +202,7 @@ def test_project_hint_is_passed_through_when_present():
 
 
 def test_started_at_is_iso_format():
-    when = datetime(2026, 5, 20, 9, 15, tzinfo=timezone.utc)
+    when = datetime(2026, 5, 20, 9, 15, tzinfo=UTC)
     s = _make_session("a", "anything", started_at=when)
     [block] = clustering.build_session_blocks([s])
     # ISO-format round-trips through fromisoformat.
@@ -261,8 +261,16 @@ def test_anthropic_single_call_for_all_sessions(monkeypatch):
 def test_anthropic_call_uses_cheap_tier_model_by_default(monkeypatch):
     sessions = [_make_session("only", "do thing")]
     reply = json.dumps(
-        {"tasks": [{"label": "x y z", "task_type": "other",
-                    "session_ids": [sessions[0].stable_id], "rationale": "."}]}
+        {
+            "tasks": [
+                {
+                    "label": "x y z",
+                    "task_type": "other",
+                    "session_ids": [sessions[0].stable_id],
+                    "rationale": ".",
+                }
+            ]
+        }
     )
     recorder = _CallRecorder(reply)
     _install_fake_anthropic(monkeypatch, recorder)
@@ -276,8 +284,16 @@ def test_anthropic_call_uses_cheap_tier_model_by_default(monkeypatch):
 def test_openai_call_uses_cheap_tier_model_by_default(monkeypatch):
     sessions = [_make_session("only", "do thing")]
     reply = json.dumps(
-        {"tasks": [{"label": "x y z", "task_type": "other",
-                    "session_ids": [sessions[0].stable_id], "rationale": "."}]}
+        {
+            "tasks": [
+                {
+                    "label": "x y z",
+                    "task_type": "other",
+                    "session_ids": [sessions[0].stable_id],
+                    "rationale": ".",
+                }
+            ]
+        }
     )
     recorder = _OpenAIRecorder(reply)
     _install_fake_openai(monkeypatch, recorder)
@@ -306,8 +322,16 @@ def test_prompt_truncates_long_first_turn_inside_call_body(monkeypatch):
     long_prompt = "z" * 1200
     sessions = [_make_session("s1", long_prompt)]
     reply = json.dumps(
-        {"tasks": [{"label": "x y z", "task_type": "other",
-                    "session_ids": [sessions[0].stable_id], "rationale": "."}]}
+        {
+            "tasks": [
+                {
+                    "label": "x y z",
+                    "task_type": "other",
+                    "session_ids": [sessions[0].stable_id],
+                    "rationale": ".",
+                }
+            ]
+        }
     )
     recorder = _CallRecorder(reply)
     _install_fake_anthropic(monkeypatch, recorder)
@@ -328,8 +352,16 @@ def test_cluster_sessions_prefers_anthropic_when_both_keys_set(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-x")
     sessions = [_make_session("s1", "anything")]
     reply = json.dumps(
-        {"tasks": [{"label": "x y z", "task_type": "other",
-                    "session_ids": [sessions[0].stable_id], "rationale": "."}]}
+        {
+            "tasks": [
+                {
+                    "label": "x y z",
+                    "task_type": "other",
+                    "session_ids": [sessions[0].stable_id],
+                    "rationale": ".",
+                }
+            ]
+        }
     )
     anth = _CallRecorder(reply)
     oai = _OpenAIRecorder(reply)
@@ -392,9 +424,7 @@ def test_validate_coverage_detects_duplicated_session_ids():
 
 def test_validate_coverage_detects_invented_session_ids():
     tasks = [
-        clustering.Task(
-            label="a", task_type="other", session_ids=["x", "FAKE"], rationale="."
-        ),
+        clustering.Task(label="a", task_type="other", session_ids=["x", "FAKE"], rationale="."),
     ]
     error = clustering._validate_coverage(tasks, {"x"})
     assert error is not None
@@ -439,10 +469,18 @@ def test_anthropic_retries_once_when_response_has_duplicate_id(monkeypatch):
     duplicated = json.dumps(
         {
             "tasks": [
-                {"label": "a", "task_type": "other",
-                 "session_ids": [s1.stable_id], "rationale": "."},
-                {"label": "b", "task_type": "other",
-                 "session_ids": [s1.stable_id, s2.stable_id], "rationale": "."},
+                {
+                    "label": "a",
+                    "task_type": "other",
+                    "session_ids": [s1.stable_id],
+                    "rationale": ".",
+                },
+                {
+                    "label": "b",
+                    "task_type": "other",
+                    "session_ids": [s1.stable_id, s2.stable_id],
+                    "rationale": ".",
+                },
             ]
         }
     )
@@ -535,9 +573,7 @@ def test_openai_retry_prompt_contains_the_validation_error(monkeypatch):
 def test_task_default_label_source_is_llm():
     # The dataclass default keeps US-032/US-033 callsites - which construct
     # Task without label_source - on the 'llm' branch.
-    t = clustering.Task(
-        label="x", task_type="other", session_ids=["a"], rationale="."
-    )
+    t = clustering.Task(label="x", task_type="other", session_ids=["a"], rationale=".")
     assert t.label_source == clustering.LABEL_SOURCE_LLM
     assert clustering.LABEL_SOURCE_LLM == "llm"
     assert clustering.LABEL_SOURCE_FALLBACK == "fallback"
@@ -545,9 +581,7 @@ def test_task_default_label_source_is_llm():
 
 def test_singleton_fallback_label_takes_first_five_words():
     s = _make_session("s1", "fix the bug in our login redirect handler")
-    assert (
-        clustering._singleton_fallback_label(s) == "fix the bug in our"
-    )
+    assert clustering._singleton_fallback_label(s) == "fix the bug in our"
 
 
 def test_singleton_fallback_label_short_turn_is_unchanged():
@@ -560,13 +594,11 @@ def test_singleton_fallback_label_normalises_whitespace():
     s = _make_session("s1", "   add   tests   for   the   redactor   please   ")
     # split() with no args splits on runs of whitespace AND drops empty edges,
     # so we expect a clean single-space join.
-    assert (
-        clustering._singleton_fallback_label(s) == "add tests for the redactor"
-    )
+    assert clustering._singleton_fallback_label(s) == "add tests for the redactor"
 
 
 def test_singleton_fallback_label_empty_when_no_user_turn():
-    when = datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc)
+    when = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
     s = Session(
         provider=Provider.CLAUDE,
         session_id="no-user",
@@ -706,9 +738,7 @@ def test_openai_falls_back_when_retry_response_is_unparseable(monkeypatch):
 # --- US-035: label and task_type validation ---------------------------------
 
 
-def _reply_with_task(
-    session_ids: list[str], label: str = "x y z", task_type: str = "other"
-) -> str:
+def _reply_with_task(session_ids: list[str], label: str = "x y z", task_type: str = "other") -> str:
     """Like _ok_reply but lets the test pin label and task_type explicitly,
     so we can drive label / task_type validation."""
     return json.dumps(
@@ -772,9 +802,7 @@ def test_validate_labels_and_types_passes_for_clean_tasks():
 def test_validate_labels_rejects_label_longer_than_60_chars():
     too_long = "x" * 61
     tasks = [
-        clustering.Task(
-            label=too_long, task_type="other", session_ids=["x"], rationale="."
-        ),
+        clustering.Task(label=too_long, task_type="other", session_ids=["x"], rationale="."),
     ]
     error = clustering._validate_labels_and_types(tasks)
     assert error is not None
@@ -919,9 +947,7 @@ def test_validate_types_accepts_each_of_the_eight_enum_values():
     # Every value in ALLOWED_TASK_TYPES must be accepted, with a clean label.
     for tt in clustering.ALLOWED_TASK_TYPES:
         tasks = [
-            clustering.Task(
-                label="auth fix", task_type=tt, session_ids=["x"], rationale="."
-            ),
+            clustering.Task(label="auth fix", task_type=tt, session_ids=["x"], rationale="."),
         ]
         assert clustering._validate_labels_and_types(tasks) is None
 
@@ -1005,12 +1031,8 @@ def test_anthropic_retry_prompt_carries_label_validation_error(monkeypatch):
 def test_anthropic_falls_back_when_retry_label_is_still_invalid(monkeypatch):
     s1 = _make_session("s1", "first call alpha")
     s2 = _make_session("s2", "second call beta")
-    invalid_first = _reply_with_task(
-        [s1.stable_id, s2.stable_id], label="you should fix this"
-    )
-    invalid_second = _reply_with_task(
-        [s1.stable_id, s2.stable_id], label="I will rewrite this"
-    )
+    invalid_first = _reply_with_task([s1.stable_id, s2.stable_id], label="you should fix this")
+    invalid_second = _reply_with_task([s1.stable_id, s2.stable_id], label="I will rewrite this")
     recorder = _CallRecorder([invalid_first, invalid_second])
     _install_fake_anthropic(monkeypatch, recorder)
 
@@ -1101,12 +1123,8 @@ def test_anti_singleton_threshold_is_8():
 
 def test_validate_shape_returns_none_for_well_shaped_response():
     tasks = [
-        clustering.Task(
-            label="a", task_type="other", session_ids=["x", "y", "z"], rationale="."
-        ),
-        clustering.Task(
-            label="b", task_type="other", session_ids=["q", "r"], rationale="."
-        ),
+        clustering.Task(label="a", task_type="other", session_ids=["x", "y", "z"], rationale="."),
+        clustering.Task(label="b", task_type="other", session_ids=["q", "r"], rationale="."),
     ]
     assert clustering._validate_shape(tasks, n_sessions=5) is None
 
@@ -1141,18 +1159,14 @@ def test_validate_shape_accepts_one_task_at_collapse_boundary_n_equal_6():
 def test_validate_shape_accepts_one_task_under_collapse_threshold():
     # N=3, one task, well under the threshold.
     tasks = [
-        clustering.Task(
-            label="a", task_type="other", session_ids=["x", "y", "z"], rationale="."
-        ),
+        clustering.Task(label="a", task_type="other", session_ids=["x", "y", "z"], rationale="."),
     ]
     assert clustering._validate_shape(tasks, n_sessions=3) is None
 
 
 def test_validate_shape_rejects_all_singletons_when_n_over_8():
     tasks = [
-        clustering.Task(
-            label=f"t{i}", task_type="other", session_ids=[f"s{i}"], rationale="."
-        )
+        clustering.Task(label=f"t{i}", task_type="other", session_ids=[f"s{i}"], rationale=".")
         for i in range(9)
     ]
     error = clustering._validate_shape(tasks, n_sessions=9)
@@ -1163,9 +1177,7 @@ def test_validate_shape_rejects_all_singletons_when_n_over_8():
 
 def test_validate_shape_accepts_all_singletons_at_boundary_n_equal_8():
     tasks = [
-        clustering.Task(
-            label=f"t{i}", task_type="other", session_ids=[f"s{i}"], rationale="."
-        )
+        clustering.Task(label=f"t{i}", task_type="other", session_ids=[f"s{i}"], rationale=".")
         for i in range(8)
     ]
     assert clustering._validate_shape(tasks, n_sessions=8) is None
@@ -1173,9 +1185,7 @@ def test_validate_shape_accepts_all_singletons_at_boundary_n_equal_8():
 
 def test_validate_shape_accepts_all_singletons_under_threshold():
     tasks = [
-        clustering.Task(
-            label=f"t{i}", task_type="other", session_ids=[f"s{i}"], rationale="."
-        )
+        clustering.Task(label=f"t{i}", task_type="other", session_ids=[f"s{i}"], rationale=".")
         for i in range(4)
     ]
     assert clustering._validate_shape(tasks, n_sessions=4) is None
@@ -1197,9 +1207,7 @@ def test_validate_shape_accepts_mixed_response_above_singleton_threshold():
             session_ids=[f"s{i}" for i in range(4, 9)],
             rationale=".",
         ),
-        clustering.Task(
-            label="c", task_type="other", session_ids=["s9"], rationale="."
-        ),
+        clustering.Task(label="c", task_type="other", session_ids=["s9"], rationale="."),
     ]
     assert clustering._validate_shape(tasks, n_sessions=10) is None
 
@@ -1363,9 +1371,7 @@ def test_anthropic_shape_retry_breaking_coverage_keeps_original(monkeypatch):
     sessions = [_make_session(f"s{i}", "thing") for i in range(7)]
     ids = [s.stable_id for s in sessions]
     collapsed = _ok_reply(ids, label="original")
-    reshape_invented = _multi_task_reply(
-        [ids[:3], ids[3:] + ["GHOST-ID"]]
-    )
+    reshape_invented = _multi_task_reply([ids[:3], ids[3:] + ["GHOST-ID"]])
     recorder = _CallRecorder([collapsed, reshape_invented])
     _install_fake_anthropic(monkeypatch, recorder)
 
@@ -1563,9 +1569,7 @@ def test_build_pass1_batches_oversized_task_pairs_with_non_task_mates():
     when such sessions exist - the constraint is "no two task-mates in one
     batch", not "task-mates must be alone".
     """
-    big_task_sessions = [
-        _make_session(f"big-{i}", f"big prompt {i}") for i in range(6)
-    ]
+    big_task_sessions = [_make_session(f"big-{i}", f"big prompt {i}") for i in range(6)]
     other = [_make_session(f"o-{i}", f"other prompt {i}") for i in range(4)]
     sessions = big_task_sessions + other
     tasks = [
@@ -1590,7 +1594,8 @@ def test_build_pass1_batches_oversized_task_pairs_with_non_task_mates():
     # At least one batch demonstrates an extra paired with a non-task-mate
     # (i.e., one big-task session and one other-task session together).
     paired = [
-        batch for batch in batches
+        batch
+        for batch in batches
         if any(s.stable_id in big_ids for s in batch)
         and any(s.stable_id in other_ids for s in batch)
     ]

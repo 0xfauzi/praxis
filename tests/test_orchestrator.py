@@ -12,13 +12,14 @@ US-070 adds run_weekly() pipeline-ordering coverage. The tests verify that
 the eight Section 9.4 steps execute in the documented order and that each
 step's outputs only feed its documented downstream consumers.
 """
+
 from __future__ import annotations
 
 import json
 import os
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -41,7 +42,7 @@ def fake_judge(monkeypatch):
     a given test exercises.
     """
 
-    def _fake(session, prefer="claude", **kwargs):  # noqa: ARG001
+    def _fake(session, prefer="claude", **kwargs):
         return JudgeResult(
             dimension_scores={d.key: 6.0 for d in RUBRIC},
             rationale={d.key: "fixture" for d in RUBRIC},
@@ -67,9 +68,7 @@ def test_run_on_empty_machine_returns_zero_summary(tmp_home):
     assert summary.coaching.generated_by == "empty"
 
 
-def test_run_is_idempotent(
-    tmp_home, synthetic_claude_session, synthetic_codex_session, fake_judge
-):
+def test_run_is_idempotent(tmp_home, synthetic_claude_session, synthetic_codex_session, fake_judge):
     first = run()
     assert first.sessions_new >= 1
     assert first.sessions_scored >= 1
@@ -208,6 +207,7 @@ def test_run_weekly_returns_summary_with_week_iso(tmp_home, step_recorder):
 
 # --- US-071: persist weekly_digests row ----------------------------------
 
+
 def test_run_weekly_writes_one_digest_row(tmp_home, step_recorder):
     """A weekly_digests row exists for the current week after run_weekly."""
     summary = run_weekly()
@@ -294,6 +294,7 @@ def test_run_weekly_accepts_external_store(tmp_home, step_recorder):
 
 # --- US-072: --dry-run computes without persisting -----------------------
 
+
 def test_run_weekly_dry_run_does_not_persist_digest(tmp_home, step_recorder):
     """dry_run=True must not write a weekly_digests row (US-072 AC #1)."""
     summary = run_weekly(dry_run=True)
@@ -317,14 +318,11 @@ def test_run_weekly_dry_run_does_not_create_db_file(tmp_home, step_recorder):
     assert not db_path.exists()
     run_weekly(dry_run=True)
     assert not db_path.exists(), (
-        "dry_run=True wrote profile.db; ProfileStore() must not be "
-        "constructed in the dry-run path"
+        "dry_run=True wrote profile.db; ProfileStore() must not be constructed in the dry-run path"
     )
 
 
-def test_run_weekly_dry_run_with_explicit_store_does_not_write(
-    tmp_home, step_recorder
-):
+def test_run_weekly_dry_run_with_explicit_store_does_not_write(tmp_home, step_recorder):
     """dry_run wins over an explicit store= (no row is written either way).
 
     Defense-in-depth: callers who pass a real store but also ask for
@@ -338,9 +336,7 @@ def test_run_weekly_dry_run_with_explicit_store_does_not_write(
     assert summary.digest_persisted is False
 
 
-def test_run_weekly_dry_run_still_returns_rendered_terminal(
-    tmp_home, monkeypatch
-):
+def test_run_weekly_dry_run_still_returns_rendered_terminal(tmp_home, monkeypatch):
     """dry_run=True still computes and returns the terminal rendering.
 
     Spec AC #2: terminal output is still produced. The renderer returns
@@ -442,13 +438,15 @@ def _write_synthetic_claude_session(home, when: datetime, content: str) -> None:
             "message": {
                 "role": "assistant",
                 "model": "claude-opus-4-7",
-                "content": [{
-                    "type": "text",
-                    "text": (
-                        "Plan: identify the failing assertion, trace the data "
-                        "model back to the producer, and add a regression test."
-                    ),
-                }],
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Plan: identify the failing assertion, trace the data "
+                            "model back to the producer, and add a regression test."
+                        ),
+                    }
+                ],
             },
         },
         {
@@ -468,14 +466,16 @@ def _write_synthetic_claude_session(home, when: datetime, content: str) -> None:
             "message": {
                 "role": "assistant",
                 "model": "claude-opus-4-7",
-                "content": [{
-                    "type": "text",
-                    "text": (
-                        "Because the audit_log writes are async, the old path "
-                        "could commit the SQL while the audit was still in "
-                        "flight - so a crash mid-flush dropped the trail."
-                    ),
-                }],
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Because the audit_log writes are async, the old path "
+                            "could commit the SQL while the audit was still in "
+                            "flight - so a crash mid-flush dropped the trail."
+                        ),
+                    }
+                ],
             },
         },
     ]
@@ -493,7 +493,7 @@ def thirty_synthetic_sessions(tmp_home):
     is not load-bearing; the test only cares that 30 files exist within
     the orchestrator's default `since_days=7` window.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for i in range(30):
         # ~5 hours between sessions keeps everything inside a 7-day window.
         when = now - timedelta(hours=5 * i + 1)
@@ -520,11 +520,12 @@ def stub_weekly_llm_calls(monkeypatch):
     to the cost estimator would always be 0 and the selector wedge of
     the estimate would vanish).
     """
+
     # Every 5th session gets a low-confidence flag so pass 2 actually
     # runs - exercising the more expensive frontier wedge of the cost
     # model. 6/30 escalation rate sits inside the spec 15.2 #3 band
     # (15-30%) which the calibration target uses on real data.
-    def _fake_score(session, prefer="claude"):  # noqa: ARG001
+    def _fake_score(session, prefer="claude"):
         # Recognizable substring from the synthetic transcripts above so
         # the moment survives the post-judge substring verifier.
         excerpt = "Walk me through the trade-off"
@@ -535,9 +536,7 @@ def stub_weekly_llm_calls(monkeypatch):
         # session flagged "low" by pass 1 will get re-judged by pass 2
         # with a different model. To approximate that, the stub returns
         # a heavier judge_model when the session would escalate.
-        judge_model = (
-            "claude-opus-4-7" if confidence == "low" else "claude-haiku-4-5"
-        )
+        judge_model = "claude-opus-4-7" if confidence == "low" else "claude-haiku-4-5"
         return JudgeResult(
             dimension_scores={d.key: 6.0 for d in RUBRIC},
             rationale={
@@ -576,7 +575,7 @@ def stub_weekly_llm_calls(monkeypatch):
 
     monkeypatch.setattr("praxis.scoring.aggregate.score_session", _fake_score)
 
-    def _fake_cluster(sessions, prefer="anthropic"):  # noqa: ARG001
+    def _fake_cluster(sessions, prefer="anthropic"):
         # One realistic-shaped Task; coverage validation in cluster_sessions
         # is not exercised here (the orchestrator only consumes the result).
         return [
@@ -591,15 +590,13 @@ def stub_weekly_llm_calls(monkeypatch):
 
     monkeypatch.setattr(orch, "cluster_sessions", _fake_cluster)
 
-    def _fake_select(candidates, primary_provider="anthropic", *, llm_caller=None):  # noqa: ARG001
+    def _fake_select(candidates, primary_provider="anthropic", *, llm_caller=None):
         if not candidates:
             return None
         return MomentSelection(
             headline_moment_id=candidates[0].moment.moment_id,
             headline_reason="largest verification slip this week",
-            supporting_moment_ids=[
-                c.moment.moment_id for c in candidates[1:3]
-            ],
+            supporting_moment_ids=[c.moment.moment_id for c in candidates[1:3]],
         )
 
     monkeypatch.setattr(orch, "select_moments_with_fallback", _fake_select)
@@ -659,9 +656,7 @@ def test_run_weekly_perf_30_sessions_under_120s_and_2_usd(
     )
 
 
-def test_run_weekly_cost_total_usd_is_persisted(
-    thirty_synthetic_sessions, stub_weekly_llm_calls
-):
+def test_run_weekly_cost_total_usd_is_persisted(thirty_synthetic_sessions, stub_weekly_llm_calls):
     """The estimated cost lands in weekly_digests.cost_total_usd.
 
     US-073's perf target is only useful if the number gets stored alongside
@@ -784,9 +779,7 @@ def _build_session_score_for(session, *, dim_value: float = 6.0) -> orch.Session
     )
 
 
-def _write_historical_claude_session(
-    home, *, when: datetime, session_name: str
-):
+def _write_historical_claude_session(home, *, when: datetime, session_name: str):
     """Write and parse one Claude session in an explicit historical week."""
     from praxis.scanners.claude import ClaudeScanner
 
@@ -800,16 +793,13 @@ def _write_historical_claude_session(
             "message": {
                 "role": "user",
                 "content": (
-                    "Goal: refactor auth callback handling. "
-                    "Constraints: preserve session tokens."
+                    "Goal: refactor auth callback handling. Constraints: preserve session tokens."
                 ),
             },
         },
         {
             "type": "assistant",
-            "timestamp": (when + timedelta(minutes=5)).isoformat().replace(
-                "+00:00", "Z"
-            ),
+            "timestamp": (when + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
             "message": {
                 "role": "assistant",
                 "model": "claude-opus-4-7",
@@ -818,9 +808,7 @@ def _write_historical_claude_session(
         },
         {
             "type": "user",
-            "timestamp": (when + timedelta(minutes=10)).isoformat().replace(
-                "+00:00", "Z"
-            ),
+            "timestamp": (when + timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
             "message": {
                 "role": "user",
                 "content": (
@@ -831,9 +819,7 @@ def _write_historical_claude_session(
         },
         {
             "type": "assistant",
-            "timestamp": (when + timedelta(minutes=15)).isoformat().replace(
-                "+00:00", "Z"
-            ),
+            "timestamp": (when + timedelta(minutes=15)).isoformat().replace("+00:00", "Z"),
             "message": {
                 "role": "assistant",
                 "model": "claude-opus-4-7",
@@ -862,7 +848,7 @@ def test_past_week_reconstructs_sessions_for_expansion_panels(tmp_home):
     sessions = [
         _write_historical_claude_session(
             tmp_home,
-            when=datetime(2026, 5, 18 + i, 10, 0, tzinfo=timezone.utc),
+            when=datetime(2026, 5, 18 + i, 10, 0, tzinfo=UTC),
             session_name=f"hist-{i}",
         )
         for i in range(3)
@@ -902,7 +888,7 @@ def stub_pass1_judge(monkeypatch):
     the real judge LLM or routing through API-key gating.
     """
 
-    def _fake(session, *, sharpen_calibration=False, stricter_low=False):  # noqa: ARG001
+    def _fake(session, *, sharpen_calibration=False, stricter_low=False):
         return _build_session_score_for(session)
 
     monkeypatch.setattr(orch, "score_one_session_pass1", _fake)
@@ -917,9 +903,7 @@ def test_step_pass1_invokes_classifier_per_session(
 
     def _fake_classify(transcript_text: str) -> AugAutoResult:
         calls.append(transcript_text)
-        return AugAutoResult(
-            classification="augmentation", confidence=0.8, rationale="stub"
-        )
+        return AugAutoResult(classification="augmentation", confidence=0.8, rationale="stub")
 
     monkeypatch.setattr(orch, "classify_session", _fake_classify)
     sessions = [synthetic_session_object]
@@ -936,10 +920,8 @@ def test_step_pass1_persists_classification_to_session_scores(
 ):
     """On a successful classify, the aug_auto columns hold the result."""
 
-    def _fake_classify(transcript_text: str) -> AugAutoResult:  # noqa: ARG001
-        return AugAutoResult(
-            classification="mixed", confidence=0.55, rationale="stub"
-        )
+    def _fake_classify(transcript_text: str) -> AugAutoResult:
+        return AugAutoResult(classification="mixed", confidence=0.55, rationale="stub")
 
     monkeypatch.setattr(orch, "classify_session", _fake_classify)
     orch._step_pass1([synthetic_session_object], tasks=[])
@@ -950,8 +932,12 @@ def test_step_pass1_persists_classification_to_session_scores(
 
 
 def test_step_pass1_no_api_key_leaves_aug_auto_null_and_logs_once(
-    tmp_home, synthetic_claude_session, synthetic_codex_session,
-    stub_pass1_judge, monkeypatch, capsys
+    tmp_home,
+    synthetic_claude_session,
+    synthetic_codex_session,
+    stub_pass1_judge,
+    monkeypatch,
+    capsys,
 ):
     """No API key for classifier: NULL columns, one info-level log per run.
 
@@ -960,19 +946,18 @@ def test_step_pass1_no_api_key_leaves_aug_auto_null_and_logs_once(
     the run does not abort and the classifier columns stay NULL while
     only a single message is emitted.
     """
+
     # Stub classifier to behave as if no API key was set.
-    def _fake_classify(transcript_text: str) -> AugAutoResult:  # noqa: ARG001
-        raise AugAutoUnavailableError(
-            "no API key configured for aug_auto classifier"
-        )
+    def _fake_classify(transcript_text: str) -> AugAutoResult:
+        raise AugAutoUnavailableError("no API key configured for aug_auto classifier")
 
     monkeypatch.setattr(orch, "classify_session", _fake_classify)
     # Use two sessions so we can assert "logged once," not once per session.
     from praxis.scanners import ALL_SCANNERS
+
     sessions = []
     for scanner_cls in ALL_SCANNERS:
-        for s in scanner_cls().scan(since=None):
-            sessions.append(s)
+        sessions.extend(scanner_cls().scan(since=None))
     sessions = [s for s in sessions if s.user_turns]
     assert len(sessions) >= 2, "fixtures should produce >=2 sessions"
 
@@ -996,10 +981,8 @@ def test_step_pass1_parse_error_leaves_aug_auto_null_and_logs(
 ):
     """AugAutoParseError: NULL columns, error message logged, run continues."""
 
-    def _fake_classify(transcript_text: str) -> AugAutoResult:  # noqa: ARG001
-        raise AugAutoParseError(
-            "classifier response is not valid JSON: synthetic test failure"
-        )
+    def _fake_classify(transcript_text: str) -> AugAutoResult:
+        raise AugAutoParseError("classifier response is not valid JSON: synthetic test failure")
 
     monkeypatch.setattr(orch, "classify_session", _fake_classify)
     pass1 = orch._step_pass1([synthetic_session_object], tasks=[])
@@ -1020,15 +1003,14 @@ def test_step_pass1_parse_error_leaves_aug_auto_null_and_logs(
 
 
 def test_step_pass1_classifier_failure_does_not_abort_other_sessions(
-    tmp_home, synthetic_claude_session, synthetic_codex_session,
-    stub_pass1_judge, monkeypatch
+    tmp_home, synthetic_claude_session, synthetic_codex_session, stub_pass1_judge, monkeypatch
 ):
     """One session's parse error must not stop the other session's classify."""
     from praxis.scanners import ALL_SCANNERS
+
     sessions = []
     for scanner_cls in ALL_SCANNERS:
-        for s in scanner_cls().scan(since=None):
-            sessions.append(s)
+        sessions.extend(scanner_cls().scan(since=None))
     sessions = [s for s in sessions if s.user_turns]
     assert len(sessions) >= 2
 
@@ -1036,13 +1018,11 @@ def test_step_pass1_classifier_failure_does_not_abort_other_sessions(
     # mutable counter rather than a per-id branch so the stub is simple.
     state = {"calls": 0}
 
-    def _fake_classify(transcript_text: str) -> AugAutoResult:  # noqa: ARG001
+    def _fake_classify(transcript_text: str) -> AugAutoResult:
         state["calls"] += 1
         if state["calls"] == 1:
             raise AugAutoParseError("first session intentionally broken")
-        return AugAutoResult(
-            classification="automation", confidence=0.7, rationale="ok"
-        )
+        return AugAutoResult(classification="automation", confidence=0.7, rationale="ok")
 
     monkeypatch.setattr(orch, "classify_session", _fake_classify)
     orch._step_pass1(sessions, tasks=[])
@@ -1058,9 +1038,7 @@ def test_step_pass1_classifier_failure_does_not_abort_other_sessions(
     assert classified >= 1
 
 
-def test_step_pass1_frontier_only_skips_classifier(
-    tmp_home, synthetic_session_object, monkeypatch
-):
+def test_step_pass1_frontier_only_skips_classifier(tmp_home, synthetic_session_object, monkeypatch):
     """In --frontier-only mode pass-1 (and therefore the classifier) is bypassed.
 
     The AC ties the classifier to pass-1 specifically; when pass-1 is
@@ -1068,11 +1046,9 @@ def test_step_pass1_frontier_only_skips_classifier(
     """
     called = {"hit": False}
 
-    def _fake_classify(transcript_text: str) -> AugAutoResult:  # noqa: ARG001
+    def _fake_classify(transcript_text: str) -> AugAutoResult:
         called["hit"] = True
-        return AugAutoResult(
-            classification="augmentation", confidence=0.9, rationale="x"
-        )
+        return AugAutoResult(classification="augmentation", confidence=0.9, rationale="x")
 
     monkeypatch.setattr(orch, "classify_session", _fake_classify)
     orch._step_pass1([synthetic_session_object], tasks=[], frontier_only=True)
@@ -1096,11 +1072,12 @@ def test_save_and_get_session_aug_auto_round_trip(tmp_home):
         overall_note="x",
         judge_model="x",
     )
-    from datetime import datetime as _dt, timezone as _tz
+    from datetime import datetime as _dt
+
     score = orch.SessionScore(
         session_stable_id="abc123",
         provider="claude",
-        started_at=_dt.now(_tz.utc),
+        started_at=_dt.now(UTC),
         dimension_scores={d.key: 5.0 for d in RUBRIC},
         overall=5.0,
         judge_result=judge,
@@ -1132,7 +1109,8 @@ def test_get_session_aug_auto_missing_session_returns_none(tmp_home):
 def _make_dummy_sessions(n: int, when_base: datetime | None = None) -> list:
     """Build N distinct in-memory Sessions with unique stable_ids."""
     from praxis.models import Provider, Role, Session, Turn
-    when_base = when_base or datetime.now(timezone.utc)
+
+    when_base = when_base or datetime.now(UTC)
     sessions = []
     for i in range(n):
         sessions.append(
@@ -1150,9 +1128,7 @@ def _make_dummy_sessions(n: int, when_base: datetime | None = None) -> list:
     return sessions
 
 
-def test_step_pass1_skips_already_scored_sessions(
-    tmp_home, stub_pass1_judge, monkeypatch
-):
+def test_step_pass1_skips_already_scored_sessions(tmp_home, stub_pass1_judge, monkeypatch):
     """Issue #5 part 2: stable_ids already in session_scores must not
     trigger the judge LLM call.
 
@@ -1161,7 +1137,8 @@ def test_step_pass1_skips_already_scored_sessions(
     """
     # Stub the aug_auto classifier so it never errors and never blocks.
     monkeypatch.setattr(
-        orch, "classify_session",
+        orch,
+        "classify_session",
         lambda _t: AugAutoResult(classification="augmentation", confidence=0.8, rationale="ok"),
     )
 
@@ -1175,8 +1152,9 @@ def test_step_pass1_skips_already_scored_sessions(
 
     def _spy(session, *, sharpen_calibration=False, stricter_low=False):
         judge_calls.append(session.stable_id)
-        return real_stub(session, sharpen_calibration=sharpen_calibration,
-                         stricter_low=stricter_low)
+        return real_stub(
+            session, sharpen_calibration=sharpen_calibration, stricter_low=stricter_low
+        )
 
     monkeypatch.setattr(orch, "score_one_session_pass1", _spy)
 
@@ -1194,7 +1172,8 @@ def test_step_pass1_respects_max_new(tmp_home, stub_pass1_judge, monkeypatch):
     """Issue #5 part 1: with max_new=3, the judge runs 3 times even though
     10 sessions are eligible (none already scored)."""
     monkeypatch.setattr(
-        orch, "classify_session",
+        orch,
+        "classify_session",
         lambda _t: AugAutoResult(classification="augmentation", confidence=0.8, rationale="ok"),
     )
     sessions = _make_dummy_sessions(10)
@@ -1204,8 +1183,9 @@ def test_step_pass1_respects_max_new(tmp_home, stub_pass1_judge, monkeypatch):
 
     def _spy(session, *, sharpen_calibration=False, stricter_low=False):
         judge_calls.append(session.stable_id)
-        return real_stub(session, sharpen_calibration=sharpen_calibration,
-                         stricter_low=stricter_low)
+        return real_stub(
+            session, sharpen_calibration=sharpen_calibration, stricter_low=stricter_low
+        )
 
     monkeypatch.setattr(orch, "score_one_session_pass1", _spy)
 
@@ -1217,14 +1197,13 @@ def test_step_pass1_respects_max_new(tmp_home, stub_pass1_judge, monkeypatch):
     assert set(judge_calls) == expected_ids
 
 
-def test_step_pass1_max_new_zero_is_unbounded(
-    tmp_home, stub_pass1_judge, monkeypatch
-):
+def test_step_pass1_max_new_zero_is_unbounded(tmp_home, stub_pass1_judge, monkeypatch):
     """max_new of 0 (or negative) means 'no cap' so every unseeded
     session is judged. This mirrors the CLI normalisation that converts
     --max-new 0 to ``None`` before invoking run_weekly."""
     monkeypatch.setattr(
-        orch, "classify_session",
+        orch,
+        "classify_session",
         lambda _t: AugAutoResult(classification="augmentation", confidence=0.8, rationale="ok"),
     )
     sessions = _make_dummy_sessions(4)
@@ -1234,8 +1213,9 @@ def test_step_pass1_max_new_zero_is_unbounded(
 
     def _spy(session, *, sharpen_calibration=False, stricter_low=False):
         judge_calls.append(session.stable_id)
-        return real_stub(session, sharpen_calibration=sharpen_calibration,
-                         stricter_low=stricter_low)
+        return real_stub(
+            session, sharpen_calibration=sharpen_calibration, stricter_low=stricter_low
+        )
 
     monkeypatch.setattr(orch, "score_one_session_pass1", _spy)
 
@@ -1243,9 +1223,7 @@ def test_step_pass1_max_new_zero_is_unbounded(
     assert len(judge_calls) == 4
 
 
-def test_step_pass1_frontier_only_skips_already_scored(
-    tmp_home, monkeypatch
-):
+def test_step_pass1_frontier_only_skips_already_scored(tmp_home, monkeypatch):
     """In --frontier-only mode, pass-1 is a no-op that flags low-confidence
     IDs for pass-2. Already-scored sessions must not be re-flagged so the
     frontier judge does not re-judge them either (issue #5)."""
@@ -1259,21 +1237,21 @@ def test_step_pass1_frontier_only_skips_already_scored(
     assert set(pass1.low_confidence_session_ids) == {s.stable_id for s in sessions[3:]}
 
 
-def test_run_weekly_max_new_default_caps_pass1(
-    tmp_home, monkeypatch
-):
+def test_run_weekly_max_new_default_caps_pass1(tmp_home, monkeypatch):
     """End-to-end: run_weekly defaults max_new=50, so a synthetic burst
     of 100 freshly-scanned sessions only gets the first 50 judged."""
     monkeypatch.setattr(
-        orch, "classify_session",
+        orch,
+        "classify_session",
         lambda _t: AugAutoResult(classification="augmentation", confidence=0.8, rationale="ok"),
     )
     sessions = _make_dummy_sessions(100)
     monkeypatch.setattr(orch, "_step_scan", lambda _s: sessions)
     monkeypatch.setattr(orch, "_step_cluster", lambda _s: [])
 
-    def _fake_pass1_judge(session, *, sharpen_calibration=False, stricter_low=False):  # noqa: ARG001
+    def _fake_pass1_judge(session, *, sharpen_calibration=False, stricter_low=False):
         return _build_session_score_for(session)
+
     monkeypatch.setattr(orch, "score_one_session_pass1", _fake_pass1_judge)
 
     summary = run_weekly()
@@ -1286,15 +1264,17 @@ def test_run_weekly_max_new_none_is_unbounded(tmp_home, monkeypatch):
     historical behaviour pass ``--max-new 0`` (the CLI normalises that to
     ``None``)."""
     monkeypatch.setattr(
-        orch, "classify_session",
+        orch,
+        "classify_session",
         lambda _t: AugAutoResult(classification="augmentation", confidence=0.8, rationale="ok"),
     )
     sessions = _make_dummy_sessions(15)
     monkeypatch.setattr(orch, "_step_scan", lambda _s: sessions)
     monkeypatch.setattr(orch, "_step_cluster", lambda _s: [])
 
-    def _fake_pass1_judge(session, *, sharpen_calibration=False, stricter_low=False):  # noqa: ARG001
+    def _fake_pass1_judge(session, *, sharpen_calibration=False, stricter_low=False):
         return _build_session_score_for(session)
+
     monkeypatch.setattr(orch, "score_one_session_pass1", _fake_pass1_judge)
 
     summary = run_weekly(max_new=None)
@@ -1304,9 +1284,7 @@ def test_run_weekly_max_new_none_is_unbounded(tmp_home, monkeypatch):
 # --- Issue #4 cost-vs-usage split: preamble chars are still billed ------
 
 
-def test_user_week_total_includes_tool_injected_preamble_chars(
-    tmp_home, monkeypatch
-):
+def test_user_week_total_includes_tool_injected_preamble_chars(tmp_home, monkeypatch):
     """Cost reporting (spec section 10.1) is "the user's spend" -- the
     actual billed amount. Tool-injected preambles (Codex AGENTS.md,
     Claude Code system-reminders) are sent to the LLM and billed for,
@@ -1319,7 +1297,7 @@ def test_user_week_total_includes_tool_injected_preamble_chars(
 
     preamble = "# AGENTS.md\n\n" + ("instructions " * 200)
     real_prompt = "fix this bug"
-    when = datetime.now(timezone.utc) - timedelta(hours=2)
+    when = datetime.now(UTC) - timedelta(hours=2)
     session = Session(
         provider=Provider.CODEX,
         session_id="cost-preamble-test",
@@ -1335,8 +1313,9 @@ def test_user_week_total_includes_tool_injected_preamble_chars(
 
     monkeypatch.setattr(orch, "_step_scan", lambda _s: [session])
     monkeypatch.setattr(orch, "_step_cluster", lambda _s: [])
-    monkeypatch.setattr(orch, "_step_pass1",
-                        lambda *a, **k: Pass1Output(results={}, low_confidence_session_ids=[]))
+    monkeypatch.setattr(
+        orch, "_step_pass1", lambda *a, **k: Pass1Output(results={}, low_confidence_session_ids=[])
+    )
     monkeypatch.setattr(orch, "_step_pass2", lambda *a, **k: {})
     monkeypatch.setattr(orch, "_step_validate_moments", lambda *a, **k: [])
     monkeypatch.setattr(orch, "_step_select_moments", lambda *a, **k: None)
@@ -1345,6 +1324,7 @@ def test_user_week_total_includes_tool_injected_preamble_chars(
 
     # Reference cost: estimator over BILLABLE chars (all user-role turns).
     from praxis.scoring.cost_ledger import estimate_session_cost_usd
+
     billable_chars = len(preamble) + len(real_prompt)
     expected = estimate_session_cost_usd("gpt-5", billable_chars)
     # If the cost path narrowed back to authored-only, we'd get the much
@@ -1371,7 +1351,7 @@ def test_run_skips_a_session_that_errors_and_keeps_going(
     batch; sessions_skipped records it and run() returns normally."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
 
-    def _boom(session, **kwargs):  # noqa: ARG001
+    def _boom(session, **kwargs):
         raise RuntimeError("scoring blew up")
 
     monkeypatch.setattr(orch, "score_one_session_pass1", _boom)
@@ -1385,9 +1365,13 @@ def test_reconstruct_sessions_omits_unparseable_or_unknown_rows(tmp_home):
     """A moved/corrupt source file or an unknown provider must be dropped, not
     crash a past-week render (hardening for _reconstruct_sessions_from_score_rows)."""
     from praxis.orchestrator import _reconstruct_sessions_from_score_rows
+
     rows = [
-        {"stable_id": "s1", "provider": "claude",
-         "source_path": "/nonexistent/definitely/missing.jsonl"},
+        {
+            "stable_id": "s1",
+            "provider": "claude",
+            "source_path": "/nonexistent/definitely/missing.jsonl",
+        },
         {"stable_id": "s2", "provider": "no-such-provider", "source_path": "/x"},
         {"stable_id": "", "provider": "claude", "source_path": "/y"},  # missing id
     ]

@@ -5,6 +5,7 @@ made the Commit / Cue / Reflect / Review loop the headline; this test
 guards against regressions to the older scorecard framing and makes sure
 the four loop verbs stay visible in the README.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -32,9 +33,7 @@ def test_readme_exists() -> None:
 
 
 def test_readme_has_praxis_heading(readme_lines: list[str]) -> None:
-    assert "# Praxis" in readme_lines, (
-        "README must include the '# Praxis' top-level heading"
-    )
+    assert "# Praxis" in readme_lines, "README must include the '# Praxis' top-level heading"
 
 
 def test_readme_has_loop_heading(readme_lines: list[str]) -> None:

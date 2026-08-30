@@ -16,10 +16,11 @@ produce count == 0 *for that signal* (other gap subtypes may still
 fire on the same turn -- the negative test only constrains its target).
 Empty input also yields 0 (no false positives on blank transcripts).
 """
+
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -31,7 +32,6 @@ from praxis.behavior.signals import (
 )
 from praxis.models import Provider, Role, Session, Turn
 
-
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 KNOWLEDGE_GAPS_DIR = FIXTURES_DIR / "knowledge_gaps"
 VERIFICATION_DEPTH_DIR = FIXTURES_DIR / "verification_depth"
@@ -39,14 +39,11 @@ VERIFICATION_DEPTH_DIR = FIXTURES_DIR / "verification_depth"
 
 def _load_session(fixture_path: Path) -> Session:
     payload = json.loads(fixture_path.read_text(encoding="utf-8"))
-    turns = [
-        Turn(role=Role(item["role"]), content=item["content"])
-        for item in payload
-    ]
+    turns = [Turn(role=Role(item["role"]), content=item["content"]) for item in payload]
     return Session(
         provider=Provider.CLAUDE,
         session_id=f"fixture-{fixture_path.stem}",
-        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
         turns=turns,
         source_path=str(fixture_path),
     )
@@ -54,9 +51,7 @@ def _load_session(fixture_path: Path) -> Session:
 
 def _fixture_paths(signal: str, polarity: str) -> list[Path]:
     paths = sorted((FIXTURES_DIR / signal).glob(f"{polarity}_*.json"))
-    assert len(paths) == 5, (
-        f"Expected 5 {polarity} fixtures for {signal}, found {len(paths)}"
-    )
+    assert len(paths) == 5, f"Expected 5 {polarity} fixtures for {signal}, found {len(paths)}"
     return paths
 
 
@@ -82,9 +77,7 @@ def test_positive_fixtures_fire(signal: str, attribute: str) -> None:
         session = _load_session(path)
         sig = extract(session)
         count = getattr(sig, attribute)
-        assert count >= 1, (
-            f"Positive fixture {path.name} for {signal} produced {attribute}={count}"
-        )
+        assert count >= 1, f"Positive fixture {path.name} for {signal} produced {attribute}={count}"
 
 
 @pytest.mark.parametrize("signal,attribute", _SCALAR_SIGNAL_PAIRS)
@@ -93,16 +86,14 @@ def test_negative_fixtures_silent(signal: str, attribute: str) -> None:
         session = _load_session(path)
         sig = extract(session)
         count = getattr(sig, attribute)
-        assert count == 0, (
-            f"Negative fixture {path.name} for {signal} produced {attribute}={count}"
-        )
+        assert count == 0, f"Negative fixture {path.name} for {signal} produced {attribute}={count}"
 
 
 def test_empty_session_has_zero_new_counts() -> None:
     session = Session(
         provider=Provider.CLAUDE,
         session_id="empty",
-        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
         turns=[],
         source_path="/tmp/empty",
     )
@@ -117,7 +108,7 @@ def test_whitespace_only_session_has_zero_new_counts() -> None:
     session = Session(
         provider=Provider.CLAUDE,
         session_id="ws",
-        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
         turns=[Turn(role=Role.USER, content="   \n\t  \n  ")],
         source_path="/tmp/ws",
     )
@@ -141,8 +132,7 @@ _KNOWLEDGE_GAP_SUBTYPES = (
 def _knowledge_gap_fixture_paths(subtype: str, polarity: str) -> list[Path]:
     paths = sorted((KNOWLEDGE_GAPS_DIR / subtype).glob(f"{polarity}_*.json"))
     assert len(paths) == 5, (
-        f"Expected 5 {polarity} fixtures for knowledge_gap subtype "
-        f"{subtype}, found {len(paths)}"
+        f"Expected 5 {polarity} fixtures for knowledge_gap subtype {subtype}, found {len(paths)}"
     )
     return paths
 
@@ -154,8 +144,7 @@ def test_knowledge_gap_positive_fixtures_fire(subtype: str) -> None:
         sig = extract(session)
         count = sig.knowledge_gaps[subtype]
         assert count >= 1, (
-            f"Positive fixture {path.name} for knowledge_gaps[{subtype}] "
-            f"produced {count}"
+            f"Positive fixture {path.name} for knowledge_gaps[{subtype}] produced {count}"
         )
 
 
@@ -166,8 +155,7 @@ def test_knowledge_gap_negative_fixtures_silent(subtype: str) -> None:
         sig = extract(session)
         count = sig.knowledge_gaps[subtype]
         assert count == 0, (
-            f"Negative fixture {path.name} for knowledge_gaps[{subtype}] "
-            f"produced {count}"
+            f"Negative fixture {path.name} for knowledge_gaps[{subtype}] produced {count}"
         )
 
 
@@ -179,7 +167,7 @@ def test_knowledge_gaps_all_keys_present_on_empty_session() -> None:
     session = Session(
         provider=Provider.CLAUDE,
         session_id="empty-gaps",
-        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
         turns=[],
         source_path="/tmp/empty",
     )
@@ -201,7 +189,7 @@ def test_knowledge_gaps_all_keys_present_when_no_gap_detected() -> None:
     session = Session(
         provider=Provider.CLAUDE,
         session_id="well-specified",
-        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
         turns=[turn],
         source_path="/tmp/well-specified",
     )
@@ -255,8 +243,7 @@ def test_verification_depth_positive_fixtures_fire(subtype: str) -> None:
         sig = extract(session)
         count = sig.verification_depth[subtype]
         assert count >= 1, (
-            f"Positive fixture {path.name} for verification_depth[{subtype}] "
-            f"produced {count}"
+            f"Positive fixture {path.name} for verification_depth[{subtype}] produced {count}"
         )
 
 
@@ -267,8 +254,7 @@ def test_verification_depth_negative_fixtures_silent(subtype: str) -> None:
         sig = extract(session)
         count = sig.verification_depth[subtype]
         assert count == 0, (
-            f"Negative fixture {path.name} for verification_depth[{subtype}] "
-            f"produced {count}"
+            f"Negative fixture {path.name} for verification_depth[{subtype}] produced {count}"
         )
 
 
@@ -276,7 +262,7 @@ def test_verification_depth_all_keys_present_on_empty_session() -> None:
     session = Session(
         provider=Provider.CLAUDE,
         session_id="empty-verif",
-        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
         turns=[],
         source_path="/tmp/empty",
     )
@@ -289,7 +275,7 @@ def _ladder_session(turns: list[Turn]) -> Session:
     return Session(
         provider=Provider.CLAUDE,
         session_id="ladder",
-        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
         turns=turns,
         source_path="/tmp/ladder",
     )
@@ -334,17 +320,13 @@ def test_tool_ladder_structural_tool_calls_attribute_is_two() -> None:
 
 
 def test_tool_ladder_hook_reference_is_three() -> None:
-    turns = [
-        Turn(role=Role.USER, content="I added a PreToolUse hook to check the format.")
-    ]
+    turns = [Turn(role=Role.USER, content="I added a PreToolUse hook to check the format.")]
     sig = extract(_ladder_session(turns))
     assert sig.tool_ladder_level == 3
 
 
 def test_tool_ladder_subagent_reference_is_four() -> None:
-    turns = [
-        Turn(role=Role.USER, content="Spawn a subagent to handle the long-running search.")
-    ]
+    turns = [Turn(role=Role.USER, content="Spawn a subagent to handle the long-running search.")]
     sig = extract(_ladder_session(turns))
     assert sig.tool_ladder_level == 4
 

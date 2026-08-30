@@ -5,8 +5,9 @@ document at 80 columns, matching the HTML report's voice.
 
 Color usage is deliberately spare: terracotta for emphasis (score
 numbers, section eyebrows, headlines), dim for secondary text, italic
-for the coaching/trajectory voice. Nothing bold (no bold for emphasis — house rule).
+for the coaching/trajectory voice. Nothing bold (no bold for emphasis: house rule).
 """
+
 from __future__ import annotations
 
 import textwrap
@@ -15,7 +16,6 @@ from praxis.behavior import TrajectoryLabel
 from praxis.orchestrator import RunSummary
 from praxis.reports.cost_ledger_panel import format_cost_disclaimer
 from praxis.scoring.rubric import RUBRIC
-
 
 # ANSI 256-color terracotta (166) is the closest practical match to
 # the Praxis primary #C1573B. Greens/ambers/reds chosen to read on
@@ -26,11 +26,11 @@ DIM = "\033[2m"
 ITALIC = "\033[3m"
 RESET = "\033[0m"
 
-GREEN = "\033[38;5;71m"     # well-matched, learning
-AMBER = "\033[38;5;172m"    # over/under, passive
-DARK_RED = "\033[38;5;124m" # atrophying
-BLUE = "\033[38;5;67m"      # mixed
-MUTED = "\033[38;5;245m"    # unknown / insufficient data
+GREEN = "\033[38;5;71m"  # well-matched, learning
+AMBER = "\033[38;5;172m"  # over/under, passive
+DARK_RED = "\033[38;5;124m"  # atrophying
+BLUE = "\033[38;5;67m"  # mixed
+MUTED = "\033[38;5;245m"  # unknown / insufficient data
 
 CONTENT_WIDTH = 64
 INDENT = "  "
@@ -54,7 +54,7 @@ def _grade_label(score: float) -> str:
 def _bar(score: float, width: int = 22) -> str:
     """Terracotta filled, dim empty. Score is 0-10."""
     score = max(0.0, min(10.0, score))
-    filled = int(round((score / 10.0) * width))
+    filled = round((score / 10.0) * width)
     return f"{TERRA}{'█' * filled}{RESET}{DIM}{'░' * (width - filled)}{RESET}"
 
 
@@ -159,8 +159,10 @@ def _coaching(summary: RunSummary) -> list[str]:
     lines.extend(_section("Coaching"))
     if coaching.headline:
         lines.extend(
-            [f"{INDENT}{INDENT}{ITALIC}{line}{RESET}"
-             for line in textwrap.wrap(coaching.headline, width=CONTENT_WIDTH)]
+            [
+                f"{INDENT}{INDENT}{ITALIC}{line}{RESET}"
+                for line in textwrap.wrap(coaching.headline, width=CONTENT_WIDTH)
+            ]
         )
         lines.append("")
 
@@ -211,9 +213,7 @@ def _trajectory(summary: RunSummary) -> list[str]:
     del_glyph = "↑" if deleg > 0.001 else ("↓" if deleg < -0.001 else "→")
 
     slopes = (
-        f"{eng_glyph} {eng:+.3f} engagement"
-        f"   {DIM}·{RESET}   "
-        f"{del_glyph} {deleg:+.3f} delegation"
+        f"{eng_glyph} {eng:+.3f} engagement   {DIM}·{RESET}   {del_glyph} {deleg:+.3f} delegation"
     )
     lines.append(f"{INDENT}{INDENT}{color}{title}{RESET}   {DIM}{slopes}{RESET}")
 
@@ -231,9 +231,7 @@ def _per_model(summary: RunSummary) -> list[str]:
     lines: list[str] = []
     lines.extend(_section("Per-model read"))
 
-    total_known_cost = sum(
-        p.estimated_cost_usd or 0.0 for p in profiles if p.estimated_cost_usd
-    )
+    total_known_cost = sum(p.estimated_cost_usd or 0.0 for p in profiles if p.estimated_cost_usd)
     if total_known_cost > 0:
         lines.append(
             f"{INDENT}{INDENT}{DIM}Window cost estimate across priced models: "

@@ -7,6 +7,7 @@ Spec 11.3:
   - user cards override built-ins
   - build_profiles([]) returns []
 """
+
 from __future__ import annotations
 
 import json
@@ -78,8 +79,14 @@ def test_user_card_overrides_builtin(tmp_home):
 
 def test_all_eight_builtin_cards_present():
     expected = {
-        "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5",
-        "gpt-5", "gpt-5-mini", "gpt-4o", "gemini-2-5-pro", "copilot-default",
+        "claude-opus-4-7",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+        "gpt-5",
+        "gpt-5-mini",
+        "gpt-4o",
+        "gemini-2-5-pro",
+        "copilot-default",
     }
     assert expected == {c.id for c in BUILTIN_CARDS}
 
@@ -99,10 +106,10 @@ def test_build_profiles_empty_input_returns_empty():
 # US-042: deterministic counterfactual overspend rule (advisor.py)
 # =========================================================================
 
-from datetime import datetime, timezone  # noqa: E402
+from datetime import UTC, datetime
 
-from praxis.models import Provider, Role, Session, Turn  # noqa: E402
-from praxis.models_advisor.advisor import (  # noqa: E402
+from praxis.models import Provider, Role, Session, Turn
+from praxis.models_advisor.advisor import (
     COUNTERFACTUAL_MAX_AVG_PROMPT_CHARS,
     COUNTERFACTUAL_MAX_USER_TURNS,
     CounterfactualOverspend,
@@ -121,7 +128,7 @@ def _make_cf_session(
     return Session(
         provider=Provider.CLAUDE,
         session_id=f"s-{model_hint or 'none'}-{session_id_suffix or len(turn_texts)}",
-        started_at=datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc),
+        started_at=datetime(2026, 5, 27, 12, 0, tzinfo=UTC),
         turns=turns,
         source_path="/tmp/test-cf",
         model_hint=model_hint,

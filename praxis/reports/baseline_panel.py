@@ -17,13 +17,11 @@ and terminal renderers both call into the same formatters: one source
 of truth keeps the panel state identical on both surfaces, which is the
 "applied uniformly" property required by the spec.
 """
+
 from __future__ import annotations
 
-
 BASELINE_PLACEHOLDER = "--"
-BASELINE_FORMING_MESSAGE = (
-    "Baseline forming. Come back in 2 more weeks for week-over-week."
-)
+BASELINE_FORMING_MESSAGE = "Baseline forming. Come back in 2 more weeks for week-over-week."
 
 # CSS class name used by the HTML report to style the last-week
 # secondary annotation as a faded anchor (spec section 8.1). Kept as

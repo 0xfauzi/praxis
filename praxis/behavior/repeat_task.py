@@ -20,11 +20,11 @@ all session durations across every cluster in the recurring group -
 so the report layer can render the "a skill could reclaim ~X min/week"
 hint without making any second-order assumptions about session timing.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from statistics import median
-
 
 # Documented English stopword list. Kept deliberately small: aggressive
 # stopword removal collapses distinct tasks (e.g., "fix the auth bug" and
@@ -33,13 +33,68 @@ from statistics import median
 # contains regardless of the underlying task.
 STOPWORDS: frozenset[str] = frozenset(
     {
-        "a", "an", "and", "any", "are", "as", "at", "be", "been", "but",
-        "by", "can", "could", "did", "do", "does", "for", "from", "had",
-        "has", "have", "i", "if", "in", "into", "is", "it", "its", "just",
-        "me", "my", "no", "not", "of", "on", "or", "should", "so", "than",
-        "that", "the", "their", "them", "then", "there", "these", "they",
-        "this", "to", "was", "we", "were", "what", "when", "which", "who",
-        "why", "will", "with", "would", "you", "your",
+        "a",
+        "an",
+        "and",
+        "any",
+        "are",
+        "as",
+        "at",
+        "be",
+        "been",
+        "but",
+        "by",
+        "can",
+        "could",
+        "did",
+        "do",
+        "does",
+        "for",
+        "from",
+        "had",
+        "has",
+        "have",
+        "i",
+        "if",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "just",
+        "me",
+        "my",
+        "no",
+        "not",
+        "of",
+        "on",
+        "or",
+        "should",
+        "so",
+        "than",
+        "that",
+        "the",
+        "their",
+        "them",
+        "then",
+        "there",
+        "these",
+        "they",
+        "this",
+        "to",
+        "was",
+        "we",
+        "were",
+        "what",
+        "when",
+        "which",
+        "who",
+        "why",
+        "will",
+        "with",
+        "would",
+        "you",
+        "your",
     }
 )
 
@@ -154,9 +209,7 @@ def overlap_ratio(a: set[str], b: set[str]) -> float:
     return len(a & b) / max(len(a), len(b))
 
 
-def detect_repeats(
-    clusters: list[Cluster], window_days: int
-) -> list[RepeatTask]:
+def detect_repeats(clusters: list[Cluster], window_days: int) -> list[RepeatTask]:
     """Return one RepeatTask per recurring cluster group in the window.
 
     Two clusters are linked when their first-sentence token sets overlap
@@ -179,16 +232,12 @@ def detect_repeats(
     days is not a meaningful concept.
     """
     if window_days <= 0:
-        raise ValueError(
-            f"window_days must be positive, got {window_days}"
-        )
+        raise ValueError(f"window_days must be positive, got {window_days}")
     if not clusters:
         return []
 
     token_sets: list[set[str]] = [tokenize(c.first_sentence) for c in clusters]
-    eligible: list[bool] = [
-        len(t) >= MIN_TOKENS_FOR_COMPARISON for t in token_sets
-    ]
+    eligible: list[bool] = [len(t) >= MIN_TOKENS_FOR_COMPARISON for t in token_sets]
 
     n = len(clusters)
     parent: list[int] = list(range(n))
@@ -254,12 +303,12 @@ def detect_repeats(
 
 
 __all__ = [
-    "Cluster",
     "MIN_OTHER_CLUSTERS_FOR_REPEAT",
     "MIN_TOKENS_FOR_COMPARISON",
     "OVERLAP_THRESHOLD",
-    "RepeatTask",
     "STOPWORDS",
+    "Cluster",
+    "RepeatTask",
     "detect_repeats",
     "overlap_ratio",
     "tokenize",

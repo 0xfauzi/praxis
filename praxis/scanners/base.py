@@ -3,6 +3,7 @@
 A Scanner knows how to find chat history files on disk for one AI
 provider and turn them into normalized Sessions.
 """
+
 from __future__ import annotations
 
 import sys
@@ -43,8 +44,7 @@ class BaseScanner(ABC):
                 session = self.parse(path)
             except Exception as exc:  # noqa: BLE001 - one bad file != dead scan
                 print(
-                    f"[scanner] skipped unreadable {self.provider_name} "
-                    f"session {path}: {exc!r}",
+                    f"[scanner] skipped unreadable {self.provider_name} session {path}: {exc!r}",
                     file=sys.stderr,
                 )
                 continue

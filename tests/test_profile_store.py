@@ -13,11 +13,12 @@ recent_pass1_confidence: the rolling 4-week telemetry that powers the
 calibration auto-tune is persisted via the same store and the count
 aggregation must be correct for the orchestrator's threshold checks.
 """
+
 from __future__ import annotations
 
 import hashlib
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from praxis.models import Moment, compute_moment_id
 from praxis.storage.profile_store import ProfileStore, resolve_home
@@ -379,15 +380,12 @@ def test_record_pass1_confidence_writes_run_log_row(tmp_home) -> None:
     conn = sqlite3.connect(store.db_path)
     conn.row_factory = sqlite3.Row
     try:
-        rows = list(
-            conn.execute(
-                "SELECT notes FROM run_log WHERE kind = 'pass1_conf'"
-            ).fetchall()
-        )
+        rows = list(conn.execute("SELECT notes FROM run_log WHERE kind = 'pass1_conf'").fetchall())
     finally:
         conn.close()
     assert len(rows) == 1
     import json
+
     parsed = json.loads(rows[0]["notes"])
     assert parsed == {"low": 2, "medium": 7, "high": 3}
 
@@ -420,8 +418,9 @@ def test_recent_pass1_confidence_excludes_rows_older_than_window(tmp_home) -> No
     # In-window row first - this one should count.
     store.record_pass1_confidence(low=1, medium=1, high=1)
     # Now hand-write an old row by going through sqlite directly.
-    old_ts = (datetime.now(timezone.utc) - timedelta(weeks=5)).isoformat()
+    old_ts = (datetime.now(UTC) - timedelta(weeks=5)).isoformat()
     import json
+
     conn = sqlite3.connect(store.db_path)
     try:
         conn.execute(
@@ -451,7 +450,7 @@ def test_recent_pass1_confidence_ignores_malformed_rows(tmp_home) -> None:
         conn.execute(
             "INSERT INTO run_log (run_at, kind, sessions_seen, sessions_new, notes) "
             "VALUES (?, ?, ?, ?, ?)",
-            (datetime.now(timezone.utc).isoformat(), "pass1_conf", 0, 0, "not-json"),
+            (datetime.now(UTC).isoformat(), "pass1_conf", 0, 0, "not-json"),
         )
         conn.commit()
     finally:

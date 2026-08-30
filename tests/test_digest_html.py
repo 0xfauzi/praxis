@@ -15,12 +15,13 @@ US-062 acceptance criteria (spec section 6.1):
 These tests build a minimal ``WeeklyDigest`` by hand rather than going
 through the full weekly pipeline, so they stay fast and pure.
 """
+
 from __future__ import annotations
 
 import dataclasses
 import os
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -44,7 +45,7 @@ def _digest(
     **overrides: object,
 ) -> WeeklyDigest:
     if generated_at is None:
-        generated_at = datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc)
+        generated_at = datetime(2026, 5, 27, 18, 0, tzinfo=UTC)
     return WeeklyDigest(
         week_iso=week_iso,
         generated_at=generated_at,
@@ -57,12 +58,10 @@ def _filled_digest() -> WeeklyDigest:
     to assert behavior on the data-rendered (not placeholder) path."""
     return WeeklyDigest(
         week_iso="2026-W21",
-        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=UTC),
         trajectory=Trajectory(
             label="Drifting",
-            headline=(
-                "Delegation up 0.14/wk over 6 weeks while engagement held flat."
-            ),
+            headline=("Delegation up 0.14/wk over 6 weeks while engagement held flat."),
             confidence_band="high confidence",
         ),
         headline_moment=MomentPanel(
@@ -126,9 +125,7 @@ def test_render_includes_week_iso_in_masthead():
 def test_render_includes_generated_date():
     """The masthead includes the generation date as a human-readable
     timestamp."""
-    out = render(
-        _digest(generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc))
-    )
+    out = render(_digest(generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=UTC)))
     assert "May 27, 2026" in out
 
 
@@ -176,9 +173,7 @@ def test_render_has_no_protocol_relative_urls():
     for attr in ("src=", "href="):
         for match in re.finditer(rf'{attr}"([^"]*)"', out):
             value = match.group(1)
-            assert not value.startswith("//"), (
-                f"protocol-relative URL in {attr}{value!r}"
-            )
+            assert not value.startswith("//"), f"protocol-relative URL in {attr}{value!r}"
 
 
 def test_render_inlines_css_in_style_block():
@@ -241,7 +236,7 @@ def test_weekly_digest_fields():
     fields; this test will be updated when they do."""
     digest = _digest()
     assert digest.week_iso == "2026-W21"
-    assert digest.generated_at == datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc)
+    assert digest.generated_at == datetime(2026, 5, 27, 18, 0, tzinfo=UTC)
 
 
 def test_render_html_escapes_week_iso():
@@ -350,9 +345,7 @@ def test_masthead_does_not_lead_with_overall_score():
     masthead_end = out.find("</header>")
     assert masthead_start >= 0 and masthead_end > masthead_start
     masthead_html = out[masthead_start:masthead_end]
-    assert "/10" not in masthead_html, (
-        f"masthead unexpectedly leads with /10: {masthead_html!r}"
-    )
+    assert "/10" not in masthead_html, f"masthead unexpectedly leads with /10: {masthead_html!r}"
 
 
 def test_render_has_no_hero_score_before_trajectory():
@@ -370,9 +363,7 @@ def test_trajectory_section_renders_headline_when_provided():
     """The trajectory section emits the LLM-generated headline so the
     user sees the specific behavioral observation, not just a label."""
     out = render(_filled_digest())
-    assert (
-        "Delegation up 0.14/wk over 6 weeks while engagement held flat." in out
-    )
+    assert "Delegation up 0.14/wk over 6 weeks while engagement held flat." in out
 
 
 def test_moment_section_omits_quoted_excerpt_when_provided():
@@ -417,10 +408,7 @@ def test_follow_up_section_renders_commitment_and_outcome_when_provided():
 
 def test_next_week_section_renders_sentence_when_provided():
     out = render(_filled_digest())
-    assert (
-        "Open every session with a one-sentence goal and the acceptance criteria."
-        in out
-    )
+    assert "Open every session with a one-sentence goal and the acceptance criteria." in out
 
 
 def test_render_filled_digest_keeps_self_containment_contract():
@@ -590,11 +578,11 @@ def test_write_digest_overwrites_same_week(tmp_path: Path):
     home = tmp_path / ".praxis"
     first_digest = _digest(
         week_iso="2026-W21",
-        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=UTC),
     )
     second_digest = _digest(
         week_iso="2026-W21",
-        generated_at=datetime(2026, 5, 28, 9, 0, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 5, 28, 9, 0, tzinfo=UTC),
     )
     first_path = write_digest(first_digest, home=home)
     first_bytes = first_path.read_text(encoding="utf-8")
@@ -611,9 +599,7 @@ def test_write_digest_updates_pointer_to_newest_week(tmp_path: Path):
     write_digest(_digest(week_iso="2026-W20"), home=home)
     written_w21 = write_digest(_digest(week_iso="2026-W21"), home=home)
     latest = home / "latest.html"
-    assert latest.read_text(encoding="utf-8") == written_w21.read_text(
-        encoding="utf-8"
-    )
+    assert latest.read_text(encoding="utf-8") == written_w21.read_text(encoding="utf-8")
     if latest.is_symlink():
         assert "2026-W21.html" in os.readlink(latest)
 
@@ -657,14 +643,10 @@ def test_write_digest_leaves_no_tmp_file(tmp_path: Path):
     home = tmp_path / ".praxis"
     write_digest(_digest(week_iso="2026-W21"), home=home)
     tmp_leftovers = list((home / "weeks").glob("*.tmp"))
-    assert tmp_leftovers == [], (
-        f"atomic write left tmp files behind: {tmp_leftovers}"
-    )
+    assert tmp_leftovers == [], f"atomic write left tmp files behind: {tmp_leftovers}"
 
 
-def test_write_digest_honors_praxis_home_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_write_digest_honors_praxis_home_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """When ``home`` is not passed, ``write_digest`` resolves the home
     directory through the same ``PRAXIS_HOME`` override the rest of
     the storage layer uses. This keeps the persistence layer testable
@@ -707,7 +689,7 @@ def _digest_with_secrets() -> WeeklyDigest:
     path the renderer is responsible for sealing."""
     return WeeklyDigest(
         week_iso="2026-W21",
-        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=UTC),
         trajectory=Trajectory(
             label="Drifting",
             headline=f"<synthetic> headline mentioning {_ANTHROPIC_KEY} inline.",
@@ -734,16 +716,12 @@ def _digest_with_secrets() -> WeeklyDigest:
                 worst_score=4.2,
             ),
         ),
-        dimensions=(
-            DimRow(title="Planning <synthetic>", score=6.8, baseline=5.4, delta=1.4),
-        ),
+        dimensions=(DimRow(title="Planning <synthetic>", score=6.8, baseline=5.4, delta=1.4),),
         follow_up=FollowUpPanel(
             commitment_text=f"avoid leaking password={_OPENAI_KEY} in prompts",
             outcome="improved <synthetic>",
         ),
-        one_thing_to_try=(
-            f"Audit transcripts for {_ANTHROPIC_KEY} and strip <synthetic> markers."
-        ),
+        one_thing_to_try=(f"Audit transcripts for {_ANTHROPIC_KEY} and strip <synthetic> markers."),
     )
 
 
@@ -841,9 +819,7 @@ def test_write_digest_strips_secrets_and_synthetic_from_disk(tmp_path: Path):
         "<synthetic>",
         "&lt;synthetic&gt;",
     ):
-        assert needle not in on_disk, (
-            f"{needle!r} leaked into the on-disk digest at {written}"
-        )
+        assert needle not in on_disk, f"{needle!r} leaked into the on-disk digest at {written}"
     assert "[REDACTED]" in on_disk
 
 
@@ -862,7 +838,7 @@ def test_render_does_not_render_redacted_placeholder_from_quote():
     """Even already-redacted transcript quotes stay out of the digest."""
     digest = WeeklyDigest(
         week_iso="2026-W21",
-        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=UTC),
         headline_moment=MomentPanel(
             quoted_excerpt="my key is [REDACTED] in the transcript",
             why_lost_score="leaked secret was scrubbed",
@@ -893,7 +869,7 @@ def test_render_filled_digest_with_secrets_keeps_self_containment_contract():
 # US-036: HTML masthead commitment block mirrors the terminal renderer
 # ---------------------------------------------------------------------------
 
-from praxis.reports.commitment_rollup import CommitmentRollup  # noqa: E402
+from praxis.reports.commitment_rollup import CommitmentRollup
 
 
 def _rollup(
@@ -971,9 +947,7 @@ def test_html_masthead_renders_self_report_tally_field():
     renderer's _format_self_report_tally)."""
     digest = dataclasses.replace(
         _digest(),
-        commitment_rollup=_rollup(
-            self_report_tally={"yes": 3, "partial": 1, "no": 0, "skip": 0}
-        ),
+        commitment_rollup=_rollup(self_report_tally={"yes": 3, "partial": 1, "no": 0, "skip": 0}),
     )
     out = render(digest)
     assert "You said" in out
@@ -1072,9 +1046,7 @@ def test_html_masthead_escapes_user_provided_display_text():
     contract for the new field."""
     digest = dataclasses.replace(
         _digest(),
-        commitment_rollup=_rollup(
-            display_text='ask "list every <table> this writes"'
-        ),
+        commitment_rollup=_rollup(display_text='ask "list every <table> this writes"'),
     )
     out = render(digest)
     # The literal <table> must not appear as a tag - it must be escaped.
@@ -1191,6 +1163,8 @@ def test_html_masthead_gap_agree_class_when_signals_align_despite_prose():
     assert 'class="cb-gap--agree"' in out
     assert 'class="cb-gap--disagree"' not in out
     assert "spurious prose" not in out
+
+
 # ----------------------------------------- US-038: behavioral-patterns panel
 
 
@@ -1200,25 +1174,28 @@ def _bp_panel_with_rows():
         BehavioralPatternRow,
         BehavioralPatternsPanel,
     )
-    return BehavioralPatternsPanel(rows=(
-        BehavioralPatternRow(
-            signal_kind="why_question",
-            label="Why-questions",
-            count=4,
-            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
-            excerpts=(
-                "why does this approach work for caching?",
-                "why is this slower than the previous version?",
+
+    return BehavioralPatternsPanel(
+        rows=(
+            BehavioralPatternRow(
+                signal_kind="why_question",
+                label="Why-questions",
+                count=4,
+                citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+                excerpts=(
+                    "why does this approach work for caching?",
+                    "why is this slower than the previous version?",
+                ),
             ),
-        ),
-        BehavioralPatternRow(
-            signal_kind="pure_delegation",
-            label="Pure delegation",
-            count=2,
-            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
-            excerpts=("write me a function",),
-        ),
-    ))
+            BehavioralPatternRow(
+                signal_kind="pure_delegation",
+                label="Pure delegation",
+                count=2,
+                citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+                excerpts=("write me a function",),
+            ),
+        )
+    )
 
 
 def _bp_empty_panel():
@@ -1227,21 +1204,25 @@ def _bp_empty_panel():
         BehavioralPatternRow,
         BehavioralPatternsPanel,
     )
-    return BehavioralPatternsPanel(rows=(
-        BehavioralPatternRow(
-            signal_kind="why_question",
-            label="Why-questions",
-            count=0,
-            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
-        ),
-    ))
+
+    return BehavioralPatternsPanel(
+        rows=(
+            BehavioralPatternRow(
+                signal_kind="why_question",
+                label="Why-questions",
+                count=0,
+                citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+            ),
+        )
+    )
 
 
 def _bp_digest(panel):
     from praxis.reports.panel_inputs import PanelInputs
+
     return WeeklyDigest(
         week_iso="2026-W21",
-        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=UTC),
         panel_inputs=PanelInputs(behavioral_signals=panel),
     )
 
@@ -1304,21 +1285,24 @@ def test_behavioral_patterns_zero_count_rows_dropped_when_others_fire():
         BehavioralPatternRow,
         BehavioralPatternsPanel,
     )
-    panel = BehavioralPatternsPanel(rows=(
-        BehavioralPatternRow(
-            signal_kind="why_question",
-            label="Why-questions",
-            count=3,
-            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
-            excerpts=("why is this slow?",),
-        ),
-        BehavioralPatternRow(
-            signal_kind="pure_delegation",
-            label="Pure delegation",
-            count=0,
-            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
-        ),
-    ))
+
+    panel = BehavioralPatternsPanel(
+        rows=(
+            BehavioralPatternRow(
+                signal_kind="why_question",
+                label="Why-questions",
+                count=3,
+                citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+                excerpts=("why is this slow?",),
+            ),
+            BehavioralPatternRow(
+                signal_kind="pure_delegation",
+                label="Pure delegation",
+                count=0,
+                citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+            ),
+        )
+    )
     out = render(_bp_digest(panel))
     assert "Why-questions" in out
     assert "Pure delegation" not in out
@@ -1355,15 +1339,18 @@ def test_behavioral_patterns_drops_excerpts_before_html_escape():
         BehavioralPatternRow,
         BehavioralPatternsPanel,
     )
-    panel = BehavioralPatternsPanel(rows=(
-        BehavioralPatternRow(
-            signal_kind="why_question",
-            label="Why-questions",
-            count=1,
-            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
-            excerpts=("<script>alert('xss')</script>",),
-        ),
-    ))
+
+    panel = BehavioralPatternsPanel(
+        rows=(
+            BehavioralPatternRow(
+                signal_kind="why_question",
+                label="Why-questions",
+                count=1,
+                citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+                excerpts=("<script>alert('xss')</script>",),
+            ),
+        )
+    )
     out = render(_bp_digest(panel))
     assert "<script>alert" not in out
     assert "&lt;script&gt;alert" not in out
@@ -1375,6 +1362,7 @@ def test_behavioral_patterns_drops_excerpts_before_html_escape():
 
 def _aug_auto_html_panel():
     from praxis.reports.panel_inputs import AugAutoBalancePanel
+
     return AugAutoBalancePanel(
         augmentation_count=3,
         automation_count=2,
@@ -1385,6 +1373,7 @@ def _aug_auto_html_panel():
 
 def _aug_auto_unavailable_panel():
     from praxis.reports.panel_inputs import AugAutoBalancePanel
+
     return AugAutoBalancePanel(
         unclassified_count=3,
         classifier_unavailable=True,
@@ -1393,6 +1382,7 @@ def _aug_auto_unavailable_panel():
 
 def _cadence_html_panel():
     from praxis.reports.panel_inputs import CadencePanel
+
     return CadencePanel(
         weekday_streak=5,
         substantive_session_count=7,
@@ -1402,6 +1392,7 @@ def _cadence_html_panel():
 
 def _cadence_empty_panel():
     from praxis.reports.panel_inputs import CadencePanel
+
     return CadencePanel(
         weekday_streak=0,
         substantive_session_count=0,
@@ -1411,9 +1402,10 @@ def _cadence_empty_panel():
 
 def _us039_digest(*, aug_auto=None, cadence=None):
     from praxis.reports.panel_inputs import PanelInputs
+
     return WeeklyDigest(
         week_iso="2026-W21",
-        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=UTC),
         panel_inputs=PanelInputs(
             aug_auto_balance=aug_auto,
             cadence=cadence,
@@ -1556,6 +1548,7 @@ def _repeat_task_html_panel():
         RepeatTaskRadarPanel,
         RepeatTaskRow,
     )
+
     return RepeatTaskRadarPanel(
         rows=(
             RepeatTaskRow(
@@ -1574,11 +1567,13 @@ def _repeat_task_html_panel():
 
 def _repeat_task_empty_panel():
     from praxis.reports.panel_inputs import RepeatTaskRadarPanel
+
     return RepeatTaskRadarPanel()
 
 
 def _verification_html_panel():
     from praxis.reports.panel_inputs import VerificationCalibrationPanel
+
     return VerificationCalibrationPanel(
         source_check_count=2,
         test_run_count=3,
@@ -1589,14 +1584,16 @@ def _verification_html_panel():
 
 def _verification_empty_panel():
     from praxis.reports.panel_inputs import VerificationCalibrationPanel
+
     return VerificationCalibrationPanel()
 
 
 def _us040_digest(*, repeat_task=None, verification=None):
     from praxis.reports.panel_inputs import PanelInputs
+
     return WeeklyDigest(
         week_iso="2026-W21",
-        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=UTC),
         panel_inputs=PanelInputs(
             repeat_task_radar=repeat_task,
             verification_calibration=verification,
@@ -1653,6 +1650,7 @@ def test_repeat_task_radar_html_escapes_canonical_sentence():
         RepeatTaskRadarPanel,
         RepeatTaskRow,
     )
+
     panel = RepeatTaskRadarPanel(
         rows=(
             RepeatTaskRow(
@@ -1732,9 +1730,10 @@ def test_us040_panels_render_after_cadence():
     inside the data block after the cadence panel so the editorial
     cadence stays uniform."""
     from praxis.reports.panel_inputs import PanelInputs
+
     digest = WeeklyDigest(
         week_iso="2026-W21",
-        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=UTC),
         panel_inputs=PanelInputs(
             aug_auto_balance=_aug_auto_html_panel(),
             cadence=_cadence_html_panel(),
@@ -1754,6 +1753,7 @@ def test_us040_panels_render_after_cadence():
 
 def _specification_html_panel():
     from praxis.reports.panel_inputs import SpecificationAdoptionPanel
+
     return SpecificationAdoptionPanel(
         sessions_with_spec=3,
         total_sessions=5,
@@ -1765,6 +1765,7 @@ def _context_engineering_html_panel():
         ContextEngineeringDepthPanel,
         ContextEngineeringRow,
     )
+
     return ContextEngineeringDepthPanel(
         rows=(
             ContextEngineeringRow(
@@ -1802,6 +1803,7 @@ def _knowledge_gap_html_panel():
         KnowledgeGapDistributionPanel,
         KnowledgeGapRow,
     )
+
     return KnowledgeGapDistributionPanel(
         rows=(
             KnowledgeGapRow(kind="missing_context", label="Missing context", count=4),
@@ -1819,9 +1821,10 @@ def _us041_digest(
     knowledge_gap=None,
 ):
     from praxis.reports.panel_inputs import PanelInputs
+
     return WeeklyDigest(
         week_iso="2026-W21",
-        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=UTC),
         panel_inputs=PanelInputs(
             specification_adoption=specification,
             context_engineering=context_engineering,
@@ -1842,6 +1845,7 @@ def test_specification_adoption_renders_no_sessions_placeholder():
     """When no sessions exist the body falls through to the verbatim
     US-041 placeholder."""
     from praxis.reports.panel_inputs import SpecificationAdoptionPanel
+
     out = render(_us041_digest(specification=SpecificationAdoptionPanel()))
     assert "No sessions to measure specification adoption this week." in out
 
@@ -1870,15 +1874,14 @@ def test_context_engineering_section_always_present():
     """The section anchor always renders."""
     out_empty = render(_digest())
     assert 'id="context-engineering-depth"' in out_empty
-    out_full = render(
-        _us041_digest(context_engineering=_context_engineering_html_panel())
-    )
+    out_full = render(_us041_digest(context_engineering=_context_engineering_html_panel()))
     assert 'id="context-engineering-depth"' in out_full
 
 
 def test_context_engineering_renders_no_artifacts_placeholder():
     """An empty panel surfaces the verbatim no-artifacts placeholder."""
     from praxis.reports.panel_inputs import ContextEngineeringDepthPanel
+
     out = render(_us041_digest(context_engineering=ContextEngineeringDepthPanel()))
     assert "No scaffolding artifacts referenced this week." in out
 
@@ -1886,9 +1889,7 @@ def test_context_engineering_renders_no_artifacts_placeholder():
 def test_context_engineering_renders_kinds_with_positive_count():
     """Kinds with positive counts render; zero-count kinds are
     skipped so the reader's eye is drawn to what fired."""
-    out = render(
-        _us041_digest(context_engineering=_context_engineering_html_panel())
-    )
+    out = render(_us041_digest(context_engineering=_context_engineering_html_panel()))
     start = out.find('id="context-engineering-depth"')
     end = out.find("</section>", start)
     section = out[start:end]
@@ -1904,9 +1905,7 @@ def test_context_engineering_renders_kinds_with_positive_count():
 
 def test_context_engineering_renders_citation():
     """The DORA 2025 + Anthropic Skills citation renders inline."""
-    out = render(
-        _us041_digest(context_engineering=_context_engineering_html_panel())
-    )
+    out = render(_us041_digest(context_engineering=_context_engineering_html_panel()))
     assert "DORA 2025" in out
 
 
@@ -1914,9 +1913,7 @@ def test_knowledge_gap_section_always_present():
     """The section anchor always renders."""
     out_empty = render(_digest())
     assert 'id="knowledge-gap-distribution"' in out_empty
-    out_full = render(
-        _us041_digest(knowledge_gap=_knowledge_gap_html_panel())
-    )
+    out_full = render(_us041_digest(knowledge_gap=_knowledge_gap_html_panel()))
     assert 'id="knowledge-gap-distribution"' in out_full
 
 
@@ -1927,10 +1924,16 @@ def test_knowledge_gap_renders_empty_state_when_all_zero():
         KnowledgeGapDistributionPanel,
         KnowledgeGapRow,
     )
+
     panel = KnowledgeGapDistributionPanel(
         rows=tuple(
             KnowledgeGapRow(kind=k, label=k, count=0)
-            for k in ("missing_context", "missing_specs", "multiple_context", "unclear_instructions")
+            for k in (
+                "missing_context",
+                "missing_specs",
+                "multiple_context",
+                "unclear_instructions",
+            )
         )
     )
     out = render(_us041_digest(knowledge_gap=panel))
@@ -1945,6 +1948,7 @@ def test_knowledge_gap_renders_all_four_categories_when_populated():
         KnowledgeGapDistributionPanel,
         KnowledgeGapRow,
     )
+
     panel = KnowledgeGapDistributionPanel(
         rows=(
             KnowledgeGapRow(kind="missing_context", label="Missing context", count=0),
@@ -1997,9 +2001,10 @@ def test_us041_panels_render_after_verification_calibration():
     verification calibration so the document reads habit -> verify ->
     craft."""
     from praxis.reports.panel_inputs import PanelInputs
+
     digest = WeeklyDigest(
         week_iso="2026-W21",
-        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=UTC),
         panel_inputs=PanelInputs(
             verification_calibration=_verification_html_panel(),
             specification_adoption=_specification_html_panel(),
@@ -2025,6 +2030,7 @@ def _ladder_html_panel():
         LadderRungRow,
         ToolAgentLadderPanel,
     )
+
     return ToolAgentLadderPanel(
         rows=(
             LadderRungRow(kind="prompt_only", label="Prompt-only", session_count=2),
@@ -2040,6 +2046,7 @@ def _ladder_html_panel():
 
 def _cost_effectiveness_html_panel():
     from praxis.reports.panel_inputs import RefinedCostEffectivenessPanel
+
     return RefinedCostEffectivenessPanel(
         higher_tier_display="Claude Opus 4.7",
         lower_tier_display="Claude Haiku 4.5",
@@ -2056,9 +2063,10 @@ def _us042_digest(
     cost_effectiveness=None,
 ):
     from praxis.reports.panel_inputs import PanelInputs
+
     return WeeklyDigest(
         week_iso="2026-W21",
-        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=UTC),
         panel_inputs=PanelInputs(
             tool_agent_ladder=ladder,
             refined_cost_effectiveness=cost_effectiveness,
@@ -2121,9 +2129,7 @@ def test_cost_effectiveness_section_always_present():
     """The section anchor renders regardless of data state."""
     out_empty = render(_digest())
     assert 'id="refined-cost-effectiveness"' in out_empty
-    out_full = render(
-        _us042_digest(cost_effectiveness=_cost_effectiveness_html_panel())
-    )
+    out_full = render(_us042_digest(cost_effectiveness=_cost_effectiveness_html_panel()))
     assert 'id="refined-cost-effectiveness"' in out_full
 
 
@@ -2144,9 +2150,7 @@ def test_cost_effectiveness_renders_canonical_sentence():
     """US-042 AC: when overspend is positive the panel renders the
     canonical sentence 'You spent $X on <higher> for tasks <lower>
     could have done = $Y overspend'."""
-    out = render(
-        _us042_digest(cost_effectiveness=_cost_effectiveness_html_panel())
-    )
+    out = render(_us042_digest(cost_effectiveness=_cost_effectiveness_html_panel()))
     start = out.find('id="refined-cost-effectiveness"')
     end = out.find("</section>", start)
     section = out[start:end]
@@ -2161,6 +2165,7 @@ def test_cost_effectiveness_renders_clean_signal_when_no_overspend():
     panel surfaces a positive-signal sentence ('No tier-mismatch
     overspend detected...') instead of the empty-state copy."""
     from praxis.reports.panel_inputs import RefinedCostEffectivenessPanel
+
     panel = RefinedCostEffectivenessPanel(has_cost_data=True)
     out = render(_us042_digest(cost_effectiveness=panel))
     start = out.find('id="refined-cost-effectiveness"')
@@ -2194,9 +2199,10 @@ def test_us042_panels_render_after_knowledge_gap():
     the document reads habit -> verify -> craft -> scaffolding ->
     cost."""
     from praxis.reports.panel_inputs import PanelInputs
+
     digest = WeeklyDigest(
         week_iso="2026-W21",
-        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 5, 27, 18, 0, tzinfo=UTC),
         panel_inputs=PanelInputs(
             knowledge_gap_distribution=_knowledge_gap_html_panel(),
             tool_agent_ladder=_ladder_html_panel(),

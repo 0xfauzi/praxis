@@ -7,7 +7,10 @@ Spec 5.6 acceptance criteria:
   - CopilotScanner doesn't crash on malformed JSON or locked SQLite
   - All scanners filter out zero-turn files via base scan()
 """
+
 from __future__ import annotations
+
+from datetime import UTC
 
 from praxis.scanners import (
     ClaudeScanner,
@@ -18,7 +21,7 @@ from praxis.scanners import (
 
 def test_claude_scanner_missing_root_returns_nothing(tmp_home):
     scanner = ClaudeScanner()
-    # No projects dir created — should silently produce nothing.
+    # No projects dir created. Should silently produce nothing.
     assert list(scanner.scan()) == []
 
 
@@ -76,12 +79,12 @@ def test_claude_scanner_marks_system_reminder_turn_tool_injected(tmp_home):
     """
     import json
     import uuid
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     root = tmp_home / ".claude" / "projects" / "preamble-project"
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{uuid.uuid4()}.jsonl"
-    when = datetime.now(timezone.utc)
+    when = datetime.now(UTC)
     events = [
         {
             "type": "user",
@@ -117,12 +120,16 @@ def test_codex_scanner_marks_agents_md_preamble_tool_injected(tmp_home):
     """Regression for issue #4: Codex's AGENTS.md preamble must be flagged."""
     import json
     import uuid
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    when = datetime.now(timezone.utc)
+    when = datetime.now(UTC)
     day_dir = (
-        tmp_home / ".codex" / "sessions"
-        / f"{when.year:04d}" / f"{when.month:02d}" / f"{when.day:02d}"
+        tmp_home
+        / ".codex"
+        / "sessions"
+        / f"{when.year:04d}"
+        / f"{when.month:02d}"
+        / f"{when.day:02d}"
     )
     day_dir.mkdir(parents=True, exist_ok=True)
     sid = uuid.uuid4().hex[:12]

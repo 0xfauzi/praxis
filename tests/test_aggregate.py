@@ -4,6 +4,7 @@ The heuristic decision path (US-012) has been removed: the LLM judge is
 now the only source of dimension scores. These tests cover the remaining
 shape of the pipeline.
 """
+
 from __future__ import annotations
 
 from praxis.scoring.aggregate import (

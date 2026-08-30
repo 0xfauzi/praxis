@@ -27,10 +27,11 @@ the previous week's label when the stricter 2.0*stderr gate (instead of
 1.5*) is met on the relevant axis. Otherwise the previous label sticks.
 This prevents a single noisy week from flipping the headline label.
 """
+
 from __future__ import annotations
 
+from collections.abc import Iterable
 from enum import Enum
-from typing import Iterable
 
 from praxis.behavior.slope import (
     SIGNIFICANCE_MIN_SLOPE_PER_WEEK,
@@ -39,7 +40,6 @@ from praxis.behavior.slope import (
     fit_weekly_trajectory,
 )
 from praxis.behavior.weekly import WeeklyBucket
-
 
 MIN_BUCKETS_FOR_LABEL: int = 4
 HYSTERESIS_STDERR_MULTIPLIER: float = 2.0
@@ -157,14 +157,9 @@ def apply_hysteresis(
     # Reading <-> non-Reading transitions are driven by bucket count, not
     # slope direction. Hysteresis only protects against trajectory whiplash;
     # data-availability changes pass through.
-    if (
-        previous_label is WeeklyTrajectoryLabel.READING
-        or naive is WeeklyTrajectoryLabel.READING
-    ):
+    if previous_label is WeeklyTrajectoryLabel.READING or naive is WeeklyTrajectoryLabel.READING:
         return naive
-    if is_strongly_significant(fit.engagement) or is_strongly_significant(
-        fit.delegation
-    ):
+    if is_strongly_significant(fit.engagement) or is_strongly_significant(fit.delegation):
         return naive
     return previous_label
 

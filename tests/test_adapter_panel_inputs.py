@@ -5,10 +5,11 @@ renderers see them. The behavioral-patterns panel (US-038) is the first
 contract: counts and excerpts are aggregated across every user turn in
 every session in the week.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from praxis.models import Provider, Role, Session, Turn
@@ -36,7 +37,7 @@ def _make_session(turn_texts: list[str]) -> Session:
     return Session(
         provider=Provider.CLAUDE,
         session_id=f"s-{len(turn_texts)}-{turn_texts[0][:6] if turn_texts else ''}",
-        started_at=datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc),
+        started_at=datetime(2026, 5, 27, 12, 0, tzinfo=UTC),
         turns=turns,
         source_path="/tmp/test",
     )
@@ -49,6 +50,7 @@ class _FakeSummary:
     The behavioral-patterns adapter only reads ``sessions``; everything
     else stays empty.
     """
+
     sessions: list[Session] = field(default_factory=list)
     tasks: list = field(default_factory=list)
 
@@ -129,13 +131,17 @@ def test_behavioral_panel_counts_why_questions_across_sessions():
     """A signal that fires across multiple turns and multiple sessions
     is summed correctly."""
     sessions = [
-        _make_session([
-            "Why does this approach work for caching?",
-            "Why is this slower than the previous version?",
-        ]),
-        _make_session([
-            "Why does this even compile?",
-        ]),
+        _make_session(
+            [
+                "Why does this approach work for caching?",
+                "Why is this slower than the previous version?",
+            ]
+        ),
+        _make_session(
+            [
+                "Why does this even compile?",
+            ]
+        ),
     ]
     panel = _behavioral_patterns_panel(_FakeSummary(sessions=sessions))
     why_row = next(r for r in panel.rows if r.signal_kind == "why_question")
@@ -146,10 +152,12 @@ def test_behavioral_panel_counts_pure_delegation():
     """Pure delegation pattern (imperative opener) fires on each
     qualifying turn and is summed across the week."""
     sessions = [
-        _make_session([
-            "write me a function that sorts",
-            "make it handle errors too",
-        ]),
+        _make_session(
+            [
+                "write me a function that sorts",
+                "make it handle errors too",
+            ]
+        ),
     ]
     panel = _behavioral_patterns_panel(_FakeSummary(sessions=sessions))
     pd_row = next(r for r in panel.rows if r.signal_kind == "pure_delegation")
@@ -169,11 +177,13 @@ def test_behavioral_panel_has_signals_true_when_any_row_fires():
 def test_behavioral_panel_captures_excerpts_for_fired_signals():
     """Fired signals carry counts but no transcript excerpts."""
     sessions = [
-        _make_session([
-            "Why does this approach work for caching?",
-            "Why is this slower than the previous version?",
-            "Why does this even compile?",  # third match - should be dropped
-        ]),
+        _make_session(
+            [
+                "Why does this approach work for caching?",
+                "Why is this slower than the previous version?",
+                "Why does this even compile?",  # third match - should be dropped
+            ]
+        ),
     ]
     panel = _behavioral_patterns_panel(_FakeSummary(sessions=sessions))
     why_row = next(r for r in panel.rows if r.signal_kind == "why_question")
@@ -233,7 +243,7 @@ def test_fallback_task_labels_stay_out_of_task_and_cost_views():
     """Singleton fallback labels come from first user turns and must not render."""
     raw_label = "Review this change for security"
     session = _make_session([raw_label])
-    session.started_at = datetime.now(timezone.utc)
+    session.started_at = datetime.now(UTC)
     session.model_hint = "gpt-5"
     task = SimpleNamespace(
         label=raw_label,
@@ -290,12 +300,12 @@ def test_behavioral_pattern_row_is_frozen():
 # =========================================================================
 
 
-from praxis.reports.adapter import (  # noqa: E402
+from praxis.reports.adapter import (
     _aug_auto_balance_panel,
     _cadence_panel,
     _classify_high_adopter,
 )
-from praxis.reports.panel_inputs import (  # noqa: E402
+from praxis.reports.panel_inputs import (
     AUG_AUTO_ANCHOR_CITATION,
     CADENCE_ANCHOR_CITATION,
     CADENCE_WINDOW_DAYS,
@@ -313,7 +323,7 @@ def _session_with_aug_auto(label: str | None, weekday: int = 0):
     """
     # Anchor the started_at to a Monday (May 25, 2026) plus ``weekday``
     # days so each fixture session lands on a known calendar weekday.
-    started_at = datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc) + timedelta(days=weekday)
+    started_at = datetime(2026, 5, 25, 12, 0, tzinfo=UTC) + timedelta(days=weekday)
     # The adapter checks user_authored_turns length for substantive-ness
     # (issue #4); the same list also stands in for the legacy user_turns
     # property so older code paths that fall back to it still see it.
@@ -356,7 +366,7 @@ def test_aug_auto_balance_reads_persisted_label_from_store(tmp_home):
         sess = Session(
             provider=Provider.CLAUDE,
             session_id=f"sess-aug-auto-{idx}",
-            started_at=datetime(2026, 5, 25, 12, idx, tzinfo=timezone.utc),
+            started_at=datetime(2026, 5, 25, 12, idx, tzinfo=UTC),
             turns=[
                 Turn(role=Role.USER, content="please help"),
                 Turn(role=Role.ASSISTANT, content="ok"),
@@ -513,7 +523,7 @@ def test_cadence_panel_drops_non_substantive_sessions():
     contributes neither to the count nor the streak."""
     # Build a session with only one user turn.
     s = SimpleNamespace(
-        started_at=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        started_at=datetime(2026, 5, 25, 12, 0, tzinfo=UTC),
         user_turns=[Turn(role=Role.USER, content="hi")],
         aug_auto_classification=None,
     )
@@ -627,11 +637,11 @@ def test_cadence_panel_is_frozen():
 # =========================================================================
 
 
-from praxis.reports.adapter import (  # noqa: E402
+from praxis.reports.adapter import (
     _repeat_task_radar_panel,
     _verification_calibration_panel,
 )
-from praxis.reports.panel_inputs import (  # noqa: E402
+from praxis.reports.panel_inputs import (
     REPEAT_TASK_CITATION,
     REPEAT_TASK_SKILL_TAG,
     VERIFICATION_CALIBRATION_CITATION,
@@ -639,7 +649,7 @@ from praxis.reports.panel_inputs import (  # noqa: E402
     RepeatTaskRow,
     VerificationCalibrationPanel,
 )
-from praxis.scoring.clustering import Task  # noqa: E402
+from praxis.scoring.clustering import Task
 
 
 def _session_with_first_turn(
@@ -654,7 +664,7 @@ def _session_with_first_turn(
     return Session(
         provider=Provider.CLAUDE,
         session_id=stable_id_seed,
-        started_at=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        started_at=datetime(2026, 5, 25, 12, 0, tzinfo=UTC),
         turns=turns,
         source_path="/tmp/test",
     )
@@ -700,13 +710,9 @@ def test_repeat_task_radar_detects_three_repeats():
     """Three clusters whose first sentences overlap >= 0.70 should
     surface one RepeatTask row in the panel."""
     sessions = [
-        _session_with_first_turn("fix the failing auth test in module", f"s-{i}")
-        for i in range(3)
+        _session_with_first_turn("fix the failing auth test in module", f"s-{i}") for i in range(3)
     ]
-    tasks = [
-        _make_task(f"auth-test-fix-{i}", [sessions[i].stable_id])
-        for i in range(3)
-    ]
+    tasks = [_make_task(f"auth-test-fix-{i}", [sessions[i].stable_id]) for i in range(3)]
     summary = SimpleNamespace(sessions=sessions, tasks=tasks)
     panel = _repeat_task_radar_panel(summary)
     assert panel.has_repeats is True
@@ -754,9 +760,7 @@ def test_repeat_task_radar_estimates_per_occurrence_minutes():
         )
         for i in range(3)
     ]
-    tasks = [
-        _make_task(f"auth-test-{i}", [sessions[i].stable_id]) for i in range(3)
-    ]
+    tasks = [_make_task(f"auth-test-{i}", [sessions[i].stable_id]) for i in range(3)]
     summary = SimpleNamespace(sessions=sessions, tasks=tasks)
     panel = _repeat_task_radar_panel(summary)
     assert panel.has_repeats is True
@@ -782,7 +786,7 @@ def test_verification_calibration_blanket_accept_default():
         Session(
             provider=Provider.CLAUDE,
             session_id=f"s-{i}",
-            started_at=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+            started_at=datetime(2026, 5, 25, 12, 0, tzinfo=UTC),
             turns=[Turn(role=Role.USER, content="write me a function")],
             source_path="/tmp/x",
         )
@@ -802,28 +806,28 @@ def test_verification_calibration_distributes_across_buckets():
         Session(
             provider=Provider.CLAUDE,
             session_id="src",
-            started_at=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+            started_at=datetime(2026, 5, 25, 12, 0, tzinfo=UTC),
             turns=[Turn(role=Role.USER, content="what's the source for this claim?")],
             source_path="/tmp/x",
         ),
         Session(
             provider=Provider.CLAUDE,
             session_id="test",
-            started_at=datetime(2026, 5, 25, 13, 0, tzinfo=timezone.utc),
+            started_at=datetime(2026, 5, 25, 13, 0, tzinfo=UTC),
             turns=[Turn(role=Role.USER, content="let me run the tests")],
             source_path="/tmp/x",
         ),
         Session(
             provider=Provider.CLAUDE,
             session_id="spot",
-            started_at=datetime(2026, 5, 25, 14, 0, tzinfo=timezone.utc),
+            started_at=datetime(2026, 5, 25, 14, 0, tzinfo=UTC),
             turns=[Turn(role=Role.USER, content="that looks right, let me double-check")],
             source_path="/tmp/x",
         ),
         Session(
             provider=Provider.CLAUDE,
             session_id="blanket",
-            started_at=datetime(2026, 5, 25, 15, 0, tzinfo=timezone.utc),
+            started_at=datetime(2026, 5, 25, 15, 0, tzinfo=UTC),
             turns=[Turn(role=Role.USER, content="write me a function")],
             source_path="/tmp/x",
         ),
@@ -919,12 +923,12 @@ def test_build_panel_inputs_includes_us040_panels():
 # =========================================================================
 
 
-from praxis.reports.adapter import (  # noqa: E402
+from praxis.reports.adapter import (
     _context_engineering_panel,
     _knowledge_gap_distribution_panel,
     _specification_adoption_panel,
 )
-from praxis.reports.panel_inputs import (  # noqa: E402
+from praxis.reports.panel_inputs import (
     CONTEXT_ENGINEERING_CITATION,
     KNOWLEDGE_GAP_CITATION,
     KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER,
@@ -940,8 +944,8 @@ def _spec_session(open_text: str) -> Session:
     """A real Session whose first user turn carries ``open_text``."""
     return Session(
         provider=Provider.CLAUDE,
-        session_id=f"s-{hash(open_text) & 0xffffffff}",
-        started_at=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        session_id=f"s-{hash(open_text) & 0xFFFFFFFF}",
+        started_at=datetime(2026, 5, 25, 12, 0, tzinfo=UTC),
         turns=[Turn(role=Role.USER, content=open_text)],
         source_path="/tmp/test",
     )
@@ -1071,7 +1075,7 @@ def test_knowledge_gap_accumulates_across_sessions():
         Session(
             provider=Provider.CLAUDE,
             session_id="s-1",
-            started_at=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+            started_at=datetime(2026, 5, 25, 12, 0, tzinfo=UTC),
             turns=[
                 Turn(role=Role.USER, content="write me a sorter"),
                 Turn(role=Role.USER, content="fix the failing auth test"),
@@ -1081,7 +1085,7 @@ def test_knowledge_gap_accumulates_across_sessions():
         Session(
             provider=Provider.CLAUDE,
             session_id="s-2",
-            started_at=datetime(2026, 5, 26, 12, 0, tzinfo=timezone.utc),
+            started_at=datetime(2026, 5, 26, 12, 0, tzinfo=UTC),
             turns=[
                 Turn(role=Role.USER, content="do something with this codebase"),
             ],
@@ -1168,14 +1172,14 @@ def test_build_panel_inputs_includes_us041_panels():
 # =========================================================================
 
 
-from praxis.behavior.signals import (  # noqa: E402
+from praxis.behavior.signals import (
     LADDER_KINDS_IN_PANEL_ORDER,
 )
-from praxis.reports.adapter import (  # noqa: E402
+from praxis.reports.adapter import (
     _refined_cost_effectiveness_panel,
     _tool_agent_ladder_panel,
 )
-from praxis.reports.panel_inputs import (  # noqa: E402
+from praxis.reports.panel_inputs import (
     COST_EFFECTIVENESS_CITATION,
     LADDER_LABELS,
     TOOL_AGENT_LADDER_CITATION,
@@ -1194,7 +1198,7 @@ def _ladder_session(
     return Session(
         provider=Provider.CLAUDE,
         session_id=session_id,
-        started_at=datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc),
+        started_at=datetime(2026, 5, 27, 12, 0, tzinfo=UTC),
         turns=turns,
         source_path="/tmp/test-ladder",
         model_hint=model_hint,

@@ -7,9 +7,10 @@ Spec 10.4:
   - _linear_slope([1,2,3,4,5]) ~= 1.0
   - LLM trajectory call returns None gracefully when keys absent
 """
+
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from praxis.behavior.signals import (
     KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER,
@@ -55,9 +56,12 @@ def test_extract_engaged_session_has_positive_engagement():
     turns = [
         Turn(role=Role.USER, content="Why does this approach work for caching?"),
         Turn(role=Role.ASSISTANT, content="..."),
-        Turn(role=Role.USER, content="So if I understand, the LRU evicts oldest. Am I right that this avoids the thundering herd?"),
+        Turn(
+            role=Role.USER,
+            content="So if I understand, the LRU evicts oldest. Am I right that this avoids the thundering herd?",
+        ),
     ]
-    sig = extract(_make_session(turns, datetime.now(timezone.utc)))
+    sig = extract(_make_session(turns, datetime.now(UTC)))
     assert sig.engagement_rate > 0
     assert sig.is_pure_delegator is False
 
@@ -84,7 +88,7 @@ def test_extract_skips_tool_injected_preamble_turns():
         Turn(role=Role.USER, content=preamble, tool_injected=True),
         Turn(role=Role.USER, content="write me a function"),
     ]
-    sig = extract(_make_session(turns, datetime.now(timezone.utc)))
+    sig = extract(_make_session(turns, datetime.now(UTC)))
     # Only the second turn should count.
     assert sig.user_turn_count == 1
     assert sig.why_question_count == 0
@@ -98,7 +102,7 @@ def test_extract_delegating_session_flags_pure_delegator():
         Turn(role=Role.USER, content="fix this"),
         Turn(role=Role.USER, content="now write tests"),
     ]
-    sig = extract(_make_session(turns, datetime.now(timezone.utc)))
+    sig = extract(_make_session(turns, datetime.now(UTC)))
     assert sig.delegation_rate > 0.5
     assert sig.is_pure_delegator is True
 
@@ -110,7 +114,7 @@ def test_assess_trajectory_insufficient_data():
 
 def test_assess_trajectory_learning_label():
     # Construct 10 sessions where engagement rises monotonically and delegation falls.
-    base = datetime.now(timezone.utc) - timedelta(days=10)
+    base = datetime.now(UTC) - timedelta(days=10)
     pairs = []
     for i in range(10):
         sig = BehavioralSignals(
@@ -127,21 +131,30 @@ def test_assess_trajectory_learning_label():
             independence_rate=0.0,
             is_pure_delegator=False,
         )
-        session = _make_session([Turn(role=Role.USER, content=f"turn-{i}")], base + timedelta(days=i))
+        session = _make_session(
+            [Turn(role=Role.USER, content=f"turn-{i}")], base + timedelta(days=i)
+        )
         pairs.append((session, sig))
     result = assess_trajectory_heuristic(pairs)
     assert result.label == TrajectoryLabel.LEARNING
 
 
 def test_assess_trajectory_stable_passive_label_for_delegators():
-    base = datetime.now(timezone.utc) - timedelta(days=10)
+    base = datetime.now(UTC) - timedelta(days=10)
     pairs = []
     for i in range(10):
         sig = BehavioralSignals(
-            user_turn_count=4, why_question_count=0, comprehension_check_count=0,
-            explanation_request_count=0, pure_delegation_count=4,
-            outsourced_debug_count=0, telegraphic_count=4, own_attempt_count=0,
-            engagement_rate=0.0, delegation_rate=1.0, independence_rate=0.0,
+            user_turn_count=4,
+            why_question_count=0,
+            comprehension_check_count=0,
+            explanation_request_count=0,
+            pure_delegation_count=4,
+            outsourced_debug_count=0,
+            telegraphic_count=4,
+            own_attempt_count=0,
+            engagement_rate=0.0,
+            delegation_rate=1.0,
+            independence_rate=0.0,
             is_pure_delegator=True,
         )
         session = _make_session([Turn(role=Role.USER, content="x")], base + timedelta(days=i))
@@ -258,7 +271,7 @@ def test_categorize_session_verification_blanket_accept_default():
         Turn(role=Role.USER, content="write me a function"),
         Turn(role=Role.USER, content="make it handle errors"),
     ]
-    session = _make_session(turns, datetime.now(timezone.utc))
+    session = _make_session(turns, datetime.now(UTC))
     assert categorize_session_verification(session) == "blanket_accept"
 
 
@@ -269,7 +282,7 @@ def test_categorize_session_verification_spot_check():
         Turn(role=Role.USER, content="add error handling"),
         Turn(role=Role.USER, content="that looks right, let me double-check"),
     ]
-    session = _make_session(turns, datetime.now(timezone.utc))
+    session = _make_session(turns, datetime.now(UTC))
     assert categorize_session_verification(session) == "spot_check"
 
 
@@ -280,7 +293,7 @@ def test_categorize_session_verification_test_run_beats_spot_check():
         Turn(role=Role.USER, content="that looks right"),
         Turn(role=Role.USER, content="let me run the tests"),
     ]
-    session = _make_session(turns, datetime.now(timezone.utc))
+    session = _make_session(turns, datetime.now(UTC))
     assert categorize_session_verification(session) == "test_run"
 
 
@@ -290,14 +303,14 @@ def test_categorize_session_verification_source_check_beats_test_run():
         Turn(role=Role.USER, content="let me run the tests"),
         Turn(role=Role.USER, content="what's the source for this approach?"),
     ]
-    session = _make_session(turns, datetime.now(timezone.utc))
+    session = _make_session(turns, datetime.now(UTC))
     assert categorize_session_verification(session) == "source_check"
 
 
 def test_categorize_session_verification_empty_session_blanket_accept():
     """A session with zero user turns falls into blanket_accept (no
     activity to derive a verification signal from)."""
-    session = _make_session([], datetime.now(timezone.utc))
+    session = _make_session([], datetime.now(UTC))
     assert categorize_session_verification(session) == "blanket_accept"
 
 
@@ -320,7 +333,7 @@ def test_detect_spec_block_markdown_heading():
             ),
         ),
     ]
-    session = _make_session(turns, datetime.now(timezone.utc))
+    session = _make_session(turns, datetime.now(UTC))
     assert detect_spec_block(session) is True
 
 
@@ -336,7 +349,7 @@ def test_detect_spec_block_label_colon_form():
             ),
         ),
     ]
-    session = _make_session(turns, datetime.now(timezone.utc))
+    session = _make_session(turns, datetime.now(UTC))
     assert detect_spec_block(session) is True
 
 
@@ -349,7 +362,7 @@ def test_detect_spec_block_freeform_prompt_negative():
             content="my goal is to be faster, just write me the function",
         ),
     ]
-    session = _make_session(turns, datetime.now(timezone.utc))
+    session = _make_session(turns, datetime.now(UTC))
     assert detect_spec_block(session) is False
 
 
@@ -361,19 +374,18 @@ def test_detect_spec_block_only_first_turn_evaluated():
         Turn(
             role=Role.USER,
             content=(
-                "## Goal\nLet me try again with a structured spec.\n"
-                "## Constraints\n- O(n log n)."
+                "## Goal\nLet me try again with a structured spec.\n## Constraints\n- O(n log n)."
             ),
         ),
     ]
-    session = _make_session(turns, datetime.now(timezone.utc))
+    session = _make_session(turns, datetime.now(UTC))
     assert detect_spec_block(session) is False
 
 
 def test_detect_spec_block_empty_session():
     """A session with no user turns returns False - no opening to
     measure."""
-    session = _make_session([], datetime.now(timezone.utc))
+    session = _make_session([], datetime.now(UTC))
     assert detect_spec_block(session) is False
 
 
@@ -383,7 +395,7 @@ def test_detect_scaffolding_kinds_claude_md():
     turns = [
         Turn(role=Role.USER, content="update CLAUDE.md to mention the new feature"),
     ]
-    session = _make_session(turns, datetime.now(timezone.utc))
+    session = _make_session(turns, datetime.now(UTC))
     kinds = detect_scaffolding_kinds(session)
     assert "claude_md" in kinds
 
@@ -395,7 +407,7 @@ def test_detect_scaffolding_kinds_agents_md_and_skills():
         Turn(role=Role.USER, content="add a section in AGENTS.md about the rubric"),
         Turn(role=Role.USER, content="and a skills/code-review skill for the team"),
     ]
-    session = _make_session(turns, datetime.now(timezone.utc))
+    session = _make_session(turns, datetime.now(UTC))
     kinds = detect_scaffolding_kinds(session)
     assert "agents_md" in kinds
     assert "skills" in kinds
@@ -406,7 +418,7 @@ def test_detect_scaffolding_kinds_no_artifacts_returns_empty():
     turns = [
         Turn(role=Role.USER, content="fix the failing test in module X"),
     ]
-    session = _make_session(turns, datetime.now(timezone.utc))
+    session = _make_session(turns, datetime.now(UTC))
     assert detect_scaffolding_kinds(session) == set()
 
 
@@ -416,7 +428,7 @@ def test_detect_scaffolding_kinds_returns_subset_of_panel_order():
     turns = [
         Turn(role=Role.USER, content="check CLAUDE.md and copilot-instructions.md"),
     ]
-    session = _make_session(turns, datetime.now(timezone.utc))
+    session = _make_session(turns, datetime.now(UTC))
     for kind in detect_scaffolding_kinds(session):
         assert kind in set(SCAFFOLDING_KINDS_IN_PANEL_ORDER)
 
@@ -463,8 +475,7 @@ def test_detect_knowledge_gap_kinds_missing_specs_negative_with_criteria():
     turn = Turn(
         role=Role.USER,
         content=(
-            "write me a sorter. acceptance criteria: stable, O(n log n), "
-            "handles empty lists."
+            "write me a sorter. acceptance criteria: stable, O(n log n), handles empty lists."
         ),
     )
     kinds = detect_knowledge_gap_kinds(turn)
@@ -523,7 +534,7 @@ def test_count_session_knowledge_gaps_always_includes_all_kinds():
             content="What does the LRU eviction policy do under contention?",
         ),
     ]
-    session = _make_session(turns, datetime.now(timezone.utc))
+    session = _make_session(turns, datetime.now(UTC))
     counts = count_session_knowledge_gaps(session)
     for kind in KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER:
         assert kind in counts
@@ -537,7 +548,7 @@ def test_count_session_knowledge_gaps_accumulates_per_turn():
         Turn(role=Role.USER, content="build a token rotation cron"),
         Turn(role=Role.USER, content="do something with this codebase"),
     ]
-    session = _make_session(turns, datetime.now(timezone.utc))
+    session = _make_session(turns, datetime.now(UTC))
     counts = count_session_knowledge_gaps(session)
     # Turns 1 + 2 are build-imperatives with no spec markers; turn 3
     # is vague-imperative.
@@ -548,7 +559,7 @@ def test_count_session_knowledge_gaps_accumulates_per_turn():
 
 def test_count_session_knowledge_gaps_empty_session():
     """A session with no user turns returns zeros for every category."""
-    session = _make_session([], datetime.now(timezone.utc))
+    session = _make_session([], datetime.now(UTC))
     counts = count_session_knowledge_gaps(session)
     assert counts == {kind: 0 for kind in KNOWLEDGE_GAP_KINDS_IN_PANEL_ORDER}
 
@@ -556,16 +567,25 @@ def test_count_session_knowledge_gaps_empty_session():
 def test_llm_trajectory_returns_none_without_keys(tmp_home):
     # tmp_home fixture clears both API key env vars.
     pairs = []
-    base = datetime.now(timezone.utc) - timedelta(days=10)
+    base = datetime.now(UTC) - timedelta(days=10)
     for i in range(6):
         sig = BehavioralSignals(
-            user_turn_count=1, why_question_count=0, comprehension_check_count=0,
-            explanation_request_count=0, pure_delegation_count=0,
-            outsourced_debug_count=0, telegraphic_count=0, own_attempt_count=0,
-            engagement_rate=0.5, delegation_rate=0.0, independence_rate=0.0,
+            user_turn_count=1,
+            why_question_count=0,
+            comprehension_check_count=0,
+            explanation_request_count=0,
+            pure_delegation_count=0,
+            outsourced_debug_count=0,
+            telegraphic_count=0,
+            own_attempt_count=0,
+            engagement_rate=0.5,
+            delegation_rate=0.0,
+            independence_rate=0.0,
             is_pure_delegator=False,
         )
-        pairs.append((_make_session([Turn(role=Role.USER, content="x")], base + timedelta(days=i)), sig))
+        pairs.append(
+            (_make_session([Turn(role=Role.USER, content="x")], base + timedelta(days=i)), sig)
+        )
     assert assess_trajectory_with_llm(pairs) is None
     # Top-level assess should still produce a result via the heuristic fallback.
     assert assess(pairs).label != TrajectoryLabel.INSUFFICIENT_DATA
@@ -576,16 +596,16 @@ def test_llm_trajectory_returns_none_without_keys(tmp_home):
 # =========================================================================
 
 
-from praxis.behavior.signals import (  # noqa: E402
+from praxis.behavior.signals import (
     LADDER_KINDS_IN_PANEL_ORDER,
     categorize_session_ladder_rung,
     detect_session_ladder_rungs,
 )
 
 
-def _ladder_session(turns: list[Turn]) -> "Session":
+def _ladder_session(turns: list[Turn]) -> Session:
     """Build a session for ladder tests, mirroring _make_session."""
-    return _make_session(turns, datetime.now(timezone.utc))
+    return _make_session(turns, datetime.now(UTC))
 
 
 def test_detect_session_ladder_rungs_skills_marker():

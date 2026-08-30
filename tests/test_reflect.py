@@ -36,12 +36,14 @@ but the prompt rendering and DB write are the same on a piped
 StringIO, and a piped stream is the most reliable way to assert on
 exact bytes. The actual TTY-detection logic is exercised by US-027.
 """
+
 from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -74,7 +76,6 @@ from praxis.storage.profile_store import (
     MultipleActiveCommitmentsError,
     ProfileStore,
 )
-
 
 # Use a synthetic commitment we can assert against without depending on
 # the real follow_up engine running first.
@@ -251,7 +252,7 @@ def test_load_active_commitment_raises_when_multiple_active(tmp_home):
                 ),
             )
             two_rows_landed = True
-        except Exception:
+        except sqlite3.IntegrityError:
             two_rows_landed = False
 
     if two_rows_landed:
@@ -369,9 +370,7 @@ def test_cli_reflect_no_active_commitment_exits_0_with_hint(tmp_home, capsys):
     assert "praxis commit" in out
 
 
-def test_cli_reflect_skip_inserts_row_through_argparse(
-    monkeypatch, tmp_home, capsys
-):
+def test_cli_reflect_skip_inserts_row_through_argparse(monkeypatch, tmp_home, capsys):
     """Drive ``praxis reflect`` end-to-end (argparse + handler + DB)."""
     store = ProfileStore()
     # Seed an active commitment for the current ISO week so the resolver
@@ -446,7 +445,7 @@ def _write_claude_transcript(
     posts via ``transcript_path``.
     """
     if start is None:
-        start = datetime(2026, 5, 28, 12, 0, 0, tzinfo=timezone.utc)
+        start = datetime(2026, 5, 28, 12, 0, 0, tzinfo=UTC)
     path.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
     for i in range(max(user_turns, 0)):
@@ -515,9 +514,9 @@ def test_parse_hook_payload_accepts_dict_objects(raw):
         "   \n  ",
         "not-json",
         "{bad json",
-        "123",          # JSON number, not dict
-        "[1, 2, 3]",    # JSON list, not dict
-        '"a string"',   # JSON string, not dict
+        "123",  # JSON number, not dict
+        "[1, 2, 3]",  # JSON list, not dict
+        '"a string"',  # JSON string, not dict
     ],
 )
 def test_parse_hook_payload_rejects_non_dict_or_malformed(raw):
@@ -558,18 +557,14 @@ def test_session_end_no_active_commitment_is_silent_noop(tmp_home, capsys):
     assert captured.err == ""
 
 
-def test_session_end_claude_code_shape_triggers_spawn_with_session_id(
-    tmp_home, stub_spawn
-):
+def test_session_end_claude_code_shape_triggers_spawn_with_session_id(tmp_home, stub_spawn):
     """US-027: happy-path Claude payload triggers the detached child spawn
     rather than writing a row in the parent. The parent now hands off
     to the child via the four resolved fields."""
     store = ProfileStore()
     active = _seed_active(store, "2026-W22")
 
-    transcript = _write_claude_transcript(
-        tmp_home / "claude" / "transcript-abc.jsonl"
-    )
+    transcript = _write_claude_transcript(tmp_home / "claude" / "transcript-abc.jsonl")
     stdin = io.StringIO(
         _claude_code_payload(
             session_id="claude-abc-1",
@@ -590,9 +585,7 @@ def test_session_end_claude_code_shape_triggers_spawn_with_session_id(
     assert spawn["cwd"] == "/tmp/project"
 
 
-def test_session_end_codex_shape_triggers_spawn_with_session_id(
-    tmp_home, stub_spawn
-):
+def test_session_end_codex_shape_triggers_spawn_with_session_id(tmp_home, stub_spawn):
     """Codex payload omits transcript_path; the duck-typed parse must
     still recognize it (session_id is present) and the parent must
     still spawn the child."""
@@ -705,9 +698,7 @@ def test_cli_reflect_session_end_dispatches_to_session_end_branch(
     monkeypatch.setattr(cli_main, "current_iso_week", lambda: "2026-W22")
     active = _seed_active(store, "2026-W22")
 
-    transcript = _write_claude_transcript(
-        tmp_home / "claude" / "transcript-hook-id-9.jsonl"
-    )
+    transcript = _write_claude_transcript(tmp_home / "claude" / "transcript-hook-id-9.jsonl")
     monkeypatch.setattr(
         sys,
         "stdin",
@@ -734,17 +725,13 @@ def test_cli_reflect_session_end_dispatches_to_session_end_branch(
     assert stub_spawn[0]["session_id"] == "hook-id-9"
 
 
-def test_cli_reflect_session_end_exit_0_when_no_active_commitment(
-    monkeypatch, tmp_home, capsys
-):
+def test_cli_reflect_session_end_exit_0_when_no_active_commitment(monkeypatch, tmp_home, capsys):
     """With no active commitment, --session-end exits 0 silently (no
     row to write, no AI-tool blocking)."""
     from praxis.cli import __main__ as cli_main
 
     monkeypatch.setattr(cli_main, "current_iso_week", lambda: "2026-W22")
-    monkeypatch.setattr(
-        sys, "stdin", io.StringIO(_claude_code_payload())
-    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(_claude_code_payload()))
     code = main(["reflect", "--session-end"])
 
     assert code == 0
@@ -857,7 +844,7 @@ def test_read_transcript_stats_skips_malformed_lines(tmp_home):
     """Malformed JSON lines must not crash the parser."""
     path = tmp_home / "claude" / "garbled.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    start = datetime(2026, 5, 28, 12, 0, 0, tzinfo=timezone.utc)
+    start = datetime(2026, 5, 28, 12, 0, 0, tzinfo=UTC)
     end = start + timedelta(seconds=90)
     path.write_text(
         "\n".join(
@@ -895,7 +882,7 @@ def test_read_transcript_stats_ignores_empty_user_content(tmp_home):
     must NOT count toward turns_min."""
     path = tmp_home / "claude" / "empty.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    ts = datetime(2026, 5, 28, 12, 0, 0, tzinfo=timezone.utc)
+    ts = datetime(2026, 5, 28, 12, 0, 0, tzinfo=UTC)
     path.write_text(
         "\n".join(
             [
@@ -952,16 +939,14 @@ def test_extract_transcript_path_returns_none_when_absent_or_bad(payload):
 
 
 def test_check_threshold_returns_missing_when_file_absent(tmp_home):
-    note = _check_transcript_threshold(
-        tmp_home / "ghost.jsonl", ReflectConfig()
-    )
+    note = _check_transcript_threshold(tmp_home / "ghost.jsonl", ReflectConfig())
     assert note == _TRANSCRIPT_MISSING_NOTE
 
 
 def test_check_threshold_returns_too_short_when_turns_below(tmp_home):
     transcript = _write_claude_transcript(
         tmp_home / "claude" / "short-turns.jsonl",
-        user_turns=1,        # below default 2
+        user_turns=1,  # below default 2
         elapsed_seconds=600,
     )
     note = _check_transcript_threshold(transcript, ReflectConfig())
@@ -1030,7 +1015,7 @@ def test_session_end_short_session_under_turns_writes_too_short(tmp_home):
     active = _seed_active(store, "2026-W22")
     transcript = _write_claude_transcript(
         tmp_home / "claude" / "too-few-turns.jsonl",
-        user_turns=1,        # below default 2
+        user_turns=1,  # below default 2
         elapsed_seconds=600,
     )
 
@@ -1151,9 +1136,7 @@ def test_session_end_codex_shape_skips_threshold_gate(tmp_home, stub_spawn):
     assert stub_spawn[0]["transcript_path"] is None
 
 
-def test_session_end_threshold_never_crashes_on_malformed_config(
-    tmp_home, stub_spawn
-):
+def test_session_end_threshold_never_crashes_on_malformed_config(tmp_home, stub_spawn):
     """Defense in depth: a corrupt config.toml must NOT break the Stop
     hook. The loader falls back to defaults so the gate still applies."""
     cfg_path = tmp_home / ".praxis" / "config.toml"
@@ -1376,9 +1359,7 @@ def test_child_writes_parent_terminal_closed_when_no_tty(monkeypatch, tmp_home):
     store = ProfileStore()
     active = _seed_active(store, "2026-W22")
 
-    monkeypatch.setattr(
-        cli_main, "_open_controlling_terminal", lambda: (None, None)
-    )
+    monkeypatch.setattr(cli_main, "_open_controlling_terminal", lambda: (None, None))
 
     args = _mk_child_args(
         follow_up_id=active.follow_up_id,
@@ -1406,9 +1387,7 @@ def test_child_prompts_against_tty_and_records_yes(monkeypatch, tmp_home):
     tty_in = _StringIONoClose("y\nproductive session\n")
     tty_out = _StringIONoClose()
 
-    monkeypatch.setattr(
-        cli_main, "_open_controlling_terminal", lambda: (tty_in, tty_out)
-    )
+    monkeypatch.setattr(cli_main, "_open_controlling_terminal", lambda: (tty_in, tty_out))
 
     args = _mk_child_args(
         follow_up_id=active.follow_up_id,
@@ -1441,13 +1420,9 @@ def test_child_skip_writes_row_without_note_prompt(monkeypatch, tmp_home):
 
     tty_in = _StringIONoClose("s\n")
     tty_out = _StringIONoClose()
-    monkeypatch.setattr(
-        cli_main, "_open_controlling_terminal", lambda: (tty_in, tty_out)
-    )
+    monkeypatch.setattr(cli_main, "_open_controlling_terminal", lambda: (tty_in, tty_out))
 
-    args = _mk_child_args(
-        follow_up_id=active.follow_up_id, session_id="child-skip"
-    )
+    args = _mk_child_args(follow_up_id=active.follow_up_id, session_id="child-skip")
     code = _cmd_reflect_child(args)
 
     assert code == 0
@@ -1464,9 +1439,7 @@ def test_child_with_unknown_follow_up_id_exits_clean(monkeypatch, tmp_home):
     deletion), the child exits 0 cleanly without crashing."""
     from praxis.cli import __main__ as cli_main
 
-    monkeypatch.setattr(
-        cli_main, "_open_controlling_terminal", lambda: (None, None)
-    )
+    monkeypatch.setattr(cli_main, "_open_controlling_terminal", lambda: (None, None))
     store = ProfileStore()
     _seed_active(store, "2026-W22")
 
@@ -1512,38 +1485,37 @@ def test_session_end_never_returns_exit_code_2(monkeypatch, tmp_home):
     # Malformed JSON
     assert _cmd_reflect_session_end(io.StringIO("{not-json")) != 2
     # No session_id
-    assert _cmd_reflect_session_end(
-        io.StringIO(json.dumps({"cwd": "/x"}))
-    ) != 2
+    assert _cmd_reflect_session_end(io.StringIO(json.dumps({"cwd": "/x"}))) != 2
     # Transcript missing on disk
-    assert _cmd_reflect_session_end(
-        io.StringIO(
-            _claude_code_payload(transcript_path=str(tmp_home / "ghost.jsonl"))
+    assert (
+        _cmd_reflect_session_end(
+            io.StringIO(_claude_code_payload(transcript_path=str(tmp_home / "ghost.jsonl")))
         )
-    ) != 2
+        != 2
+    )
     # Session too short
     short = _write_claude_transcript(
         tmp_home / "claude" / "short-final.jsonl",
         user_turns=0,
         elapsed_seconds=0,
     )
-    assert _cmd_reflect_session_end(
-        io.StringIO(_claude_code_payload(transcript_path=str(short)))
-    ) != 2
+    assert (
+        _cmd_reflect_session_end(io.StringIO(_claude_code_payload(transcript_path=str(short)))) != 2
+    )
     # Happy path (spawn stubbed True)
     ample = _write_claude_transcript(
         tmp_home / "claude" / "ample-final.jsonl",
         user_turns=4,
         elapsed_seconds=300,
     )
-    assert _cmd_reflect_session_end(
-        io.StringIO(_claude_code_payload(transcript_path=str(ample)))
-    ) != 2
+    assert (
+        _cmd_reflect_session_end(io.StringIO(_claude_code_payload(transcript_path=str(ample)))) != 2
+    )
     # Spawn failure
     monkeypatch.setattr(cli_main, "_spawn_reflect_child", lambda **_: False)
-    assert _cmd_reflect_session_end(
-        io.StringIO(_claude_code_payload(transcript_path=str(ample)))
-    ) != 2
+    assert (
+        _cmd_reflect_session_end(io.StringIO(_claude_code_payload(transcript_path=str(ample)))) != 2
+    )
 
 
 def test_cli_main_reflect_child_routes_through_argparse(monkeypatch, tmp_home):
@@ -1556,9 +1528,7 @@ def test_cli_main_reflect_child_routes_through_argparse(monkeypatch, tmp_home):
 
     tty_in = _StringIONoClose("n\nfollowups stale\n")
     tty_out = _StringIONoClose()
-    monkeypatch.setattr(
-        cli_main, "_open_controlling_terminal", lambda: (tty_in, tty_out)
-    )
+    monkeypatch.setattr(cli_main, "_open_controlling_terminal", lambda: (tty_in, tty_out))
 
     code = main(
         [
@@ -1603,8 +1573,7 @@ def test_load_config_reads_hook_timeout_override(tmp_home):
     cfg_path = tmp_home / ".praxis" / "config.toml"
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(
-        "[reflect]\nturns_min = 2\nelapsed_seconds_min = 60\n"
-        "hook_timeout_seconds = 10\n",
+        "[reflect]\nturns_min = 2\nelapsed_seconds_min = 60\nhook_timeout_seconds = 10\n",
         encoding="utf-8",
     )
     cfg = load_config()

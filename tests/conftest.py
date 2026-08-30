@@ -6,11 +6,12 @@ user's real `~/.claude/projects`, `~/.codex/sessions`, or
 default scanner paths) and the PRAXIS_* env vars (for code that
 re-resolves them at runtime).
 """
+
 from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -45,7 +46,7 @@ def synthetic_claude_session(tmp_home) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     session_id = str(uuid.uuid4())
     path = root / f"{session_id}.jsonl"
-    when = datetime.now(timezone.utc) - timedelta(hours=1)
+    when = datetime.now(UTC) - timedelta(hours=1)
     events = [
         {
             "type": "user",
@@ -82,10 +83,14 @@ def synthetic_claude_session(tmp_home) -> Path:
 @pytest.fixture
 def synthetic_codex_session(tmp_home) -> Path:
     """Write a small synthetic Codex rollout JSONL and return its path."""
-    when = datetime.now(timezone.utc) - timedelta(hours=2)
+    when = datetime.now(UTC) - timedelta(hours=2)
     day_dir = (
-        tmp_home / ".codex" / "sessions"
-        / f"{when.year:04d}" / f"{when.month:02d}" / f"{when.day:02d}"
+        tmp_home
+        / ".codex"
+        / "sessions"
+        / f"{when.year:04d}"
+        / f"{when.month:02d}"
+        / f"{when.day:02d}"
     )
     day_dir.mkdir(parents=True, exist_ok=True)
     sid = uuid.uuid4().hex[:12]
@@ -104,14 +109,17 @@ def synthetic_codex_session(tmp_home) -> Path:
         {
             "type": "message",
             "timestamp": (when + timedelta(seconds=20)).isoformat().replace("+00:00", "Z"),
-            "payload": {"role": "assistant", "content": [
-                {"type": "output_text", "text": "Here's a function..."},
-            ]},
+            "payload": {
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Here's a function..."},
+                ],
+            },
         },
         {
             "type": "function_call",
             "timestamp": (when + timedelta(seconds=21)).isoformat().replace("+00:00", "Z"),
-            "payload": {"name": "shell", "arguments": "{\"cmd\": \"pytest\"}"},
+            "payload": {"name": "shell", "arguments": '{"cmd": "pytest"}'},
         },
     ]
     with path.open("w", encoding="utf-8") as f:
@@ -123,13 +131,16 @@ def synthetic_codex_session(tmp_home) -> Path:
 @pytest.fixture
 def synthetic_session_object() -> Session:
     """Return a Session object directly (no file I/O)."""
-    when = datetime.now(timezone.utc) - timedelta(hours=3)
+    when = datetime.now(UTC) - timedelta(hours=3)
     return Session(
         provider=Provider.CLAUDE,
         session_id="abc-123",
         started_at=when,
         turns=[
-            Turn(role=Role.USER, content="Goal: improve test coverage. Constraints: keep CI under 5min."),
+            Turn(
+                role=Role.USER,
+                content="Goal: improve test coverage. Constraints: keep CI under 5min.",
+            ),
             Turn(role=Role.ASSISTANT, content="Plan: identify gaps then add tests."),
             Turn(role=Role.USER, content="Why does coverage matter most for the auth module?"),
             Turn(role=Role.ASSISTANT, content="Because auth bugs become security bugs..."),

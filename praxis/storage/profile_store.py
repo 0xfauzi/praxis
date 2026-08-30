@@ -6,8 +6,9 @@ Tracks every session score across all-time so we can:
   - Run daily consolidation that compares today to baseline
   - Track which coaching the user has already seen, so we don't repeat ourselves
 
-Schema is intentionally simple — three tables, no migrations needed for v1.
+Schema is intentionally simple: three tables, no migrations needed for v1.
 """
+
 from __future__ import annotations
 
 import json
@@ -16,25 +17,25 @@ import shutil
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
 
 def _utcnow() -> datetime:
     """Tz-aware UTC now. Wraps datetime.now(timezone.utc) for terseness."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _sqlite_literal(s: str) -> str:
     """Escape ``s`` for use inside a SQLite single-quoted string literal."""
     return s.replace("'", "''")
 
+
 from praxis.follow_up import FollowUp, Outcome
 from praxis.models import Moment, compute_moment_id
 from praxis.redactor import redact_secrets
 from praxis.scoring.aggregate import ProfileSnapshot, SessionScore
-
 
 SelfReport = Literal["yes", "no", "partial", "skip"]
 
@@ -236,9 +237,7 @@ class ProfileStore:
                 # stay cheap, since SessionStart hooks open the store on every
                 # session and a full DB copy each time would be wasteful.
                 backup_path = (
-                    self._backup_db_if_exists()
-                    if self._follow_ups_rebuild_pending()
-                    else None
+                    self._backup_db_if_exists() if self._follow_ups_rebuild_pending() else None
                 )
                 try:
                     with self._conn() as conn:
@@ -268,9 +267,7 @@ class ProfileStore:
         except Exception as exc:
             if backup_path is not None:
                 self._restore_db_from_backup(backup_path)
-            raise MigrationError(
-                self._migration_failure_message(backup_path, exc)
-            ) from exc
+            raise MigrationError(self._migration_failure_message(backup_path, exc)) from exc
         self._run_sql_migrations()
 
     def _follow_ups_rebuild_pending(self) -> bool:
@@ -284,8 +281,7 @@ class ProfileStore:
         """
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT sql FROM sqlite_master "
-                "WHERE type = 'table' AND name = 'follow_ups'"
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'follow_ups'"
             ).fetchone()
             if row is None:
                 return False
@@ -325,12 +321,9 @@ class ProfileStore:
             # follow_ups.superseded_by and session_reflections.follow_up_id
             # reference follow_ups(id).
             table_row = conn.execute(
-                "SELECT sql FROM sqlite_master "
-                "WHERE type = 'table' AND name = 'follow_ups'"
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'follow_ups'"
             ).fetchone()
-            check_allows_superseded = (
-                table_row is not None and "superseded'" in table_row[0]
-            )
+            check_allows_superseded = table_row is not None and "superseded'" in table_row[0]
             if not check_allows_superseded:
                 conn.executescript(
                     """
@@ -415,9 +408,7 @@ class ProfileStore:
         cur = conn.execute("PRAGMA table_info(session_scores)")
         existing_cols = {row[1] for row in cur.fetchall()}
         if "signals_json" not in existing_cols:
-            conn.execute(
-                "ALTER TABLE session_scores ADD COLUMN signals_json TEXT"
-            )
+            conn.execute("ALTER TABLE session_scores ADD COLUMN signals_json TEXT")
 
     @staticmethod
     def _ensure_moments_columns(conn: sqlite3.Connection) -> None:
@@ -550,9 +541,7 @@ class ProfileStore:
     @staticmethod
     def _migration_failure_message(backup_path: Path | None, exc: Exception) -> str:
         if backup_path is None:
-            return (
-                f"v0.2 schema migration failed (no backup made; fresh DB): {exc}"
-            )
+            return f"v0.2 schema migration failed (no backup made; fresh DB): {exc}"
         return (
             f"v0.2 schema migration failed: {exc}\n"
             f"Database has been restored from backup at: {backup_path.resolve()}"
@@ -637,9 +626,7 @@ class ProfileStore:
 
     def _applied_migration_versions(self) -> set[str]:
         with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT version FROM schema_migrations"
-            ).fetchall()
+            rows = conn.execute("SELECT version FROM schema_migrations").fetchall()
         return {row["version"] for row in rows}
 
     def _table_exists(self, table: str) -> bool:
@@ -684,8 +671,7 @@ class ProfileStore:
         """
         with self._conn() as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO schema_migrations (version, applied_at) "
-                "VALUES (?, ?)",
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                 (version, _utcnow().isoformat()),
             )
 
@@ -700,7 +686,8 @@ class ProfileStore:
         applied_at = _utcnow().isoformat()
         script = (
             "BEGIN;\n"
-            + body_sql.rstrip(" \t\r\n;") + ";\n"
+            + body_sql.rstrip(" \t\r\n;")
+            + ";\n"
             + "INSERT INTO schema_migrations (version, applied_at) VALUES ("
             + f"'{_sqlite_literal(version)}', '{_sqlite_literal(applied_at)}'"
             + ");\n"
@@ -734,9 +721,7 @@ class ProfileStore:
 
     def has_session(self, stable_id: str) -> bool:
         with self._conn() as conn:
-            cur = conn.execute(
-                "SELECT 1 FROM session_scores WHERE stable_id = ?", (stable_id,)
-            )
+            cur = conn.execute("SELECT 1 FROM session_scores WHERE stable_id = ?", (stable_id,))
             return cur.fetchone() is not None
 
     def save_session_score(
@@ -847,8 +832,7 @@ class ProfileStore:
         """
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT * FROM session_scores WHERE stable_id = ? "
-                "ORDER BY judge_pass DESC LIMIT 1",
+                "SELECT * FROM session_scores WHERE stable_id = ? ORDER BY judge_pass DESC LIMIT 1",
                 (stable_id,),
             ).fetchone()
         if row is None:
@@ -896,9 +880,7 @@ class ProfileStore:
     # Delegates to set_session_aug_auto so validation stays in one place.
     save_session_aug_auto = set_session_aug_auto
 
-    def get_session_aug_auto(
-        self, stable_id: str
-    ) -> tuple[str | None, float | None]:
+    def get_session_aug_auto(self, stable_id: str) -> tuple[str | None, float | None]:
         """Return ``(classification, confidence)`` for a session.
 
         Returns ``(None, None)`` when the session row is missing or when
@@ -919,9 +901,7 @@ class ProfileStore:
 
     # ---- moments --------------------------------------------------------
 
-    def save_moments(
-        self, session_stable_id: str, moments: list[Moment]
-    ) -> list[Moment]:
+    def save_moments(self, session_stable_id: str, moments: list[Moment]) -> list[Moment]:
         """Replace this session's moments with the given list, after redaction.
 
         Per spec §4.4 + AC for US-020:
@@ -1073,18 +1053,16 @@ class ProfileStore:
             )
             if session_stable_ids:
                 conn.executemany(
-                    "INSERT INTO task_members (task_id, session_stable_id) "
-                    "VALUES (?, ?)",
+                    "INSERT INTO task_members (task_id, session_stable_id) VALUES (?, ?)",
                     [(task_id, sid) for sid in session_stable_ids],
                 )
 
-    def load_tasks_for_week(
-        self, week_start: datetime, week_end: datetime
-    ) -> list[dict[str, Any]]:
+    def load_tasks_for_week(self, week_start: datetime, week_end: datetime) -> list[dict[str, Any]]:
         """Return tasks that started within [week_start, week_end), with members."""
         with self._conn() as conn:
             task_rows = [
-                dict(row) for row in conn.execute(
+                dict(row)
+                for row in conn.execute(
                     "SELECT * FROM tasks WHERE started_at >= ? AND started_at < ? "
                     "ORDER BY started_at ASC",
                     (week_start.isoformat(), week_end.isoformat()),
@@ -1140,8 +1118,7 @@ class ProfileStore:
         counts: dict[str, int] = {"low": 0, "medium": 0, "high": 0}
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT notes FROM run_log "
-                "WHERE kind = 'pass1_conf' AND run_at >= ?",
+                "SELECT notes FROM run_log WHERE kind = 'pass1_conf' AND run_at >= ?",
                 (cutoff.isoformat(),),
             ).fetchall()
         for row in rows:
@@ -1172,8 +1149,7 @@ class ProfileStore:
         """
         with self._conn() as conn:
             existing = conn.execute(
-                "SELECT id FROM follow_ups WHERE week_iso = ? "
-                "ORDER BY id DESC LIMIT 1",
+                "SELECT id FROM follow_ups WHERE week_iso = ? ORDER BY id DESC LIMIT 1",
                 (follow_up.week_iso,),
             ).fetchone()
             if existing is not None:
@@ -1195,9 +1171,7 @@ class ProfileStore:
                     ),
                 )
                 return
-            conn.execute(
-                "DELETE FROM follow_ups WHERE week_iso = ?", (follow_up.week_iso,)
-            )
+            conn.execute("DELETE FROM follow_ups WHERE week_iso = ?", (follow_up.week_iso,))
             conn.execute(
                 """
                 INSERT INTO follow_ups
@@ -1293,9 +1267,7 @@ class ProfileStore:
             display_text=row["display_text"],
         )
 
-    def supersede_and_insert_follow_up(
-        self, *, prior_id: int, new_follow_up: FollowUp
-    ) -> int:
+    def supersede_and_insert_follow_up(self, *, prior_id: int, new_follow_up: FollowUp) -> int:
         """Atomically supersede the prior row and insert ``new_follow_up``.
 
         Performed inside a single transaction (single ``_conn()`` block,
@@ -1327,8 +1299,7 @@ class ProfileStore:
             )
             if updated.rowcount != 1:
                 raise RuntimeError(
-                    f"supersede_and_insert_follow_up: prior_id {prior_id} "
-                    f"not found; rolling back."
+                    f"supersede_and_insert_follow_up: prior_id {prior_id} not found; rolling back."
                 )
             cur = conn.execute(
                 """
@@ -1458,9 +1429,7 @@ class ProfileStore:
     def count_weekly_digests(self) -> int:
         """Number of rows in weekly_digests. Used by idempotency tests."""
         with self._conn() as conn:
-            return conn.execute(
-                "SELECT COUNT(*) AS c FROM weekly_digests"
-            ).fetchone()["c"]
+            return conn.execute("SELECT COUNT(*) AS c FROM weekly_digests").fetchone()["c"]
 
     def latest_weekly_digest_week(self) -> str | None:
         """Return the most recent ISO week with a weekly_digests row, or None.
@@ -1471,14 +1440,11 @@ class ProfileStore:
         """
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT week_iso FROM weekly_digests "
-                "ORDER BY week_iso DESC LIMIT 1"
+                "SELECT week_iso FROM weekly_digests ORDER BY week_iso DESC LIMIT 1"
             ).fetchone()
         return row["week_iso"] if row else None
 
-    def weekly_cost_baseline(
-        self, before_week_iso: str, lookback_days: int = 90
-    ) -> float | None:
+    def weekly_cost_baseline(self, before_week_iso: str, lookback_days: int = 90) -> float | None:
         """Mean cost_total_usd across prior digests in the last 90 days.
 
         Spec 10.1: the cost ledger baseline is the rolling weekly mean.
@@ -1602,7 +1568,8 @@ class ProfileStore:
                 select_cols.append("display_text AS _display_text")
 
             sql = (
-                "SELECT " + ", ".join(select_cols)
+                "SELECT "
+                + ", ".join(select_cols)
                 + " FROM follow_ups WHERE week_iso = ? AND outcome = 'pending'"
             )
             if has_superseded:
@@ -1641,9 +1608,7 @@ class ProfileStore:
             follow_up=fu,
         )
 
-    def load_commitment_by_id(
-        self, follow_up_id: int
-    ) -> ActiveCommitment | None:
+    def load_commitment_by_id(self, follow_up_id: int) -> ActiveCommitment | None:
         """Load a follow_ups row by its id and wrap it as ActiveCommitment.
 
         Used by the US-027 detached child path: the parent has already
@@ -1679,10 +1644,7 @@ class ProfileStore:
                 select_cols.append("display_text AS _display_text")
 
             id_expr = "id" if has_id else "rowid"
-            sql = (
-                "SELECT " + ", ".join(select_cols)
-                + f" FROM follow_ups WHERE {id_expr} = ?"
-            )
+            sql = "SELECT " + ", ".join(select_cols) + f" FROM follow_ups WHERE {id_expr} = ?"
             row = conn.execute(sql, (follow_up_id,)).fetchone()
 
         if row is None:
@@ -1720,9 +1682,7 @@ class ProfileStore:
         :meth:`load_active_commitment` (raises on >1 row).
         """
         with self._conn() as conn:
-            cols = {
-                r[1] for r in conn.execute("PRAGMA table_info(follow_ups)").fetchall()
-            }
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(follow_ups)").fetchall()}
             extra = " AND superseded_by IS NULL" if "superseded_by" in cols else ""
             rows = conn.execute(
                 "SELECT week_iso, dim_key, commitment_text, target_metric, "
@@ -1776,9 +1736,7 @@ class ProfileStore:
             )
             return int(cur.lastrowid or 0)
 
-    def load_session_reflections(
-        self, *, follow_up_id: int
-    ) -> list[dict[str, Any]]:
+    def load_session_reflections(self, *, follow_up_id: int) -> list[dict[str, Any]]:
         """Read back every session_reflections row for one follow-up.
 
         Returns a list of dicts ordered by id ASC (insertion order).

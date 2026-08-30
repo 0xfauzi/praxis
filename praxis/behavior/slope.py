@@ -11,15 +11,15 @@ This module owns the math only. Label assignment (US-044), hysteresis
 (US-045), and the LLM headline (US-046) build on the SlopeFit values
 produced here.
 """
+
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Callable, Iterable
 
 from praxis.behavior.weekly import WeeklyBucket
-
 
 SIGNIFICANCE_STDERR_MULTIPLIER: float = 1.5
 SIGNIFICANCE_MIN_SLOPE_PER_WEEK: float = 0.05

@@ -6,27 +6,27 @@ skill-developing users from atrophying users.
 
 Their RCT (n=52 developers learning Trio) found three "high skill
 development" patterns where users stayed cognitively engaged:
-  1. Generation-then-comprehension — ask AI to generate, then ask 'why'
+  1. Generation-then-comprehension: ask AI to generate, then ask 'why'
   2. Asking for explanations alongside code/answers
   3. Verifying understanding by testing or rephrasing
 
 Atrophy patterns:
-  1. Pure delegation — accept output without follow-up
-  2. Outsourcing debugging — "fix this" without engaging with the error
-  3. Telegraphic single-turn requests — "write me X" with no engagement
+  1. Pure delegation: accept output without follow-up
+  2. Outsourcing debugging: "fix this" without engaging with the error
+  3. Telegraphic single-turn requests: "write me X" with no engagement
 
 These are detectable from text alone. The Shen & Tamkin paper found
 ~80% of participants used patterns OTHER than pure delegation; the
 20% who delegated were faster but had the worst learning outcomes.
 We capture this split.
 """
+
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
 
 from praxis.models import Session, Turn
-
 
 # A "pure delegator" verdict needs enough turns to be real. One terse
 # prompt ("fix this") can trip pure-delegation, outsourced-debug AND
@@ -50,7 +50,7 @@ SIGNAL_KINDS_IN_PANEL_ORDER: tuple[str, ...] = (
 )
 
 
-# Engagement signals — user is staying cognitively in the loop
+# Engagement signals: user is staying cognitively in the loop
 _WHY_QUESTIONS = re.compile(
     r"\b(why (does|is|did|are|do)|how does (this|it|that) work|"
     r"what does (this|it|that) (do|mean)|explain (this|that|how|why)|"
@@ -73,7 +73,7 @@ _EXPLANATION_REQUESTS = re.compile(
     re.IGNORECASE,
 )
 
-# Atrophy signals — user is delegating without engagement
+# Atrophy signals: user is delegating without engagement
 _PURE_DELEGATION = re.compile(
     r"^(write|make|create|build|generate|give me|do|fix|implement)\s",
     re.IGNORECASE,
@@ -86,7 +86,7 @@ _OUTSOURCED_DEBUG = re.compile(
     re.IGNORECASE,
 )
 
-# Independence signals — did the user try first?
+# Independence signals: did the user try first?
 _OWN_ATTEMPT_MARKERS = re.compile(
     r"\b(i tried|i was thinking|my approach|i wrote|"
     r"my (idea|attempt|guess)|here'?s what i have|"
@@ -94,7 +94,8 @@ _OWN_ATTEMPT_MARKERS = re.compile(
     re.IGNORECASE,
 )
 
-# Telegraphic prompts — very short, no context, no engagement
+
+# Telegraphic prompts: very short, no context, no engagement
 def _is_telegraphic(text: str) -> bool:
     stripped = text.strip()
     return len(stripped) < 80 and "\n" not in stripped and "?" not in stripped[:-1]
@@ -113,7 +114,7 @@ def _is_telegraphic(text: str) -> bool:
 #   - OpenAI Codex/Responses docs on structured instructions and tool-loop
 #     refinement (the "give the model a goal, then refine" pattern).
 
-# Specification artifact — the user supplies a written spec: goal, constraints,
+# Specification artifact - the user supplies a written spec: goal, constraints,
 # acceptance criteria, inputs/outputs, or a Given/When/Then scenario. This is
 # the cheapest, highest-leverage move per Anthropic's guidance and is the
 # spec-driven-development practice called out in our own CLAUDE.md.
@@ -131,7 +132,7 @@ _SPECIFICATION_ARTIFACT = re.compile(
     r"handle|accept|reject|fail)\b",
 )
 
-# Error naming — the user identifies a *specific* error class, traceback, or
+# Error naming: the user identifies a *specific* error class, traceback, or
 # error message instead of telegraphic "fix this". Shen & Tamkin's debugging
 # finding (17pp comprehension gap, biggest in debugging) maps directly here:
 # naming the error is the diagnostic step the atrophying group skips.
@@ -157,7 +158,7 @@ _ERROR_NAMING = re.compile(
     re.IGNORECASE,
 )
 
-# Iterative refinement — the user revises the previous output instead of
+# Iterative refinement: the user revises the previous output instead of
 # accepting it ("now also...", "instead of X try Y", "tweak the..."). Anthropic
 # Claude Code best practices explicitly recommend iteration over one-shot
 # requests; this is the positive counterpart of pure delegation.
@@ -249,9 +250,7 @@ def _is_missing_context(text: str) -> bool:
         return False
     if _FILE_EXTENSION.search(stripped):
         return False
-    if "/" in stripped:
-        return False
-    return True
+    return "/" not in stripped
 
 
 _CREATION_REQUEST = re.compile(
@@ -270,9 +269,7 @@ _SPEC_MARKERS = re.compile(
 def _is_missing_specs(text: str) -> bool:
     if not _CREATION_REQUEST.match(text):
         return False
-    if _SPEC_MARKERS.search(text):
-        return False
-    return True
+    return not _SPEC_MARKERS.search(text)
 
 
 _TRANSITION_MARKERS = re.compile(
@@ -724,12 +721,12 @@ class BehavioralSignals:
     own_attempt_count: int
 
     # Derived ratios (0-1)
-    engagement_rate: float       # share of user turns with engagement signals
-    delegation_rate: float       # share with atrophy signals
-    independence_rate: float     # share showing own attempt before asking
+    engagement_rate: float  # share of user turns with engagement signals
+    delegation_rate: float  # share with atrophy signals
+    independence_rate: float  # share showing own attempt before asking
 
-    # Single most diagnostic signal — Shen & Tamkin's key finding
-    is_pure_delegator: bool      # True if delegation_rate > 0.6 and engagement_rate < 0.1
+    # Single most diagnostic signal: Shen & Tamkin's key finding
+    is_pure_delegator: bool  # True if delegation_rate > 0.6 and engagement_rate < 0.1
 
     # --- Expansion (US-005). All counts are over USER turns. Defaults preserve
     # backward compatibility with callers that construct BehavioralSignals
@@ -842,9 +839,7 @@ def extract(session: Session) -> BehavioralSignals:
             verification_depth["spot_check"] += 1
         if _BLANKET_ACCEPT.search(t.content):
             verification_depth["blanket_accept"] += 1
-    comprehension_hits = sum(
-        1 for t in user_turns if _CODE_COMPREHENSION.search(t.content)
-    )
+    comprehension_hits = sum(1 for t in user_turns if _CODE_COMPREHENSION.search(t.content))
     # tool_ladder_level scans the WHOLE transcript (not just user turns), per
     # the AC: max-rung-observed; tool_calls live on assistant turns.
     tool_ladder_level = max(
@@ -1097,9 +1092,7 @@ def detect_spec_block(session: Session) -> bool:
         return False
     if _SPEC_BLOCK_HEADING_MARKERS.search(content):
         return True
-    if _SPEC_BLOCK_INLINE_MARKERS.search(content):
-        return True
-    return False
+    return bool(_SPEC_BLOCK_INLINE_MARKERS.search(content))
 
 
 # Context-engineering scaffolding artifacts per spec section 11. Each
@@ -1119,16 +1112,12 @@ SCAFFOLDING_KINDS_IN_PANEL_ORDER: tuple[str, ...] = (
 _SCAFFOLDING_PATTERNS: dict[str, re.Pattern[str]] = {
     "claude_md": re.compile(r"\bCLAUDE\.md\b", re.IGNORECASE),
     "agents_md": re.compile(r"\bAGENTS\.md\b", re.IGNORECASE),
-    "copilot_instructions": re.compile(
-        r"\bcopilot[-_]?instructions(?:\.md)?\b", re.IGNORECASE
-    ),
+    "copilot_instructions": re.compile(r"\bcopilot[-_]?instructions(?:\.md)?\b", re.IGNORECASE),
     # ChatGPT "Projects" feature (OpenAI 2024) - the leading uppercase
     # marker keeps the pattern from firing on generic uses of "project"
     # (e.g. "this project's auth module"). The user explicitly names
     # the surface or describes it as a Custom GPT.
-    "projects": re.compile(
-        r"\b(ChatGPT Projects?|Custom GPT|custom instructions for ChatGPT)\b"
-    ),
+    "projects": re.compile(r"\b(ChatGPT Projects?|Custom GPT|custom instructions for ChatGPT)\b"),
     # Anthropic Skills + the broader "skill file" idiom. The .skill
     # extension is the canonical artifact; the "subagent" / "agent
     # skill" / "Skills/<name>" forms cover the spelled-out variants.
@@ -1270,9 +1259,7 @@ def detect_knowledge_gap_kinds(turn: Turn) -> set[str]:
 
     # Missing specs: build-something imperative with no acceptance
     # criteria / done-when / expected-output markers.
-    if _BUILD_IMPERATIVE.search(content) and not _SPECS_PRESENT_MARKERS.search(
-        content
-    ):
+    if _BUILD_IMPERATIVE.search(content) and not _SPECS_PRESENT_MARKERS.search(content):
         kinds.add("missing_specs")
 
     if _MULTIPLE_CONTEXT_MARKERS.search(content):

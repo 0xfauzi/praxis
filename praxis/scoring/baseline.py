@@ -13,13 +13,13 @@ The function is pure: pass in the candidate sessions plus an `as_of`
 moment, get back a Baseline value. Wiring this into the weekly digest
 pipeline is a separate concern handled by later stories.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from praxis.scoring.rubric import RUBRIC
-
 
 OVERALL_CLIP_LOW = 1.0
 OVERALL_CLIP_HIGH = 9.0
@@ -62,8 +62,8 @@ class Baseline:
     delegation_mean: float
     independence_mean: float
     session_count: int
-    window_start: date    # inclusive: as_of_date - 90 days
-    window_end: date      # exclusive: start of as_of's ISO week (Monday)
+    window_start: date  # inclusive: as_of_date - 90 days
+    window_end: date  # exclusive: start of as_of's ISO week (Monday)
 
 
 @dataclass(frozen=True)
@@ -88,8 +88,8 @@ class LastWeekMean:
     delegation_mean: float
     independence_mean: float
     session_count: int
-    week_start: date    # inclusive: Monday of prior ISO week
-    week_end: date      # exclusive: Monday of current ISO week
+    week_start: date  # inclusive: Monday of prior ISO week
+    week_end: date  # exclusive: Monday of current ISO week
 
 
 def _iso_week_start(d: date) -> date:
@@ -132,23 +132,19 @@ def compute_baseline(
     based on that signal (see US-035).
     """
     if as_of is None:
-        as_of = datetime.now(timezone.utc)
+        as_of = datetime.now(UTC)
     as_of_date = as_of.date()
     window_end = _iso_week_start(as_of_date)
     window_start = as_of_date - timedelta(days=BASELINE_WINDOW_DAYS)
 
-    included = [
-        s for s in sessions
-        if window_start <= s.started_at.date() < window_end
-    ]
+    included = [s for s in sessions if window_start <= s.started_at.date() < window_end]
     n = len(included)
     if n == 0:
         return _empty_baseline(window_start, window_end)
 
     overall_mean = sum(_clip_overall(s.overall) for s in included) / n
     dim_means: dict[str, float] = {
-        d.key: sum(s.dimension_scores.get(d.key, 5.0) for s in included) / n
-        for d in RUBRIC
+        d.key: sum(s.dimension_scores.get(d.key, 5.0) for s in included) / n for d in RUBRIC
     }
     engagement_mean = sum(s.engagement_rate for s in included) / n
     delegation_mean = sum(s.delegation_rate for s in included) / n
@@ -186,7 +182,7 @@ def data_span_days(
     if not sessions:
         return 0
     if as_of is None:
-        as_of = datetime.now(timezone.utc)
+        as_of = datetime.now(UTC)
     earliest_date = min(s.started_at.date() for s in sessions)
     return max(0, (as_of.date() - earliest_date).days)
 
@@ -223,7 +219,7 @@ def has_prior_week_sessions(
     if not sessions:
         return False
     if as_of is None:
-        as_of = datetime.now(timezone.utc)
+        as_of = datetime.now(UTC)
     current_week_start = _iso_week_start(as_of.date())
     return any(s.started_at.date() < current_week_start for s in sessions)
 
@@ -252,22 +248,18 @@ def compute_last_week_mean(
     belongs to the current ISO week and would land in this-week's mean).
     """
     if as_of is None:
-        as_of = datetime.now(timezone.utc)
+        as_of = datetime.now(UTC)
     week_end = _iso_week_start(as_of.date())
     week_start = week_end - timedelta(days=7)
 
-    included = [
-        s for s in sessions
-        if week_start <= s.started_at.date() < week_end
-    ]
+    included = [s for s in sessions if week_start <= s.started_at.date() < week_end]
     n = len(included)
     if n == 0:
         return None
 
     overall_mean = sum(_clip_overall(s.overall) for s in included) / n
     dim_means: dict[str, float] = {
-        d.key: sum(s.dimension_scores.get(d.key, 5.0) for s in included) / n
-        for d in RUBRIC
+        d.key: sum(s.dimension_scores.get(d.key, 5.0) for s in included) / n for d in RUBRIC
     }
     engagement_mean = sum(s.engagement_rate for s in included) / n
     delegation_mean = sum(s.delegation_rate for s in included) / n

@@ -6,6 +6,7 @@ input is missing). US-068 / US-069 added the cost ledger, tasks and
 six-dim footer; US-035 added the masthead's commitment block. Each
 story's tests sit in its own labelled section below.
 """
+
 from __future__ import annotations
 
 import re
@@ -13,6 +14,15 @@ import re
 from praxis.reports import digest_terminal
 from praxis.reports.commitment_rollup import CommitmentRollup
 from praxis.reports.digest_terminal import (
+    _COST_LEDGER_PLACEHOLDER,
+    _DIMENSIONS_PLACEHOLDER,
+    _FOLLOW_UP_PLACEHOLDER,
+    _GAP_AGREE_LINE,
+    _GAP_DISAGREE_LINE,
+    _HEADLINE_MOMENT_PLACEHOLDER,
+    _NO_SESSIONS_LOGGED,
+    _TASKS_PLACEHOLDER,
+    _TRAJECTORY_PLACEHOLDER,
     MAX_LINE_WIDTH,
     MAX_TASKS_RENDERED,
     CostLedgerView,
@@ -24,18 +34,6 @@ from praxis.reports.digest_terminal import (
     render,
     visible_width,
 )
-from praxis.reports.digest_terminal import (
-    _COST_LEDGER_PLACEHOLDER,
-    _DIMENSIONS_PLACEHOLDER,
-    _FOLLOW_UP_PLACEHOLDER,
-    _GAP_AGREE_LINE,
-    _GAP_DISAGREE_LINE,
-    _HEADLINE_MOMENT_PLACEHOLDER,
-    _NO_SESSIONS_LOGGED,
-    _TASKS_PLACEHOLDER,
-    _TRAJECTORY_PLACEHOLDER,
-)
-
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -117,8 +115,7 @@ def test_populated_digest_lines_under_80():
     for i, line in enumerate(lines):
         stripped = _strip_ansi(line)
         assert visible_width(line) <= MAX_LINE_WIDTH, (
-            f"line {i} ({len(stripped)} visible chars > {MAX_LINE_WIDTH}): "
-            f"{stripped!r}"
+            f"line {i} ({len(stripped)} visible chars > {MAX_LINE_WIDTH}): {stripped!r}"
         )
 
 
@@ -136,8 +133,7 @@ def test_long_trajectory_headline_wraps_within_budget():
     lines = _all_lines(digest)
     for i, line in enumerate(lines):
         assert visible_width(line) <= MAX_LINE_WIDTH, (
-            f"line {i} ({visible_width(line)} > {MAX_LINE_WIDTH}): "
-            f"{_strip_ansi(line)!r}"
+            f"line {i} ({visible_width(line)} > {MAX_LINE_WIDTH}): {_strip_ansi(line)!r}"
         )
 
 
@@ -161,6 +157,7 @@ def test_renderer_module_does_not_clobber_v01_terminal():
     delete this guard.
     """
     from praxis.reports import terminal as v01
+
     assert v01.render is not digest_terminal.render
 
 
@@ -197,10 +194,7 @@ def _realistic_headline_moment() -> HeadlineMomentView:
 
 def _realistic_follow_up_pending() -> FollowUpView:
     return FollowUpView(
-        commitment_text=(
-            "Run `pytest` and paste the actual output before saying "
-            "'all green'."
-        ),
+        commitment_text=("Run `pytest` and paste the actual output before saying 'all green'."),
         target_metric="verification_rate",
         baseline_value=0.32,
         measured_value=None,
@@ -210,10 +204,7 @@ def _realistic_follow_up_pending() -> FollowUpView:
 
 def _realistic_follow_up_closed() -> FollowUpView:
     return FollowUpView(
-        commitment_text=(
-            "Run `pytest` and paste the actual output before saying "
-            "'all green'."
-        ),
+        commitment_text=("Run `pytest` and paste the actual output before saying 'all green'."),
         target_metric="verification_rate",
         baseline_value=0.32,
         measured_value=0.58,
@@ -241,8 +232,7 @@ def test_all_mandatory_sections_render_with_data():
     text = _strip_ansi(render(_full_digest()))
     for eyebrow in _MANDATORY_EYEBROWS:
         assert text.count(eyebrow) == 1, (
-            f"expected eyebrow {eyebrow!r} exactly once; got {text.count(eyebrow)} "
-            f"in:\n{text}"
+            f"expected eyebrow {eyebrow!r} exactly once; got {text.count(eyebrow)} in:\n{text}"
         )
 
 
@@ -410,8 +400,7 @@ def test_long_strings_in_all_sections_still_wrap():
     lines = _all_lines(digest)
     for i, line in enumerate(lines):
         assert visible_width(line) <= MAX_LINE_WIDTH, (
-            f"line {i} ({visible_width(line)} > {MAX_LINE_WIDTH}): "
-            f"{_strip_ansi(line)!r}"
+            f"line {i} ({visible_width(line)} > {MAX_LINE_WIDTH}): {_strip_ansi(line)!r}"
         )
 
 
@@ -726,8 +715,7 @@ def test_cost_ledger_lines_under_80_with_data():
         baseline_usd=78.90,
         biggest_model="Claude Opus 4.7",
         biggest_task_label=(
-            "deeply involved migration of authentication middleware "
-            "across three repositories"
+            "deeply involved migration of authentication middleware across three repositories"
         ),
         biggest_line_usd=45.67,
         biggest_line_sessions=12,
@@ -737,8 +725,7 @@ def test_cost_ledger_lines_under_80_with_data():
     digest = WeeklyDigest(cost_ledger=ledger)
     for i, line in enumerate(_all_lines(digest)):
         assert visible_width(line) <= MAX_LINE_WIDTH, (
-            f"line {i} ({visible_width(line)} > {MAX_LINE_WIDTH}): "
-            f"{_strip_ansi(line)!r}"
+            f"line {i} ({visible_width(line)} > {MAX_LINE_WIDTH}): {_strip_ansi(line)!r}"
         )
 
 
@@ -747,8 +734,7 @@ def test_tasks_lines_under_80_with_data():
     digest = WeeklyDigest(tasks=_realistic_tasks())
     for i, line in enumerate(_all_lines(digest)):
         assert visible_width(line) <= MAX_LINE_WIDTH, (
-            f"line {i} ({visible_width(line)} > {MAX_LINE_WIDTH}): "
-            f"{_strip_ansi(line)!r}"
+            f"line {i} ({visible_width(line)} > {MAX_LINE_WIDTH}): {_strip_ansi(line)!r}"
         )
 
 
@@ -771,8 +757,7 @@ def test_tasks_lines_under_80_with_long_labels():
     )
     for i, line in enumerate(_all_lines(digest)):
         assert visible_width(line) <= MAX_LINE_WIDTH, (
-            f"line {i} ({visible_width(line)} > {MAX_LINE_WIDTH}): "
-            f"{_strip_ansi(line)!r}"
+            f"line {i} ({visible_width(line)} > {MAX_LINE_WIDTH}): {_strip_ansi(line)!r}"
         )
 
 
@@ -997,9 +982,7 @@ def test_six_dim_panel_significant_positive_delta_renders_up_arrow():
     Locks the up-arrow path so a refactor that drops the arrow glyph
     or the sign-aware formatter trips here.
     """
-    digest = WeeklyDigest(
-        dimensions=[DimRowView(dim_key="planning", score=5.7, baseline=5.1)]
-    )
+    digest = WeeklyDigest(dimensions=[DimRowView(dim_key="planning", score=5.7, baseline=5.1)])
     text = _strip_ansi(render(digest))
     # ``format_delta`` emits "↑ +0.6" (sign-aware, one decimal).
     assert "↑ +0.6" in text
@@ -1007,9 +990,7 @@ def test_six_dim_panel_significant_positive_delta_renders_up_arrow():
 
 def test_six_dim_panel_significant_negative_delta_renders_down_arrow():
     """A delta <= -0.3 renders as '↓ -X.X' (spec section 8.3)."""
-    digest = WeeklyDigest(
-        dimensions=[DimRowView(dim_key="iteration", score=4.1, baseline=4.5)]
-    )
+    digest = WeeklyDigest(dimensions=[DimRowView(dim_key="iteration", score=4.1, baseline=4.5)])
     text = _strip_ansi(render(digest))
     assert "↓ -0.4" in text
 
@@ -1021,9 +1002,7 @@ def test_six_dim_panel_insignificant_delta_renders_tilde():
     real movement and rendering noise; a zero-or-near-zero delta must
     not be dressed up as a movement.
     """
-    digest = WeeklyDigest(
-        dimensions=[DimRowView(dim_key="tools", score=5.7, baseline=5.7)]
-    )
+    digest = WeeklyDigest(dimensions=[DimRowView(dim_key="tools", score=5.7, baseline=5.7)])
     text = _strip_ansi(render(digest))
     # Single ``~`` on the row; no arrow glyphs.
     assert "~" in text
@@ -1038,9 +1017,7 @@ def test_six_dim_panel_baseline_forming_shows_dashes():
     14 days of data. The literal ``baseline --`` stub makes the
     forming state visible to the reader.
     """
-    digest = WeeklyDigest(
-        dimensions=[DimRowView(dim_key="fit", score=6.0, baseline=None)]
-    )
+    digest = WeeklyDigest(dimensions=[DimRowView(dim_key="fit", score=6.0, baseline=None)])
     text = _strip_ansi(render(digest))
     assert "baseline --" in text
 
@@ -1051,9 +1028,7 @@ def test_six_dim_panel_baseline_forming_hides_delta():
     The 'forming' annotation takes the place of the delta so the row
     still aligns visually, but no arrow or sign is rendered.
     """
-    digest = WeeklyDigest(
-        dimensions=[DimRowView(dim_key="fit", score=6.0, baseline=None)]
-    )
+    digest = WeeklyDigest(dimensions=[DimRowView(dim_key="fit", score=6.0, baseline=None)])
     text = _strip_ansi(render(digest))
     # The forming branch shows '(forming)' in place of any delta.
     assert "(forming)" in text
@@ -1083,8 +1058,7 @@ def test_six_dim_panel_lines_under_80_with_data():
     digest = WeeklyDigest(dimensions=_realistic_dimensions())
     for i, line in enumerate(_all_lines(digest)):
         assert visible_width(line) <= MAX_LINE_WIDTH, (
-            f"line {i} ({visible_width(line)} > {MAX_LINE_WIDTH}): "
-            f"{_strip_ansi(line)!r}"
+            f"line {i} ({visible_width(line)} > {MAX_LINE_WIDTH}): {_strip_ansi(line)!r}"
         )
 
 
@@ -1103,8 +1077,7 @@ def test_six_dim_panel_lines_under_80_with_extreme_values():
     )
     for i, line in enumerate(_all_lines(digest)):
         assert visible_width(line) <= MAX_LINE_WIDTH, (
-            f"line {i} ({visible_width(line)} > {MAX_LINE_WIDTH}): "
-            f"{_strip_ansi(line)!r}"
+            f"line {i} ({visible_width(line)} > {MAX_LINE_WIDTH}): {_strip_ansi(line)!r}"
         )
 
 
@@ -1145,9 +1118,7 @@ def test_sections_appear_in_spec_order_with_dimensions_as_footer():
         )
     ]
     assert all(p >= 0 for p in positions), f"missing eyebrow(s): {positions}"
-    assert positions == sorted(positions), (
-        f"sections out of order: {positions}"
-    )
+    assert positions == sorted(positions), f"sections out of order: {positions}"
 
 
 def test_six_dim_panel_renders_six_body_lines():
@@ -1167,17 +1138,14 @@ def test_six_dim_panel_renders_six_body_lines():
     next_panel = text.find("BEHAVIORAL PATTERNS", panel_start)
     if next_panel > -1:
         line_start = text.rfind("\n", 0, next_panel)
-        panel_text = text[panel_start:line_start if line_start > -1 else next_panel]
+        panel_text = text[panel_start : line_start if line_start > -1 else next_panel]
     else:
         panel_text = text[panel_start:]
     body_lines = [
-        line for line in panel_text.split("\n")
-        if line.strip()
-        and "THE SIX DIMENSIONS" not in line
+        line for line in panel_text.split("\n") if line.strip() and "THE SIX DIMENSIONS" not in line
     ]
     assert len(body_lines) == 6, (
-        f"expected 6 body lines in panel; got {len(body_lines)}:\n"
-        + "\n".join(body_lines)
+        f"expected 6 body lines in panel; got {len(body_lines)}:\n" + "\n".join(body_lines)
     )
 
 
@@ -1207,9 +1175,7 @@ def test_six_dim_panel_renders_in_caller_provided_order():
 
 def _rollup_full(
     *,
-    display_text: str = (
-        "Before debugging, paste the error + your expected output."
-    ),
+    display_text: str = ("Before debugging, paste the error + your expected output."),
     target_dim_key: str = "verification",
     sessions_this_week: int = 7,
     sessions_prior_week: int = 5,
@@ -1262,10 +1228,7 @@ def test_masthead_renders_focus_header_and_quoted_display_text():
     rollup = _rollup_full()
     text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
     assert "Your focus this week:" in text
-    assert (
-        '"Before debugging, paste the error + your expected output."'
-        in text
-    )
+    assert '"Before debugging, paste the error + your expected output."' in text
 
 
 def test_masthead_renders_how_it_went_header():
@@ -1297,9 +1260,7 @@ def test_masthead_self_report_tally_lists_nonzero_buckets():
     section 2 example shows only the non-empty buckets ordered
     yes -> partial -> no.
     """
-    rollup = _rollup_full(
-        self_report_tally={"yes": 4, "partial": 1, "no": 2, "skip": 0}
-    )
+    rollup = _rollup_full(self_report_tally={"yes": 4, "partial": 1, "no": 2, "skip": 0})
     text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
     assert "You said:" in text
     assert "4 yes / 1 partial / 2 no" in text
@@ -1664,9 +1625,7 @@ def test_masthead_gap_line_truncates_prose_over_two_sentences():
         self_report_tally=rollup.self_report_tally,
         dim_before=rollup.dim_before,
         dim_after=rollup.dim_after,
-        gap_prose=(
-            "First short observation. Second short note. Third extra. Fourth."
-        ),
+        gap_prose=("First short observation. Second short note. Third extra. Fourth."),
     )
     text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
     assert "First short observation. Second short note..." in text
@@ -1743,6 +1702,8 @@ def test_masthead_gap_line_ignores_prose_on_agreement():
     text = _strip_ansi(render(WeeklyDigest(commitment_rollup=rollup)))
     assert _GAP_AGREE_LINE in text
     assert "spurious judge prose" not in text
+
+
 # -------------------------------------- US-038: behavioral-patterns panel
 
 
@@ -1752,28 +1713,31 @@ def _behavioral_panel_with_signals():
         BehavioralPatternRow,
         BehavioralPatternsPanel,
     )
-    return BehavioralPatternsPanel(rows=(
-        BehavioralPatternRow(
-            signal_kind="why_question",
-            label="Why-questions",
-            count=4,
-            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
-            excerpts=(
-                "why does this approach work for caching?",
-                "why is this slower than the previous version?",
+
+    return BehavioralPatternsPanel(
+        rows=(
+            BehavioralPatternRow(
+                signal_kind="why_question",
+                label="Why-questions",
+                count=4,
+                citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+                excerpts=(
+                    "why does this approach work for caching?",
+                    "why is this slower than the previous version?",
+                ),
             ),
-        ),
-        BehavioralPatternRow(
-            signal_kind="pure_delegation",
-            label="Pure delegation",
-            count=2,
-            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
-            excerpts=(
-                "write me a function",
-                "make it handle errors",
+            BehavioralPatternRow(
+                signal_kind="pure_delegation",
+                label="Pure delegation",
+                count=2,
+                citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+                excerpts=(
+                    "write me a function",
+                    "make it handle errors",
+                ),
             ),
-        ),
-    ))
+        )
+    )
 
 
 def _empty_behavioral_panel():
@@ -1782,18 +1746,22 @@ def _empty_behavioral_panel():
         BehavioralPatternRow,
         BehavioralPatternsPanel,
     )
-    return BehavioralPatternsPanel(rows=(
-        BehavioralPatternRow(
-            signal_kind="why_question",
-            label="Why-questions",
-            count=0,
-            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
-        ),
-    ))
+
+    return BehavioralPatternsPanel(
+        rows=(
+            BehavioralPatternRow(
+                signal_kind="why_question",
+                label="Why-questions",
+                count=0,
+                citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+            ),
+        )
+    )
 
 
 def _panel_inputs(panel):
     from praxis.reports.panel_inputs import PanelInputs
+
     return PanelInputs(behavioral_signals=panel)
 
 
@@ -1857,21 +1825,24 @@ def test_behavioral_patterns_zero_count_rows_are_hidden_when_others_fire():
         BehavioralPatternRow,
         BehavioralPatternsPanel,
     )
-    panel = BehavioralPatternsPanel(rows=(
-        BehavioralPatternRow(
-            signal_kind="why_question",
-            label="Why-questions",
-            count=3,
-            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
-            excerpts=("why is this slow?",),
-        ),
-        BehavioralPatternRow(
-            signal_kind="pure_delegation",
-            label="Pure delegation",
-            count=0,
-            citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
-        ),
-    ))
+
+    panel = BehavioralPatternsPanel(
+        rows=(
+            BehavioralPatternRow(
+                signal_kind="why_question",
+                label="Why-questions",
+                count=3,
+                citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+                excerpts=("why is this slow?",),
+            ),
+            BehavioralPatternRow(
+                signal_kind="pure_delegation",
+                label="Pure delegation",
+                count=0,
+                citation="Shen & Tamkin 2026 (arXiv 2601.20245)",
+            ),
+        )
+    )
     digest = WeeklyDigest(panel_inputs=_panel_inputs(panel))
     text = _strip_ansi(render(digest))
     # Why-questions row is present.
@@ -1909,11 +1880,11 @@ def test_behavioral_patterns_section_appears_after_six_dim_panel():
 # ---------------- US-039: aug/auto balance + cadence panels (terminal) -------
 
 
-from praxis.reports.digest_terminal import (  # noqa: E402
+from praxis.reports.digest_terminal import (
     _AUG_AUTO_BALANCE_CLASSIFIER_UNAVAILABLE,
     _CADENCE_NO_ACTIVITY,
 )
-from praxis.reports.panel_inputs import (  # noqa: E402
+from praxis.reports.panel_inputs import (
     AugAutoBalancePanel,
     CadencePanel,
     PanelInputs,
@@ -1971,9 +1942,7 @@ def test_aug_auto_balance_renders_classifier_unavailable():
 def test_aug_auto_balance_renders_shares_when_populated():
     """The three shares render as percentages so the reader sees the
     user's split rather than raw counts."""
-    digest = WeeklyDigest(
-        panel_inputs=_full_panel_inputs(aug_auto=_aug_auto_populated())
-    )
+    digest = WeeklyDigest(panel_inputs=_full_panel_inputs(aug_auto=_aug_auto_populated()))
     text = _strip_ansi(render(digest))
     # 2/4 = 50% aug; 1/4 = 25% auto; 1/4 = 25% mixed
     assert "Augmentation: 50%" in text
@@ -1984,9 +1953,7 @@ def test_aug_auto_balance_renders_shares_when_populated():
 def test_aug_auto_balance_renders_industry_anchor_citation():
     """The Anthropic Economic Index anchor (~52%/45%) is cited inline
     as a footnote so the reader can compare against the industry baseline."""
-    digest = WeeklyDigest(
-        panel_inputs=_full_panel_inputs(aug_auto=_aug_auto_populated())
-    )
+    digest = WeeklyDigest(panel_inputs=_full_panel_inputs(aug_auto=_aug_auto_populated()))
     text = _strip_ansi(render(digest))
     assert "Anthropic Economic Index" in text
     assert "52%" in text
@@ -2036,27 +2003,21 @@ def test_cadence_omits_high_adopter_label_when_no_activity():
 def test_cadence_renders_streak_when_populated():
     """The streak shows as 'N of 21 days' so the reader can see how
     much of the window they were active."""
-    digest = WeeklyDigest(
-        panel_inputs=_full_panel_inputs(cadence=_cadence_populated())
-    )
+    digest = WeeklyDigest(panel_inputs=_full_panel_inputs(cadence=_cadence_populated()))
     text = _strip_ansi(render(digest))
     assert "Weekday streak: 4 of 21 days" in text
 
 
 def test_cadence_renders_spectrum_label_when_populated():
     """The high-adopter position renders as a human-facing label."""
-    digest = WeeklyDigest(
-        panel_inputs=_full_panel_inputs(cadence=_cadence_populated())
-    )
+    digest = WeeklyDigest(panel_inputs=_full_panel_inputs(cadence=_cadence_populated()))
     text = _strip_ansi(render(digest))
     assert "Spectrum: Moderate-adopter" in text
 
 
 def test_cadence_renders_arxiv_citation():
     """The arXiv 2509.19708 anchor is cited inline (US-039 acceptance)."""
-    digest = WeeklyDigest(
-        panel_inputs=_full_panel_inputs(cadence=_cadence_populated())
-    )
+    digest = WeeklyDigest(panel_inputs=_full_panel_inputs(cadence=_cadence_populated()))
     text = _strip_ansi(render(digest))
     assert "arXiv 2509.19708" in text
 
@@ -2079,11 +2040,11 @@ def test_aug_auto_and_cadence_panels_respect_80_column_budget():
 # ---------------- US-040: repeat-task radar + verification calibration -------
 
 
-from praxis.reports.digest_terminal import (  # noqa: E402
+from praxis.reports.digest_terminal import (
     _REPEAT_TASK_EMPTY,
     _VERIFICATION_CALIBRATION_NO_SESSIONS,
 )
-from praxis.reports.panel_inputs import (  # noqa: E402
+from praxis.reports.panel_inputs import (
     REPEAT_TASK_SKILL_TAG,
     RepeatTaskRadarPanel,
     RepeatTaskRow,
@@ -2095,16 +2056,12 @@ def _repeat_task_populated() -> RepeatTaskRadarPanel:
     return RepeatTaskRadarPanel(
         rows=(
             RepeatTaskRow(
-                canonical_first_sentence=(
-                    "fix the failing auth test"
-                ),
+                canonical_first_sentence=("fix the failing auth test"),
                 occurrences=3,
                 estimated_minutes_per_occurrence=12.0,
             ),
             RepeatTaskRow(
-                canonical_first_sentence=(
-                    "regenerate the changelog entry"
-                ),
+                canonical_first_sentence=("regenerate the changelog entry"),
                 occurrences=4,
                 estimated_minutes_per_occurrence=8.5,
             ),
@@ -2137,9 +2094,7 @@ def test_repeat_task_radar_eyebrow_always_renders():
     document shape is stable across empty + populated runs."""
     text_empty = _strip_ansi(render(WeeklyDigest()))
     text_full = _strip_ansi(
-        render(
-            WeeklyDigest(panel_inputs=_us040_panel_inputs(repeat_task=_repeat_task_populated()))
-        )
+        render(WeeklyDigest(panel_inputs=_us040_panel_inputs(repeat_task=_repeat_task_populated())))
     )
     assert "REPEAT-TASK RADAR" in text_empty
     assert "REPEAT-TASK RADAR" in text_full
@@ -2165,9 +2120,7 @@ def test_repeat_task_radar_no_panel_renders_empty_state():
 def test_repeat_task_radar_renders_each_row():
     """Each RepeatTask renders its canonical sentence, occurrence
     count, per-occurrence minutes, and the 'Could become a skill' tag."""
-    digest = WeeklyDigest(
-        panel_inputs=_us040_panel_inputs(repeat_task=_repeat_task_populated())
-    )
+    digest = WeeklyDigest(panel_inputs=_us040_panel_inputs(repeat_task=_repeat_task_populated()))
     text = _strip_ansi(render(digest))
     assert "fix the failing auth test" in text
     assert "regenerate the changelog entry" in text
@@ -2179,9 +2132,7 @@ def test_repeat_task_radar_renders_each_row():
 def test_repeat_task_radar_renders_estimated_minutes():
     """The per-occurrence minutes show up so the reader knows the
     rough reclaimable time per occurrence."""
-    digest = WeeklyDigest(
-        panel_inputs=_us040_panel_inputs(repeat_task=_repeat_task_populated())
-    )
+    digest = WeeklyDigest(panel_inputs=_us040_panel_inputs(repeat_task=_repeat_task_populated()))
     text = _strip_ansi(render(digest))
     # 12.0 minutes renders as "12 min"; 8.5 renders as "8.5 min".
     assert "12 min" in text
@@ -2191,9 +2142,7 @@ def test_repeat_task_radar_renders_estimated_minutes():
 def test_repeat_task_radar_renders_citation():
     """The OpenAI + Anthropic Skills citation renders inline as a
     small footnote (US-040 AC)."""
-    digest = WeeklyDigest(
-        panel_inputs=_us040_panel_inputs(repeat_task=_repeat_task_populated())
-    )
+    digest = WeeklyDigest(panel_inputs=_us040_panel_inputs(repeat_task=_repeat_task_populated()))
     text = _strip_ansi(render(digest))
     assert "OpenAI" in text
     assert "Anthropic Skills" in text
@@ -2222,9 +2171,7 @@ def test_verification_calibration_renders_no_sessions_empty_state():
 
 def test_verification_calibration_renders_each_bucket_count():
     """All four buckets render in display order."""
-    digest = WeeklyDigest(
-        panel_inputs=_us040_panel_inputs(verification=_verification_populated())
-    )
+    digest = WeeklyDigest(panel_inputs=_us040_panel_inputs(verification=_verification_populated()))
     text = _strip_ansi(render(digest))
     assert "Source-check: 2 sessions" in text
     assert "Test-run: 3 sessions" in text
@@ -2235,9 +2182,7 @@ def test_verification_calibration_renders_each_bucket_count():
 def test_verification_calibration_renders_citation():
     """The Sonar / Stack Overflow 2025 / automation-bias citation
     renders inline (US-040 AC)."""
-    digest = WeeklyDigest(
-        panel_inputs=_us040_panel_inputs(verification=_verification_populated())
-    )
+    digest = WeeklyDigest(panel_inputs=_us040_panel_inputs(verification=_verification_populated()))
     text = _strip_ansi(render(digest))
     assert "Sonar" in text
     assert "Stack Overflow" in text
@@ -2262,12 +2207,12 @@ def test_us040_panels_respect_80_column_budget():
 # ---------------- US-041: spec adoption + context engineering + gaps ---------
 
 
-from praxis.reports.digest_terminal import (  # noqa: E402
+from praxis.reports.digest_terminal import (
     _CONTEXT_ENGINEERING_NO_ARTIFACTS,
     _KNOWLEDGE_GAP_EMPTY,
     _SPECIFICATION_ADOPTION_NO_SESSIONS,
 )
-from praxis.reports.panel_inputs import (  # noqa: E402
+from praxis.reports.panel_inputs import (
     ContextEngineeringDepthPanel,
     ContextEngineeringRow,
     KnowledgeGapDistributionPanel,
@@ -2361,9 +2306,7 @@ def test_specification_adoption_eyebrow_always_renders():
     text_empty = _strip_ansi(render(WeeklyDigest()))
     text_full = _strip_ansi(
         render(
-            WeeklyDigest(
-                panel_inputs=_us041_panel_inputs(specification=_specification_populated())
-            )
+            WeeklyDigest(panel_inputs=_us041_panel_inputs(specification=_specification_populated()))
         )
     )
     assert "SPECIFICATION ADOPTION" in text_empty
@@ -2422,9 +2365,7 @@ def test_context_engineering_renders_no_artifacts_message():
     """When no scaffolding kinds fired, the panel emits the verbatim
     no-artifacts message."""
     panel = ContextEngineeringDepthPanel()
-    digest = WeeklyDigest(
-        panel_inputs=_us041_panel_inputs(context_engineering=panel)
-    )
+    digest = WeeklyDigest(panel_inputs=_us041_panel_inputs(context_engineering=panel))
     text = _strip_ansi(render(digest))
     assert _CONTEXT_ENGINEERING_NO_ARTIFACTS in text
 
@@ -2433,9 +2374,7 @@ def test_context_engineering_renders_present_kinds_only():
     """Rows with zero count are skipped so the reader sees only what
     fired this week."""
     digest = WeeklyDigest(
-        panel_inputs=_us041_panel_inputs(
-            context_engineering=_context_engineering_populated()
-        )
+        panel_inputs=_us041_panel_inputs(context_engineering=_context_engineering_populated())
     )
     text = _strip_ansi(render(digest))
     assert "CLAUDE.md: 2 sessions" in text
@@ -2448,9 +2387,7 @@ def test_context_engineering_renders_present_kinds_only():
 def test_context_engineering_renders_citation():
     """The DORA 2025 + Anthropic Skills citation renders inline."""
     digest = WeeklyDigest(
-        panel_inputs=_us041_panel_inputs(
-            context_engineering=_context_engineering_populated()
-        )
+        panel_inputs=_us041_panel_inputs(context_engineering=_context_engineering_populated())
     )
     text = _strip_ansi(render(digest))
     assert "DORA 2025" in text
@@ -2462,11 +2399,7 @@ def test_knowledge_gap_eyebrow_always_renders():
     text_empty = _strip_ansi(render(WeeklyDigest()))
     text_full = _strip_ansi(
         render(
-            WeeklyDigest(
-                panel_inputs=_us041_panel_inputs(
-                    knowledge_gap=_knowledge_gap_populated()
-                )
-            )
+            WeeklyDigest(panel_inputs=_us041_panel_inputs(knowledge_gap=_knowledge_gap_populated()))
         )
     )
     assert "KNOWLEDGE GAPS" in text_empty
@@ -2539,11 +2472,11 @@ def test_us041_panels_respect_80_column_budget():
 # =========================================================================
 
 
-from praxis.reports.digest_terminal import (  # noqa: E402
+from praxis.reports.digest_terminal import (
     _COST_EFFECTIVENESS_NO_COST_DATA,
     _TOOL_AGENT_LADDER_NO_ACTIVITY,
 )
-from praxis.reports.panel_inputs import (  # noqa: E402
+from praxis.reports.panel_inputs import (
     LadderRungRow,
     RefinedCostEffectivenessPanel,
     ToolAgentLadderPanel,
@@ -2590,11 +2523,7 @@ def test_tool_agent_ladder_eyebrow_always_renders():
     """The eyebrow renders regardless of data state."""
     text_empty = _strip_ansi(render(WeeklyDigest()))
     text_full = _strip_ansi(
-        render(
-            WeeklyDigest(
-                panel_inputs=_us042_panel_inputs(ladder=_ladder_populated())
-            )
-        )
+        render(WeeklyDigest(panel_inputs=_us042_panel_inputs(ladder=_ladder_populated())))
     )
     assert "TOOL/AGENT LADDER" in text_empty
     assert "TOOL/AGENT LADDER" in text_full
@@ -2609,18 +2538,14 @@ def test_tool_agent_ladder_empty_state_renders_placeholder():
 
 def test_tool_agent_ladder_renders_max_rung_headline():
     """A populated panel surfaces the max-rung headline ('Max rung: Skills')."""
-    digest = WeeklyDigest(
-        panel_inputs=_us042_panel_inputs(ladder=_ladder_populated())
-    )
+    digest = WeeklyDigest(panel_inputs=_us042_panel_inputs(ladder=_ladder_populated()))
     text = _strip_ansi(render(digest))
     assert "Max rung: Skills" in text
 
 
 def test_tool_agent_ladder_renders_per_rung_counts():
     """A populated panel lists per-rung counts in rung order."""
-    digest = WeeklyDigest(
-        panel_inputs=_us042_panel_inputs(ladder=_ladder_populated())
-    )
+    digest = WeeklyDigest(panel_inputs=_us042_panel_inputs(ladder=_ladder_populated()))
     text = _strip_ansi(render(digest))
     assert "Prompt-only: 2 sessions" in text
     assert "Tools-on: 3 sessions" in text
@@ -2631,9 +2556,7 @@ def test_tool_agent_ladder_renders_per_rung_counts():
 def test_tool_agent_ladder_renders_citation():
     """The Anthropic Skills/hooks/subagents + OpenAI harness-engineering
     citation renders inline."""
-    digest = WeeklyDigest(
-        panel_inputs=_us042_panel_inputs(ladder=_ladder_populated())
-    )
+    digest = WeeklyDigest(panel_inputs=_us042_panel_inputs(ladder=_ladder_populated()))
     text = _strip_ansi(render(digest))
     assert "Anthropic" in text
     assert "OpenAI" in text
@@ -2645,9 +2568,7 @@ def test_cost_effectiveness_eyebrow_always_renders():
     text_full = _strip_ansi(
         render(
             WeeklyDigest(
-                panel_inputs=_us042_panel_inputs(
-                    cost_effectiveness=_cost_effectiveness_populated()
-                )
+                panel_inputs=_us042_panel_inputs(cost_effectiveness=_cost_effectiveness_populated())
             )
         )
     )
@@ -2670,9 +2591,7 @@ def test_cost_effectiveness_renders_canonical_sentence():
     """US-042 AC: the panel renders 'You spent $X on <higher> for tasks
     <lower> could have done = $Y overspend' verbatim when overspend > 0."""
     digest = WeeklyDigest(
-        panel_inputs=_us042_panel_inputs(
-            cost_effectiveness=_cost_effectiveness_populated()
-        )
+        panel_inputs=_us042_panel_inputs(cost_effectiveness=_cost_effectiveness_populated())
     )
     text = _strip_ansi(render(digest))
     assert "You spent $12.34 on Claude Opus 4.7" in text
@@ -2685,9 +2604,7 @@ def test_cost_effectiveness_renders_clean_signal_when_no_overspend():
     the panel renders a positive-signal sentence (not the empty-state
     placeholder, which would conflate 'no data' with 'no waste')."""
     panel = RefinedCostEffectivenessPanel(has_cost_data=True)
-    digest = WeeklyDigest(
-        panel_inputs=_us042_panel_inputs(cost_effectiveness=panel)
-    )
+    digest = WeeklyDigest(panel_inputs=_us042_panel_inputs(cost_effectiveness=panel))
     text = _strip_ansi(render(digest))
     assert "No tier-mismatch overspend" in text
     assert _COST_EFFECTIVENESS_NO_COST_DATA not in text

@@ -102,7 +102,7 @@
   - The single "scorecard" occurrence I removed lived at README.md L223. The directory name itself (`~/Documents/code/scorecard/...`) is OUTSIDE README content and is not asserted against. PLAN.md still talks about "scorecard" in the context of the historical positioning ("repositioned from scorecard to coach") -- that is intentional and not a regression.
   - The new test file follows the pyproject `[tool.pytest.ini_options] testpaths = ["tests"]` discovery; no conftest fixtures are required because the test only reads README.md as a static file at the repo root computed via `Path(__file__).resolve().parent.parent`.
   - Gotchas:
-    * Em dashes ("—") in the original README were converted to "-", ":", or "and" per the user's `~/.claude/CLAUDE.md` style rule ("No em dashes - use hyphens or colons instead"). Future README edits should keep that convention.
+    * Em dashes (U+2014) in the original README were converted to "-", ":", or "and" per the user's `~/.claude/CLAUDE.md` style rule ("No em dashes - use hyphens or colons instead"). Future README edits should keep that convention.
     * The README mentions `praxis uninstall-coach` (the symmetric command described in PLAN.md). It does not exist yet either; same caveat as the loop verbs.
     * `test_readme_does_not_mention_scorecard` is defensive beyond US-043 AC #3 (which only requires the four headings/verbs). If a future ad-hoc edit reintroduces "scorecard," this guard fires immediately.
 ---

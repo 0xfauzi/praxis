@@ -13,6 +13,7 @@ The tests go through ``main(argv)`` rather than shelling out to a subprocess
 so they stay fast and remain valid even when the praxis console script is
 not on PATH (e.g. when running from a fresh checkout without `pip install`).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -22,7 +23,6 @@ from contextlib import redirect_stderr, redirect_stdout
 import pytest
 
 from praxis.cli.__main__ import build_parser, main
-
 
 LOOP_VERBS = ("commit", "nudge", "reflect", "review", "install-coach")
 MORE_VERBS = (
@@ -105,9 +105,7 @@ def test_loop_section_precedes_more_section():
     loop_idx = text.find("Loop:")
     more_idx = text.find("More:")
     assert loop_idx != -1 and more_idx != -1
-    assert loop_idx < more_idx, (
-        "Loop heading must appear before More heading in `praxis --help`"
-    )
+    assert loop_idx < more_idx, "Loop heading must appear before More heading in `praxis --help`"
 
 
 # --- AC #3: 'commit' appears before 'scan' in the help text ---
