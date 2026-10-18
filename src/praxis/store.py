@@ -96,7 +96,57 @@ CREATE TABLE IF NOT EXISTS attributions (
                                         AND reverted IS NULL))
 ) STRICT;
 CREATE INDEX IF NOT EXISTS attributions_session ON attributions (session_id);
+-- Which repository a session worked in, by hashed toplevel. Written on every snapshot.
+CREATE TABLE IF NOT EXISTS session_repos (
+  session_id TEXT NOT NULL,
+  repo_id    TEXT NOT NULL,
+  ts         TEXT NOT NULL,
+  PRIMARY KEY (session_id, repo_id)
+) STRICT;
+CREATE TABLE IF NOT EXISTS repo_config (
+  repo_id  TEXT PRIMARY KEY,
+  test_cmd TEXT NOT NULL,
+  ts       TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS items (
+  item_id      TEXT PRIMARY KEY,
+  repo_id      TEXT NOT NULL,
+  created_ts   TEXT NOT NULL,
+  kind         TEXT NOT NULL CHECK (kind IN ('write-it')),
+  file         TEXT,
+  qualname     TEXT,
+  agent_lines  INTEGER CHECK (agent_lines IS NULL OR agent_lines >= 0),
+  total_lines  INTEGER CHECK (total_lines IS NULL OR total_lines > 0),
+  min_fraction REAL NOT NULL CHECK (min_fraction >= 0 AND min_fraction <= 1),
+  validation   TEXT NOT NULL,
+  claim_class  TEXT NOT NULL CHECK (claim_class = 'derived'),
+  sources      TEXT NOT NULL CHECK (json_valid(sources) AND sources <> '[]'),
+  reducer_version TEXT NOT NULL,
+  assumptions  TEXT NOT NULL CHECK (json_valid(assumptions)),
+  -- A refused drill records an item with no function; a function always has a file.
+  CHECK ((file IS NULL) = (qualname IS NULL))
+) STRICT;
+CREATE TABLE IF NOT EXISTS results (
+  id            INTEGER PRIMARY KEY,
+  item_id       TEXT NOT NULL REFERENCES items (item_id),
+  ts            TEXT NOT NULL,
+  outcome       TEXT NOT NULL CHECK (outcome IN ('pass', 'fail', 'aborted', 'refused')),
+  elapsed_s     REAL NOT NULL CHECK (elapsed_s >= 0),
+  test_cmd_hash TEXT NOT NULL,
+  claim_class   TEXT NOT NULL CHECK (claim_class = 'observed'),
+  coverage      TEXT NOT NULL CHECK (coverage = 'full'),
+  sources       TEXT NOT NULL CHECK (json_valid(sources) AND sources <> '[]'),
+  reducer_version TEXT NOT NULL,
+  warnings      TEXT NOT NULL CHECK (json_valid(warnings))
+) STRICT;
 """
+
+ITEM_ASSUMPTIONS = [
+    "a function's lines are the agent's when their hashes match agent deltas recorded"
+    " for this repository, so a line the owner retyped identically still counts as the"
+    " agent's",
+    "the tests the owner configured are the only judge of a body",
+]
 
 
 @dataclass(frozen=True)
@@ -115,6 +165,32 @@ class Attribution:
     assumptions: list[str]
     warnings: list[str] = field(default_factory=list)
     claim_class: str = "derived"
+
+
+@dataclass(frozen=True)
+class ItemRow:
+    item_id: str
+    repo_id: str
+    created_ts: str
+    kind: str
+    file: str | None
+    qualname: str | None
+    agent_lines: int | None
+    total_lines: int | None
+    min_fraction: float
+    sources: list[str]
+    validation: str
+
+
+@dataclass(frozen=True)
+class ResultRow:
+    item_id: str
+    ts: str
+    outcome: str
+    elapsed_s: float
+    test_cmd_hash: str
+    sources: list[str]
+    warnings: list[str]
 
 
 class Store:
@@ -274,7 +350,110 @@ class Store:
                 ],
             )
 
+    def touch_session_repo(self, session_id: str, repo_id: str, ts: str) -> None:
+        self.db.execute(
+            "INSERT OR IGNORE INTO session_repos (session_id, repo_id, ts)"
+            " VALUES (?, ?, ?)",
+            (session_id, repo_id, ts),
+        )
+
+    def set_test_cmd(self, repo_id: str, test_cmd: str, ts: str) -> None:
+        self.db.execute(
+            "INSERT OR REPLACE INTO repo_config (repo_id, test_cmd, ts)"
+            " VALUES (?, ?, ?)",
+            (repo_id, test_cmd, ts),
+        )
+
+    def item(self, row: ItemRow) -> None:
+        self.db.execute(
+            "INSERT INTO items (item_id, repo_id, created_ts, kind, file, qualname,"
+            " agent_lines, total_lines, min_fraction, validation, claim_class, sources,"
+            " reducer_version, assumptions)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'derived', ?, ?, ?)",
+            (
+                row.item_id,
+                row.repo_id,
+                row.created_ts,
+                row.kind,
+                row.file,
+                row.qualname,
+                row.agent_lines,
+                row.total_lines,
+                row.min_fraction,
+                row.validation,
+                json.dumps(row.sources),
+                REDUCER_VERSION,
+                json.dumps(ITEM_ASSUMPTIONS),
+            ),
+        )
+
+    def result(self, row: ResultRow) -> None:
+        self.db.execute(
+            "INSERT INTO results (item_id, ts, outcome, elapsed_s, test_cmd_hash,"
+            " claim_class, coverage, sources, reducer_version, warnings)"
+            " VALUES (?, ?, ?, ?, ?, 'observed', 'full', ?, ?, ?)",
+            (
+                row.item_id,
+                row.ts,
+                row.outcome,
+                row.elapsed_s,
+                row.test_cmd_hash,
+                json.dumps(row.sources),
+                REDUCER_VERSION,
+                json.dumps(row.warnings),
+            ),
+        )
+
     # -- reads ----------------------------------------------------------------------
+
+    def test_cmd(self, repo_id: str) -> str | None:
+        row = self.db.execute(
+            "SELECT test_cmd FROM repo_config WHERE repo_id = ?", (repo_id,)
+        ).fetchone()
+        return None if row is None else str(row[0])
+
+    def agent_files(self, repo_id: str) -> list[str]:
+        return [
+            str(r[0])
+            for r in self.db.execute(
+                "SELECT DISTINCT d.file FROM agent_deltas d"
+                " JOIN session_repos s ON s.session_id = d.session_id"
+                " WHERE s.repo_id = ? ORDER BY d.file",
+                (repo_id,),
+            )
+        ]
+
+    def agent_hashes(self, repo_id: str, file: str) -> tuple[set[str], list[str]]:
+        """Line hashes the agent added to one file across every session on the repo, and
+        the sessions they came from. A hash the agent later removed (sum <= 0) is not
+        the agent's any more."""
+        hashes: set[str] = set()
+        for h, total in self.db.execute(
+            "SELECT d.line_hash, SUM(d.delta) FROM agent_deltas d"
+            " JOIN session_repos s ON s.session_id = d.session_id"
+            " WHERE s.repo_id = ? AND d.file = ? GROUP BY d.line_hash",
+            (repo_id, file),
+        ):
+            if total > 0:
+                hashes.add(str(h))
+        sessions = [
+            str(r[0])
+            for r in self.db.execute(
+                "SELECT DISTINCT d.session_id FROM agent_deltas d"
+                " JOIN session_repos s ON s.session_id = d.session_id"
+                " WHERE s.repo_id = ? AND d.file = ? ORDER BY d.session_id",
+                (repo_id, file),
+            )
+        ]
+        return hashes, sessions
+
+    def item_rows(self) -> list[sqlite3.Row]:
+        self.db.row_factory = sqlite3.Row
+        return list(self.db.execute("SELECT * FROM items ORDER BY created_ts"))
+
+    def result_rows(self) -> list[sqlite3.Row]:
+        self.db.row_factory = sqlite3.Row
+        return list(self.db.execute("SELECT * FROM results ORDER BY id"))
 
     def baseline_of(self, session_id: str) -> Files | None:
         rows = self.db.execute(

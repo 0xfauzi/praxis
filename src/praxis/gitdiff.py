@@ -45,6 +45,24 @@ def line_hash(kind: bytes, line: bytes) -> str:
     return hashlib.sha256(kind + b"\x00" + line).hexdigest()[:32]
 
 
+def repo_id(toplevel_path: str) -> str:
+    """How the ledger names a repository: a hash of its toplevel path, not the path."""
+    return hashlib.sha256(toplevel_path.encode("utf-8", "surrogateescape")).hexdigest()[
+        :16
+    ]
+
+
+def toplevel(cwd: str | Path, timeout_s: float = GIT_TIMEOUT_S) -> str | None:
+    """The repository root for ``cwd``; None without a repository or without git."""
+    try:
+        top = _git(cwd, "rev-parse", "--show-toplevel", timeout=timeout_s)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if top.returncode != 0:
+        return None
+    return top.stdout.decode("utf-8", "surrogateescape").strip()
+
+
 def _git(
     cwd: str | Path, *args: str, timeout: float
 ) -> subprocess.CompletedProcess[bytes]:

@@ -45,10 +45,13 @@ invariants and the commands. Enforceable rules live in hooks and validators, not
    through the model, the ledger and the report. A skill with no drill result is unrated,
    not rated at a starting number. "0 delegations" and "delegation was not observable for
    this session" are different statements that the coverage field keeps apart.
-5. **No prompt or assistant text is ever persisted.** Transcripts are read at analysis time
-   from where the agent wrote them and the store holds only what was derived, with its
-   source cited as session id and turn index. The store's CHECK constraints and the
-   integration suite enforce the absence.
+5. **No prompt, assistant or code text is ever persisted.** Transcripts are read at analysis
+   time from where the agent wrote them and the store holds only what was derived, with
+   its source cited as session id and turn index. The identifiers that name a thing (a
+   repo-relative path, a function's qualified name, a repository's hashed root) are
+   stored; no line of anyone's code is. A drill holds the original bytes of the one file
+   it strips only for the drill's duration, in a named backup it deletes on restore. The
+   integration suite reads the database bytes to enforce the absence.
 6. **Standard library only beside the agent, and the judge client lives in one module.**
    `dependencies` in pyproject.toml is empty and stays empty. The one network client, to the
    judge model, is `src/praxis/judge.py`; the `judge-isolation` hook refuses

@@ -11,7 +11,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from praxis.gitdiff import Snap, Unobservable, snapshot
+from praxis.gitdiff import Snap, Unobservable, repo_id, snapshot
 from praxis.store import Attribution, Files, Store
 
 MUTATING_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"})
@@ -48,7 +48,7 @@ def handle(payload: dict[str, Any], store: Store, now: str) -> Result:
     tool_use_id = _str(payload, "tool_use_id")
 
     if event == "SessionStart":
-        return _session_start(session, cwd, store)
+        return _session_start(session, cwd, store, now)
     if event == "PreToolUse":
         return _pre_tool(session, cwd, tool, tool_use_id, store, now)
     if event in ("PostToolUse", "PostToolUseFailure"):
@@ -58,10 +58,18 @@ def handle(payload: dict[str, Any], store: Store, now: str) -> Result:
     return Result("ok", "event not used by the recorder")
 
 
-def _session_start(session: str, cwd: str, store: Store) -> Result:
+def _snap(session: str, cwd: str, store: Store, now: str) -> Snap | Unobservable:
+    """One snapshot, and the session-to-repository link the instrument reads later."""
+    snap = snapshot(cwd)
+    if not isinstance(snap, Unobservable):
+        store.touch_session_repo(session, repo_id(snap.toplevel), now)
+    return snap
+
+
+def _session_start(session: str, cwd: str, store: Store, now: str) -> Result:
     if store.has_baseline(session):
         return Result("ok", "baseline kept from an earlier SessionStart")
-    snap = snapshot(cwd)
+    snap = _snap(session, cwd, store, now)
     if isinstance(snap, Unobservable):
         return Result("unobservable", snap.reason)
     store.baseline(session, snap.files)
@@ -82,7 +90,7 @@ def _pre_tool(
         return Result("ok", "not a mutating tool")
     if tool_use_id is None:
         return Result("unobservable", "payload lacks tool_use_id")
-    snap = snapshot(cwd)
+    snap = _snap(session, cwd, store, now)
     if isinstance(snap, Unobservable):
         return Result("unobservable", snap.reason)
     store.pending_put(session, tool_use_id, now, snap.files)
@@ -104,7 +112,7 @@ def _post_tool(
     pre = store.pending_take(session, tool_use_id)
     if pre is None:
         return Result("unobservable", "no pre snapshot for this tool_use_id")
-    snap = snapshot(cwd)
+    snap = _snap(session, cwd, store, now)
     if isinstance(snap, Unobservable):
         return Result("unobservable", snap.reason)
     changes = _delta(pre, snap.files)
@@ -127,7 +135,7 @@ def _delta(pre: Files, post: Files) -> list[tuple[str, str, int]]:
 
 
 def _boundary(session: str, cwd: str, trigger: str, store: Store, now: str) -> Result:
-    snap = snapshot(cwd)
+    snap = _snap(session, cwd, store, now)
     if isinstance(snap, Unobservable):
         return Result("unobservable", snap.reason)
     baseline = store.baseline_of(session)
