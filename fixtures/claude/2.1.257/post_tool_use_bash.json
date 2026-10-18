@@ -1,0 +1,24 @@
+{
+ "cwd": "<repo>",
+ "duration_ms": 586,
+ "effort": {
+  "level": "xhigh"
+ },
+ "hook_event_name": "PostToolUse",
+ "permission_mode": "bypassPermissions",
+ "prompt_id": "6568e6d5-e826-443f-96d9-7c9932036328",
+ "session_id": "ee208626-febb-4959-9378-5ce0f10bf44d",
+ "tool_input": {
+  "command": "uv run pytest 2>&1 | tail -50"
+ },
+ "tool_name": "Bash",
+ "tool_response": {
+  "interrupted": false,
+  "isImage": false,
+  "noOutputExpected": false,
+  "stderr": "",
+  "stdout": "warning: `VIRTUAL_ENV=<home>/Documents/code/telltale/.claude/worktrees/agent-a8427aac24b8efa9d/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nerror: Querying Python at `<repo>/.venv/bin/python3` failed with exit status signal: 6 (SIGABRT)\n\n[stderr]\ndyld[95840]: Library not loaded: @executable_path/../lib/libpython3.12.dylib\n  Referenced from: <4C4C444D-5555-3144-A1A1-03B62E0D6878> <repo>/.venv/bin/python3\n  Reason: tried: '<repo>/.venv/lib/libpython3.12.dylib' (no such file)"
+ },
+ "tool_use_id": "toolu_01DtQnngqFkpvWLfh7HJrAQw",
+ "transcript_path": "<home>/.claude/projects/<home-slug>-Documents-code-telltale--claude-worktrees-agent-a8427aac24b8efa9d-experiments-E01-out-S1-repo/ee208626-febb-4959-9378-5ce0f10bf44d.jsonl"
+}

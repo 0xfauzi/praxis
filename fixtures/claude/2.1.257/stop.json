@@ -1,0 +1,15 @@
+{
+ "background_tasks": [],
+ "cwd": "<repo>",
+ "effort": {
+  "level": "xhigh"
+ },
+ "hook_event_name": "Stop",
+ "last_assistant_message": "Both tests pass. Fixed `divide` in `pkg/calc.py:11` to raise `ValueError(\"divide by zero\")` when `right == 0` instead of letting `ZeroDivisionError` propagate.",
+ "permission_mode": "bypassPermissions",
+ "prompt_id": "6568e6d5-e826-443f-96d9-7c9932036328",
+ "session_crons": [],
+ "session_id": "ee208626-febb-4959-9378-5ce0f10bf44d",
+ "stop_hook_active": false,
+ "transcript_path": "<home>/.claude/projects/<home-slug>-Documents-code-telltale--claude-worktrees-agent-a8427aac24b8efa9d-experiments-E01-out-S1-repo/ee208626-febb-4959-9378-5ce0f10bf44d.jsonl"
+}

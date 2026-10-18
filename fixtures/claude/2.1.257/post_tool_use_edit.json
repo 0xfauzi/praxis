@@ -1,0 +1,51 @@
+{
+ "cwd": "<repo>",
+ "duration_ms": 3,
+ "effort": {
+  "level": "xhigh"
+ },
+ "hook_event_name": "PostToolUse",
+ "permission_mode": "bypassPermissions",
+ "prompt_id": "6568e6d5-e826-443f-96d9-7c9932036328",
+ "session_id": "ee208626-febb-4959-9378-5ce0f10bf44d",
+ "tool_input": {
+  "file_path": "<repo>/pkg/calc.py",
+  "new_string": "def divide(left: float, right: float) -> float:\n    \"\"\"Return left divided by right.\"\"\"\n    if right == 0:\n        raise ValueError(\"divide by zero\")\n    return left / right",
+  "old_string": "def divide(left: float, right: float) -> float:\n    \"\"\"Return left divided by right.\n\n    The zero case is unguarded on purpose. tests/test_calc.py asserts a\n    ValueError that this code does not raise, so a fresh copy of this fixture\n    has exactly one failing test for a scenario to fix.\n    \"\"\"\n    return left / right",
+  "replace_all": false
+ },
+ "tool_name": "Edit",
+ "tool_response": {
+  "filePath": "<repo>/pkg/calc.py",
+  "newString": "def divide(left: float, right: float) -> float:\n    \"\"\"Return left divided by right.\"\"\"\n    if right == 0:\n        raise ValueError(\"divide by zero\")\n    return left / right",
+  "oldString": "def divide(left: float, right: float) -> float:\n    \"\"\"Return left divided by right.\n\n    The zero case is unguarded on purpose. tests/test_calc.py asserts a\n    ValueError that this code does not raise, so a fresh copy of this fixture\n    has exactly one failing test for a scenario to fix.\n    \"\"\"\n    return left / right",
+  "originalFile": "\"\"\"Two arithmetic helpers. divide carries the bug this fixture exists to show.\"\"\"\n\nfrom __future__ import annotations\n\n\ndef add(left: float, right: float) -> float:\n    \"\"\"Return the sum of two numbers.\"\"\"\n    return left + right\n\n\ndef divide(left: float, right: float) -> float:\n    \"\"\"Return left divided by right.\n\n    The zero case is unguarded on purpose. tests/test_calc.py asserts a\n    ValueError that this code does not raise, so a fresh copy of this fixture\n    has exactly one failing test for a scenario to fix.\n    \"\"\"\n    return left / right\n",
+  "replaceAll": false,
+  "structuredPatch": [
+   {
+    "lines": [
+     " ",
+     " ",
+     " def divide(left: float, right: float) -> float:",
+     "-    \"\"\"Return left divided by right.",
+     "-",
+     "-    The zero case is unguarded on purpose. tests/test_calc.py asserts a",
+     "-    ValueError that this code does not raise, so a fresh copy of this fixture",
+     "-    has exactly one failing test for a scenario to fix.",
+     "-    \"\"\"",
+     "+    \"\"\"Return left divided by right.\"\"\"",
+     "+    if right == 0:",
+     "+        raise ValueError(\"divide by zero\")",
+     "     return left / right"
+    ],
+    "newLines": 7,
+    "newStart": 9,
+    "oldLines": 10,
+    "oldStart": 9
+   }
+  ],
+  "userModified": false
+ },
+ "tool_use_id": "toolu_01VPCXysHpysoBSMX1mETQYF",
+ "transcript_path": "<home>/.claude/projects/<home-slug>-Documents-code-telltale--claude-worktrees-agent-a8427aac24b8efa9d-experiments-E01-out-S1-repo/ee208626-febb-4959-9378-5ce0f10bf44d.jsonl"
+}

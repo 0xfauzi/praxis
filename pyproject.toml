@@ -54,6 +54,11 @@ extend-exclude = [
   # NOT source. `ruff format .` reformats Python inside Markdown fences (measured in
   # telltale with ruff 0.16.5), and code quoted under docs/ is evidence or a quoted plan.
   "docs",
+  # The runners under experiments/E##/ are the record of what ran when the write-up in
+  # docs/experiments/E##.md was produced. Reformatting them would make the artefact a
+  # record of this repository's formatter. New runners meet the rules by being written to
+  # them; old ones are not edited.
+  "experiments",
 ]
 
 [tool.ruff.lint]
@@ -92,6 +97,9 @@ select = [
 "src/praxis/cli.py" = ["T201"]
 
 [tool.mypy]
+# experiments/ holds stand-alone runners that import a sibling repository by sys.path and
+# are verified by running them; see the ruff exclude above.
+exclude = ['^experiments/']
 strict = true
 warn_unreachable = true      # not included in --strict
 warn_unused_configs = true
@@ -129,6 +137,9 @@ testpaths = ["tests/integration"]
 # DEP003 "imported but it is a transitive dependency", because the package is installed
 # into .venv by `uv sync` like any other distribution.
 known_first_party = ["praxis"]
+# experiments/E01 imports telltale from a sibling checkout by sys.path; it is not a
+# dependency of this package and deptry would report it as one.
+extend_exclude = ["experiments/.*"]
 
 [tool.deptry.per_rule_ignores]
 # DEP004 is "a dev dependency imported in production code". pytest is imported by

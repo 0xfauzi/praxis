@@ -1,0 +1,19 @@
+{
+ "cwd": "<repo>",
+ "effort": {
+  "level": "xhigh"
+ },
+ "hook_event_name": "PreToolUse",
+ "permission_mode": "bypassPermissions",
+ "prompt_id": "6568e6d5-e826-443f-96d9-7c9932036328",
+ "session_id": "ee208626-febb-4959-9378-5ce0f10bf44d",
+ "tool_input": {
+  "file_path": "<repo>/pkg/calc.py",
+  "new_string": "def divide(left: float, right: float) -> float:\n    \"\"\"Return left divided by right.\"\"\"\n    if right == 0:\n        raise ValueError(\"divide by zero\")\n    return left / right",
+  "old_string": "def divide(left: float, right: float) -> float:\n    \"\"\"Return left divided by right.\n\n    The zero case is unguarded on purpose. tests/test_calc.py asserts a\n    ValueError that this code does not raise, so a fresh copy of this fixture\n    has exactly one failing test for a scenario to fix.\n    \"\"\"\n    return left / right",
+  "replace_all": false
+ },
+ "tool_name": "Edit",
+ "tool_use_id": "toolu_01VPCXysHpysoBSMX1mETQYF",
+ "transcript_path": "<home>/.claude/projects/<home-slug>-Documents-code-telltale--claude-worktrees-agent-a8427aac24b8efa9d-experiments-E01-out-S1-repo/ee208626-febb-4959-9378-5ce0f10bf44d.jsonl"
+}

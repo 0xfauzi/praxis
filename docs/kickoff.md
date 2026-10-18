@@ -4,7 +4,7 @@
 
 After this is built I will know, from measurements I did not grade, whether my unassisted ability on the skills I use with coding agents is rising, flat or falling, skill by skill; the agent I work with will run in a different mode (tutor, collaborator, delegate) depending on which skill a prompt touches and what I have demonstrated on it; and the whole thing will exist as a pre-registered protocol another person could run on themselves and produce comparable data. "Learning" means a change in unassisted performance over time. Nothing inferred from how I phrase prompts counts as learning on its own.
 
-This is a new repository. Praxis (github.com/0xfauzi/praxis) is archived and is not a base, a dependency or a source of code. Telltale (/home/user/telltale) is the recorder and stays a separate repository; read its AGENTS.md first, its invariants apply to anything that touches it and are the model for this repo's own. explain-pr (/home/user/explain-pr) is a Claude Code skill and a candidate scorer for the explain-back drill.
+This is a new repository. The first praxis is archived as `praxis-v0` and is not a base, a dependency or a source of code. Telltale is a separate repository whose invariants were the model for this repo's own; it was evaluated as the recorder and failed the attribution requirement (`docs/experiments/E01.md`), so praxis records its own evidence and telltale is at most a read-only import source. explain-pr is a Claude Code skill and a candidate scorer for the explain-back drill.
 
 ## Standards, set before the first line of product code
 
@@ -16,24 +16,25 @@ This is a new repository. Praxis (github.com/0xfauzi/praxis) is archived and is 
 6. Local only. The only bytes that leave the machine are drill items and compacted transcripts sent to the judge model I authorize, after redaction. The judge client lives in exactly one module, enforced by a hook as telltale does for its model stack.
 7. Measure, do not estimate. Any number in code, a comment or a report that was not produced by running something is written as "needs measuring" with the command that would measure it.
 
-## Architecture (five layers, one repo plus telltale)
+## Architecture (five layers, one repo)
 
-- **Record** (telltale, unchanged except where named below): tool calls, file reads and edits, commands classified as test/lint/typecheck with exit status, compactions, per-request tokens, model, git snapshots. It never stores prompt or assistant text.
+- **Record** (`praxis hook`, `docs/design/01-recorder.md`): line-hash multiset snapshots of the working tree before and after every mutating tool call and at every prompt boundary, from which agent, human, pre-existing and ambiguous line counts are derived per file. Hashes and counts only; no prompt, assistant or file text is ever stored. Telltale's per-request tokens, compactions and verification runs can be joined read-only on the session id when its store is present.
 - **Ledger** (new): per-skill table of what I delegated, what I did by hand, what I explained back, and my unassisted rating. The taxonomy is extracted from my own sessions, not a syllabus.
 - **Instrument** (new): drills generated from my own agent's output, administered with no AI attached, scored by execution, scheduled by spaced repetition, feeding a per-skill rating.
 - **Policy** (new): a hook package that chooses tutor, collaborator or delegate per prompt from the ledger, and injects or defers accordingly.
 - **Protocol** (new): the pre-registration, the instrument and an anonymized export schema, publishable so the n=1 design can become n=many.
 
-## Phase 1: recorder gaps (changes to telltale, under its invariants and briefs process)
+## Phase 1: the recorder (built here; see docs/design/01-recorder.md)
 
-- Edit attribution. From telltale's git snapshots joined to PostToolUse Write/Edit payloads, split each working-tree diff into agent-authored hunks and human-authored hunks. Ambiguous stays ambiguous; nothing is attributed by default. Output: human-authored lines per session, observed.
-- Confirm or refute with a real run whether Claude Code's OTel metric `claude_code.code_edit_tool.decision` (accept/reject per edit) reaches telltale's receiver, and store it if it does. It is the cheapest "did I read it" signal available.
-- Codex: verify with a real Codex binary that hooks written in the shape Codex 0.150+ accepts (map of event to list of `{matcher?, hooks: [...]}`) fire for UserPromptSubmit and PreToolUse. Record the measured result in docs/experiments.
-- Join key: the Claude session UUID (`observations.provider_session_id`). The new repo reads transcript text at analysis time directly from `~/.claude/projects` and `~/.codex/sessions` and never persists it; refuse, do not guess, when a session is present on one side only.
+- `praxis hook`: one command for every hook event, exit 0 whatever happens. SessionStart takes the baseline snapshot; PreToolUse and PostToolUse around Edit, Write, MultiEdit, NotebookEdit and Bash take the pre and post snapshots whose difference is the agent's delta; UserPromptSubmit and Stop take the boundary snapshot that is attributed against the agent multiset and the baseline. Per-file counts of agent, human, pre-existing, ambiguous and reverted lines are written as Evidence rows with claim class derived.
+- Judge first: the integration suite drives the installed binary with payloads in the recorded Claude Code 2.1.257 shape against a real git repository, with the expected counts written before each scenario runs. Garbage on stdin, no git repository, a repository with no commits, binary and oversize files all exit 0 and record why nothing was attributed.
+- `praxis setup claude --print` and `praxis setup codex --print` print the hook snippets; `--apply` is refused until the consent flow in invariant 8 exists.
+- Codex: verify with a real Codex binary that the printed shape fires for the six events. Record the measured result in docs/experiments. Needs the owner's machine.
+- Transcript join: the session id in the hook payload is the transcript's filename stem under `~/.claude/projects`. Text is read at analysis time and never persisted; refuse, do not guess, when a session has ledger rows and no transcript or the reverse.
 
 ## Phase 2: the skill ledger
 
-- From each session's transcript and telltale activities, extract the skills touched: libraries, language features, debugging techniques, architectural moves. Every ledger row cites the session and turn it came from. Prove cardinality at the boundary: a skill that cannot be tied to a turn is not recorded.
+- From each session's transcript and recorder rows, extract the skills touched: libraries, language features, debugging techniques, architectural moves. Every ledger row cites the session and turn it came from. Prove cardinality at the boundary: a skill that cannot be tied to a turn is not recorded.
 - Classify each user turn as substitution (asked for the solution) or complement (asked for the explanation, showed an attempt, asked why), following Lehmann, Cornelius and Sting (arXiv:2409.09047). Use the judge model with a fixed prompt and record its confidence; keep no regex layer.
 - Per skill: delegated count, hand-written lines (from Phase 1), explain-backs, unassisted rating (Phase 3), and my declared intent for the skill (learning, maintaining, not wanted). The delegation rule is then a lookup: delegating a skill marked learning, or any skill with no unassisted demonstration, is the event Phase 5 fires on.
 
@@ -51,7 +52,7 @@ This is a new repository. Praxis (github.com/0xfauzi/praxis) is archived and is 
 
 ## Phase 4: calibration (starts with zero behavioural signals and admits only those that earn it)
 
-- Candidate signals: substitution rate, human-authored lines, read-before-edit ratio, test runs per edit epoch, time between agent edit and my next edit, anything else telltale observes. Fit on the first half of weeks, predict unassisted ratings on the second half. Report held-out correlation per signal with confidence intervals. A signal below the pre-registered threshold is not reported anywhere, under any label.
+- Candidate signals: substitution rate, human-authored lines, read-before-edit ratio, test runs per edit epoch, time between agent edit and my next edit, anything else the recorder observes. Fit on the first half of weeks, predict unassisted ratings on the second half. Report held-out correlation per signal with confidence intervals. A signal below the pre-registered threshold is not reported anywhere, under any label.
 - Placebo: repeat on shuffled week labels. Anything that survives the placebo is noise and is removed.
 - The gap series: assisted output quality (project tests passing in-session, agent-authored lines accepted) against unassisted rating, per skill. Diverging series are the finding; name the skills.
 
@@ -82,8 +83,8 @@ This is a new repository. Praxis (github.com/0xfauzi/praxis) is archived and is 
 
 ## Belief
 
-The target is the hard version: a per-skill unassisted rating, a held-out validated predictor, a completed eight-week randomized n-of-1 result, and a protocol another person can run. Not a dashboard. Ship the ugly end-to-end proof first: one skill, one write-it drill, one tutor-mode cue, one week, all wired through telltale, before generalizing anything. Try edit attribution and drill generation in parallel; whichever stalls, report the stall with the measurement that shows it. Stop only when every phase has run against my real data and the pre-registered judge has returned a result. Then report the closest result, the gap to the target, and what would close it.
+The target is the hard version: a per-skill unassisted rating, a held-out validated predictor, a completed eight-week randomized n-of-1 result, and a protocol another person can run. Not a dashboard. Ship the ugly end-to-end proof first: one skill, one write-it drill, one tutor-mode cue, one week, all wired through the recorder, before generalizing anything. Try edit attribution and drill generation in parallel; whichever stalls, report the stall with the measurement that shows it. Stop only when every phase has run against my real data and the pre-registered judge has returned a result. Then report the closest result, the gap to the target, and what would close it.
 
 ## Before starting
 
-Rewrite this through the four lenses in the Ambition section, show me the few-line version, and name the access you need that you do not have: the repository name and its creation, my real `~/.claude` and `~/.codex` session files, a Codex binary for the hook test, a judge API key, telltale write access under its briefs process, and the owner's per-file consent before any hook is installed into global settings.
+Rewrite this through the four lenses in the Ambition section, show me the few-line version, and name the access you need that you do not have: the repository name and its creation, my real `~/.claude` and `~/.codex` session files, a Codex binary for the hook test, a judge API key, and the owner's per-file consent before any hook is installed into global settings.

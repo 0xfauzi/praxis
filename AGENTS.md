@@ -2,12 +2,14 @@
 
 Praxis measures what its owner can do on the skills they use with coding agents when the
 agent is switched off, and chooses, per prompt and per skill, which mode the agent runs in:
-tutor, collaborator or delegate. The recorder is telltale, a separate repository. The first
-praxis (archived as `praxis-v0`) inferred learning from the wording of prompts and never
-measured unassisted capability; nothing from it is a base, a dependency or a source of code
-here. The design is `docs/kickoff.md` until a design document replaces it, and the study
-protocol is `docs/preregistration.md`. This file holds the invariants and the commands.
-Enforceable rules live in hooks and validators, not in prose.
+tutor, collaborator or delegate. It records its own evidence through the agent's hooks
+(`docs/design/01-recorder.md`); telltale, a separate repository, is an optional read-only
+import source and never a dependency (`docs/experiments/E01.md` is the measurement behind
+that decision). The first praxis (archived as `praxis-v0`) inferred learning from the
+wording of prompts and never measured unassisted capability; nothing from it is a base, a
+dependency or a source of code here. The design is `docs/kickoff.md` until a design document
+replaces it, and the study protocol is `docs/preregistration.md`. This file holds the
+invariants and the commands. Enforceable rules live in hooks and validators, not in prose.
 
 ## Commands
 
@@ -23,10 +25,12 @@ Enforceable rules live in hooks and validators, not in prose.
 
 ## Architecture invariants (violating any is a bug, not a style choice)
 
-1. **Five layers, and the recorder is not one of ours.** Record (telltale), Ledger,
-   Instrument, Policy, Protocol. Praxis opens telltale's store read-only, through one
-   function in `store.py`, and never writes to it. Anything the recorder lacks is a change
-   to telltale under its own invariants and briefs, never a second recorder here.
+1. **Five layers, and the recorder records only what the others need.** Record, Ledger,
+   Instrument, Policy, Protocol. The recorder is `praxis hook`: command hooks that snapshot
+   the working tree as a multiset of line hashes before and after every mutating tool call
+   and at every prompt boundary, so that attribution falls out of one mechanism for every
+   tool. It stores hashes and counts, never lines. Any other recorder's store (telltale's
+   included) is opened read-only through one function in `store.py` and never written.
 2. **Every derived number is an Evidence, and it is written through store.py.** Evidence
    carries its claim class (observed, derived, comparative, associative, predictive), its
    coverage, its non-empty source list, its reducer version, its assumptions and its
@@ -70,8 +74,14 @@ Enforceable rules live in hooks and validators, not in prose.
     stored. A later edit to it says why in the same commit.
 12. **Integration tests only, in one directory.** `tests/integration/` is the whole test
     tree. `tests/integration/conftest.py` refuses to run while a test file exists anywhere
-    else, and the `tests-live-under-integration` hook refuses to commit one. A test that
-    stubs the store, the judge or telltale is a test of the stub.
+    else, and the `tests-live-under-integration` hook refuses to commit one. The hooks are
+    the system: a hook tested with a stubbed payload or a stubbed git is a test of the stub,
+    so the suite drives the installed `praxis` binary with recorded payloads against a real
+    repository.
+13. **Duplicate is not one.** Attribution matches multisets: two identical lines are two
+    lines, and a line the agent added that the diff no longer holds is ambiguous, never
+    folded into human. Content-identical lines from two authors are indistinguishable by
+    construction and the assumptions field says so on every row.
 
 ## Style
 

@@ -1,0 +1,16 @@
+{
+ "cwd": "<repo>",
+ "effort": {
+  "level": "xhigh"
+ },
+ "hook_event_name": "PreToolUse",
+ "permission_mode": "bypassPermissions",
+ "prompt_id": "6568e6d5-e826-443f-96d9-7c9932036328",
+ "session_id": "ee208626-febb-4959-9378-5ce0f10bf44d",
+ "tool_input": {
+  "command": "uv run pytest 2>&1 | tail -50"
+ },
+ "tool_name": "Bash",
+ "tool_use_id": "toolu_01DtQnngqFkpvWLfh7HJrAQw",
+ "transcript_path": "<home>/.claude/projects/<home-slug>-Documents-code-telltale--claude-worktrees-agent-a8427aac24b8efa9d-experiments-E01-out-S1-repo/ee208626-febb-4959-9378-5ce0f10bf44d.jsonl"
+}

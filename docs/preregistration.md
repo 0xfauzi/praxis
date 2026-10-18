@@ -36,7 +36,7 @@ Secondary, in this order and no others:
 
 1. Substitution rate: share of user turns classified as substitution by the judge, per
    week.
-2. Human-authored lines per week, from telltale's edit attribution.
+2. Human-authored lines per week, from the recorder's attribution rows (docs/design/01-recorder.md).
 3. Drill completion rate: items offered against items completed, per week.
 4. Self-report agreement: the owner's weekly "did I follow the mode" answer against the
    hooks' record of modes fired.
