@@ -1,0 +1,135 @@
+[project]
+name = "praxis"
+version = "0.0.1"
+description = "Measures unassisted capability on the skills used with coding agents and chooses the agent's mode per skill."
+readme = "README.md"
+requires-python = ">=3.12"
+# EMPTY ON PURPOSE. The policy hooks run inside the owner's agent sessions, beside the
+# agent: every import added here is a package that can fail, slow down or change behaviour
+# in a session that is not ours. Everything the hooks, the ledger and the store need
+# (sqlite3, json, argparse, hashlib, subprocess, dataclasses, urllib) is in the 3.12
+# standard library. The judge is reached over urllib.request from exactly one module,
+# src/praxis/judge.py, which the judge-isolation pre-commit hook enforces.
+dependencies = []
+
+[project.scripts]
+praxis = "praxis.cli:main"
+
+[dependency-groups]
+# The gates, and nothing else. Installed by a plain `uv sync`; no gate may depend on a
+# group that a default sync does not install, or the same command answers a different
+# question depending on who ran it.
+dev = [
+  "codespell",
+  "deptry",
+  "mypy",
+  "pre-commit",
+  "pytest",
+  # Every test carries a wall-clock cap (see [tool.pytest.ini_options] addopts). Drills run
+  # real subprocesses, where the failure mode is a hang rather than an assertion.
+  "pytest-timeout",
+  "ruff",
+  "vulture",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# Explicit rather than inferred: scripts/ is an importable tree and does not belong in
+# the wheel.
+packages = ["src/praxis"]
+
+[tool.ruff]
+line-length = 88
+extend-exclude = [
+  # Copied byte-identical from the shared pre-commit set and never edited here.
+  "scripts/precommit",
+  # Gitignored scratch. `ruff check .` is a local gate, and scratch left in tmp/ must not
+  # fail it.
+  "tmp",
+  # NOT source. `ruff format .` reformats Python inside Markdown fences (measured in
+  # telltale with ruff 0.16.5), and code quoted under docs/ is evidence or a quoted plan.
+  "docs",
+]
+
+[tool.ruff.lint]
+# Explicit select, never ALL: a new ruff release must not turn a green tree red on its own,
+# because an agent that meets an unexplained failure silences the gate rather than fixing
+# the code.
+select = [
+  "E", "W", "F", "I", "UP", "B", "SIM",
+  "C4", "PT", "PTH", "RUF",
+  "ERA",            # commented-out code is dead code
+  "ARG", "T20", "TC",
+  # PGH rejects a BLANKET `# noqa` and a BLANKET `# type: ignore`. Targeted forms still
+  # work, so an exemption costs naming what is being exempted.
+  "PGH",
+  # DTZ: every ledger row and drill result carries a timestamp that later weeks are
+  # compared against. A naive datetime.now() means something different per machine.
+  "ASYNC",
+  "DTZ",
+  "LOG",
+  "EXE",
+  "RSE", "SLOT", "YTT",
+  # A CURATED slice of flake8-bandit, each code mapped to an invariant:
+  #   S102/S307 - a drill harness executes the owner's project tests, never captured
+  #     text. `exec` or `eval` anywhere in this tree would turn a payload into code.
+  #   S602/S604/S605/S606 - never shell=True: a file path from a transcript becomes a
+  #     command otherwise.
+  #   S608 - the store IS sqlite3. String-built SQL is reachable from the CLI.
+  #   S324 - item ids and source hashes are sha256.
+  #   S113/S501 - the judge client must set a timeout and keep verification on.
+  "S102", "S113", "S307", "S324", "S501",
+  "S602", "S604", "S605", "S606", "S608",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# T201 is `print`. The CLI is the one place where printed text IS the deliverable.
+"src/praxis/cli.py" = ["T201"]
+
+[tool.mypy]
+strict = true
+warn_unreachable = true      # not included in --strict
+warn_unused_configs = true
+
+[tool.vulture]
+min_confidence = 80
+# src only. tests/ is where a fixture exists to be read by pytest rather than by our code,
+# and scripts/precommit/ is copied byte-identical from the shared set.
+paths = ["src"]
+
+[tool.codespell]
+# uv.lock is generated and full of hashes that look like misspelled words.
+skip = "uv.lock"
+# Project vocabulary, not typos. Grow this list; never skip a whole documentation tree.
+# `sting` is the surname in Lehmann, Cornelius and Sting (arXiv:2409.09047), cited in
+# docs/kickoff.md.
+ignore-words-list = "sting"
+
+[tool.pytest.ini_options]
+# --strict-markers: an unregistered marker is a typo that would silently deselect a test.
+# -p no:cacheprovider: no .pytest_cache in the tree; the cache changes what a rerun does.
+# --timeout=120: the suite drives real subprocesses, where the failure mode is a hang.
+addopts = "--strict-markers -p no:cacheprovider --timeout=120"
+markers = [
+  "integration: exercises the real system end to end. Every test here is one.",
+  "live: needs a real agent binary or a judge key and spends tokens. Never run by CI.",
+]
+# The ONLY test directory. tests/integration/conftest.py refuses to run at all when a test
+# file exists anywhere else, and the tests-live-under-integration pre-commit hook refuses
+# to commit one.
+testpaths = ["tests/integration"]
+
+[tool.deptry]
+# `praxis` is this project. Without this line the absolute import in cli.py reads as
+# DEP003 "imported but it is a transitive dependency", because the package is installed
+# into .venv by `uv sync` like any other distribution.
+known_first_party = ["praxis"]
+
+[tool.deptry.per_rule_ignores]
+# DEP004 is "a dev dependency imported in production code". pytest is imported by
+# tests/integration/conftest.py, which deptry's default exclude drops today; the entry is
+# what keeps the answer the same on the day this file sets its own `extend_exclude`.
+DEP004 = ["pytest"]

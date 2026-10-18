@@ -1,0 +1,27 @@
+# Credentials. Gitignored, never allowlisted: the staged secret scan has to keep watching
+# this path, because `git add -f .env` is the commit the scan exists for.
+.env
+.DS_Store
+
+# Environments and tool caches.
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+# `-p no:cacheprovider` in [tool.pytest.ini_options] stops our own runs writing this one.
+# A run that does not read that config (an IDE runner, a different rootdir) still does.
+.pytest_cache/
+.ruff_cache/
+.complexipy_cache/
+
+# Working scratch. Also excluded from ruff and mypy, so a script left here cannot fail a
+# local gate that a clean checkout would pass.
+tmp/
+
+# The ledger and drill results live in $PRAXIS_HOME (default ~/.praxis/), outside the
+# repository, so no ignore line can protect them. They are never committed by any code
+# path here.
+
+# Claude Code session permission cache (machine-local, regenerated) and agent worktrees.
+.claude/settings.local.json
+.claude/worktrees/

@@ -1,0 +1,109 @@
+# The gates AGENTS.md names, run on the server where --no-verify cannot reach them.
+#
+# Every local gate is bypassable: `git commit --no-verify` skips all of pre-commit, and
+# nothing forces a developer or an agent to run mypy before pushing. This workflow is the
+# copy that a merge to main has to satisfy.
+#
+# ONE job: this repository is uv only, with zero runtime dependencies. A second job would
+# buy a second name for the same toolchain and pay another cold `uv sync` for it.
+name: CI
+
+on:
+  # Only main on push. A PR branch already gets a pull_request run, and listening to both
+  # events would bill every branch push twice for the same commit.
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: no job here writes to the repository, comments on a PR, or publishes
+# anything.
+permissions:
+  contents: read
+
+# Cancel a superseded run, but never on main: a main run records whether that commit is
+# sound, and a later push must not erase the answer for an earlier one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  # uv resolves `requires-python = ">=3.12"` against whatever interpreter it finds, so
+  # without this the CI Python drifts upward on its own. The committed .python-version
+  # pins the local side to the same 3.12, so both resolve one interpreter.
+  UV_PYTHON: "3.12"
+  # Never resolve during a gate run: if uv.lock does not already satisfy pyproject.toml,
+  # fail instead of quietly installing a different dependency set than the one reviewed.
+  UV_LOCKED: "1"
+
+jobs:
+  gates:
+    name: gates
+    runs-on: ubuntu-latest
+    # Needs measuring on the first green run; telltale's identical job measured 150 s cold,
+    # 125 s of which was pre-commit compiling its golang hooks. 15 is a stuck-runner stop,
+    # not a budget. Re-state this comment with the measured number once a run exists.
+    timeout-minutes: 15
+    steps:
+      # Actions pinned to a commit SHA, not a tag. A tag is a mutable pointer: whoever can
+      # move `v7` can run code in this workflow. The comment records which release each
+      # SHA was, and dependabot moves both together.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here uses git after this step, so the credential has no reason to
+          # survive it.
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      # actionlint and gitleaks are language: golang, which pre-commit COMPILES into its
+      # hook env on a cold cache. Keyed on the config that determines the binaries.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ env.UV_PYTHON }}-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - name: install the locked environment
+        run: uv sync --locked
+
+      - name: ruff check
+        run: uv run ruff check .
+      - name: ruff format
+        run: uv run ruff format --check .
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mypy_cache
+          key: mypy-${{ runner.os }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-${{ github.sha }}
+          restore-keys: |
+            mypy-${{ runner.os }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-
+      - name: mypy
+        run: uv run mypy .
+
+      # ONE run, because there is one package and one dependency list. The rule this gate
+      # protects is the empty `dependencies` list in pyproject.toml: the day a module under
+      # src/ imports something that is not in the standard library, DEP001 says so here.
+      - name: deptry
+        run: uv run deptry .
+
+      # Known advisories against the LOCKED set. Here from the first commit so it is never
+      # added later against a red tree.
+      - name: audit the locked dependencies
+        run: uv audit --preview-features audit-command
+
+      # The ONLY place a secret scan runs on a server: the pre-commit gitleaks hook scans
+      # the STAGED diff, which is empty on a fresh checkout. This runs the same binary at
+      # the same rev over the checked-out tree.
+      - name: scan the tree for secrets
+        run: uv run pre-commit run --hook-stage manual gitleaks-tree --all-files
+
+      # `live` is excluded on purpose: those tests need an agent binary or a judge key and
+      # spend tokens a CI runner has neither the credentials nor the permission to spend.
+      - name: pytest (integration)
+        run: uv run pytest -m integration
+
+      # Last because it is the catch-all: the step a `--no-verify` commit cannot get past.
+      - name: pre-commit (all files)
+        run: uv run pre-commit run --all-files --show-diff-on-failure
