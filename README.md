@@ -11,6 +11,19 @@ ambiguous, at every prompt boundary. `praxis drill` strips the body of a functio
 wrote, in place and with no agent attached, and scores what the owner writes by the
 project's own tests. No ratings, no scheduling, no claims about anyone yet.
 
+## Install, on the machine where the agents run
+
+```
+uv tool install git+https://github.com/0xfauzi/praxis   # or `uv sync` in a checkout
+praxis setup claude --apply    # shows the change to ~/.claude/settings.json, asks, writes
+praxis setup codex --apply     # the same for ~/.codex/hooks.json
+praxis doctor                  # what is installed, recorded and pending
+```
+
+Nothing is written outside this repository without a yes typed on a terminal, and the
+previous bytes of any file written are kept under `~/.praxis/settings-backups/`.
+`praxis setup <agent> --remove` takes praxis out again the same way.
+
 The standards are `AGENTS.md`, the plan `docs/kickoff.md`, the protocol
 `docs/preregistration.md`, the designs `docs/design/01-recorder.md` and
 `docs/design/02-instrument.md`, and the measurements behind them `docs/experiments/E01.md`

@@ -495,9 +495,10 @@ def test_setup_prints_a_valid_snippet_and_refuses_to_apply(tmp_path: Path) -> No
         == "Edit|Write|MultiEdit|NotebookEdit|Bash"
     )
     assert block["hooks"]["Stop"][0]["hooks"][0]["command"].endswith("praxis hook")
+    # Without a terminal there is no consent, so --apply refuses and writes nothing.
     refused = subprocess.run(
         [found, "setup", "claude", "--apply"], capture_output=True, check=False, env=env
     )
     assert refused.returncode == 2
-    assert b"invariant 8" in refused.stderr
+    assert b"invariant 8" in refused.stdout
     assert sorted(Path(tmp_path).rglob("*")) == [], "setup wrote under HOME"

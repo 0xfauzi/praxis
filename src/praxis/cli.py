@@ -4,18 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import sys
 from pathlib import Path
 
-from praxis import __version__, drill, hooks, store
-
-HOOK_EVENTS_UNMATCHED = ("SessionStart", "UserPromptSubmit", "Stop")
-HOOK_EVENTS_MATCHED = ("PreToolUse", "PostToolUse", "PostToolUseFailure")
-MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash"
-# Seconds. Well above the measured cost of one hook (docs/experiments/E01.md) and well
-# below the point where a stuck hook would be noticed in a session.
-HOOK_TIMEOUT_S = 10
+from praxis import __version__, doctor, drill, hooks, install, store
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -33,12 +25,23 @@ def main(argv: list[str] | None = None) -> int:
         "hook", help="run as an agent hook: reads one payload on stdin, exits 0"
     )
 
-    setup = sub.add_parser("setup", help="print the hook snippet for an agent")
+    setup = sub.add_parser("setup", help="print or install the hook block for an agent")
     setup.add_argument("agent", choices=("claude", "codex"))
     setup.add_argument(
-        "--print", action="store_true", dest="print_", help="print the snippet"
+        "--print", action="store_true", dest="print_", help="print the block"
     )
-    setup.add_argument("--apply", action="store_true", help="refused: see AGENTS.md 8")
+    setup.add_argument(
+        "--apply",
+        action="store_true",
+        help="merge the block into the file, with consent",
+    )
+    setup.add_argument(
+        "--remove",
+        action="store_true",
+        help="take praxis out of the file, with consent",
+    )
+
+    sub.add_parser("doctor", help="what is installed, recorded and pending; read-only")
 
     attr = sub.add_parser("attributions", help="attribution rows from the ledger")
     attr.add_argument("--session", help="one session id")
@@ -65,7 +68,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.verb == "hook":
         return hooks.run(sys.stdin.buffer, store.home())
     if args.verb == "setup":
-        return _setup(args.agent, args.print_, args.apply)
+        return _setup(args.agent, args.print_, args.apply, args.remove)
+    if args.verb == "doctor":
+        return doctor.run(
+            cwd=Path.cwd(), home=Path.home(), praxis_home=store.home(), out=sys.stdout
+        )
     if args.verb == "attributions":
         return _attributions(args.session, args.json)
     if args.verb == "sessions":
@@ -96,46 +103,24 @@ def _drill(args: argparse.Namespace) -> int:
         ledger.close()
 
 
-def _command() -> str:
-    found = shutil.which("praxis")
-    return f"{found or Path(sys.argv[0]).resolve()} hook"
-
-
-def snippet(agent: str) -> dict[str, object]:
-    """The hooks block for ~/.claude/settings.json or ~/.codex/hooks.json.
-
-    Codex 0.150 and later want the same shape as Claude Code, a map of event name to a
-    list of {matcher?, hooks: [...]}; a flat list is rejected with "invalid type: map,
-    expected a sequence" (measured in telltale's E02 against 0.150.1). Which events
-    Codex fires for a given build needs measuring on the owner's machine; the shape is
-    shared.
-    """
-    del agent  # one shape for both, kept as a parameter so a divergence has a home
-    entry = {"type": "command", "command": _command(), "timeout": HOOK_TIMEOUT_S}
-    hooks_block: dict[str, object] = {}
-    for event in HOOK_EVENTS_UNMATCHED:
-        hooks_block[event] = [{"hooks": [entry]}]
-    for event in HOOK_EVENTS_MATCHED:
-        hooks_block[event] = [{"matcher": MATCHER, "hooks": [entry]}]
-    return {"hooks": hooks_block}
-
-
-def _setup(agent: str, print_: bool, apply: bool) -> int:
-    if apply:
-        print(
-            "praxis setup --apply is refused: AGENTS.md invariant 8 requires an"
-            " interactive per-file consent flow, which is not built. Paste the printed"
-            " snippet into the named file yourself.",
-            file=sys.stderr,
+def _setup(agent: str, print_: bool, apply: bool, remove: bool) -> int:
+    if apply or remove:
+        return install.apply(
+            agent=agent,
+            remove=remove,
+            home=Path.home(),
+            praxis_home=store.home(),
+            stdin=sys.stdin,
+            out=sys.stdout,
         )
-        return 2
-    target = "~/.claude/settings.json" if agent == "claude" else "~/.codex/hooks.json"
+    target = f"~/{install.TARGETS[agent]}"
     if not print_:
         print(
-            f"praxis setup {agent} --print  # prints the block to merge into {target}"
+            f"praxis setup {agent} --print   # the block to merge into {target}\n"
+            f"praxis setup {agent} --apply   # merge it there, after your yes"
         )
         return 0
-    print(json.dumps(snippet(agent), indent=2))
+    print(json.dumps(install.snippet(agent), indent=2))
     return 0
 
 
