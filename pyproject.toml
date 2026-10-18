@@ -4,6 +4,8 @@ version = "0.0.1"
 description = "Measures unassisted capability on the skills used with coding agents and chooses the agent's mode per skill."
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
 # EMPTY ON PURPOSE. The policy hooks run inside the owner's agent sessions, beside the
 # agent: every import added here is a package that can fail, slow down or change behaviour
 # in a session that is not ours. Everything the hooks, the ledger and the store need
