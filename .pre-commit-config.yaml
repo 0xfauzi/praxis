@@ -322,7 +322,7 @@ repos:
         # Invariant 2. A derived, comparative, associative or predictive number reaches
         # the database through one constructor and one set of CHECK constraints, or the
         # claim class on it means nothing.
-        entry: 'INSERT\s+INTO\s+(hook_events|baselines|pending|agent_deltas|attributions|session_repos|repo_config|items|results|evidence|ratings|ledger)'
+        entry: 'INSERT\s+INTO\s+(hook_events|baselines|pending|agent_deltas|attributions|session_repos|component_maps|boundary_rules|file_edges|scenario_runs|tasks|exposures|forecasts|outcomes|probe_items|probe_responses|drift_responses|divergences|decisions|decision_responses|knockouts|pathfinder_runs|flags|evidence|ledger)'
         files: '^src/praxis/(?!store\.py).*\.py$'
       - id: tests-live-under-integration
         name: tests live under tests/integration/ only

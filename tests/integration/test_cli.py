@@ -55,3 +55,14 @@ def test_no_verb_prints_usage_and_exits_zero(tmp_path: Path) -> None:
     done = _praxis(home=home)
     assert done.returncode == 0, done.stderr
     assert done.stdout.startswith("usage: praxis")
+
+
+def test_the_rejected_drill_verb_is_gone(tmp_path: Path) -> None:
+    # Design 03 section 12: the write-it drill (design 02) is deleted, verb and all.
+    # argparse refuses an unknown verb with exit 2 and names it.
+    home = tmp_path / "home"
+    home.mkdir()
+    done = _praxis("drill", "--list", home=home)
+    assert done.returncode == 2
+    assert "invalid choice: 'drill'" in done.stderr
+    assert sorted(home.rglob("*")) == [], "the refused verb wrote under HOME"

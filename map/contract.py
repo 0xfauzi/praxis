@@ -27,12 +27,12 @@ INVARIANTS: tuple[Invariant, ...] = (
     Invariant(
         2,
         "Only src/praxis/store.py contains INSERT statements for the ledger tables. The derived-writes-only-in-store pre-commit hook refuses them in other modules (AGENTS.md, invariant 2; .pre-commit-config.yaml).",
-        governs=("Ledger", "Recorder", "HookEntry", "WriteItInstrument"),
-        reason="The CHECK constraints and the one constructor in store.py are then the only way that a derived number reaches the database (AGENTS.md, invariant 2).",
+        governs=("Ledger", "Recorder", "HookEntry"),
+        reason="The CHECK constraints in schema.py and the writers in store.py are then the only way into the derived tables (AGENTS.md, invariant 2; src/praxis/store.py docstring).",
     ),
     Invariant(
         3,
-        "The ledger stores hashes, counts, and identifiers. It never stores a line of a file, a prompt, or a tool input or response (AGENTS.md, invariant 5; src/praxis/store.py docstring; docs/design/01-recorder.md, What is stored).",
+        "The ledger stores hashes, counts, and identifiers. It never stores a line of a file, a prompt, or a tool input or response (AGENTS.md, invariant 5; src/praxis/schema.py docstring; docs/design/01-recorder.md, What is stored).",
         governs=(
             "Ledger",
             "Recorder",
@@ -44,7 +44,7 @@ INVARIANTS: tuple[Invariant, ...] = (
     ),
     Invariant(
         4,
-        "Without a baseline, the human, pre-existing, and reverted counts are NULL and the coverage is no_baseline. A CHECK constraint keeps the two together (AGENTS.md, invariant 4; src/praxis/store.py:93-96).",
+        "Without a baseline, the human, pre-existing, and reverted counts are NULL and the coverage is no_baseline. A CHECK constraint keeps the two together (AGENTS.md, invariant 4; src/praxis/schema.py:155-158).",
         governs=("Recorder", "Ledger"),
         reason="Unknown stays unknown: a missing value is None through the model, the ledger, and the report (AGENTS.md, invariant 4; docs/design/01-recorder.md, Attribution).",
     ),
@@ -62,7 +62,7 @@ INVARIANTS: tuple[Invariant, ...] = (
     ),
     Invariant(
         7,
-        "praxis doctor opens the ledger in SQLite read-only mode and never creates it (src/praxis/doctor.py docstring and line 61).",
+        "praxis doctor opens the ledger in SQLite read-only mode and never creates it (src/praxis/doctor.py docstring and line 62).",
         governs=("Doctor",),
         reason="The doctor reports state and must not change the state that it reports (src/praxis/doctor.py docstring).",
     ),
@@ -79,7 +79,8 @@ INVARIANTS: tuple[Invariant, ...] = (
             "ComponentMap",
             "Extractors",
             "TranscriptReader",
-            "WriteItInstrument",
+            "AgentCheck",
+            "Scoring",
         ),
         reason="The hook runs beside the agent, so each added import is a cost that the agent session pays (AGENTS.md, invariant 6).",
     ),
@@ -98,7 +99,7 @@ INVARIANTS: tuple[Invariant, ...] = (
     Invariant(
         11,
         "The attached-agent check looks for claude or codex processes with a working directory in the repository. Where /proc is missing, it counts any such process anywhere (AGENTS.md, invariant 9; src/praxis/unassisted.py docstring and attached_agents).",
-        governs=("AgentCheck", "WriteItInstrument"),
+        governs=("AgentCheck",),
         reason="A probe answered with an agent attached is not unassisted, so the harness refuses it and records the refusal (AGENTS.md, invariant 9; docs/kickoff.md, Phase 3).",
     ),
 )

@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from praxis import __version__, doctor, drill, hooks, install, store
+from praxis import __version__, doctor, hooks, install, store
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -49,21 +49,6 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("sessions", help="sessions in the ledger with their latest totals")
 
-    dr = sub.add_parser("drill", help="one write-it item in this repository, no agent")
-    dr.add_argument(
-        "--test-cmd", help="the project's test command; remembered per repo"
-    )
-    dr.add_argument(
-        "--min-agent-fraction",
-        type=float,
-        default=drill.DEFAULT_MIN_FRACTION,
-        help="smallest share of a function's lines the agent must have written",
-    )
-    dr.add_argument(
-        "--list", action="store_true", help="show candidates, change nothing"
-    )
-    dr.add_argument("--restore", action="store_true", help="restore a crashed drill")
-
     args = parser.parse_args(argv)
     if args.verb == "hook":
         return hooks.run(sys.stdin.buffer, store.home())
@@ -77,30 +62,8 @@ def main(argv: list[str] | None = None) -> int:
         return _attributions(args.session, args.json)
     if args.verb == "sessions":
         return _sessions()
-    if args.verb == "drill":
-        return _drill(args)
     parser.print_usage(sys.stdout)
     return 0
-
-
-def _drill(args: argparse.Namespace) -> int:
-    home = store.home()
-    if args.restore:
-        return drill.restore(home, sys.stdout)
-    ledger = store.Store(home / "ledger.db").open()
-    try:
-        return drill.run(
-            cwd=Path.cwd(),
-            home=home,
-            store=ledger,
-            test_cmd=args.test_cmd,
-            min_fraction=args.min_agent_fraction,
-            list_only=args.list,
-            stdin=sys.stdin,
-            out=sys.stdout,
-        )
-    finally:
-        ledger.close()
 
 
 def _setup(agent: str, print_: bool, apply: bool, remove: bool) -> int:
