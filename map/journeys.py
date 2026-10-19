@@ -372,6 +372,18 @@ DOCTOR: Steps = (
         ("Doctor", "Probe"),
         "If the ledger is at the current schema version, the doctor reports the number of structural probes due now.",
     ),
+    Step(
+        ("Doctor",),
+        (),
+        ("Doctor", "ScenarioRunner"),
+        "The doctor asks the scenario runner for the scenario summary line.",
+    ),
+    Step(
+        ("ScenarioRunner",),
+        (),
+        flow="scen-version",
+        say="The scenario runner reads the ledger version in read-only mode, and it opens a Store only at the current version.",
+    ),
 )
 
 LEDGER_ROWS: Steps = (
@@ -450,5 +462,8 @@ JOURNEYS: tuple[Journey, ...] = (
     journeys_instrument.PROBE,
     journeys_instrument.COMPONENTS_FREEZE,
     journeys_instrument.COMPONENTS_SHOW,
+    journeys_instrument.COMPONENTS_DERIVE,
+    journeys_instrument.SCENARIOS_RUN,
+    journeys_instrument.SCENARIOS_SHOW,
     journeys_instrument.REPORT,
 )
