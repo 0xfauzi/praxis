@@ -139,8 +139,10 @@ stamped on every derived row. A map defines nodes only: every edge comes from an
    `too_few_components`, never padded.
 4. A file directly in a directory that has components below it belongs to `<dir>/.`.
 
-Measured here: the product root is `src/praxis`, and depth 1 gives 9 product components
-(cli, doctor, drill, gitdiff, hooks, install, recorder, spans, store). Taking the
+Measured here (re-measured with `components.derive` once it existed; the first count of 9
+left out `__init__.py` by hand): the product root is `src/praxis`, and depth 1 gives 10
+product components (`.` for the non-empty `__init__.py`, cli, doctor, drill, gitdiff, hooks,
+install, recorder, spans, store). Taking the
 top-level package would give 1 component [MX]. In a flat package like this, depth-1
 components are single files, so the forecast in section 4.4 is close to "which files will
 the agent edit" [CR]. That is why an owner map that groups files into the owner's own
@@ -185,10 +187,12 @@ counts (invariant 5).
 
 - A file edge f -> g exists if f has an `Import` or `ImportFrom` resolving (relative
   imports included) to a module in g. Lifted to components through the map.
-- Each component edge carries its import-site count and whether every site is
-  function-level (inside a `def`) or at least one is module-level. Measured here:
-  `spans -> store` is function-level only, and `drill -> gitdiff` has 2 sites; a
-  one-site function-level helper import is incidental reuse, not a boundary dependency
+- Each component edge carries its import-site count and whether at least one site
+  executes at import time (module-level) or none does (every site inside a `def` or under
+  `if TYPE_CHECKING`). Measured here: `spans -> store` has no import-time site (its one
+  site is under `if TYPE_CHECKING`, found when `extract.py` was run against the figures
+  first written here, which called it function-level), and `drill -> gitdiff` has 2 sites; a
+  one-site non-import-time helper import is incidental reuse, not a boundary dependency
   [CR]. D1 items are stratified by these two attributes and reported per stratum.
 - Reach: the transitive closure of the component graph.
 - Blind spots counted per component: `importlib.import_module`, `__import__`, string
@@ -197,9 +201,11 @@ counts (invariant 5).
   SQL and infrastructure wiring [SE], so every row carries the assumption that an absent
   edge may be an extractor blind spot.
 
-Measured here, X1 on `src/praxis`: 16 edges among 72 ordered pairs (base rate 0.222);
-`store` is imported by 5 components and `cli` imports 5. Of the 56 non-edge pairs, 7 reach
-their target through another component and 49 have no path at all.
+Measured here, X1 on `src/praxis` with the 10-component map (`extract.static_imports`,
+2026-10-19): 17 edges among 90 ordered pairs (base rate 0.189); `store` is imported by 5
+components and `cli` imports 6 (`.` included). Of the 73 non-edge pairs, 7 reach their
+target through another component and 66 have no path at all. (The first figures here, 16
+edges among 72 pairs, came from a 9-component count that dropped `__init__.py`.)
 
 ### 3.2 X2: runtime component traces of owner-named scenarios (candidate)
 
@@ -246,13 +252,13 @@ An **item** is (relation, A, B[, scenario or table]). Relations: D1 direct impor
 reach-through, RT runtime call or execution, TB table write. The item supply is finite and
 binding:
 
-- Measured here: 72 ordered D1 pairs. D2 has 7 positives against 49 negatives, so a
+- Measured here: 90 ordered D1 pairs. D2 has 7 positives against 66 negatives, so a
   constant 0.1 forecast nearly aces it; D2 is reported but never pooled into the primary
   outcome without the R_layer reference beside it.
 - An item is consumed by its first exposure (section 6). It is re-admitted as a new item
   only when its truth flips (a new epoch), which the recorder's edge history detects.
-- At 4 items consumed per task (section 6.2 defaults), praxis's D1 pool alone lasts 18
-  tasks (72 / 4, derived).
+- At 4 items consumed per task (section 6.2 defaults), praxis's D1 pool alone lasts 22
+  tasks (90 / 4, derived).
 - `praxis components pool` reports the supply per repository and relation. The power
   simulation (section 6.6) takes the supply as an input, and a repository whose supply
   cannot reach the simulated count over the study is declared infeasible for the
@@ -264,7 +270,11 @@ Shared conventions:
 
 - Every probability is on the grid {0.1, 0.3, 0.5, 0.7, 0.9}. On this grid the Brier score
   keeps honest reporting optimal (the nearest grid point is best for every one of 999
-  beliefs except 2 exact-midpoint ties); the log score does not (31 of 999) [MS, derived].
+  beliefs q = i/1000, with exact ties at the 4 midpoints 0.2, 0.4, 0.6 and 0.8); the log
+  score does not (for 30 of the 999 no nearest grid point is log-optimal, 34 counting the
+  midpoints where the log score picks one side) [MS, derived; re-measured by exact Fraction
+  enumeration in `tests/integration/test_scoring.py`, which replaced the first figures of 2
+  ties and 31 failures].
   The log score is stored as a secondary number only, with the clip named in the
   assumptions field.
 - Brier of one binary forecast: `BS = (p - o)^2`. A set forecast is one binary forecast per
@@ -281,9 +291,15 @@ Shared conventions:
   resampled consistency bands [MS]. Resolution is reported with calibration, never
   calibration alone, because always forecasting the base rate games calibration (Murphy
   1973 [LS, MS]).
-- A diagram bin is interpreted only with at least 81 forecasts (the count that resolves a
-  0.10 miscalibration at p = 0.7 to a 95 percent half-width); detecting it with 80 percent
-  power needs about 165, roughly 400 to 800 forecasts over five bins [MS, derived].
+- A diagram bin is interpreted only with at least 97 forecasts: the count that resolves
+  a 0.10 miscalibration to a 95 percent half-width at p = 0.5, the worst grid value (81 at
+  0.3 and 0.7, 35 at 0.1 and 0.9; the first draft's uniform 81 was the p = 0.7 figure).
+  Detecting it with 80 percent power needs 153 to 172 depending on the direction of the
+  miscalibration (165 under the same-variance approximation); with equal use of the five
+  bins that is about 485 and 825 forecasts, and with unequal use the least-used bin sets
+  the total [MS, derived; arithmetic re-done 2026-10-19 with the normal approximation and
+  an exact binomial]. Both counts assume independent forecasts: divide by the design
+  effect 1 + (m - 1) ICC once the ICC is measured.
 - Within-task forecasts are correlated: `n_eff = n_tasks * m / (1 + (m - 1) * ICC)`; the
   ICC needs measuring [MS].
 - Every derived row carries the Evidence fields as columns with CHECK constraints: claim
@@ -437,8 +453,10 @@ When they differ and the owner predicted `o_final`, that is a supervisory event,
 
 **(d) Reported.** BS; BSS against R1, R0, R_last; REL, RES, UNC; CORP; recall and precision
 at p >= 0.5 as descriptions (the documented human failure is predicting too small a change
-set, Lindvall and Sandahl 1998, recall 0.76 and precision 0.96 as reported second-hand and
-unreconciled with a one-in-three figure [SE]); `o_first` and `o_final` separately; at
+set, Lindvall and Sandahl 1998: precision about 0.96 second-hand, and recall about one
+third in release R4, where 30 classes were predicted and 94 changed of 136, from excerpts of
+the paywalled paper; a second-hand recall of 0.76 contradicts the authors' abstract and is
+not used [SE]; a citation for underprediction, never a reference number for scoring); `o_first` and `o_final` separately; at
 component and file grain; stratified by R1's expected touched count, never by observed
 size [MS, RT].
 
@@ -533,14 +551,17 @@ component is reported. The owner's working tree is never written.
 ### 4.8 C1: Pathfinder map (convergent only)
 
 Every P weeks (a design choice; cost needs measuring), the owner rates every unordered pair
-of product components for relatedness, 1 to 9 (36 pairs for praxis's 9 components,
+of product components for relatedness, 1 to 9 (45 pairs for praxis's 10 components,
 measured here), converted to distance d = 10 - rating. The owner's network is
 PFnet(r = infinity, q = n - 1), computed by a Floyd-Warshall pass with max in place of sum
 (standard library). Similarity to referents N_imp (an undirected link wherever X1 has an
-edge) and N_co (co-change above the median pair) by neighbourhood closeness. The closeness
-formula was written from memory in the draft and must be checked against Goldsmith and
-Davenport before it is frozen (Q13); until then C1 is not computed. A node whose
-neighbourhood union is empty is NULL. Whether code-derived referents stand in for expert
+edge) and N_co (co-change above the median pair) by Schvaneveldt's link similarity
+PFSIM = C / (|L1| + |L2| - C), with C the links the two networks share, reported beside its
+chance level E[C] = |L1| |L2| / P over the P pairs (JPathfinder manual, "Network
+Similarity"; Trumpower, Sharara and Goldsmith 2010 [LS]; `scoring.pfsim`). The per-node
+neighbourhood closeness of Goldsmith and Davenport (1990) that the first draft named could
+not be verified (the Ablex chapter is not online; Q13 stays open) and is not computed.
+PFSIM is NULL when neither network has a link. Whether code-derived referents stand in for expert
 referents is open: the literature validated against experts (Acton, Johnson and Goldsmith
 1994 [LS]), and concept maps share little variance with other tests (r = .31 [LS]).
 Derived; never an outcome.
@@ -720,7 +741,15 @@ a multiple baseline across repositories with randomized start points (Koehler an
   control until that repository's randomly drawn start week; from then on, task-level
   randomization at P(treatment) = 0.5.
 - Outcome: BS on never-exposed P1 items per repository per week, level change at the start
-  point, by the Koehler-Levin randomization test over start points.
+  point, by a randomization test over start points. The allocation scheme is the one the
+  test re-draws: here each repository draws its own start week independently from its
+  committed candidate set (the Marascuilo-Busk scheme, prod k_i assignments), which is what
+  `scoring.koehler_levin` enumerates; Koehler and Levin's regulated variant also assigns
+  repositories to non-overlapping tiers (N! prod k_t assignments; Bulte and Onghena 2009
+  [MS]) and would need that extra draw. Statistic: the mean over repositories of (mean BS
+  before the start minus mean BS after it), rejected for large values. Weeks without P1
+  data are excluded from a phase mean, never zero-filled; an assignment that empties a
+  phase is dropped from numerator and denominator, and Stage 2 says so.
 - Spillover check: bound-item BS of control tasks after the start against bound-item BS
   of the (all-control) registered tasks before it; bound items are drawn by the same rule
   before the start. Once predicting is a habit, the owner may predict silently in control tasks,
@@ -746,7 +775,7 @@ instrument passes section 8.
   derived here): 24 first probes per arm give power 0.46 for g = 0.54 and 0.16 for
   g = 0.28 [CR]; 80 percent power needs about 54 items per arm for g = 0.54 and about 200
   for g = 0.28. At k_e = 2 that is about 54 and 200 registered tasks in total, and about 108
-  and 400 consumed bound items, against praxis's 72 D1 pairs.
+  and 400 consumed bound items, against praxis's 90 D1 pairs.
 - So a conceptual-size effect is out of reach on one repository of praxis's size with
   imports alone. What closes the gap: more relations (X2, X3), truth-flip re-admission,
   pooling across repositories, and the measured registration rate. The Stage 2
@@ -938,17 +967,17 @@ No computed number is labelled observed, and nothing is labelled causal.
 | Q9 | Best lag L; does probing contaminate later probes | L = 2 against L = 7 days on validation-only items; first against repeat probe accuracy |
 | Q10 | Forecast against prequestions as separate components of the bundle | A later factorial variant |
 | Q11 | W, W_d, the survival threshold, the binding window, deadlines, the exclusion cap | Pilot distributions through `derive.py` |
-| Q12 | Codex payloads (apply_patch, failed commands), transcript location, terminalSequence support | A real Codex binary (kickoff Phase 1) |
-| Q13 | The exact Pathfinder closeness formula | Read Goldsmith and Davenport before computing C1 |
-| Q14 | Lag-1 autocorrelation prior | Read Shadish et al. 2013 (doi:10.3758/s13428-012-0282-1), then replace with the owner's value |
+| Q12 | Codex payloads (apply_patch, failed commands), transcript location, terminalSequence support | Documented (learn.chatgpt.com/docs/hooks, read 2026-10-19): `tool_name` is `apply_patch` with the patch in `tool_input.command`; PostToolUse fires on a failed Bash but no exit-status field is documented; no terminalSequence; `systemMessage` is a UI warning. Interactive firing of all events is documented by omission only: one recorded interactive session still needed |
+| Q13 | The exact Pathfinder closeness formula | Searched 2026-10-19: the Goldsmith and Davenport chapter is not online and the 1991 paper is paywalled; replaced by Schvaneveldt's verified PFSIM (section 4.8). Reopen only if the chapter is read on paper |
+| Q14 | Lag-1 autocorrelation prior | Read (ERIC ED544032, 2026-10-19): no pooled prior; the two worked examples average about -0.17 and -0.05, and the paper's illustration uses 0.222. Stage 2 simulates over the grid {-0.2, 0, 0.2} (a design choice) until the owner's pilot value replaces it |
 | Q15 | Empty-segment rate on coding sessions | Segment definition 5.3 over the owner's transcripts |
 | Q16 | Hook latency added by edges at Stop and the notice read | E04, extending `experiments/E01/hook_cost.py` |
 | Q17 | X2 overhead, determinism and coverage; X3 coverage | E05, E06 |
-| Q18 | Whether terminalSequence output leaves the transcript untouched on 2.1.303; whether systemMessage reaches the model | One recorded session each |
+| Q18 | Whether terminalSequence output leaves the transcript untouched on 2.1.303; whether systemMessage reaches the model | Documented (code.claude.com/docs/en/hooks, 2026-10-19): every event accepts terminalSequence, OSC 0/1/2/9/99/777 and BEL only, interactive only; a synchronous hook's stdout never reaches the transcript view, but whether the on-disk JSONL stays free of it is undocumented, so the planned test stands. An ASYNC hook's systemMessage and additionalContext are delivered to the model, so the praxis Stop hook must stay synchronous and never emit systemMessage, stopReason or continue |
 | Q19 | ICC of forecasts within a task; per-item BS SD; between-week SD | Pilot |
 | Q20 | Brier-unit size of the pretesting effect for this owner | Pilot prequestion items against shown-only items, exploratory |
-| Q21 | Lindvall and Sandahl's primary recall figure | Read JSS 43(1):19-27 |
-| Q22 | Any published study scoring human predictions of an agent's edit locations | Targeted search of 2026 CHI and CSCW; the SE review found none |
+| Q21 | Lindvall and Sandahl's primary recall figure | Paywalled; resolved from excerpts as section 4.4(d) now states (recall about one third in R4, precision about 0.96 second-hand) |
+| Q22 | Any published study scoring human predictions of an agent's edit locations | Five targeted searches on 2026-10-19 over arXiv and the CHI, CSCW, ICSE and FSE 2025-2026 terms found none; the nearest are post-hoc sabotage detection and agents forecasting their own edits. Absence in search, not proof |
 
 ## 14. Design record
 

@@ -25,3 +25,7 @@ tmp/
 # Claude Code session permission cache (machine-local, regenerated) and agent worktrees.
 .claude/settings.local.json
 .claude/worktrees/
+
+# systemap's decision store and facts cache (recorded answers keyed by source digests).
+# Upstream gitignores it too; the map itself (map/, docs/map/) is tracked.
+.systemap/
