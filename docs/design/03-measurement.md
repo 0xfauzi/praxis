@@ -139,8 +139,10 @@ stamped on every derived row. A map defines nodes only: every edge comes from an
    `too_few_components`, never padded.
 4. A file directly in a directory that has components below it belongs to `<dir>/.`.
 
-Measured here: the product root is `src/praxis`, and depth 1 gives 9 product components
-(cli, doctor, drill, gitdiff, hooks, install, recorder, spans, store). Taking the
+Measured here (re-measured with `components.derive` once it existed; the first count of 9
+left out `__init__.py` by hand): the product root is `src/praxis`, and depth 1 gives 10
+product components (`.` for the non-empty `__init__.py`, cli, doctor, drill, gitdiff, hooks,
+install, recorder, spans, store). Taking the
 top-level package would give 1 component [MX]. In a flat package like this, depth-1
 components are single files, so the forecast in section 4.4 is close to "which files will
 the agent edit" [CR]. That is why an owner map that groups files into the owner's own
@@ -185,10 +187,12 @@ counts (invariant 5).
 
 - A file edge f -> g exists if f has an `Import` or `ImportFrom` resolving (relative
   imports included) to a module in g. Lifted to components through the map.
-- Each component edge carries its import-site count and whether every site is
-  function-level (inside a `def`) or at least one is module-level. Measured here:
-  `spans -> store` is function-level only, and `drill -> gitdiff` has 2 sites; a
-  one-site function-level helper import is incidental reuse, not a boundary dependency
+- Each component edge carries its import-site count and whether at least one site
+  executes at import time (module-level) or none does (every site inside a `def` or under
+  `if TYPE_CHECKING`). Measured here: `spans -> store` has no import-time site (its one
+  site is under `if TYPE_CHECKING`, found when `extract.py` was run against the figures
+  first written here, which called it function-level), and `drill -> gitdiff` has 2 sites; a
+  one-site non-import-time helper import is incidental reuse, not a boundary dependency
   [CR]. D1 items are stratified by these two attributes and reported per stratum.
 - Reach: the transitive closure of the component graph.
 - Blind spots counted per component: `importlib.import_module`, `__import__`, string
@@ -197,9 +201,11 @@ counts (invariant 5).
   SQL and infrastructure wiring [SE], so every row carries the assumption that an absent
   edge may be an extractor blind spot.
 
-Measured here, X1 on `src/praxis`: 16 edges among 72 ordered pairs (base rate 0.222);
-`store` is imported by 5 components and `cli` imports 5. Of the 56 non-edge pairs, 7 reach
-their target through another component and 49 have no path at all.
+Measured here, X1 on `src/praxis` with the 10-component map (`extract.static_imports`,
+2026-10-19): 17 edges among 90 ordered pairs (base rate 0.189); `store` is imported by 5
+components and `cli` imports 6 (`.` included). Of the 73 non-edge pairs, 7 reach their
+target through another component and 66 have no path at all. (The first figures here, 16
+edges among 72 pairs, came from a 9-component count that dropped `__init__.py`.)
 
 ### 3.2 X2: runtime component traces of owner-named scenarios (candidate)
 
@@ -246,13 +252,13 @@ An **item** is (relation, A, B[, scenario or table]). Relations: D1 direct impor
 reach-through, RT runtime call or execution, TB table write. The item supply is finite and
 binding:
 
-- Measured here: 72 ordered D1 pairs. D2 has 7 positives against 49 negatives, so a
+- Measured here: 90 ordered D1 pairs. D2 has 7 positives against 66 negatives, so a
   constant 0.1 forecast nearly aces it; D2 is reported but never pooled into the primary
   outcome without the R_layer reference beside it.
 - An item is consumed by its first exposure (section 6). It is re-admitted as a new item
   only when its truth flips (a new epoch), which the recorder's edge history detects.
-- At 4 items consumed per task (section 6.2 defaults), praxis's D1 pool alone lasts 18
-  tasks (72 / 4, derived).
+- At 4 items consumed per task (section 6.2 defaults), praxis's D1 pool alone lasts 22
+  tasks (90 / 4, derived).
 - `praxis components pool` reports the supply per repository and relation. The power
   simulation (section 6.6) takes the supply as an input, and a repository whose supply
   cannot reach the simulated count over the study is declared infeasible for the
@@ -533,7 +539,7 @@ component is reported. The owner's working tree is never written.
 ### 4.8 C1: Pathfinder map (convergent only)
 
 Every P weeks (a design choice; cost needs measuring), the owner rates every unordered pair
-of product components for relatedness, 1 to 9 (36 pairs for praxis's 9 components,
+of product components for relatedness, 1 to 9 (45 pairs for praxis's 10 components,
 measured here), converted to distance d = 10 - rating. The owner's network is
 PFnet(r = infinity, q = n - 1), computed by a Floyd-Warshall pass with max in place of sum
 (standard library). Similarity to referents N_imp (an undirected link wherever X1 has an
@@ -746,7 +752,7 @@ instrument passes section 8.
   derived here): 24 first probes per arm give power 0.46 for g = 0.54 and 0.16 for
   g = 0.28 [CR]; 80 percent power needs about 54 items per arm for g = 0.54 and about 200
   for g = 0.28. At k_e = 2 that is about 54 and 200 registered tasks in total, and about 108
-  and 400 consumed bound items, against praxis's 72 D1 pairs.
+  and 400 consumed bound items, against praxis's 90 D1 pairs.
 - So a conceptual-size effect is out of reach on one repository of praxis's size with
   imports alone. What closes the gap: more relations (X2, X3), truth-flip re-admission,
   pooling across repositories, and the measured registration rate. The Stage 2

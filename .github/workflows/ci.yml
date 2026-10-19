@@ -50,8 +50,10 @@ jobs:
       # SHA was, and dependabot moves both together.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Nothing here uses git after this step, so the credential has no reason to
-          # survive it.
+          # The suite reads git history (test_extract checks X1 against the numbers
+          # measured at commit 697b332, and skips when that commit is absent), but writes
+          # nothing back, so the credential has no reason to survive this step.
+          fetch-depth: 0
           persist-credentials: false
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:

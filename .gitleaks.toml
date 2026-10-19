@@ -1,0 +1,26 @@
+# Secret-scanning config, used by both gitleaks hooks in .pre-commit-config.yaml. It EXTENDS
+# the shipped rules and disables none of them.
+
+title = "praxis"
+
+[extend]
+useDefault = true
+
+# The whole-tree scan reads the filesystem, and CI creates .venv/ before it runs.
+[[allowlists]]
+description = "installed dependencies and generated caches are not repository content"
+paths = [
+  '''(^|/)\.venv/''',
+  '''(^|/)node_modules/''',
+]
+
+# fixtures/sources/ holds transcripts recorded from real agent binaries (telltale's
+# included). Those recordings carry fake credentials, each marked TELLTALEFAKE, planted so
+# that a reader can be shown to drop them. Allowlisted by the marker in the MATCH, never by
+# path, so a real secret in the same file is still reported.
+[[allowlists]]
+description = "TELLTALEFAKE privacy probes in recorded fixtures"
+regexTarget = "match"
+regexes = [
+  '''TELLTALEFAKE''',
+]
