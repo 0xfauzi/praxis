@@ -33,7 +33,7 @@ CONTAINERS = (
         id="outside",
         label="OUTSIDE",
         sub="agent, owner, git, files",
-        box=(16, 16, 190, 674),
+        box=(16, 16, 190, 731),
         tone="host",
     ),
     Container(
@@ -48,25 +48,26 @@ CONTAINERS = (
 # A region contains a group of components with one function.
 # The record, ledger, and instrument regions follow the layers of
 # docs/design/03-measurement.md section 12. The analysis region holds the protocol
-# modules (report, scoring) and the transcript reader that the probe and the report call.
+# modules (report, scoring), the transcript reader that the probe and the report call,
+# and the supply count, which reads all transcripts at analysis time and writes nothing.
 # The policy layer has no module yet.
 REGIONS = (
-    Region(id="record", label="RECORD", box=(250, 412, 190, 204), container="system"),
-    Region(id="ledger", label="LEDGER", box=(868, 412, 190, 112), container="system"),
+    Region(id="record", label="RECORD", box=(868, 652, 190, 204), container="system"),
+    Region(id="ledger", label="LEDGER", box=(868, 320, 190, 112), container="system"),
     Region(
-        id="commands", label="COMMANDS", box=(868, 652, 190, 112), container="system"
+        id="commands", label="COMMANDS", box=(868, 80, 190, 112), container="system"
     ),
     Region(
         id="owner",
         label="SETUP AND CHECKS",
-        box=(250, 652, 190, 204),
+        box=(250, 80, 190, 204),
         container="system",
     ),
     Region(
-        id="measure", label="INSTRUMENT", box=(250, 80, 570, 296), container="system"
+        id="measure", label="INSTRUMENT", box=(250, 320, 570, 296), container="system"
     ),
     Region(
-        id="analysis", label="ANALYSIS", box=(868, 80, 190, 296), container="system"
+        id="analysis", label="ANALYSIS", box=(250, 652, 380, 204), container="system"
     ),
 )
 
@@ -78,7 +79,7 @@ COMPONENTS: tuple[Component, ...] = (
         kind="actor",
         container="outside",
         x=36,
-        y=626,
+        y=591,
     ),
     Component(
         id="Owner",
@@ -86,7 +87,7 @@ COMPONENTS: tuple[Component, ...] = (
         kind="actor",
         container="outside",
         x=36,
-        y=534,
+        y=315,
     ),
     Component(
         id="Git",
@@ -94,7 +95,7 @@ COMPONENTS: tuple[Component, ...] = (
         kind="actor",
         container="outside",
         x=36,
-        y=258,
+        y=499,
     ),
     Component(
         id="WorkingTree",
@@ -102,7 +103,7 @@ COMPONENTS: tuple[Component, ...] = (
         kind="actor",
         container="outside",
         x=36,
-        y=350,
+        y=683,
     ),
     Component(
         id="PraxisHome",
@@ -110,7 +111,7 @@ COMPONENTS: tuple[Component, ...] = (
         kind="actor",
         container="outside",
         x=36,
-        y=442,
+        y=407,
     ),
     # Source components.
     Component(
@@ -122,8 +123,8 @@ COMPONENTS: tuple[Component, ...] = (
         region="commands",
         note="The package module praxis holds only the docstring and __version__, which the command surface prints for --version. The command table builds the argparse parsers in a loop, so the extractor finds no subcommand entry point.",
         x=888,
-        y=692,
-        source_review="56d7325b3f9fcc4d926207d410439e9aa3afcb9f3f03acf5085c695867cca929",
+        y=120,
+        source_review="7496a1fd7a7f736feb91764b792fde2774bbf0a80a1b603fc486aff9735d112a",
     ),
     Component(
         id="HookEntry",
@@ -132,9 +133,9 @@ COMPONENTS: tuple[Component, ...] = (
         implemented_by=("praxis.hooks",),
         entry="run",
         region="record",
-        x=270,
-        y=544,
-        source_review="e02cbea43c40f4d5f78b7b8557afd1e640f688c24ff01e23ee52b61b09a28d9c",
+        x=888,
+        y=784,
+        source_review="96b9221f589d237fb01f463cf14dec653f50dfa9efa907449776fb38becd53aa",
     ),
     Component(
         id="Recorder",
@@ -144,9 +145,9 @@ COMPONENTS: tuple[Component, ...] = (
         entry="handle",
         region="record",
         note="A HEAD that is not a descendant of the base commit makes the snapshot unobservable and voids a bound task. The notice flag is set only at the Stop that closes a segment, for a payload without turn_id. The recorder imports components, extract, and transcript inside the functions that use them.",
-        x=270,
-        y=452,
-        source_review="b382c68b5d3816f7a356f10c1010b7c6f1f92e89ce7ffd13ed1bab2d053573e6",
+        x=888,
+        y=692,
+        source_review="3c0cb25ce2ded9ae6238005ac9fa502e9a4c6dfa2234aaaa26a5b88e5ce3ff19",
     ),
     Component(
         id="Ledger",
@@ -158,8 +159,8 @@ COMPONENTS: tuple[Component, ...] = (
         region="ledger",
         note="Each table in schema.CLAIMS has a CHECK that fixes its one claim class and refuses an empty source list. The attributions table accepts any claim class, and hook_events has none. Triggers make the measurement tables and repository_starts append-only, and a task or a map sets each transition column once. repository_starts has one row per repository, and its start week must be one of its candidate weeks. A task fixes forced_control at registration. segment_close writes the outcomes and the task close in one transaction. A scenario run must name the HEAD tree it traced, unless its outcome is not_python. On a ledger that already held runs, migrate adds tree_hash without that CHECK. migrate also adds forced_control and makes the trigger for the fixed task columns again. probe_items_unprobed leaves out an item that a probe asked, so the binding pool and the validation draw hold blind items only. The survival lookup intersects agent line-hash multisets with a probe multiset, so two identical lines count as two. When PRAGMA user_version differs from SCHEMA_VERSION, Store.open runs the DDL and then migrate.",
         x=888,
-        y=452,
-        source_review="e961f5f375c4aac7b3c00295c2c07ab91e322a2492d2306eb4c0c152f97bf84a",
+        y=360,
+        source_review="623b3fbb53a13dfa1576d3eb2f7b00f42d620f50bf0215f8e2db80ac085b1f97",
     ),
     Component(
         id="ConsentedInstall",
@@ -169,8 +170,8 @@ COMPONENTS: tuple[Component, ...] = (
         entry="apply",
         region="owner",
         x=270,
-        y=692,
-        source_review="4d9b8c232d8f287b8a90218d0ea0714c636762047076f5fa14f7e2cd8c2230c8",
+        y=120,
+        source_review="f9c281b47448d91ebba5a7bf9144c449ac00452da1cae02f2ca4c8eeb5c0c770",
     ),
     Component(
         id="Doctor",
@@ -181,8 +182,8 @@ COMPONENTS: tuple[Component, ...] = (
         region="owner",
         note="Counts come from a SQLite read-only connection. Items due come from probe.due, which opens a Store. The doctor asks for them only at SCHEMA_VERSION, so no migration can run. The scenario line comes from scenarios.summary, which also opens a Store only at SCHEMA_VERSION. The doctor imports hooks, probe, and scenarios inside the functions that use them.",
         x=270,
-        y=784,
-        source_review="eb3f4e8bda6ec04606e1023d794fe8c448dc9e2789dd9aa8d1be78dd8e93ca1e",
+        y=212,
+        source_review="7cdc4dfb34af0d65a6763a46d67db9b0c0213e44f57b231df4f0fa1a605f4014",
     ),
     Component(
         id="ComponentMap",
@@ -193,8 +194,8 @@ COMPONENTS: tuple[Component, ...] = (
         region="measure",
         note="A flat package has more than 30 children at depth 1. Its children are grouped by the name before the first underscore. Then each one-file group joins the multi-file group with the most import edges, when that maximum is unique. The edges come from static_imports. The ledger calls from_json before it stores a map. The recorder, the item pool, the scenario runner, the task registration, the probe, and the report parse the frozen map and assign paths with it.",
         x=460,
-        y=212,
-        source_review="5d9cdc72f15a4ceca9c7e2d63da8ed93a57645f2483005204369a407feaad2c4",
+        y=544,
+        source_review="cea32bd6afa49eb223146e245a6bfa41561ca9f944f4a0761318a23e9a319918",
     ),
     Component(
         id="Extractors",
@@ -205,8 +206,8 @@ COMPONENTS: tuple[Component, ...] = (
         region="measure",
         note="The recorder, the component map, the item pool, the task registration, and the probe call static_imports. A resolved TYPE_CHECKING import is an edge that is not module-level, and type_only counts it, not blind_spots (EXTRACTOR_VERSION x1-v2). The scenario runner calls scratch_clone and run_scenario, and its rows carry X2_VERSION.",
         x=270,
-        y=120,
-        source_review="178cb7bc49df2fb4297c4f22c1eb5d3aed7c63478a4ac8ec1c2e242d7f3659fb",
+        y=544,
+        source_review="c26438563293e6de1775ccbf5efb1cdd0b9694ed0e6ef34f45ed900d1f207537",
     ),
     Component(
         id="ItemPool",
@@ -216,9 +217,9 @@ COMPONENTS: tuple[Component, ...] = (
         entry="freeze",
         region="measure",
         note="A change to a frozen map needs a --reason from MAP_REASONS. Freeze refuses fewer than 5 or more than 30 product components and prints the draft of a mechanical map. A second freeze writes only the missing pairs, and a pair whose truth flipped gets a new item at the next epoch. A component without a parsed Python file gives no items, not items with truth 0. After each freeze, it calls draw_start, which draws the start week at the first freeze only and prints nothing. praxis make components --write never writes over an existing owner file.",
-        x=460,
-        y=304,
-        source_review="258b4eddec0b681c34fd6bec88614fca1952c25672136e3b514d3ef3154455be",
+        x=650,
+        y=360,
+        source_review="4dc33114d6f3d42e8ceabadf8cf4a6fc0a38f2001b20246d08f9a15070339f8f",
     ),
     Component(
         id="TaskRegistration",
@@ -229,8 +230,8 @@ COMPONENTS: tuple[Component, ...] = (
         region="measure",
         note="A task before the start week is control with forced_control set, and its text is the text of any control task. From the start week, the arm generator reads only the seed, the repository id, and the task ordinal. The region touch rate counts closed tasks in TOUCH_WINDOW_WEEKS, where None counts all. The binding pool holds only items that no task exposed and no probe asked. The recorder binds the task and closes its segment. praxis show task calls last, which prints only the result.",
         x=650,
-        y=304,
-        source_review="07030a53db16c81f1734d57bc5c15a9a539a0168eb60ad5e0d67bfde84d9b7e8",
+        y=452,
+        source_review="d350c8e9e4e25cf8f40a01f4a933bea3e7995c257918c2fecb333b9c750e3977",
     ),
     Component(
         id="Probe",
@@ -240,9 +241,9 @@ COMPONENTS: tuple[Component, ...] = (
         entry="administer",
         region="measure",
         note="A structural item without a truth from the extractors now is not asked and stays due. After the due items, a structural probe asks up to N_VALIDATION never-drawn validation items each ISO week, ranked by a hash of task.SEED. It asks an item answered on the grid once more inside the P1 window, as a retest. The knockout reads only scenario runs of the HEAD tree. Pathfinder ratings stay in memory and only the scores are stored.",
-        x=650,
-        y=212,
-        source_review="8b42c03ec28f5f5b3d220d197523693afb32e4efb9958bc15ffc54a7e1e31cfd",
+        x=460,
+        y=452,
+        source_review="f72f75523da981d0177a576c33c3805bbd36dc95fa3a5d994405d9a543afbb0f",
     ),
     Component(
         id="ScenarioRunner",
@@ -253,20 +254,20 @@ COMPONENTS: tuple[Component, ...] = (
         region="measure",
         note="The scenario file is a closed shape. A scenario id is stored as an identifier, and the argv is stored only as a hash. PRAXIS_HOME points into the clone, so a scenario cannot write the owner's ledger. The clone is deleted after each scenario, also when it fails.",
         x=270,
-        y=212,
-        source_review="6b2f11e5ed75ea3e6e10434faf45617f3e29f8613e5faaeac8bcfaf8a86f9936",
+        y=360,
+        source_review="ac939aabf0620144d03b26ab73cdba87a14d494f0ec8b251695b23717f437aae",
     ),
     Component(
         id="TranscriptReader",
-        does="Finds and reads one Claude Code transcript at analysis time. It returns prompt, assistant, and tool-call records with identifiers, timestamps, counts, and hashes.",
+        does="Finds and reads one Claude Code transcript at analysis time. It returns prompt, assistant, and tool-call records with identifiers, timestamps, counts, and hashes. A tool call keeps the lowercased suffix of the file that it names, not the path.",
         interface="read(path) -> Session",
         implemented_by=("praxis.transcript",),
         entry="read",
         region="analysis",
-        note="The probe and the report call locate and read, and the recorder calls options_hash. The name sets that it returns must never be stored.",
-        x=888,
-        y=120,
-        source_review="e9d49c458bb60f5303da2ec639f0a196f8a0211d5015d5b176ca0683bdd0d14b",
+        note="The probe and the report call locate and read. The supply count calls read, and the recorder calls options_hash. The name sets that it returns must never be stored.",
+        x=270,
+        y=692,
+        source_review="437fcad1074a763520f3d6cab2dd571e972774ec75583a73bc3afff07b8376b1",
     ),
     Component(
         id="AgentCheck",
@@ -276,9 +277,9 @@ COMPONENTS: tuple[Component, ...] = (
         entry="attached_agents",
         region="measure",
         note="The command surface, the doctor, the item pool, the scenario runner, the task registration, and the probe call locate. The doctor and the probe call attached_agents.",
-        x=270,
-        y=304,
-        source_review="2b80eb94c0e4d2b81e7b21109edacfbec4b5b519b46f320f1fb8e98d16863788",
+        x=460,
+        y=360,
+        source_review="cf61f78d46d82598b308b278e587c43831ed889971b25f8a577da54755110ec9",
     ),
     Component(
         id="Scoring",
@@ -288,21 +289,33 @@ COMPONENTS: tuple[Component, ...] = (
         entry="brier",
         region="analysis",
         note="No I/O and no imports from other praxis modules. The probe calls pfnet and pfsim. The report calls bss, decomposition, corp_reliability, randomization_test, and snap.",
-        x=888,
-        y=212,
-        source_review="534298a1749413732c3be895c5cd5f67689f049a234508c1d52b8489fce29ca4",
+        x=460,
+        y=692,
+        source_review="58715978e7b9343c6772fcc668e3ced0e627d159fbd58e8606548bb54b290f45",
     ),
     Component(
         id="Report",
-        does="Computes references, Brier scores, decomposition, CORP bands, randomization tests, the pipeline placebo, test-retest, and the general effect across repositories from the ledger. It writes nothing, and its text holds counts, numbers, and reason codes only.",
+        does="Computes references, Brier scores, decomposition, CORP bands, randomization tests, the pipeline placebo, test-retest, and the general effect across repositories from the ledger. It writes nothing. Its text and its JSON form hold counts, numbers, and reason codes only.",
         interface="scores(store, repo_id, seed, draws) -> Scores",
         implemented_by=("praxis.report", "praxis.render", "praxis.general"),
         entry="scores",
         region="analysis",
-        note="praxis.report computes the scores. praxis.general computes the general effect with koehler_levin over the repository starts. praxis.render holds the result shapes and the text, and report re-exports them. A forced-control task is out of the P1 blocks and arm contrasts. R_fam counts closed tasks in the touch window. render refuses the words cause, impact, and would unless a pre-registered rule is met, and then it names the rule. A pipeline placebo below ALPHA suspends each P1 arm contrast in the text. Validation items never enter a P1 block or an arm contrast. A reference that cannot be fitted is NULL, never another reference.",
-        x=888,
-        y=304,
-        source_review="c73ecb83e7085d69253ead25ff048c5f64e76675d60ca02cf6d5380e72c40851",
+        note="praxis.report computes the scores. praxis.general computes the general effect with koehler_levin over the repository starts. praxis.render holds the result shapes, the text, and the JSON form. report re-exports the shapes and render, and the command surface calls render.to_json directly. A forced-control task is out of the P1 blocks and arm contrasts. R_fam counts closed tasks in the touch window. render and to_json refuse the words cause, impact, and would unless a pre-registered rule is met, and then the text names the rule. A pipeline placebo below ALPHA suspends each P1 arm contrast in the text. Validation items never enter a P1 block or an arm contrast. A reference that cannot be fitted is NULL, never another reference.",
+        x=460,
+        y=784,
+        source_review="a26fa894027173d9edd09ae49008848d290b09dbd4364bb7d9e649e112053e8d",
+    ),
+    Component(
+        id="Supply",
+        does="For praxis show supply, reads the Claude Code transcripts of the owner and makes counts for each ISO week. The values are prompts, the registration denominator, repositories by hashed id, decisions, the empty-segment rate, and edit calls by file suffix. It writes nothing and prints no path, prompt text, or repository name.",
+        interface="show(home, weeks, as_json, out) -> int",
+        implemented_by=("praxis.supply",),
+        entry="show",
+        region="analysis",
+        note="This is not part of the transcript reader, which reads one transcript. The supply count reads all transcripts, groups prompts and tool calls by ISO week, gets repository ids through git, and prints a table or JSON. A week before the first prompt on disk is unobservable, not zero. A session in which no prompt has origin gives prompts of unknown kind and no segments. Codex rollout files are counted and not read. EDIT_TOOLS is recorder.MUTATING_TOOLS without Bash.",
+        x=270,
+        y=784,
+        source_review="b7d9a851f9a6e494aa6e2b391852654642831617d9453e1a56863785071153ca",
     ),
 )
 
@@ -342,6 +355,7 @@ PLAIN: dict[str, str] = {
     "AgentCheck": "the agent-presence check",
     "Scoring": "the scoring functions",
     "Report": "the report",
+    "Supply": "the supply count",
 }
 
 LAYERS: tuple[Layer, ...] = ()
@@ -441,7 +455,7 @@ RELATIONS: dict[tuple[str, str] | str, str] = {
     (
         "CommandSurface",
         "Report",
-    ): "The command surface opens the ledger, calls scores with the committed seed and draw count, and calls render on stdout.",
+    ): "The command surface opens the ledger and calls scores with the committed seed and draw count. It calls render on stdout, or to_json for --json.",
     (
         "CommandSurface",
         "AgentCheck",
@@ -680,6 +694,23 @@ RELATIONS: dict[tuple[str, str] | str, str] = {
         "Report",
         "Scoring",
     ): "The report calls bss, decomposition, corp_reliability, and randomization_test, which is two-sided for the placebo. praxis.general calls koehler_levin with the weekly series of each repository.",
+    # The supply count.
+    (
+        "CommandSurface",
+        "Supply",
+    ): "For praxis show supply, the command surface calls show with the home directory, the --weeks value, and the --json flag.",
+    (
+        "CodingAgent",
+        "Supply",
+    ): "The supply count lists the JSONL files under ~/.claude/projects and reads the cwd of each prompt line. It counts the Codex rollout files and does not read them.",
+    (
+        "TranscriptReader",
+        "Supply",
+    ): "For each transcript file, the reader returns the session id, the prompts with origin kinds, the tool calls, and the warnings. A tool call has its option count and file suffix.",
+    (
+        "Supply",
+        "Recorder",
+    ): "For each new cwd of a prompt, the supply count calls toplevel and repo_id. It reads MUTATING_TOOLS for the names of the edit and mutating tools.",
 }
 
 VERBS: dict[str, tuple[str, str]] = {

@@ -98,6 +98,7 @@ INVARIANTS: tuple[Invariant, ...] = (
             "TaskRegistration",
             "Probe",
             "Report",
+            "Supply",
         ),
         reason="The hook runs beside the agent, so each added import is a cost that the agent session pays (AGENTS.md, invariant 6).",
     ),
@@ -121,7 +122,7 @@ INVARIANTS: tuple[Invariant, ...] = (
     ),
     Invariant(
         12,
-        "praxis show report writes nothing when its text holds the words cause, impact, or would and no pre-registered rule is met. The text names each rule with its result (AGENTS.md, invariant 3; src/praxis/render.py docstring, _REFUSED, and render).",
+        "praxis show report writes nothing when its text holds the words cause, impact, or would and no pre-registered rule is met. The JSON object for --json has the same rule. The text names each rule with its result (AGENTS.md, invariant 3; src/praxis/render.py docstring, _REFUSED, _guard, render, and to_json).",
         governs=("Report",),
         reason="A claim class is never upgraded. A report may narrow a claim or drop it, and it refuses these words unless the pre-registered decision rule was met (AGENTS.md, invariant 3; docs/preregistration.md).",
     ),
@@ -130,6 +131,12 @@ INVARIANTS: tuple[Invariant, ...] = (
         "Owner answers are closed vocabulary. Other typed text is asked again and dropped, and a free recall is shown and discarded, with not even its length kept (AGENTS.md, invariant 5; src/praxis/task.py docstring; src/praxis/probe.py docstring).",
         governs=("TaskRegistration", "Probe"),
         reason="No prompt, assistant, or code text is persisted, and the owner input that praxis keeps is grid probabilities, component ids, option indices, and reason codes (AGENTS.md, invariant 5).",
+    ),
+    Invariant(
+        14,
+        "praxis show supply writes nothing. Its text and its JSON object hold no path, prompt text, or repository name, and a repository appears only as a hashed id. A week before the first prompt on disk is unobservable, not zero (src/praxis/supply.py docstring and show; tests/integration/test_supply.py, test_show_supply_counts_the_fixture_and_prints_no_path_or_text).",
+        governs=("Supply",),
+        reason="No prompt, assistant, or code text is persisted, and unknown stays unknown (AGENTS.md, invariants 4 and 5). The supply count reads the transcripts of the owner where the agent wrote them, so its output must not carry their text (src/praxis/supply.py docstring).",
     ),
 )
 
