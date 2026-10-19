@@ -31,42 +31,36 @@ CONTAINERS = (
         id="outside",
         label="OUTSIDE",
         sub="agent, owner, git, files",
-        box=(16, 16, 190, 867),
+        box=(16, 16, 190, 660),
         tone="host",
     ),
     Container(
         id="system",
         label="PRAXIS",
         sub="one process per command",
-        box=(230, 16, 468, 1008),
+        box=(230, 16, 468, 860),
         tone="server",
     ),
 )
 
 # A region contains a group of components with one function.
 REGIONS = (
-    Region(id="record", label="RECORD", box=(250, 80, 190, 204), container="system"),
-    Region(id="ledger", label="LEDGER", box=(488, 80, 190, 112), container="system"),
+    Region(id="record", label="RECORD", box=(488, 320, 190, 204), container="system"),
+    Region(id="ledger", label="LEDGER", box=(488, 652, 190, 112), container="system"),
     Region(
-        id="commands", label="COMMANDS", box=(250, 320, 190, 112), container="system"
+        id="commands", label="COMMANDS", box=(488, 80, 190, 112), container="system"
     ),
     Region(
         id="owner",
         label="SETUP AND CHECKS",
-        box=(488, 320, 190, 204),
+        box=(250, 80, 190, 204),
         container="system",
     ),
     Region(
-        id="measure", label="MEASUREMENT", box=(250, 560, 190, 296), container="system"
+        id="measure", label="MEASUREMENT", box=(250, 320, 190, 296), container="system"
     ),
     Region(
-        id="analysis", label="ANALYSIS", box=(488, 560, 190, 204), container="system"
-    ),
-    Region(
-        id="rejected",
-        label="REJECTED INSTRUMENT",
-        box=(250, 892, 190, 112),
-        container="system",
+        id="analysis", label="ANALYSIS", box=(250, 652, 190, 204), container="system"
     ),
 )
 
@@ -78,15 +72,15 @@ COMPONENTS: tuple[Component, ...] = (
         kind="actor",
         container="outside",
         x=36,
-        y=451,
+        y=336,
     ),
     Component(
         id="Owner",
-        does="The person who owns the repositories. The owner types praxis commands on a terminal and answers the consent and drill prompts.",
+        does="The person who owns the repositories. The owner types praxis commands on a terminal and answers the consent prompt.",
         kind="actor",
         container="outside",
         x=36,
-        y=727,
+        y=126,
     ),
     Component(
         id="Git",
@@ -94,7 +88,7 @@ COMPONENTS: tuple[Component, ...] = (
         kind="actor",
         container="outside",
         x=36,
-        y=543,
+        y=612,
     ),
     Component(
         id="WorkingTree",
@@ -102,15 +96,15 @@ COMPONENTS: tuple[Component, ...] = (
         kind="actor",
         container="outside",
         x=36,
-        y=819,
+        y=520,
     ),
     Component(
         id="PraxisHome",
-        does="The directory $PRAXIS_HOME (default ~/.praxis). It holds the SQLite ledger file ledger.db, settings backups, drill backups, owner component files, and scratch clones.",
+        does="The directory $PRAXIS_HOME (default ~/.praxis). It holds the SQLite ledger file ledger.db, settings backups, owner component files, and scratch clones.",
         kind="actor",
         container="outside",
         x=36,
-        y=635,
+        y=428,
     ),
     # Source components.
     Component(
@@ -120,9 +114,9 @@ COMPONENTS: tuple[Component, ...] = (
         implemented_by=("praxis.cli",),
         entry="main",
         region="commands",
-        x=270,
-        y=360,
-        source_review="fc20e18c7fa12f25a3160902eb79d452fc01d2d0284ffbbb3d5903f42d7cf8a1",
+        x=508,
+        y=120,
+        source_review="ac30632cfe18834fccf59223768a00c2f5bf81cac2faef99fcd1f25f5f2c2081",
     ),
     Component(
         id="HookEntry",
@@ -131,9 +125,9 @@ COMPONENTS: tuple[Component, ...] = (
         implemented_by=("praxis.hooks",),
         entry="run",
         region="record",
-        x=270,
-        y=120,
-        source_review="05dec417202f77cdf40437037a81e36f4ac7a0412cff566c9122ac45537e6b77",
+        x=508,
+        y=360,
+        source_review="b15fd9542dd7535b2758b82c24405bae9e738629f918d6c02e5e3e59245ec224",
     ),
     Component(
         id="Recorder",
@@ -142,21 +136,22 @@ COMPONENTS: tuple[Component, ...] = (
         implemented_by=("praxis.recorder", "praxis.gitdiff"),
         entry="handle",
         region="record",
-        x=270,
-        y=212,
-        source_review="8aa628d81bd84f698834513aea207d55c70813e0c8ea0e07f8c362bf5766437f",
+        x=508,
+        y=452,
+        source_review="ffa2f84ee33b649ae23420caf4706978f6b13bcc12e9097379ffd98359c72e09",
     ),
     Component(
         id="Ledger",
-        does="The SQLite ledger under $PRAXIS_HOME. It is the only module that inserts rows, and its CHECK constraints refuse derived rows without a claim class, sources, or coverage.",
-        interface="Store.open / Store.attributions / Store.agent_multiset",
-        implemented_by=("praxis.store",),
+        does="The SQLite ledger under $PRAXIS_HOME. praxis.schema holds its DDL and closed vocabularies, and praxis.store holds every INSERT. It keeps recorder rows, component maps, tasks, probes, forecasts, decisions, and flags.",
+        interface="Store.open / Store.attributions / Store.agent_multiset / Store.survival",
+        implemented_by=("praxis.store", "praxis.schema"),
         entry="Store",
         kind="store",
         region="ledger",
+        note="Each table in schema.CLAIMS has a CHECK that fixes its one claim class and refuses an empty source list. The attributions table accepts any claim class, and hook_events has none. Triggers make the measurement tables append-only, and a task or a map sets each transition column once. The survival lookup intersects agent line-hash multisets with a probe multiset, so two identical lines count as two. When PRAGMA user_version differs from SCHEMA_VERSION, Store.open runs the DDL and then migrate, which drops the tables of the rejected drill.",
         x=508,
-        y=120,
-        source_review="fe900c9bdf8deaec2ec44f28881ad84efd47014f54159a717a65058ffc426178",
+        y=692,
+        source_review="7a245fe2dae76a064af5aff00673893af9c754a74f0317c4c2debe7dbe52f43a",
     ),
     Component(
         id="ConsentedInstall",
@@ -165,20 +160,20 @@ COMPONENTS: tuple[Component, ...] = (
         implemented_by=("praxis.install",),
         entry="apply",
         region="owner",
-        x=508,
-        y=360,
-        source_review="737ce18cbd211a44fe02c16b11665b0fb40ea1850c9ded8f1e8cbbb9c60e0fc0",
+        x=270,
+        y=120,
+        source_review="e78831d1bab7e37d04dac4ae0a0381af9ff5533c522092f8bdd8124754eae9e8",
     ),
     Component(
         id="Doctor",
-        does="Reports what is installed, recorded, and pending. It opens the ledger in SQLite read-only mode and writes no file.",
+        does="Reports the installed hooks, the ledger row counts, and the agent processes attached to the current repository. It opens the ledger in SQLite read-only mode and writes no file.",
         interface="run(cwd, home, praxis_home, out) -> int",
         implemented_by=("praxis.doctor",),
         entry="run",
         region="owner",
-        x=508,
-        y=452,
-        source_review="0ce391beb5e7454a1dd13deb093d83b8100b2ca5c04177353dd5e7c6c7cb52d0",
+        x=270,
+        y=212,
+        source_review="c192ca046d1b468e32ba7ac7c0b71060a8acf27f75423e6941471029ab77613a",
     ),
     Component(
         id="ComponentMap",
@@ -187,10 +182,10 @@ COMPONENTS: tuple[Component, ...] = (
         implemented_by=("praxis.components",),
         entry="derive",
         region="measure",
-        note="No other praxis module imports this module yet. The command surface has no components verb.",
+        note="Only the ledger imports this module: Store.component_map_put parses a map with from_json before it stores the rules. The command surface has no components verb.",
         x=270,
-        y=600,
-        source_review="2a75a10f691c0783e3de5b8c1903445a7a408556928d07c4b7f232d18ef22e5e",
+        y=544,
+        source_review="e8f271fd2355b7f588b2b014f61bedd4ddd5131dbb0136c08b19f4dcefb6436f",
     ),
     Component(
         id="Extractors",
@@ -201,8 +196,8 @@ COMPONENTS: tuple[Component, ...] = (
         region="measure",
         note="No other praxis module imports this module yet. Runtime traces and schema references wait for their experiments.",
         x=270,
-        y=692,
-        source_review="da99158bd43c3fdd0e9ef78b1bcb5b706deb099285a372d631ac1bc7ba8da6ed",
+        y=452,
+        source_review="0e123df13e271f1c40ed270cd132faa1457bd9d470593c46b075384bcec14c31",
     ),
     Component(
         id="TranscriptReader",
@@ -212,9 +207,9 @@ COMPONENTS: tuple[Component, ...] = (
         entry="read",
         region="analysis",
         note="No other praxis module imports this module yet. The name sets that it returns must never be stored.",
-        x=508,
-        y=600,
-        source_review="cdcb088c4705b192065aa2446df307668375182a74fe8db20627df5c32c1fe39",
+        x=270,
+        y=692,
+        source_review="2c1320e42460edc00afa776a2dede311f9122afd0bb1c9d5acb43f82f22c28e1",
     ),
     Component(
         id="AgentCheck",
@@ -223,10 +218,10 @@ COMPONENTS: tuple[Component, ...] = (
         implemented_by=("praxis.unassisted",),
         entry="attached_agents",
         region="measure",
-        note="No other praxis module imports this module yet. praxis.drill still holds its own copy of these functions.",
+        note="The doctor imports locate and attached_agents from this module. No probe harness imports it yet.",
         x=270,
-        y=784,
-        source_review="df33c064b1fd4bed5d7539acbfb065add6d4cd915ccfc70a86acb602dbb47c3b",
+        y=360,
+        source_review="8a61a3f1b1c4aa74f804c64bacd6fc29fb52c2c1bb28ec053c53f48262bb8582",
     ),
     Component(
         id="Scoring",
@@ -236,21 +231,9 @@ COMPONENTS: tuple[Component, ...] = (
         entry="brier",
         region="analysis",
         note="No I/O and no imports from other praxis modules, so the map shows no flows for it. No other praxis module imports it yet.",
-        x=508,
-        y=692,
-        source_review="04d2e1a0151fa3ea9b7a62c2f6b930e6489d7e7b79ddf640a10ac14aa9719f0a",
-    ),
-    Component(
-        id="WriteItInstrument",
-        does="The rejected write-it drill. It finds functions with agent lines, strips one body in place, runs the project's tests, and restores the file.",
-        interface="run(cwd, home, store, test_cmd, min_fraction, list_only, stdin, out) -> int",
-        implemented_by=("praxis.drill", "praxis.spans"),
-        entry="run",
-        region="rejected",
-        note="docs/design/02-instrument.md is REJECTED. Design 03 section 12 deletes these modules. The agent check now has a copy in praxis.unassisted.",
         x=270,
-        y=932,
-        source_review="611a06d8680a75ea4c294a7c092df4a13f3f907684cc30df3f43cd661232659a",
+        y=784,
+        source_review="65c94aab0a52d96a62a4dcd439be1ceb7a76b38b22cf81096da11d8df434e41d",
     ),
 )
 
@@ -265,10 +248,10 @@ FLOWS: tuple[Flow, ...] = (
         "hook call",
         "control",
         source_refs=(
-            "praxis.cli:main@7f92ea345a0770f9619336ec9398b1192ee80fc1deabd3ad818ebe169cc66353",
+            "praxis.cli:main@ea9564e4199500544b11e719846616df53144d5a7d9e29fd5d9c8db1bbc9f008",
             "praxis.hooks:run@274f9ceb29a04dcce555714a64215223e5b02e532d7d99bcc8850b99e35d8c6c",
         ),
-        review_digest="66da05b30b49d994c8ace7f262f8fab9c98dfbbcb4f52a139e57df88fa185833",
+        review_digest="35f21b17279c02401a424e44829f38fd611c1b519bc7d21ebd6480987035ba74",
     ),
     Flow(
         "HookEntry",
@@ -288,9 +271,9 @@ FLOWS: tuple[Flow, ...] = (
         "data",
         source_refs=(
             "praxis.hooks:run@274f9ceb29a04dcce555714a64215223e5b02e532d7d99bcc8850b99e35d8c6c",
-            "praxis.store:Store@14573af1ba7d9502959e36f96434047562802a32c1eb99547034f77de1073c3d",
+            "praxis.store:Store@9a54e6e3255bcaface7173b343bcd8812279c1a90e80a25fb030c70d9bdb8a80",
         ),
-        review_digest="d5e37e8aefaf4eb6fc0a6a5e4b20034ebe49316eefcb63114fbea7cc91ed51eb",
+        review_digest="2747754f364eaec8c42eb70c8351b2c3bdb0e2f5f15a21177d85cea10e7bc1ee",
     ),
     # The recorder.
     Flow("Recorder", "Git", "diff command", "control"),
@@ -302,10 +285,10 @@ FLOWS: tuple[Flow, ...] = (
         "data",
         source_refs=(
             "praxis.recorder:handle@51d9a05dc62fe47492b746dbe02ce3892111f0c5a310cbc10e9124882b20b092",
-            "praxis.store:Store@14573af1ba7d9502959e36f96434047562802a32c1eb99547034f77de1073c3d",
+            "praxis.store:Store@9a54e6e3255bcaface7173b343bcd8812279c1a90e80a25fb030c70d9bdb8a80",
         ),
         id="rec-hashes",
-        review_digest="903ea88297b8165a53334277763d75e6cb798a269eea727c2b083f3697c6deee",
+        review_digest="5c0fd78a59e0b72e26a8a413badefefb71f017e7a13104d3fd88fb189d255d36",
     ),
     Flow(
         "Recorder",
@@ -314,10 +297,11 @@ FLOWS: tuple[Flow, ...] = (
         "data",
         source_refs=(
             "praxis.recorder:attribute@51d9a05dc62fe47492b746dbe02ce3892111f0c5a310cbc10e9124882b20b092",
-            "praxis.store:Attribution@14573af1ba7d9502959e36f96434047562802a32c1eb99547034f77de1073c3d",
+            "praxis.store:Store@9a54e6e3255bcaface7173b343bcd8812279c1a90e80a25fb030c70d9bdb8a80",
+            "praxis.schema:Attribution@f41c1417f45ac88ccc9db47207cfdfa45f0bccb933b82748a0fc9b5947849da4",
         ),
         id="rec-attributions",
-        review_digest="21fde126acfe5cf8593908c59c86b6e706bed36d6a6a0af6d44f05ddbe43fcc2",
+        review_digest="52fcb3bbc677a0b57c1d7e08293a0d23375591d329964b9b236b0fed87e0b0b6",
     ),
     Flow(
         "Ledger",
@@ -325,10 +309,10 @@ FLOWS: tuple[Flow, ...] = (
         "stored multisets",
         "data",
         source_refs=(
-            "praxis.store:Store@14573af1ba7d9502959e36f96434047562802a32c1eb99547034f77de1073c3d",
+            "praxis.store:Store@9a54e6e3255bcaface7173b343bcd8812279c1a90e80a25fb030c70d9bdb8a80",
             "praxis.recorder:handle@51d9a05dc62fe47492b746dbe02ce3892111f0c5a310cbc10e9124882b20b092",
         ),
-        review_digest="f1540bc3d7ac77a85620cd74e31d45ef1985f3d831dcd76896fc045b6e1db850",
+        review_digest="750909fe58c766624de556ee2e3a6cc9d289630b4697350b0a58c518b32c42e7",
     ),
     Flow("Ledger", "PraxisHome", "SQLite rows", "data"),
     # The owner's commands.
@@ -339,11 +323,11 @@ FLOWS: tuple[Flow, ...] = (
         "setup call",
         "control",
         source_refs=(
-            "praxis.cli:main@7f92ea345a0770f9619336ec9398b1192ee80fc1deabd3ad818ebe169cc66353",
+            "praxis.cli:main@ea9564e4199500544b11e719846616df53144d5a7d9e29fd5d9c8db1bbc9f008",
             "praxis.install:apply@d3a4a8ea93aad6e8cbd2bab839ae50a063b38924c70b9e388e5a614f34fde984",
             "praxis.install:snippet@d3a4a8ea93aad6e8cbd2bab839ae50a063b38924c70b9e388e5a614f34fde984",
         ),
-        review_digest="d5fe0caa336a1e8b90a3ca86a62a421fd9330ce52fe3a4693e1a2924d4d81a9f",
+        review_digest="4e3ae0abd07f00d86a4def0dd4cc5a4a9c696dd225e6e20ed01f38180c6989b7",
     ),
     Flow(
         "CommandSurface",
@@ -351,22 +335,10 @@ FLOWS: tuple[Flow, ...] = (
         "doctor call",
         "control",
         source_refs=(
-            "praxis.cli:main@7f92ea345a0770f9619336ec9398b1192ee80fc1deabd3ad818ebe169cc66353",
-            "praxis.doctor:run@ca1f8d48277796b39c5c5bc70bd0472591c4fde5b8b4c8dac0ad4923200d16f0",
+            "praxis.cli:main@ea9564e4199500544b11e719846616df53144d5a7d9e29fd5d9c8db1bbc9f008",
+            "praxis.doctor:run@22fa9d94aaeae45630c14accade1f5d2b32e6924ab027568f75f27834e9dff2c",
         ),
-        review_digest="ec5784caadf16cb22ab549b673f1eca7a8bf6d85e5bec9a4de7c7425fde98d71",
-    ),
-    Flow(
-        "CommandSurface",
-        "WriteItInstrument",
-        "drill call",
-        "control",
-        source_refs=(
-            "praxis.cli:main@7f92ea345a0770f9619336ec9398b1192ee80fc1deabd3ad818ebe169cc66353",
-            "praxis.drill:run@f6770b21d58a7607260c804269224a72a11496c0e58d018ea6aefadabecbf1eb",
-            "praxis.drill:restore@f6770b21d58a7607260c804269224a72a11496c0e58d018ea6aefadabecbf1eb",
-        ),
-        review_digest="487e9c43959a59a498f18385d21f4b488587b3842724d1b68c9da6b772b748f7",
+        review_digest="bc2530f8893aacb1ab6af960440852936bfd7dce2635e80907841618efeefe61",
     ),
     Flow(
         "Ledger",
@@ -374,10 +346,10 @@ FLOWS: tuple[Flow, ...] = (
         "attribution rows",
         "data",
         source_refs=(
-            "praxis.store:Store@14573af1ba7d9502959e36f96434047562802a32c1eb99547034f77de1073c3d",
-            "praxis.cli@7f92ea345a0770f9619336ec9398b1192ee80fc1deabd3ad818ebe169cc66353",
+            "praxis.store:Store@9a54e6e3255bcaface7173b343bcd8812279c1a90e80a25fb030c70d9bdb8a80",
+            "praxis.cli@ea9564e4199500544b11e719846616df53144d5a7d9e29fd5d9c8db1bbc9f008",
         ),
-        review_digest="cc0e6733c1a2fe5566d04f150b9b9783b8bf2389a1946035837ed6946ae6185b",
+        review_digest="da4afbc729abc6a2fb290aff790cd33edb5082cd0de5ec95a5b7f3942ff8e9f6",
     ),
     # The consented install.
     Flow("Owner", "ConsentedInstall", "consent answer", "data"),
@@ -390,27 +362,38 @@ FLOWS: tuple[Flow, ...] = (
         "settings check",
         "control",
         source_refs=(
-            "praxis.doctor@ca1f8d48277796b39c5c5bc70bd0472591c4fde5b8b4c8dac0ad4923200d16f0",
+            "praxis.doctor@22fa9d94aaeae45630c14accade1f5d2b32e6924ab027568f75f27834e9dff2c",
             "praxis.install:load@d3a4a8ea93aad6e8cbd2bab839ae50a063b38924c70b9e388e5a614f34fde984",
             "praxis.install:is_ours@d3a4a8ea93aad6e8cbd2bab839ae50a063b38924c70b9e388e5a614f34fde984",
         ),
-        review_digest="4b15b3875c1e4299c560cb8c5e6d5334d9ee64203e32928d5f947cf1efff369a",
+        review_digest="2c531662bc4eef9b3379148416d989476ba5dce16dc47b87d9054e68492100e2",
     ),
     Flow(
         "Doctor",
-        "WriteItInstrument",
+        "AgentCheck",
         "agent check",
         "control",
         source_refs=(
-            "praxis.doctor:run@ca1f8d48277796b39c5c5bc70bd0472591c4fde5b8b4c8dac0ad4923200d16f0",
-            "praxis.drill:attached_agents@f6770b21d58a7607260c804269224a72a11496c0e58d018ea6aefadabecbf1eb",
-            "praxis.drill:pending_backups@f6770b21d58a7607260c804269224a72a11496c0e58d018ea6aefadabecbf1eb",
+            "praxis.doctor:run@22fa9d94aaeae45630c14accade1f5d2b32e6924ab027568f75f27834e9dff2c",
+            "praxis.unassisted:locate@e0098ef9d9441ea9e8d4ee4691b9455fe259c4a2a3307565d22c6541c89ebfce",
+            "praxis.unassisted:attached_agents@e0098ef9d9441ea9e8d4ee4691b9455fe259c4a2a3307565d22c6541c89ebfce",
         ),
-        review_digest="a5ed8c4bdc260fcf74489d099777d393f1a1188c32b5089e042a041ca3bd9b0d",
+        review_digest="dcc77071c4125303f0a3eb3305d21c70472d57b23cfd881824698feea372c0df",
     ),
     Flow("PraxisHome", "Doctor", "ledger counts", "data"),
     # The measurement.
     Flow("ComponentMap", "Git", "file listing", "control"),
+    Flow(
+        "Ledger",
+        "ComponentMap",
+        "map check",
+        "control",
+        source_refs=(
+            "praxis.store:Store@9a54e6e3255bcaface7173b343bcd8812279c1a90e80a25fb030c70d9bdb8a80",
+            "praxis.components:from_json@14512efa5dc730de8c4d744478074e61dda64429fb74424506b90fda989803b2",
+        ),
+        review_digest="9fd14c278939e0884db979f79e54227de3d7943da4d022f957ed1510ef2b6013",
+    ),
     Flow("PraxisHome", "ComponentMap", "owner map file", "data"),
     Flow("Extractors", "Git", "clone command", "control"),
     Flow("WorkingTree", "Extractors", "Python source", "data"),
@@ -429,54 +412,13 @@ FLOWS: tuple[Flow, ...] = (
         ),
         review_digest="fa69df84b7d788c15722bd761dcb0309ccb4757eb455106d1ddf5ec787044b72",
     ),
-    # The rejected instrument.
-    Flow(
-        "Ledger",
-        "WriteItInstrument",
-        "agent line hashes",
-        "data",
-        source_refs=(
-            "praxis.store:Store@14573af1ba7d9502959e36f96434047562802a32c1eb99547034f77de1073c3d",
-            "praxis.spans:candidates@0d95616db648a487c68db145c8b78fe06b96b614a26a0754068ce2cdeab237c3",
-            "praxis.drill@f6770b21d58a7607260c804269224a72a11496c0e58d018ea6aefadabecbf1eb",
-        ),
-        review_digest="61e4e3212190fc62e0fa1cfee6760c70dae0f3fd7ba53b4a3dcb4523d524499f",
-    ),
-    Flow(
-        "WriteItInstrument",
-        "Ledger",
-        "items and results",
-        "data",
-        source_refs=(
-            "praxis.drill@f6770b21d58a7607260c804269224a72a11496c0e58d018ea6aefadabecbf1eb",
-            "praxis.store:ItemRow@14573af1ba7d9502959e36f96434047562802a32c1eb99547034f77de1073c3d",
-            "praxis.store:ResultRow@14573af1ba7d9502959e36f96434047562802a32c1eb99547034f77de1073c3d",
-        ),
-        review_digest="b90ab7715508b76fbb8ed13f06de4294d096786620ea09ef84f89176f6ef0c59",
-    ),
-    Flow(
-        "WriteItInstrument",
-        "Recorder",
-        "line hashing",
-        "control",
-        source_refs=(
-            "praxis.drill:locate@f6770b21d58a7607260c804269224a72a11496c0e58d018ea6aefadabecbf1eb",
-            "praxis.spans:agent_line_numbers@0d95616db648a487c68db145c8b78fe06b96b614a26a0754068ce2cdeab237c3",
-            "praxis.gitdiff:toplevel@7981f4d247dbe86168d192c4098b53805ea1bd77a91310b68ffb6b39c3a4cf0f",
-            "praxis.gitdiff:line_hash@7981f4d247dbe86168d192c4098b53805ea1bd77a91310b68ffb6b39c3a4cf0f",
-        ),
-        review_digest="3fccffd2954051e5bcdf05f282fc378c9639a36c7fc677eeb6532bba31c3b9c9",
-    ),
-    Flow("WriteItInstrument", "WorkingTree", "function body", "data"),
-    Flow("WriteItInstrument", "PraxisHome", "drill backup", "data"),
-    Flow("Owner", "WriteItInstrument", "drill answer", "data"),
 )
 
 FLOW_KINDS: tuple[str, ...] = ()
 
 # The invariants and the import rules are in the contract file, map/contract.py.
 MODEL = Model(
-    canvas=(714, 1040),
+    canvas=(714, 892),
     containers=CONTAINERS,
     regions=REGIONS,
     components=COMPONENTS,
@@ -499,7 +441,6 @@ PLAIN: dict[str, str] = {
     "Doctor": "the read-only doctor",
     "ComponentMap": "the component map",
     "Extractors": "the extractors",
-    "WriteItInstrument": "the rejected write-it instrument",
     "TranscriptReader": "the transcript reader",
     "AgentCheck": "the agent-presence check",
     "Scoring": "the scoring functions",
@@ -566,10 +507,6 @@ RELATIONS: dict[tuple[str, str] | str, str] = {
         "Doctor",
     ): "The command surface calls the doctor with the current directory and the home paths.",
     (
-        "CommandSurface",
-        "WriteItInstrument",
-    ): "The command surface opens the ledger and calls the drill, or calls the drill restore.",
-    (
         "Ledger",
         "CommandSurface",
     ): "The ledger returns attribution rows and session ids for the attributions and sessions verbs.",
@@ -591,12 +528,16 @@ RELATIONS: dict[tuple[str, str] | str, str] = {
     ): "The doctor calls the install functions that load the settings file and find the praxis hook entries.",
     (
         "Doctor",
-        "WriteItInstrument",
-    ): "The doctor calls the drill module for pending drill backups and for agent processes attached to the repository.",
+        "AgentCheck",
+    ): "The doctor calls locate for the repository of the current directory and attached_agents for the agent processes inside it.",
     (
         "PraxisHome",
         "Doctor",
-    ): "The doctor opens ledger.db in SQLite read-only mode and counts rows in each table.",
+    ): "The doctor opens ledger.db in SQLite read-only mode and counts sessions, hook events, unobservable or error events, and attribution rows.",
+    (
+        "Ledger",
+        "ComponentMap",
+    ): "Before it stores a map, the ledger calls from_json, which refuses a map whose source or version does not match its rules.",
     (
         "ComponentMap",
         "Git",
@@ -621,30 +562,6 @@ RELATIONS: dict[tuple[str, str] | str, str] = {
         "CodingAgent",
         "TranscriptReader",
     ): "The agent writes each session as a JSONL file under ~/.claude/projects, and the reader parses it in memory.",
-    (
-        "Ledger",
-        "WriteItInstrument",
-    ): "The ledger returns the files and the line hashes that the agent added on the repository, and the test command.",
-    (
-        "WriteItInstrument",
-        "Ledger",
-    ): "The drill records the test command, one item for each validated candidate, and the result.",
-    (
-        "WriteItInstrument",
-        "Recorder",
-    ): "The drill calls the snapshot module for the repository root and for the line hash function.",
-    (
-        "WriteItInstrument",
-        "WorkingTree",
-    ): "The drill replaces one function body in the file, runs the project's tests, and restores the original bytes.",
-    (
-        "WriteItInstrument",
-        "PraxisHome",
-    ): "The drill keeps the original file bytes under drills until it restores them.",
-    (
-        "Owner",
-        "WriteItInstrument",
-    ): "The owner presses Enter to run the tests, or types q to stop the drill.",
 }
 
 VERBS: dict[str, tuple[str, str]] = {

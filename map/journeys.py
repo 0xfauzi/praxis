@@ -193,8 +193,8 @@ DOCTOR: Steps = (
     Step(
         ("Doctor",),
         (),
-        ("Doctor", "WriteItInstrument"),
-        "The doctor reports pending drill backups and attached agent processes.",
+        ("Doctor", "AgentCheck"),
+        "The doctor finds the repository of the current directory and reports the number of attached agent processes.",
     ),
 )
 
@@ -210,57 +210,6 @@ LEDGER_ROWS: Steps = (
         ("Ledger",),
         ("Ledger", "CommandSurface"),
         "The command surface prints the attribution rows, and prints unknown for each NULL count.",
-    ),
-)
-
-WRITE_IT_DRILL: Steps = (
-    Step(
-        ("Owner",),
-        (),
-        ("Owner", "CommandSurface"),
-        "The owner types praxis drill in a repository.",
-    ),
-    Step(
-        ("CommandSurface",),
-        (),
-        ("CommandSurface", "WriteItInstrument"),
-        "The command surface opens the ledger and calls the drill.",
-    ),
-    Step(
-        ("WriteItInstrument",),
-        ("Ledger",),
-        ("Ledger", "WriteItInstrument"),
-        "The drill loads the test command and the agent line hashes for the repository.",
-    ),
-    Step(
-        ("WriteItInstrument",),
-        (),
-        ("WriteItInstrument", "Recorder"),
-        "The drill hashes each line of the current file to find agent lines in each function.",
-    ),
-    Step(
-        ("WriteItInstrument",),
-        (),
-        ("WriteItInstrument", "WorkingTree"),
-        "If no agent is attached, the drill validates a candidate with the tests and strips its body.",
-    ),
-    Step(
-        ("WriteItInstrument",),
-        (),
-        ("WriteItInstrument", "PraxisHome"),
-        "The drill keeps the original bytes in a named backup.",
-    ),
-    Step(
-        ("Owner",),
-        (),
-        ("Owner", "WriteItInstrument"),
-        "The owner writes the body and presses Enter.",
-    ),
-    Step(
-        ("WriteItInstrument",),
-        ("Ledger",),
-        ("WriteItInstrument", "Ledger"),
-        "The drill restores the file, deletes the backup, and records the result.",
     ),
 )
 
@@ -305,12 +254,5 @@ JOURNEYS: tuple[Journey, ...] = (
             '["subcommand","praxis.cli","praxis","attributions"]',
             '["subcommand","praxis.cli","praxis","sessions"]',
         ),
-    ),
-    Journey(
-        id="write-it-drill",
-        label="A write-it drill (rejected)",
-        starts="praxis drill (subcommand)",
-        steps=WRITE_IT_DRILL,
-        covers=('["subcommand","praxis.cli","praxis","drill"]',),
     ),
 )
