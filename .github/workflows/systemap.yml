@@ -1,0 +1,179 @@
+name: systemap
+
+# The committed map must agree with the source facts and the renderer.
+# This workflow uses the package version that made it.
+# When you install a new systemap version, change the version in this file.
+#
+# SYSTEMAP_CI below controls what a map finding does. With advisory, a finding gives a
+# warning and the job passes. With strict, a finding makes the job fail. When systemap
+# cannot run, the job fails with both values. The delta log gives each action.
+# The delta job writes the architecture summary of a pull request to the job summary.
+# Only the comment job can write a pull request comment. It writes the summary as one
+# comment, and changes that comment on each push. It runs only for a pull request from
+# a branch of this repository, because a fork pull request has a read-only token.
+
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # advisory: a map finding gives a warning. strict: a map finding makes the job fail.
+  SYSTEMAP_CI: advisory
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  systemap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: latest
+          enable-cache: true
+
+      - name: Source facts match
+        run: |
+          code=0
+          uvx --from "systemap==2.0.0" systemap extract --check || code=$?
+          if [ "$code" = "1" ]; then
+            level=warning
+            if [ "$SYSTEMAP_CI" = "strict" ]; then level=error; fi
+            echo "::$level title=Stale map::Source facts do not agree with the repository. Run systemap refresh. Then commit the output directory."
+            if [ "$SYSTEMAP_CI" = "strict" ]; then exit 1; fi
+          elif [ "$code" != "0" ]; then
+            echo "::error title=Stale map::systemap could not run (exit $code). The lines above give the reason."
+            exit "$code"
+          fi
+
+      - name: Map consistency checks
+        run: |
+          code=0
+          uvx --from "systemap==2.0.0" systemap check || code=$?
+          if [ "$code" = "1" ]; then
+            level=warning
+            if [ "$SYSTEMAP_CI" = "strict" ]; then level=error; fi
+            echo "::$level title=Map check::The model has fields that do not agree, or modules without a component. Examine the findings above."
+            if [ "$SYSTEMAP_CI" = "strict" ]; then exit 1; fi
+          elif [ "$code" != "0" ]; then
+            echo "::error title=Map check::systemap could not run (exit $code). The lines above give the reason."
+            exit "$code"
+          fi
+
+      - name: Judgement answers
+        run: |
+          code=0
+          uvx --from "systemap==2.0.0" systemap judgement --strict || code=$?
+          if [ "$code" = "1" ]; then
+            level=warning
+            if [ "$SYSTEMAP_CI" = "strict" ]; then level=error; fi
+            echo "::$level title=Judgement::A judgement finding has no answer. Change the map or record an answer under [judgement] answered in systemap.toml."
+            if [ "$SYSTEMAP_CI" = "strict" ]; then exit 1; fi
+          elif [ "$code" != "0" ]; then
+            echo "::error title=Judgement::systemap could not run (exit $code). The lines above give the reason."
+            exit "$code"
+          fi
+
+      - name: Rendered page matches
+        run: |
+          code=0
+          uvx --from "systemap==2.0.0" systemap render --check || code=$?
+          if [ "$code" = "1" ]; then
+            level=warning
+            if [ "$SYSTEMAP_CI" = "strict" ]; then level=error; fi
+            echo "::$level title=Stale map::index.html does not agree with the renderer output. Run systemap refresh. Then commit the output directory."
+            if [ "$SYSTEMAP_CI" = "strict" ]; then exit 1; fi
+          elif [ "$code" != "0" ]; then
+            echo "::error title=Stale map::systemap could not run (exit $code). The lines above give the reason."
+            exit "$code"
+          fi
+
+  delta:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      comment: ${{ steps.delta.outputs.comment }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the base and the head commits, for the two extractions
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: latest
+          enable-cache: true
+
+      - name: Map change results
+        id: delta
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          code=0
+          uvx --from "systemap==2.0.0" systemap delta --base "$BASE" --head "$HEAD" --pr "$PR" --comment comment.md || code=$?
+          echo "$code" > delta.code
+          if [ -s comment.md ]; then
+            cat comment.md >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo "comment<<SYSTEMAP_COMMENT"
+              cat comment.md
+              echo "SYSTEMAP_COMMENT"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Map is current
+        run: |
+          code="$(cat delta.code)"
+          if [ "$code" = "1" ]; then
+            level=warning
+            if [ "$SYSTEMAP_CI" = "strict" ]; then level=error; fi
+            echo "::$level title=Map delta::A map update is necessary. Do the action in each line of the Map change results step. Then run the command in its last line."
+            if [ "$SYSTEMAP_CI" = "strict" ]; then exit 1; fi
+          elif [ "$code" != "0" ]; then
+            echo "::error title=Map delta::systemap delta could not run (exit $code). The Map change results step gives the reason."
+            exit "$code"
+          fi
+
+  # This job writes the architecture summary as one pull request comment.
+  # It runs only for a pull request from a branch of this repository. The code and the settings
+  # of a pull request from a fork can change the comment text. The job summary of the delta job
+  # gives the summary for each pull request, also from a fork.
+  comment:
+    needs: delta
+    if: >-
+      ${{ !cancelled() && needs.delta.outputs.comment != ''
+      && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write # this job posts or updates the summary comment
+    steps:
+      - name: Architecture summary
+        env:
+          BODY: ${{ needs.delta.outputs.comment }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          existing="$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq 'map(select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- systemap delta -->")))) | first | .id // empty' | head -n 1)"
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$existing" -f body="$BODY" > /dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$BODY" > /dev/null
+          fi || echo "::warning title=Architecture summary::The job could not write the comment. The job summary of the delta job gives the text."
