@@ -60,6 +60,10 @@ extend-exclude = [
   # record of this repository's formatter. New runners meet the rules by being written to
   # them; old ones are not edited.
   "experiments",
+  # The systemap skill, installed verbatim from 0xfauzi/systemap and never edited here. Its
+  # reference files hold Python in Markdown fences that `ruff format .` would rewrite
+  # (CI run 39253254819, 2026-10-19), and an edited copy would no longer be the skill.
+  ".claude/skills",
 ]
 
 [tool.ruff.lint]
