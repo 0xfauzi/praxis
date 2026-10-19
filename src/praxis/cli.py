@@ -336,8 +336,8 @@ def _run_scenarios(_args: argparse.Namespace) -> int:
     return scenarios.run(_cwd(), _home(), sys.stdout, now)
 
 
-def _show_report(_args: argparse.Namespace) -> int:
-    from praxis import report, task
+def _show_report(args: argparse.Namespace) -> int:
+    from praxis import render, report, task
     from praxis.store import Store
     from praxis.unassisted import locate
 
@@ -351,11 +351,22 @@ def _show_report(_args: argparse.Namespace) -> int:
     finally:
         ledger.close()
     try:
-        report.render(scores, sys.stdout)
+        if args.json:
+            print(render.to_json(scores))
+        else:
+            report.render(scores, sys.stdout)
     except ValueError as exc:  # a refused word with no met rule: nothing was written
         print(exc, file=sys.stderr)
         return 1
     return 0
+
+
+def _show_supply(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from praxis import supply
+
+    return supply.show(Path.home(), args.weeks, args.json, sys.stdout)
 
 
 _AGENT = (Option("agent", "AGENT"),)
@@ -396,13 +407,18 @@ COMMANDS: tuple[Command, ...] = (
     Command("run", "scenarios", "", "Run each scenario in a scratch clone of the "
             "repository. Praxis records the components that it enters.",
             _run_scenarios),
-    Command("show", "report", "", "Show the scores and their analysis for this "
-            "repository.", _show_report),
+    Command("show", "report", "[--json]", "Show the scores and their analysis for this "
+            "repository. With --json, write them as JSON.", _show_report,
+            (Option("--json", None),)),
     Command("show", "lines", "[--session ID] [--json]", "Show the line counts by "
             "author for each file at each hook event.", _show_lines,
             (Option("--session", "ID"), Option("--json", None))),
     Command("show", "sessions", "", "Show each session with its line counts at its "
             "last hook event.", _show_sessions),
+    Command("show", "supply", "[--weeks N] [--json]", "Show the prompts, changes, "
+            "repositories and decisions in your agent transcripts. Praxis stores "
+            "none of them.", _show_supply,
+            (Option("--weeks", "N"), Option("--json", None))),
     Command("hook", None, "", "Record one hook event from the agent. Only the agent "
             "runs this command.", _hook),
 )  # fmt: skip

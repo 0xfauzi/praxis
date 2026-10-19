@@ -45,9 +45,10 @@ GRAMMAR = [
     "praxis test pathfinder",
     "praxis show scenarios",
     "praxis run scenarios",
-    "praxis show report",
+    "praxis show report [--json]",
     "praxis show lines [--session ID] [--json]",
     "praxis show sessions",
+    "praxis show supply [--weeks N] [--json]",
     "praxis hook",
 ]
 # Every name the grammar replaced. There are no aliases: one term for one concept.
@@ -147,9 +148,9 @@ def test_an_old_name_exits_2_with_the_usage(
 @pytest.mark.parametrize(
     ("argv", "last_line", "usage_lines"),
     [
-        (("show", "foo"), "praxis show foo is not a command.", 8),
+        (("show", "foo"), "praxis show foo is not a command.", 9),
         (("test", "structural"), "praxis test structural is not a command.", 5),
-        (("show",), "praxis show: the object is missing.", 8),
+        (("show",), "praxis show: the object is missing.", 9),
         (("install",), "praxis install: the agent is missing. Write claude or codex.",
          1),
         (("install", "cursor"), "praxis install cursor is not a command.", 1),

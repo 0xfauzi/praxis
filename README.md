@@ -62,9 +62,10 @@ no words to show this list.
 | `praxis test pathfinder` | Give a number for how closely each pair of components is related, with no agent attached. |
 | `praxis show scenarios` | Show each scenario in the scenario file and its last run. |
 | `praxis run scenarios` | Run each scenario in a scratch clone and record the components that it enters. |
-| `praxis show report` | Show the scores and their analysis for this repository. |
+| `praxis show report [--json]` | Show the scores and their analysis for this repository. With --json, write them as JSON. |
 | `praxis show lines [--session ID] [--json]` | Show the line counts by author for each file at each hook event. |
 | `praxis show sessions` | Show each session with its line counts at its last hook event. |
+| `praxis show supply [--weeks N] [--json]` | Show the prompts, changes, repositories and decisions in your agent transcripts. Praxis stores none of them. |
 | `praxis hook` | Record one hook event from the agent. Only the agent runs this command. |
 
 AGENT is `claude` or `codex`. `praxis --version` shows the version. `praxis hook` keeps its
