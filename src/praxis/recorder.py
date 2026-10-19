@@ -39,7 +39,7 @@ MUTATING_TOOLS = frozenset(
 )
 DECISION_TOOLS = frozenset({"AskUserQuestion", "ExitPlanMode"})
 # The one string a hook ever prints (design 5.4): fixed, nothing variable escaped in.
-NOTICE = "\x1b]9;praxis: feedback ready\x07"
+NOTICE = "\x1b]9;praxis: result ready\x07"
 EDGES_REDUCER = "recorder-edges-v1"
 OUTCOME_REDUCER = "segment-outcome-v1"
 DECISION_REDUCER = "decision-pointer-v1"
@@ -325,7 +325,7 @@ def _prompt(ev: _Event, store: Store, now: str) -> Result:
 
 
 def _earlier(registered: str, now: str) -> bool:
-    """A task binds only to a prompt after it (G8). ``praxis task`` writes its own
+    """A task binds only to a prompt after it (G8). ``praxis start task`` writes its own
     timestamp, so both are parsed rather than compared as strings."""
     try:
         return dt.datetime.fromisoformat(registered) < dt.datetime.fromisoformat(now)

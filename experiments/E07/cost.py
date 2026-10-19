@@ -2,8 +2,8 @@
 own timestamps?
 
 Acceptance rule, written before the run (2026-10-19). The kickoff's budget, V9 in
-docs/preregistration.md 1.7: the daily median of `praxis task` plus `praxis probe`
-time is at most ten minutes. Per UTC day with any task or probe row:
+docs/preregistration.md 1.7: the daily median of `praxis start task` plus `praxis
+test` time is at most ten minutes. Per UTC day with any task or probe row:
 
   task seconds    a treatment task's last forecast ts minus its registration ts (the
                   forecast rows are written once, after the last answer); a control task

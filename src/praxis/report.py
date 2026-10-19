@@ -1,14 +1,15 @@
-"""`praxis report`: references, scores and the randomization tests of design 03
-sections 4.1 (P1), 4.4 (F1) and 6.3, computed at analysis time from the ledger.
+"""`praxis show report`: references, scores and the randomization tests of design 03
+sections 4.1 (P1), 4.4 (F1), 6.3 and 6.4, computed at analysis time from the ledger.
 
 Nothing here writes: every number is recomputed from rows store.py holds, and carries
 its Evidence fields in memory. A reference is fitted only on data dated strictly before
 the forecast it is compared with, and one that cannot be fitted is NULL, never another
 reference. A block below its minimum is refused with a reason code, not scored. The
 prompt text R1 needs is read from the transcript, intersected with component ids and
-dropped. The shapes returned and their text live in render.py. The pipeline placebo
-and V1's test-retest read the never-drawn validation probes, which no P1 block or arm
-contrast ever scores.
+dropped. The shapes returned and their text live in render.py. The pipeline placebo,
+V1's test-retest and the general effect (general.py) read the never-drawn validation
+probes, which no P1 block or arm contrast ever scores. A forced-control task (design
+6.4) was not randomized, so its items are out of the P1 blocks and arm contrasts.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from itertools import pairwise, permutations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from praxis import components, scoring, transcript
+from praxis import components, general, scoring, transcript
 from praxis.components import ComponentMap, assign, from_json, product_components
 from praxis.probe import L_DAYS, L_MAX_DAYS
 from praxis.render import (
@@ -39,10 +40,12 @@ from praxis.render import (
     suspended,
 )
 from praxis.render import Block as Block
+from praxis.render import General as General
 from praxis.render import Rule as Rule
 from praxis.render import Scores as Scores
 from praxis.render import render as render
 from praxis.store import Evidence, Store
+from praxis.task import in_window, window_assumption
 
 if TYPE_CHECKING:
     import sqlite3
@@ -63,40 +66,44 @@ PR1_CLAIM = "the instrument changed delayed structural accuracy on bound items"
 _PAIR_TIE = 1e-12
 
 P1_ASSUMPTIONS = (
-    "first probe of an item only; skipped, slow, truth-changed, out-of-window, "
-    "unexposed answers and tasks not closed are excluded and counted by arm",
+    "first probe of an item only. The P1 blocks exclude skipped, slow, truth-changed, "
+    "out-of-window and unexposed answers, forced-control tasks and tasks not closed, "
+    "and count each by arm.",
     f"the probe window is {L_DAYS:g} to {L_MAX_DAYS:g} days after exposure",
-    "R_base and R_layer read the D1 graph strictly before the probe: per pair the "
-    "latest X1 read (pool or probe truth) unless a later edge-history scan shows a "
-    "file importing the target; a scan covers only changed files, so it never "
-    "removes an edge",
+    "R_base and R_layer read the D1 graph strictly before the probe. Per pair, they "
+    "use the latest X1 read (pool or probe truth), unless a later edge-history scan "
+    "shows a file that imports the target. A scan covers only changed files, so it "
+    "never removes an edge.",
     "R_layer is NULL when the earlier graph has a cycle (no topological order)",
-    "R_fam is PAV of earlier first-probe truths on co-touch share over all earlier "
-    "closed tasks (the window needs measuring); NULL until both truths occurred",
-    "D2 and runtime items have no reference yet; summed Brier is blind to "
-    "dependence between the items of one task",
+    "R_fam is PAV of earlier first-probe truths on the co-touch share over the earlier "
+    "closed tasks in the trailing touch window. It is NULL until both truth values "
+    "occurred.",
+    "D2 and runtime items have no reference yet. Summed Brier is blind to dependence "
+    "between the items of one task.",
 )
 F1_ASSUMPTIONS = (
-    "closed treatment tasks only; the outcome is o_first, o_final is not scored yet",
-    "unanswered, flagged, no-outcome and empty-segment forecasts are excluded and "
-    "counted; the exclusion cap needs measuring (derive.py)",
+    "closed treatment tasks only. The outcome is o_first, and o_final is not scored "
+    "yet.",
+    "F1 excludes and counts unanswered, flagged, no-outcome and empty-segment "
+    "forecasts. The exclusion cap needs measuring (derive.py).",
     "R1 is (k + 1) / (n + 2) over earlier closed tasks with the same prompt-named "
-    "state (a component id as a whole word or a path the map assigns to it); an "
-    "unreadable prompt is unknown, never unnamed; the burn-in needs measuring",
-    "R0 is the earlier touch share; R_last is 0.9 if the previous closed task "
-    "touched the component, else 0.1",
+    "state: a component id as a whole word, or a path that the map assigns to it. An "
+    "unreadable prompt is unknown, never unnamed. The burn-in needs measuring.",
+    "R0 is the earlier touch share. R_last is 0.9 if the previous closed task touched "
+    "the component, else 0.1.",
 )
 SCORE_ASSUMPTIONS = (
-    f"a block needs {MIN_FORECASTS} forecasts, the decomposition's floor; the Stage 2 "
-    "minimum from the power simulation needs measuring and replaces it",
-    "REL, RES, UNC bias-corrected after Ferro and Fricker (2012) as Siegert (2013) "
-    "writes them; REL and RES may be negative",
+    f"a block needs {MIN_FORECASTS} forecasts, the floor of the decomposition. The "
+    "Stage 2 minimum from the power simulation replaces it, and it needs measuring.",
+    "REL, RES and UNC are bias-corrected after Ferro and Fricker (2012), as Siegert "
+    "(2013) writes them. REL and RES can be negative.",
     f"CORP consistency bands: {BAND_DRAWS} bootstrap draws of whole tasks (seed "
-    f"{BAND_SEED}, level {BAND_LEVEL:g}), outcomes redrawn as Bernoulli(p) and PAV "
-    "refitted as reliabilitydiag does (default 100 draws of single forecasts); "
-    "tasks, because forecasts within one are not independent; no bound correction",
+    f"{BAND_SEED}, level {BAND_LEVEL:g}). The bands draw outcomes again as "
+    "Bernoulli(p) and fit PAV again, as reliabilitydiag does (its default is 100 draws "
+    "of single forecasts). Tasks are the unit, because the forecasts of one task are "
+    "not independent. There is no bound correction.",
     "a CORP bin is read at 35 forecasts (p 0.1, 0.9), 81 (0.3, 0.7) or 97 (0.5) if "
-    "independent: divide by 1 + (m - 1) ICC once the ICC is measured",
+    "independent. Divide by 1 + (m - 1) ICC when the ICC is measured.",
 )
 Pair = tuple[str, str]
 Refs = dict[str, float | None]
@@ -253,7 +260,11 @@ def _layer(graph: Mapping[Pair, bool], pair: Pair) -> float | None:
 def _cotouch(view: _View, pair: Pair, t: dt.datetime) -> float | None:
     """Share of earlier closed tasks touching both components; a task with no outcome
     row for either is unknown there and left out."""
-    rows = [view.touched[r["task_id"]] for r in view.closed if _t(r["closed_ts"]) < t]
+    rows = [
+        view.touched[r["task_id"]]
+        for r in view.closed
+        if _t(r["closed_ts"]) < t and in_window(r["closed_ts"], t)
+    ]
     both = [o for o in rows if pair[0] in o and pair[1] in o]
     if not both:
         return None
@@ -384,11 +395,12 @@ def _forecasts(view: _View) -> Iterator[tuple[sqlite3.Row, sqlite3.Row]]:
 
 def _p1_reason(view: _View, r: sqlite3.Row) -> str | None:
     exposed = r["exposed_task"]
+    owner = None if exposed is None else view.tasks[exposed]
     checks = (
-        ("not_exposed", exposed is None or r["task_id"] != exposed),
-        ("task_not_closed", exposed is not None
-         and view.tasks[exposed]["status"] != "closed"),
-    )  # fmt: skip
+        ("not_exposed", owner is None or r["task_id"] != exposed),
+        ("forced_control", owner is not None and owner["forced_control"] == 1),
+        ("task_not_closed", owner is not None and owner["status"] != "closed"),
+    )
     found = next((code for code, hit in checks if hit), None)
     return found or _unusable(r, windowed=True)
 
@@ -560,7 +572,7 @@ def _block(
 
 def _blocks(view: _View, p1: Sequence[_Scored], f1: Sequence[_Scored]) -> list[Block]:
     fallback = f"component_maps:{view.repo_id}:{view.cmap.version}"
-    p1_notes = (*P1_ASSUMPTIONS, *SCORE_ASSUMPTIONS)
+    p1_notes = (*P1_ASSUMPTIONS, window_assumption(), *SCORE_ASSUMPTIONS)
     blocks: list[Block] = []
     for role in ROLES:
         for arm in ARMS:
@@ -602,12 +614,15 @@ def scores(
     store: Store, repo_id: str, *, seed: int | None = None, draws: int | None = None
 ) -> Scores:
     """Every block, the exclusion counts and the weekly counts; with a seed and a draw
-    count also the randomization tests and the rule they feed."""
+    count also the randomization tests, the rule they feed and the general effect."""
     view = _view(store, repo_id)
+    across = General(None, 0, {}, run=False)
+    if seed is not None and draws is not None:
+        across = _general(store, seed, draws)
     if isinstance(view, tuple):
         reason, version = view
         return Scores(repo_id, version, reason, (), {}, {}, {}, (_pr1({}, [reason]),),
-                      (0, None))  # fmt: skip
+                      (0, None), across)  # fmt: skip
     p1, p1_counts = _p1(view)
     f1, f1_counts = _f1(view)
     tests: dict[str, tuple[float, int] | None] = {}
@@ -615,7 +630,21 @@ def scores(
         tests = _tests(view, (p1, f1), seed, draws)
     return Scores(repo_id, view.cmap.version, None, tuple(_blocks(view, p1, f1)),
                   dict(sorted((p1_counts + f1_counts).items())), _weeks(view), tests,
-                  (_pr1(tests, []),), _retest(view))  # fmt: skip
+                  (_pr1(tests, []),), _retest(view), across)  # fmt: skip
+
+
+def _general(store: Store, seed: int, draws: int) -> General:
+    """Design 6.4 over every repository with a start week: each one's first usable
+    probes of never-drawn items, or the reason it has none."""
+    starts = store.repository_starts()
+    probes: dict[str, list[tuple[dt.datetime, float]] | str] = {}
+    for start in starts:
+        view = _view(store, start["repo_id"])
+        probes[start["repo_id"]] = view[0] if isinstance(view, tuple) else [
+            (_t(rs[0]["ts"]), _brier(rs[0])) for rs in view.never.values()
+            if _unusable(rs[0], windowed=False) is None
+        ]  # fmt: skip
+    return general.effect(starts, probes, seed, draws)
 
 
 # -- randomization ------------------------------------------------------------------

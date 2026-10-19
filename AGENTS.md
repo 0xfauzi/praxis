@@ -74,13 +74,14 @@ rules live in hooks and validators, not in prose.
    the agent's output bytes or exit code, exits 0 whatever happened, and gives up silently
    at its timeout. Its only channels are `additionalContext` and, at the Stop that closes a
    registered task's scored segment, one `terminalSequence` notice from a closed vocabulary,
-   which Claude Code writes to the owner's terminal and never to the agent. A PreToolUse
-   `defer` is not a channel: Claude Code ignores it in interactive sessions.
+   which Claude Code writes to the owner's terminal and never to the agent. The vocabulary
+   has one string: `praxis: result ready`. A PreToolUse `defer` is not a channel: Claude
+   Code ignores it in interactive sessions.
 8. **No global configuration is ever edited without the owner's per-file consent.**
    `~/.claude/settings.json`, `~/.codex/config.toml` and everything else outside this
-   repository and `$PRAXIS_HOME` are read-only by default. `praxis setup` PRINTS the
-   snippet; `--apply` writes exactly one named file after an interactive yes and refuses
-   when stdin is not a TTY.
+   repository and `$PRAXIS_HOME` are read-only by default. `praxis show install <agent>`
+   PRINTS the snippet. `praxis install <agent>` and `praxis remove <agent>` write exactly
+   one named file after an interactive yes, and refuse when stdin is not a TTY.
 9. **Probes are answered unassisted and scored by deterministic extractors, never by
    tests.** A structural, drift, decision or knockout item is answered with no agent process
    attached (the harness refuses and records the refusal) and scored against the repository

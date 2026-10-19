@@ -1,4 +1,4 @@
-"""`praxis probe <kind>`, driven through probe.administer against a real git repository
+"""`praxis test <object>`, driven through probe.administer against a real git repository
 with real imports, a map derived and frozen from it, items exposed by tasks registered
 through the store, and a real ledger under a temporary $PRAXIS_HOME. The verb lands in
 stage C, so these tests pass the stdin and stdout it will pass. Expected values are
@@ -192,11 +192,16 @@ def test_structural_records_brier_inputs_rereads_truth_and_drops_typed_text(
         assert (r["head_sha"], r["tree_hash"]) == (head, tree)
         assert r["claim_class"] == "observed"
         assert json.loads(r["sources"]) == [f"probe_item:{r['item_id']}",
-                                            "x1:x1-v1", f"tree:{tree}"]  # fmt: skip
-    assert "answered 4; 0 could not be scored now" in shown
-    assert "yes" not in shown  # no answer key at probe time
+                                            "x1:x1-v2", f"tree:{tree}"]  # fmt: skip
+    assert "Answered: 4. Not asked: 0." in shown
+    d2 = "Does code in e import code in b through other components? [1 3 5 7 9 s] "
+    assert d2 in shown
+    assert shown.count("  Type one of the answers in the brackets.\n") == 2
+    assert "Praxis does not show the correct answers.\n" in shown
+    # No answer key at probe time: the only yes is in the help for the grid.
+    assert "yes" not in shown.replace(probe.GRID_HELP, "")
     assert probe.due(home, repo_id, NOW, 7.0) == []
-    assert "no structural item is due" in administer(repo, home, "structural", "")
+    assert administer(repo, home, "structural", "") == "No question is due.\n"
     assert CANARY.encode() not in home_bytes(home)
 
 
@@ -213,7 +218,7 @@ def test_an_unparsed_source_component_is_not_asked_and_stays_due(
         (key["c", "d"], "full", []),
         (key["e", "b"], "partial", ["parse_failure"]),
     ]
-    assert "answered 3; 1 could not be scored now and stay due" in shown
+    assert "Answered: 3. Not asked: 1. Praxis cannot find the correct" in shown
     assert [r["item_id"] for r in probe.due(home, repo_id, NOW, 7.0)] == [key["a", "b"]]
 
 
@@ -244,7 +249,11 @@ def test_an_attached_agent_refuses_every_kind_and_the_refusal_is_recorded(
     with fake_agent(tmp_path / "bin", repo / "src") as pid:
         code = probe.administer(repo, home, io.StringIO("9\n" * 20), out, NOW, kind)
     assert code == 2
-    assert f"claude pid {pid} in {repo / 'src'}" in out.getvalue()
+    assert out.getvalue() == (
+        "praxis test: an agent runs in this repository. Praxis asked no question and "
+        f"recorded the refusal.\n  claude pid {pid} in {repo / 'src'}\n"
+        "Stop the agent, then run the command again.\n"
+    )
     assert flags(home) == [("agent_attached", {"kind": kind, "agents": 1})]
     for table in ("probe_responses", "drift_responses", "decision_responses",
                   "knockouts", "pathfinder_runs"):  # fmt: skip
@@ -315,10 +324,13 @@ def test_drift_scores_against_the_edge_history_once_per_week(
     assert {r["week"] for r in got} == {"2026-W02"}
     assert json.loads(got[0]["sources"]) == [
         f"edge_history:{ago(7)}/{NOW}", f"sess-{ago(3)[:10]}"]  # fmt: skip
-    assert "  c: you said yes, changed: yes\n" in shown
-    assert "  f: you said yes, changed: unknown\n" in shown
+    assert "  c: your answer: yes. Changed: yes.\n" in shown
+    assert "  e: your answer: skipped. Changed: no.\n" in shown
+    assert "  f: your answer: yes. Changed: unknown.\n" in shown
     again = administer(repo, home, "drift", "y\n" * 6)
-    assert "the drift probe for 2026-W02 is already answered" in again
+    assert again == (
+        "You answered the questions for 2026-W02. Run this command again next week.\n"
+    )
     assert len(rows(home, "SELECT * FROM drift_responses")) == 6
     assert CANARY.encode() not in home_bytes(home)
 
@@ -370,13 +382,13 @@ def test_decision_recall_voids_swept_and_changed_transcripts_and_feeds_back(
         (ids["t1"], 1, 0)
     ]
     assert 10.0 <= got[0]["lag_days"] < 10.01
-    assert "offered 3 options" in shown
-    assert "It was option 2." in shown
+    assert "showed you 3 options." in shown
+    assert "  You selected option 2.\n" in shown
     assert LABEL_CANARY not in shown
     voids = [("transcript_swept", {"decision_id": ids["t2"]}),
              ("transcript_changed", {"decision_id": ids["t3"]})]  # fmt: skip
     assert flags(home) == voids
-    assert "no decision is due" in administer(repo, home, "decision", "")
+    assert administer(repo, home, "decision", "") == "No decision is due.\n"
     assert flags(home) == voids
     data = home_bytes(home)
     assert CANARY.encode() not in data
@@ -406,8 +418,11 @@ def test_knockout_shows_failing_scenarios_and_scores_the_named_components(
     def knocked(now: str) -> str:
         """The draw for ``now``, read from what is shown: one failing scenario, or
         none when the draw is a, which no ok run enters."""
-        found = re.search(r"Scenarios that fail: (\S+) \(of 5\)",
-                          administer(repo, home, "knockout", "", now))  # fmt: skip
+        shown = administer(repo, home, "knockout", "", now)
+        assert shown.startswith("Praxis selected one component. It did not run a "
+                                "scenario.\n")  # fmt: skip
+        found = re.search(r"Scenarios that entered it in their last recorded run: "
+                          r"(\S+) \([01] of 5\)\.\n", shown)  # fmt: skip
         assert found is not None
         shown = found.group(1)
         return "a" if shown == "none" else shown.removeprefix("run-")
@@ -442,7 +457,9 @@ def test_pathfinder_stores_pfsim_against_x1_and_discards_the_ratings(
     typed = f"{CANARY}\n10\n" + "".join(
         "9\n" if pair in close else "1\n" for pair in pairs
     )
-    assert "ratings are discarded" in administer(repo, home, "pathfinder", typed)
+    shown = administer(repo, home, "pathfinder", typed)
+    assert shown.endswith("Praxis recorded the similarity score. It did not keep your "
+                          "ratings.\n")  # fmt: skip
     administer(repo, home, "pathfinder", "9\n1\ns\n")
     (got,) = rows(home, "SELECT * FROM pathfinder_runs")
     assert (got["n_components"], got["coverage"]) == (6, "full")
@@ -458,10 +475,16 @@ def test_refusals_outside_a_repository_and_without_a_frozen_map(
 ) -> None:
     out = io.StringIO()
     assert probe.administer(tmp_path, home, io.StringIO(), out, NOW, "drift") == 2
-    assert "not inside a git repository" in out.getvalue()
+    assert out.getvalue() == (
+        "praxis test: this directory is not in a git repository. Run the command in a "
+        "repository.\n"
+    )
     out = io.StringIO()
     assert probe.administer(repo, home, io.StringIO(), out, NOW, "drift") == 2
-    assert "no frozen component map" in out.getvalue()
+    assert out.getvalue() == (
+        "praxis test: the component map of this repository is not set. Run `praxis "
+        "set components` first.\n"
+    )
     with pytest.raises(ValueError, match="probe kinds"):
         probe.administer(repo, home, io.StringIO(), out, NOW, "teach-back")
     found = locate(repo)
@@ -512,7 +535,7 @@ def test_structural_asks_never_drawn_items_once_a_week_then_retests_them(
     w02 = week_draw(repo_id, "2026-W02", never)  # NOW is Monday 2026-01-05
     # Week 2: the due item first, then the first validation item; end of input.
     shown = administer(repo, home, "structural", "9\n7\n")
-    assert "3 items due" in shown
+    assert shown.startswith("Questions due: 3. Answer each question in 60 seconds.\n")
     assert "validation" not in shown
     assert "never" not in shown
     first = asked(home, 0)
@@ -524,7 +547,7 @@ def test_structural_asks_never_drawn_items_once_a_week_then_retests_them(
     administer(repo, home, "structural", "1\n", ago(-1))
     assert asked(home, 2) == [(w02[1], None, None)]
     again = administer(repo, home, "structural", "5\n5\n5\n", ago(-2))
-    assert "no structural item is due" in again
+    assert again == "No question is due.\n"
     # Week 3: a new draw from the three never asked, then the two retests, in the
     # order they were first asked (8.1 and 7.1 days ago, inside the 7 to 28 days).
     w03 = week_draw(repo_id, "2026-W03", [i for i in never if i not in w02[:2]])
@@ -584,13 +607,13 @@ def test_knockout_refuses_stale_traces_and_reads_those_of_heads_tree(
     plant("run-old", "e" * 40, ago(1))  # the latest run traced another tree
     out = io.StringIO()
     code = probe.administer(repo, home, io.StringIO("2\n"), out, NOW, "knockout")
-    assert (code, out.getvalue()) == (2, "no scenario run traced HEAD's tree; the "
-                                      "traces are stale: run `praxis scenarios "
-                                      "run`\n")  # fmt: skip
+    assert (code, out.getvalue()) == (
+        2, "praxis test: no scenario run is recorded for the files of the current "
+        "commit. Run `praxis run scenarios` first.\n")  # fmt: skip
     assert rows(home, "SELECT * FROM knockouts") == []
     assert flags(home) == []
     plant("run-b", head_tree(repo), ago(2))
     shown = administer(repo, home, "knockout", "2\n")
-    assert "(of 1)" in shown  # run-old is not read against this tree
+    assert re.search(r"\([01] of 1\)\.\n", shown)  # run-old is not read against it
     (got,) = rows(home, "SELECT * FROM knockouts")
     assert json.loads(got["sources"]) == ["scenario_run:2"]

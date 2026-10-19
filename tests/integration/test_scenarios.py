@@ -1,7 +1,7 @@
-"""`praxis scenarios run`, `praxis scenarios` and the doctor's scenarios line, driven
-through the installed binary against a real git repository and a real $PRAXIS_HOME,
-plus the tree_hash column those runs write. Every expected value is written here, from
-the files planted, before the run.
+"""`praxis run scenarios`, `praxis show scenarios` and the scenarios line of
+`praxis show status`, driven through the installed binary against a real git
+repository and a real $PRAXIS_HOME, plus the tree_hash column those runs write. Every
+expected value is written here, from the files planted, before the run.
 
 The planted package `app` (src layout) has five product components: `.` (a non-empty
 __init__.py), main, lib, a and b. `python3 -m app.main` enters `.` (the package),
@@ -140,11 +140,12 @@ def write_scenarios(praxis_home: Path, repo: Path, text: str) -> Path:
 
 
 def freeze(repo: Path, home: Path) -> str:
-    done = praxis("components", "freeze", home=home, cwd=repo)
+    done = praxis("set", "components", home=home, cwd=repo)
     assert done.returncode == 0, done.stdout + done.stderr
     first = done.stdout.splitlines()[0]
-    assert first.endswith("frozen (mechanical), 5 product components"), first
-    return first.split()[1]
+    assert first.startswith("Praxis set component map "), first
+    assert first.endswith(" (mechanical): 5 product components"), first
+    return first.split()[4]
 
 
 def ledger_bytes(praxis_home: Path) -> bytes:
@@ -178,7 +179,7 @@ def test_run_traces_the_clone_and_records_one_row_per_scenario(
     owner_main = (repo / "src/app/main.py").read_bytes()
     before = git_state(repo)
 
-    done = praxis("scenarios", "run", home=home, cwd=repo, pythonpath=str(repo / "src"))
+    done = praxis("run", "scenarios", home=home, cwd=repo, pythonpath=str(repo / "src"))
 
     assert done.returncode == 0, done.stdout + done.stderr
     lines = done.stdout.splitlines()
@@ -214,7 +215,7 @@ def test_run_traces_the_clone_and_records_one_row_per_scenario(
     assert (repo / "src/app/main.py").read_bytes() == owner_main
     assert CANARY.encode() not in ledger_bytes(praxis_home), "argv reached the ledger"
 
-    shown = praxis("scenarios", home=home, cwd=repo)
+    shown = praxis("show", "scenarios", home=home, cwd=repo)
     assert shown.returncode == 0, shown.stderr
     ts = runs[0]["ts"]
     assert shown.stdout.splitlines() == [
@@ -223,7 +224,7 @@ def test_run_traces_the_clone_and_records_one_row_per_scenario(
         f"  main-fails: last run {ts} failed on tree HEAD, components . lib main",
         f"  no-python: last run {ts} not_python on tree HEAD, components none seen",
     ]
-    doctor = praxis("doctor", home=home, cwd=repo).stdout.splitlines()
+    doctor = praxis("show", "status", home=home, cwd=repo).stdout.splitlines()
     assert (
         f"scenarios: 3 configured, 3 run on map {version}; last run {ts}"
         " (failed 1, not_python 1, ok 1)" in doctor
@@ -233,7 +234,7 @@ def test_run_traces_the_clone_and_records_one_row_per_scenario(
     write_scenarios(
         praxis_home, repo, scenario_toml({**ARGV, "main": ["python3", "-m", "app.b"]})
     )
-    lines = praxis("scenarios", home=home, cwd=repo).stdout.splitlines()
+    lines = praxis("show", "scenarios", home=home, cwd=repo).stdout.splitlines()
     assert lines[1] == (
         f"  main: last run {ts} ok on tree {tree[:12]}, components . lib main;"
         " argv changed"
@@ -244,23 +245,23 @@ def test_refusals_write_nothing(repo: Path, home: Path) -> None:
     praxis_home = home / "praxis-home"
     repo_id = locate(repo).repo_id  # type: ignore[union-attr]
     where = praxis_home / "scenarios" / f"{repo_id}.toml"
-    verb = "praxis scenarios run"
+    verb = "praxis run scenarios"
 
-    done = praxis("scenarios", "run", home=home, cwd=repo)
+    done = praxis("run", "scenarios", home=home, cwd=repo)
     assert (done.returncode, done.stdout) == (
         2,
         f"{verb}: no scenarios; {where} names them\n",
     )
-    shown = praxis("scenarios", home=home, cwd=repo)
+    shown = praxis("show", "scenarios", home=home, cwd=repo)
     assert (shown.returncode, shown.stdout) == (
         0,
         f"no scenarios configured; {where} names them\n",
     )
     write_scenarios(praxis_home, repo, scenario_toml(ARGV))
-    done = praxis("scenarios", "run", home=home, cwd=repo)
+    done = praxis("run", "scenarios", home=home, cwd=repo)
     assert (done.returncode, done.stdout) == (
         2,
-        f"{verb}: no frozen map; `praxis components freeze` freezes one\n",
+        f"{verb}: no set component map. To set one, run `praxis set components`.\n",
     )
     assert not (praxis_home / "ledger.db").exists(), "a refusal created the ledger"
 
@@ -282,15 +283,15 @@ def test_refusals_write_nothing(repo: Path, home: Path) -> None:
     }
     for text, why in malformed.items():
         write_scenarios(praxis_home, repo, text)
-        done = praxis("scenarios", "run", home=home, cwd=repo)
+        done = praxis("run", "scenarios", home=home, cwd=repo)
         assert done.returncode == 2, text
         assert done.stdout.startswith(f"{verb}: {where}: {why}"), done.stdout
         assert CANARY not in done.stdout
-        shown = praxis("scenarios", home=home, cwd=repo)
+        shown = praxis("show", "scenarios", home=home, cwd=repo)
         assert shown.returncode == 2
-        assert shown.stdout.startswith(f"praxis scenarios: {where}: {why}")
-        doctor = praxis("doctor", home=home, cwd=repo).stdout.splitlines()
-        assert f"scenarios: {where} refused; `praxis scenarios`" in doctor
+        assert shown.stdout.startswith(f"praxis show scenarios: {where}: {why}")
+        doctor = praxis("show", "status", home=home, cwd=repo).stdout.splitlines()
+        assert f"scenarios: {where} refused; `praxis show scenarios`" in doctor
     assert ledger_rows(praxis_home, "SELECT * FROM scenario_runs") == []
     assert list((praxis_home / "scratch").glob("*")) == []
     assert CANARY.encode() not in ledger_bytes(praxis_home)

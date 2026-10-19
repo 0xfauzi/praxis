@@ -29,10 +29,12 @@ parameters fixed from measurement.
 
 ### 1.2 Design
 
-- Single participant. Q1: task-level randomization inside `praxis task`, P(treatment) =
-  0.5 (design choice), seed committed in Stage 2; general effect by a multiple baseline
-  across at least 3 repositories with randomized start weeks (Koehler-Levin), descriptive
-  only if fewer repositories are active. Q2: an allocation whose smallest attainable p is
+- Single participant. Q1: task-level randomization inside `praxis start task`,
+  P(treatment) = 0.5 (design choice), seed committed in Stage 2; general effect by a
+  multiple baseline across at least 3 repositories with randomized start weeks
+  (Koehler-Levin), descriptive only if fewer repositories are active. Each repository
+  draws its start week at its first frozen map, and its tasks before that week are
+  control tasks (design 6.4). Q2: an allocation whose smallest attainable p is
   below alpha (unrestricted 4-of-8, at least 12 pair-blocked weeks, or multiple baseline);
   8 pair-blocked weeks are withdrawn (minimum p 0.0625).
 - Pilot under Stage 1, with no randomization; the first pilot week is practice and never a
@@ -54,21 +56,21 @@ component map:
 
 - Recorder rows: snapshots, agent deltas, attributions, edge history at Stop, decision
   pointers, hook latency.
-- Component maps and pool supply: `praxis components freeze` and `praxis components` per
-  repository.
+- Component maps and pool supply: `praxis set components` and `praxis show components`
+  per repository.
 - Tasks: registration time, sampled components, F1 forecasts, prequestion answers, the
   bound, related-untested and drawn-not-shown items, flags, seconds spent, abandonment.
 - P1 probes: every first probe of an exposed item, with response time, deadline result,
   truth, coverage and the attached-agent result; a validation-only set probed twice, 7
-  days apart (V1); a validation-only comparison of L = 2 against L = 7 days (Q9 of the
-  design).
+  days apart (V1); a comparison of L = 2 against L = 7 days on exposed items (Q9 of the
+  design). Validation rows carry no lag by schema, so they are not in this comparison.
 - S1 drift probes weekly, S2 boundary rules and divergences, S4 removals, S3 decision
   pointers and responses where structured decisions occur, K knockouts for V7. C1
   Pathfinder runs are stored as PFSIM and PFSIM minus chance against the X1 referent,
   with the component count (`scoring.pfsim`, which replaced the unchecked closeness
   formula of design Q13); the ratings themselves are discarded.
 - V3: one pilot week of the owner's real changes labelled by hand at their own grain.
-- Owner-machine measurements, reported by `praxis doctor` and the pilot: repositories
+- Owner-machine measurements, reported by `praxis show status` and the pilot: repositories
   active per week, structured-decision supply, empty-segment rate, Codex payloads. Nothing
   is blocked on them.
 
@@ -91,13 +93,18 @@ by the rule committed with it, and the change is logged.
 | alpha, specific contrast | 0.05, one-sided | design 6.3 |
 | Incongruent share of bound and held-out items | one half | design 8, V5 |
 | R1 prior | (k + 1) / (n + 2) | design 4.4 |
+| Validation items per week N_VALIDATION | 2 | design choice in `probe.py`; replaced by `derive.py` (1.7) |
+| Trailing touch window `TOUCH_WINDOW_WEEKS` | all history (None) | design 6.2; replaced by `derive.py` (1.7) |
+| Start-week candidates per repository | the 6 ISO weeks (K_START) that start two weeks after the first freeze week | design 6.4 |
 
-Two extractor decisions are also fixed here. X1 static-import validity is assumed: dynamic
-imports (`importlib`, `__import__`, string registries, `if TYPE_CHECKING`) are counted as
-blind spots per component and make the items involving that component `partial`. Agent
-predictability is not replayed: the published SWE-bench run-to-run coefficient of
-variation (15.2 percent for Claude 4.5 Sonnet, 47.0 percent for Llama-3.1-70B, Mehta 2026,
-cited in design 8) stands as the prior.
+Two extractor decisions are also fixed here. X1 static-import validity is assumed. Praxis
+counts what X1 cannot resolve as blind spots per component: `importlib`, `__import__`,
+string registries and a module name that matches two files. A blind spot makes the items
+involving that component `partial`. An import under `if TYPE_CHECKING:` that X1 resolves
+is an edge, not a blind spot (design 3.1). The extractor version for this rule is
+`x1-v2`. Agent predictability is not replayed: the published SWE-bench run-to-run
+coefficient of variation (15.2 percent for Claude 4.5 Sonnet, 47.0 percent for
+Llama-3.1-70B, Mehta 2026, cited in design 8) stands as the prior.
 
 ### 1.5 Metrics and definitions
 
@@ -107,8 +114,8 @@ Murphy decomposition with the Ferro-Fricker correction; CORP diagrams, bins read
 81 or more forecasts; component map frozen per repository before its first task,
 versioned, never pooled across versions; unassisted means the attached-agent check passed
 and the item deadline was met. Stage 2 fixes, each from derive.py and starting from the
-values in 1.4: L, L_max, deadlines, r, k_e, k_r, k_p, h, windows W and W_d, the survival
-threshold, the exclusion cap and minimum counts. No Glicko-2, Elo or Rasch: one respondent
+values in 1.4: L, L_max, deadlines, r, k_e, k_r, k_p, h, windows W, W_d and W_touch,
+N_VALIDATION, the survival threshold, the exclusion cap and minimum counts. No Glicko-2, Elo or Rasch: one respondent
 cannot identify item difficulty.
 
 ### 1.6 Parameters `derive.py` sets, and from what
@@ -118,11 +125,13 @@ reads pilot weeks 2 and 3 only and maps them deterministically to:
 
 | Parameter | Pilot input |
 |---|---|
-| L (only if changed) | the L = 2 against L = 7 comparison on validation-only items |
+| L (only if changed) | the L = 2 against L = 7 comparison on exposed items |
 | L_max | `probe_missed` rate by lag |
 | Probe deadlines | per-item response-time distribution |
 | Binding and preview window W | registration-to-prompt gap distribution |
 | Detection-latency window W_d | time from agent addition to removal (S4) |
+| Trailing touch window W_touch | R1's leave-one-out Brier on the closed pilot tasks, per candidate window |
+| Validation items per week N_VALIDATION | seconds per validation item, tasks per week, and the D1 items that no task exposed and no probe asked |
 | Decision survival threshold | multiset survival of the following prompt's agent hashes (S3) |
 | Cut points (co-touch median for V5, familiarity buckets for S1) | co-touch distribution on data before each item |
 | R1 burn-in | R1's leave-one-out Brier against the count of earlier segments |
@@ -168,7 +177,7 @@ and otherwise the parameter stays unset in Stage 2. No rule falls back to a defa
 
 | Parameter or threshold | Rule | Minimum pilot input |
 |---|---|---|
-| L | 2 days only if the split-half reliability (days as groups) of first-probe Brier at lags under 7 days is at least 0.10 above that at 7 days or more; otherwise 7 stands. probe.py has no short-lag mode yet, so as built this rule leaves L at 7 | 3 days with 2 or more probes in each lag group |
+| L | [proposed, needs owner decision] L is 2 days only if one split-half reliability (days as groups) is at least 0.10 above the other. The first is that of first-probe Brier on exposed items at lags of 2 to under 7 days. The second is that at 7 days or more. Otherwise 7 stands. Validation rows carry no lag by schema (`task_id` and `lag_days` are NULL together), so they are not compared. probe.py makes an exposed item due only from 7 days. As built, this rule therefore leaves L at 7 | 3 days with 2 or more exposed-item probes in each lag group |
 | L_max | the smallest of 14, 21 and 28 days at which at most 10 percent of the exposed items that old were never probed within it (a skip is a probe); none of them means infeasible (V9) | 20 exposures old enough |
 | Probe deadline, per relation | the 90th percentile (nearest rank) of seconds over answered first probes, rounded up to 5 s; otherwise the provisional 60 s stands | 30 answers |
 | W | the 95th percentile of registration-to-bind seconds, rounded up to the minute | 10 bound tasks |
@@ -176,6 +185,8 @@ and otherwise the parameter stays unset in Stage 2. No rule falls back to a defa
 | Decision survival threshold | Otsu's two-class cut over the decisions' survival fractions (the share of the following prompt's agent lines that survive to the session's last boundary, by multiset) | 10 decisions with 2 distinct fractions |
 | Co-touch cut (V5) | per item, on closed tasks before its exposure: the median co-touch share over product pairs that both have outcome rows; a share at the median is low | none: a rule, applied at analysis time |
 | Familiarity buckets (S1) | never co-touched; at or below the median nonzero co-touch share; above it | none: a rule |
+| W_touch | [proposed, needs owner decision] W_touch is the window from {4, 8, 13, 26 weeks, all history} with the smallest leave-one-out R1 Brier. The Brier is the mean over the pilot tasks. A tie keeps all history, then the longer window. `task.TOUCH_WINDOW_WEEKS` takes the value, None for all history. Below the minimum input, all history stands | 10 pilot tasks whose bound prompt is found in its transcript, for every window |
+| N_VALIDATION | [proposed, needs owner decision] Per repository with a frozen map, N is the largest count whose 52 weeks of draws stay under a quarter of the pool. The pool is the D1 items that no task exposed and no probe asked. N is 0 when the pool is smaller than 52 weeks of tasks at the pilot rate, at 4 items each. The smallest N over the repositories wins. derive.py prints the median seconds per validation item beside it | 1 repository with a frozen map |
 | R1 burn-in | the start of the first block of 5 earlier-segment counts whose mean leave-one-out R1 Brier improves on the next block's by at most 0.01 | 10 pilot tasks whose bound prompt is found in its transcript |
 | Exclusion cap | the one-sided 95 percent Wilson upper bound of the share of pilot tasks flagged `agent_previewed`, `late_prediction` or `version_change`, rounded up to 0.01 | 10 tasks |
 | N, sessions per week (2.5) | half the mean weekly session count of pilot weeks 2 and 3, rounded down | 1 session |
@@ -296,3 +307,8 @@ same pilot and confirmatory study on their own machine and produce comparable ro
 | 2026-10-19 | all | Rewritten for docs/design/03-measurement.md before any data, as Stage 1 (pilot) and the Stage 2 frame | The owner rejected write-it drills and test scoring; Glicko-2 is unidentifiable at n = 1. |
 | 2026-10-19 | 1.7 | Interval level for V5/V8 and the derive.py rules proposed, each [proposed, needs owner decision] | derive.py committed with its rules (invariant 11); no data exists |
 | 2026-10-19 | 1.3 | C1 stated as PFSIM (`scoring.pfsim`) in place of the unchecked closeness formula; pool supply read with `praxis components` | The wording follows the instrument as built; no data exists |
+| 2026-10-19 | 1.2, 1.3 | Command names follow the verb-first grammar: `praxis start task`, `praxis set components`, `praxis show components`, `praxis show status` | The names are written to the ASD-STE100 common rules; the procedures do not change; no data exists |
+| 2026-10-19 | 1.4 | A resolved `if TYPE_CHECKING` import is an X1 edge, not a blind spot (extractor version `x1-v2`) | X1 resolves it statically, so the owner can be asked about it (design 3.1); no data exists |
+| 2026-10-19 | 1.3, 1.6, 1.7 | The L rule compares L = 2 against L = 7 on exposed items only | Validation rows carry no lag by schema (CHECK in `probe_responses`); no data exists |
+| 2026-10-19 | 1.4, 1.5, 1.6, 1.7 | N_VALIDATION and W_touch added: Stage 1 values in 1.4 and `derive.py` rules in 1.7, each [proposed, needs owner decision] | `derive.py` is committed with its rules before any pilot row (invariant 11); no data exists |
+| 2026-10-19 | 1.2, 1.4 | Start-week draw at the first frozen map, 6 candidate weeks from two weeks after the freeze week, earlier tasks forced to control | Design 6.4 as built; the multiple-baseline test needs each start drawn before the data that it splits; no data exists |

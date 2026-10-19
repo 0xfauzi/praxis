@@ -1,7 +1,10 @@
-"""`praxis task` and `praxis last`, driven through the module against a real git
-repository, a component map derived and frozen from it, planted probe items and a real
-ledger under a temporary $PRAXIS_HOME. The CLI verbs land in stage C, so these tests
-call task.register and task.last with the stdin and stdout the verbs will pass.
+"""`praxis start task` and `praxis show task`, driven through the module against a real
+git repository, a component map derived and set from it, planted probe items and a real
+ledger under a temporary $PRAXIS_HOME. These tests call task.register and task.last
+with the stdin and stdout that the commands pass.
+
+The map is set at FROZEN, so the start week (design 6.4, at most 7 weeks later) is past
+at NOW and the arm is drawn; the forced-control test sets its map at NOW instead.
 
 The arm is checked against an oracle written here from the rule in task.py's docstring
 (sha256 of json.dumps([seed, repo_id, ordinal]), treatment below 0.5). repo_id hashes
@@ -11,6 +14,7 @@ the first seed that the oracle says gives the arm it needs.
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import io
 import json
@@ -33,6 +37,7 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.integration
 
 NOW = "2026-01-05T09:00:00.000Z"
+FROZEN = "2025-10-06T09:00:00.000Z"
 CANARY = "CANARYTASK7c41e"
 MODULES = ("a", "b", "c", "d", "e", "f")
 TRUE_EDGES = {("a", "b"), ("b", "c"), ("c", "d"), ("e", "a")}
@@ -68,17 +73,22 @@ ALL_PAIRS: list[Item] = [
 ]
 
 
-def freeze(repo: Path, home: Path, items: list[Item] = ALL_PAIRS) -> tuple[str, str]:
-    """Derive, store and freeze the map; plant the items (every ordered D1 pair at
-    epoch 0 unless told otherwise)."""
+def freeze(
+    repo: Path, home: Path, items: list[Item] = ALL_PAIRS, at: str | None = FROZEN
+) -> tuple[str, str]:
+    """Derive, store and set the map and draw the start week as `praxis set
+    components` does (no draw when ``at`` is None); plant the items (every ordered D1
+    pair at epoch 0 unless told otherwise)."""
     found = locate(repo)
     assert found is not None
     cmap = derive(repo, found.repo_id)
     assert sorted(product_components(cmap)) == list(MODULES)
     s = ledger(home)
     try:
-        s.component_map_put(to_json(cmap), NOW)
-        s.component_map_freeze(found.repo_id, cmap.version, NOW)
+        s.component_map_put(to_json(cmap), at or FROZEN)
+        s.component_map_freeze(found.repo_id, cmap.version, at or FROZEN)
+        if at is not None:
+            task.draw_start(s, found.repo_id, cmap.version, at)
         if items:
             s.probe_items_put(
                 rows=items,
@@ -103,10 +113,16 @@ def seed_for(arm: str, repo_id: str, ordinal: int) -> int:
     return next(s for s in range(1000) if oracle(s, repo_id, ordinal)[1] == arm)
 
 
-def run(repo: Path, home: Path, seed: int, typed: str = "") -> tuple[int, str, int]:
+def run(
+    repo: Path, home: Path, seed: int, typed: str = "", now: str = NOW
+) -> tuple[int, str, int]:
     stdin, stdout = io.StringIO(typed), io.StringIO()
-    code = task.register(repo, home, stdin, stdout, NOW, seed)
+    code = task.register(repo, home, stdin, stdout, now, seed)
     return code, stdout.getvalue(), stdin.tell()
+
+
+START = "praxis start task: "
+CONTROL_OUT = "No task is closed yet.\nPraxis recorded task 1 as a control task.\n"
 
 
 def tasks(home: Path, repo_id: str) -> list[sqlite3.Row]:
@@ -159,23 +175,32 @@ def close_with(home: Path, task_id: str, touched: set[str], ts: str) -> None:
         s.close()
 
 
-def test_refuses_without_a_frozen_map_or_outside_a_repository(
+def test_refuses_without_a_set_map_a_start_or_a_repository(
     repo: Path, home: Path, tmp_path: Path
 ) -> None:
     code, out, _ = run(repo, home, 0)
-    assert (code, out.count("\n")) == (2, 1)
-    assert "frozen component map" in out
+    assert (code, out) == (2, START + "this repository has no set component map. To"
+                              " set one, run `praxis set components`.\n")  # fmt: skip
     found = locate(repo)
     assert found is not None
     assert tasks(home, found.repo_id) == []
+    freeze(repo, home, at=None)  # a map set without the start draw
+    code, out, _ = run(repo, home, 0)
+    assert (code, out) == (2, START + "this repository has no study start record. To"
+                              " make one, run `praxis set components`.\n")  # fmt: skip
+    assert tasks(home, found.repo_id) == []
     outside = tmp_path / "plain"
     outside.mkdir()
-    refused = "praxis task: not inside a git repository\n"
+    refused = "praxis start task: run this command in a git repository.\n"
     assert run(outside, home, 0)[:2] == (2, refused)
     buf = io.StringIO()
     assert task.last(outside, home, buf) == 2
+    assert buf.getvalue() == "praxis show task: run this command in a git repository.\n"
     buf = io.StringIO()
-    assert (task.last(repo, home, buf), buf.getvalue()) == (0, "no closed task yet\n")
+    assert (task.last(repo, home, buf), buf.getvalue()) == (
+        0,
+        "No task is closed yet.\n",
+    )
 
 
 def test_control_binds_items_and_reads_nothing(repo: Path, home: Path) -> None:
@@ -183,12 +208,12 @@ def test_control_binds_items_and_reads_nothing(repo: Path, home: Path) -> None:
     seed = seed_for("control", repo_id, 1)
     code, out, consumed = run(repo, home, seed, f"{CANARY}\n9\n")
     assert (code, consumed) == (0, 0)
-    assert out == "no closed task yet\nregistered\n"
+    assert out == CONTROL_OUT
     (row,) = tasks(home, repo_id)
     key = oracle(seed, repo_id, 1)[0]
     expected = {"ordinal": 1, "arm": "control", "seed_hash": key, "status": "unbound",
                 "stratum": "uniform", "region_json": "[]", "ts": NOW,
-                "map_version": version}  # fmt: skip
+                "map_version": version, "forced_control": 0}  # fmt: skip
     assert {k: row[k] for k in expected} == expected
     roles = exposures(home, row["task_id"])
     assert [len(roles[r]) for r in ("bound", "related", "drawn_not_shown")] == [2, 1, 1]
@@ -214,10 +239,10 @@ def test_treatment_records_grid_answers_and_drops_typed_text(
     typed = "".join(f"{CANARY}\n{a}\n" for a in answers)
     code, out, _ = run(repo, home, seed, typed)
     assert code == 0
-    assert out.endswith("registered\n")
-    assert out.count("answer 1 3 5 7 9 or s") == 7
+    assert out.endswith("Praxis recorded task 1 as a treatment task.\n")
+    assert out.count("  Type one of the answers in the brackets.\n") == 7
     (row,) = tasks(home, repo_id)
-    assert row["arm"] == "treatment"
+    assert (row["arm"], row["forced_control"]) == ("treatment", 0)
     roles = exposures(home, row["task_id"])
     s = ledger(home)
     try:
@@ -247,7 +272,7 @@ def test_a_second_task_supersedes_the_open_one_and_end_of_input_is_unanswered(
     second_seed = seed_for("treatment", repo_id, 2)
     code, out, _ = run(repo, home, second_seed, "")
     assert code == 0
-    assert "the open task was superseded by this one\n" in out
+    assert "The previous open task is now void. This task replaces it.\n" in out
     first, second = tasks(home, repo_id)
     assert (first["status"], first["void_reason"]) == ("superseded", "superseded")
     assert (second["status"], second["arm"], second["ordinal"]) == (
@@ -268,7 +293,7 @@ def test_empty_pool_registers_with_stratum_empty(repo: Path, home: Path) -> None
     repo_id, _ = freeze(repo, home, [])
     code, out, _ = run(repo, home, seed_for("treatment", repo_id, 1), "5\n" * 5)
     assert code == 0
-    assert "true now?" not in out
+    assert "as it is now" not in out
     (row,) = tasks(home, repo_id)
     assert (row["stratum"], row["region_json"]) == ("empty", "[]")
     assert exposures(home, row["task_id"]) == {"bound": [], "related": [],
@@ -296,12 +321,13 @@ def test_region_follows_touch_rate_and_last_shows_bound_items_only(
     shown = buf.getvalue()
     lines = shown.splitlines()
     assert lines[:4] == [
-        "last task 1 (treatment), closed 2026-01-05T10:00:00.000Z",
-        "components touched: a, b, c",
-        "  a: changed at the end yes, edges +1 -0",
-        "  b: changed at the end unknown, edges unknown",
+        "Last closed task: task 1, a treatment task, closed at"
+        " 2026-01-05T10:00:00.000Z",
+        "Components that the agent changed: a, b, c",
+        "  a: changed at the end yes, imports of other components 1 added, 0 removed",
+        "  b: changed at the end unknown, imports of other components unknown",
     ]
-    assert "  a -> f (forbidden by the boundary rules)" in lines
+    assert "  a -> f: the rule is forbidden" in lines
     roles = exposures(home, t1["task_id"])
     for r in roles["bound"]:
         answer = "yes" if r["truth"] else "no"  # the tree holds no import: now no
@@ -310,14 +336,15 @@ def test_region_follows_touch_rate_and_last_shows_bound_items_only(
         assert question(r) not in shown
     # Every answer was 0.9, so a miss costs 0.81 and a hit 0.01: every miss (the
     # untouched d, e, f and the false items) leads the list.
-    head = "your answers against the outcome, high-confidence misses first:"
+    head = "Your answers and the results, the most confident wrong answers first:"
     start = lines.index(head)
     answered = lines[start + 1 :]
     assert len(answered) == 7
-    outcome = ["no" if "outcome no" in line else "yes" for line in answered]
+    outcome = ["no" if line.endswith("result no") else "yes" for line in answered]
     assert outcome == sorted(outcome)  # every "no" (a miss at 0.9) before any "yes"
-    misses = [line for line in answered if "agent changes" in line and "no:" in line]
-    assert {line.rsplit(" ", 1)[1] for line in misses} <= {"d", "e", "f"}
+    asked = "  Will the agent change code in "
+    misses = [line for line in answered if asked in line and "result no" in line]
+    assert {line[len(asked)] for line in misses} <= {"d", "e", "f"}
 
     t2_seed = seed_for("control", repo_id, 2)
     assert run(repo, home, t2_seed)[0] == 0
@@ -325,8 +352,9 @@ def test_region_follows_touch_rate_and_last_shows_bound_items_only(
     close_with(home, t2["task_id"], {"a", "b", "d"}, "2026-01-05T11:00:00.000Z")
     code, out, _ = run(repo, home, seed_for("control", repo_id, 3))
     assert code == 0
-    assert out.startswith("last task 2 (control), closed 2026-01-05T11:00:00.000Z\n")
-    assert "your answers" not in out
+    assert out.startswith("Last closed task: task 2, a control task, closed at"
+                          " 2026-01-05T11:00:00.000Z\n")  # fmt: skip
+    assert "Your answers" not in out
     t3 = tasks(home, repo_id)[2]
     region = json.loads(t3["region_json"])
     # Rates: a 1, b 1, c 0.5, d 0.5, e 0, f 0. h = 3: a, b and one of the tied c, d.
@@ -354,7 +382,7 @@ def test_last_rereads_bound_item_truth_from_the_working_tree(
     buf = io.StringIO()
     assert task.last(repo, home, buf) == 0
     lines = buf.getvalue().splitlines()
-    start = lines.index("bound items, true when drawn and now:")
+    start = lines.index(task.BOUND.rstrip("\n"))
     assert sorted(lines[start + 1 : start + 3]) == [
         "  Does code in a import code in b? yes, now no",
         "  Does code in f import code in a? no, now unknown",
@@ -398,3 +426,59 @@ def test_a_validation_probed_item_leaves_the_binding_pool(
     roles = exposures(home, t1["task_id"])
     assert [r["item_id"] for r in roles["bound"]] == [kept["item_id"]]
     assert roles["related"] == roles["drawn_not_shown"] == []
+
+
+# design 6.4: the start week, and design 6.2: the trailing touch window
+
+
+def test_a_task_before_the_start_week_is_forced_control_and_silent(
+    repo: Path, home: Path
+) -> None:
+    repo_id, version = freeze(repo, home, at=NOW)  # NOW is Monday of 2026-W02
+    # Oracle: K_START = 6 weeks from START_GAP_WEEKS = 2 weeks after the set week.
+    weeks = [f"2026-W{w:02d}" for w in range(4, 10)]
+    key = hashlib.sha256(json.dumps([task.SEED, repo_id, "start"]).encode())
+    week = random.Random(int(key.hexdigest(), 16)).choice(weeks)
+    s = ledger(home)
+    try:
+        assert task.draw_start(s, repo_id, version, "2026-03-02T09:00:00Z") == week
+        (start,) = s.repository_starts()
+    finally:
+        s.close()
+    assert dict(start) == {"repo_id": repo_id, "map_version": version,
+                           "drawn_ts": NOW, "start_week": week,
+                           "candidates_json": json.dumps(weeks),
+                           "seed_hash": key.hexdigest()}  # fmt: skip
+    seed = seed_for("treatment", repo_id, 1)  # the arm draw says treatment
+    code, out, consumed = run(repo, home, seed, "9\n" * 7)
+    assert (code, out, consumed) == (0, CONTROL_OUT, 0)
+    assert "W" not in out, "the text names a week"
+    (first,) = tasks(home, repo_id)
+    assert (first["arm"], first["forced_control"]) == ("control", 1)
+    monday = dt.date.fromisocalendar(int(week[:4]), int(week[-2:]), 1)
+    seed = seed_for("treatment", repo_id, 2)
+    code, out, _ = run(repo, home, seed, "9\n" * 7, f"{monday}T09:00:00.000Z")
+    assert out.endswith("Praxis recorded task 2 as a treatment task.\n")
+    second = tasks(home, repo_id)[1]
+    assert (second["arm"], second["forced_control"]) == ("treatment", 0)
+
+
+def test_the_touch_window_moves_the_region(
+    repo: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_id, _ = freeze(repo, home)
+    # Two tasks touch d e f in November, one touches a b c the day before NOW. All
+    # history: d e f 2/3, a b c 1/3. A 4-week window holds only the last: a b c 1/1.
+    history = [("2025-11-03", {"d", "e", "f"}), ("2025-11-10", {"d", "e", "f"}),
+               ("2026-01-04", {"a", "b", "c"})]  # fmt: skip
+    for ordinal, (day, touched) in enumerate(history, 1):
+        assert run(repo, home, 0, "9\n" * 7, f"{day}T09:00:00.000Z")[0] == 0
+        tid = tasks(home, repo_id)[ordinal - 1]["task_id"]
+        close_with(home, tid, touched, f"{day}T10:00:00.000Z")
+    regions = []
+    for weeks in (None, 4):
+        monkeypatch.setattr(task, "TOUCH_WINDOW_WEEKS", weeks)
+        assert run(repo, home, 0, "9\n" * 7)[0] == 0
+        regions.append(json.loads(tasks(home, repo_id)[-1]["region_json"]))
+    assert regions == [["d", "e", "f"], ["a", "b", "c"]]
+    assert "TOUCH_WINDOW_WEEKS is 4 weeks" in task.window_assumption()

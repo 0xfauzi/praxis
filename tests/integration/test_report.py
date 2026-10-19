@@ -56,7 +56,10 @@ def session(ordinal: int) -> str:
 
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
-    root = tmp_path / "repo"
+    return make_repo(tmp_path / "repo")
+
+
+def make_repo(root: Path) -> Path:
     pkg = root / "src" / "pkg"
     pkg.mkdir(parents=True)
     (pkg / "__init__.py").write_text("")
@@ -97,6 +100,7 @@ class World:
         roles: tuple[list[tuple[str, str]], ...],
         times: tuple[str, str],
         touched: set[str],
+        forced: bool = False,
     ) -> str:
         tid = f"{ordinal:016x}"
         bound, related, drawn = ([self.item[p] for p in r] for r in roles)
@@ -104,6 +108,7 @@ class World:
             region=[], bound=bound, related=related, drawn=drawn, task_id=tid,
             repo_id=self.repo_id, map_version=self.version, ordinal=ordinal,
             ts=times[0], arm=arm, seed_hash=SEED_HASH, stratum="region",
+            forced_control=forced,
         )  # fmt: skip
         self.store.task_bind(tid, session(ordinal), f"prompt-{ordinal}", times[0])
         rows = [(c, c in touched, None, None, None) for c in NAMES]
@@ -354,7 +359,7 @@ def test_refuses_without_a_map_or_with_too_few_components(
     assert set(report.randomization(store, found.repo_id, 1, 10).values()) == {None}
     out = io.StringIO()
     report.render(s, out)
-    assert "refused: no_frozen_map" in out.getvalue()
+    assert "no scores: no_frozen_map" in out.getvalue()
     rules = (*FIXED, *(Rule(n, (f"src/pkg/{n}.py",)) for n in NAMES[:4]))
     small = ComponentMap(found.repo_id, "owner", rules, map_version(rules), ())
     store.component_map_put(to_json(small), T0)
@@ -471,3 +476,75 @@ def test_bands_keep_zero_rates_and_the_shuffle_statistic_squares() -> None:
     assert skill == pytest.approx(0.8)
     swapped = report._shuffled_skill(touched, tasks, given, r1, ["t2", "t1"])
     assert swapped == pytest.approx(-1.6)
+
+
+# design 6.4: the general effect across repositories
+
+
+def started(tmp_path: Path, home: Path, name: str, weeks: tuple[str, ...]) -> World:
+    """A repository whose start week is the last of its candidate weeks."""
+    w = World(make_repo(tmp_path / name), home)
+    w.store.repository_start_put(
+        candidates=weeks, repo_id=w.repo_id, map_version=w.version, drawn_ts=T0,
+        start_week=weeks[-1], seed_hash=SEED_HASH,
+    )  # fmt: skip
+    return w
+
+
+# One never-drawn probe a week, Monday to Monday: 2026-W03 to 2026-W06.
+DAYS = ((1, 13), (1, 20), (1, 27), (2, 3))
+
+
+def weekly(w: World, right: tuple[bool, ...]) -> None:
+    for (month, day), pair, ok in zip(DAYS, NEVER, right, strict=False):
+        validate(w, pair, f"2026-{month:02d}-{day:02d}T10:00:00.000Z", sure(pair, ok))
+
+
+def test_the_general_effect_redraws_the_start_weeks_by_hand(
+    tmp_path: Path, home: Path
+) -> None:
+    # Each repository: Brier 0.81, 0.81 before its start in W05, 0.01, 0.01 from it.
+    # Candidates W04 (split 1) and W05 (split 2). Split 2 gaps 0.81 - 0.01 = 0.80;
+    # split 1 gaps 0.81 - 0.83 / 3. Of the 2^3 = 8 start combinations only the drawn
+    # one reaches a mean gap of 0.80: p = 1/8.
+    level = (False, False, True, True)
+    worlds = [started(tmp_path, home, f"r{i}", ("2026-W04", "2026-W05"))
+              for i in range(2)]  # fmt: skip
+    late = started(tmp_path, home, "late", ("2026-W06", "2026-W07"))
+    gap = started(tmp_path, home, "gap", ("2026-W04", "2026-W05"))
+    for w in (*worlds, late):
+        weekly(w, level)
+    for (month, day), pair in zip((DAYS[0], *DAYS[2:]), NEVER, strict=False):
+        validate(gap, pair, f"2026-{month:02d}-{day:02d}T10:00:00.000Z", 0.5)
+    s = report.scores(late.store, late.repo_id, seed=7, draws=500)
+    # late's start W07 is after its last week; gap has no W04 probe, so W04 and W05
+    # are one split, two assignments koehler_levin cannot weight: both left out.
+    left = {"candidates_share_a_split": 1, "no_week_after_start": 1}
+    assert s.general == report.General(None, 2, left, run=True)
+    third = started(tmp_path, home, "r2", ("2026-W04", "2026-W05"))
+    weekly(third, level)
+    s = report.scores(late.store, late.repo_id, seed=7, draws=500)
+    assert s.general.p == pytest.approx(1 / 8)
+    assert s.general == report.General(s.general.p, 3, left, run=True)
+    out = io.StringIO()
+    report.render(s, out)
+    assert (
+        "general effect across repositories: p 0.1250, repositories 3, left out:"
+        " candidates_share_a_split 1; no_week_after_start 1\n"
+    ) in out.getvalue()
+    assert "Marascuilo-Busk" in out.getvalue()
+    assert not report.scores(late.store, late.repo_id).general.run
+
+
+def test_a_forced_control_task_is_out_of_the_arm_contrasts(
+    repo: Path, home: Path
+) -> None:
+    w = World(repo, home)
+    ab, ba = ("alpha", "beta"), ("beta", "alpha")
+    forced = w.task(1, "control", ([ab], [], []), (at(5, 10), at(5, 11)), set(), True)
+    drawn = w.task(2, "control", ([ba], [], []), (at(5, 12), at(5, 13)), set())
+    w.respond(ab, forced, at(13, 10), 0.9)
+    w.respond(ba, drawn, at(13, 11), 0.1)
+    s = report.scores(w.store, w.repo_id)
+    assert s.counts == {("P1", "forced_control", "control"): 1}
+    assert block(s, "P1", "bound", "control").n == 1

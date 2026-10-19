@@ -121,7 +121,7 @@ stamped on every derived row. A map defines nodes only: every edge comes from an
 
 ### 2.2 Mechanical map (the default)
 
-`praxis components derive` computes it from `git ls-files`, with no owner input.
+`praxis make components` computes it from `git ls-files`, with no owner input.
 
 1. Fixed classes first: `tests` (paths under `tests/` or `test/`, `test_*.py`,
    `*_test.py`), `docs` (`docs/`, `*.md`, `*.rst`), `config` (dotfiles, `pyproject.toml`,
@@ -148,7 +148,7 @@ stamped on every derived row. A map defines nodes only: every edge comes from an
    carries the warning `grouped_by_prefix_and_imports`,
    plus `above_30_after_grouping` when it is still above 30. Freeze refuses any map with
    fewer than 5 or more than 30 product components and prints a mechanical map's draft
-   in the owner's toml format (section 2.4), which `praxis components derive --write`
+   in the owner's toml format (section 2.4), which `praxis make components --write`
    saves once for the owner to merge. Measured at HEAD (E03 addendum): telltale 72
    children give 21 components; systemap 163 give 40, with purity 0.80 against the
    owner's own 16-component map; praxis is not grouped. The pre-registered bound of 34
@@ -156,7 +156,7 @@ stamped on every derived row. A map defines nodes only: every edge comes from an
 
 Measured here: the product root is `src/praxis`, and depth 1 makes each module a product
 component (`.` for the non-empty `__init__.py`). The count is the tree's, so it is
-re-measured by `praxis components` on the current tree rather than written here: 10 when
+re-measured by `praxis show components` on the current tree rather than written here: 10 when
 this section was first written (the first count of 9 left out `__init__.py` by hand), 14
 at e9b5e3a and 18 with wave 2's stage B (E03). Taking the top-level package would give 1
 component [MX]. In a flat package like this, depth-1
@@ -178,7 +178,7 @@ extractor for another language is added only after its own experiment.
 - The owner may write `$PRAXIS_HOME/components/<repo_id>.toml`, read with `tomllib`:
   `[[component]]` tables with an `id` and `globs`. It lives under `$PRAXIS_HOME`, never in
   the owner's repository (invariant 8 [MX]).
-- `praxis components freeze` records `map_version`, source (`mechanical` or `owner`) and a
+- `praxis set components` records `map_version`, source (`mechanical` or `owner`) and a
   timestamp. No task or probe is accepted in a repository without a frozen map. Freezing
   refuses fewer than 5 product components, which blocks the coarse-map move [RT, playbook
   (g)].
@@ -211,15 +211,22 @@ counts (invariant 5).
   one-site non-import-time helper import is incidental reuse, not a boundary dependency
   [CR]. D1 items are stratified by these two attributes and reported per stratum.
 - Reach: the transitive closure of the component graph.
-- Blind spots counted per component: `importlib.import_module`, `__import__`, string
-  plugin registries, and `if TYPE_CHECKING` imports (counted separately). Any of these
-  makes items involving the component `partial`. Static graphs miss dynamic, configuration,
-  SQL and infrastructure wiring [SE], so every row carries the assumption that an absent
-  edge may be an extractor blind spot.
+- Blind spots, counted per component, are imports that X1 cannot resolve:
+  `importlib.import_module`, `__import__`, string plugin registries and a module name
+  that matches two files. X1 does not detect string registries, so each count is
+  a lower bound. Any blind spot makes items involving the component `partial`. Static
+  graphs miss dynamic, configuration, SQL and infrastructure wiring [SE], so every row
+  carries the assumption that an absent edge may be an extractor blind spot.
+- Decision (wave 4, 2026-10-19): an import under `if TYPE_CHECKING:` that X1 resolves is
+  a known edge with `module_level=False`, not a blind spot. Reason: X1 resolves it
+  statically, so the owner can be asked about it. Counted as a blind spot, it made every
+  praxis component `partial` for a convention (ruff's TC rules), not for an extractor
+  gap. `StaticGraph.type_only` counts these imports per component, so a report can
+  stratify by them; nothing reads that count yet. The extractor version is `x1-v2`.
 
 Measured here, X1 on `src/praxis` (`extract.static_imports`): the edges, the ordered
-pairs and the base rate are the tree's and are re-measured by `praxis components` on the
-current tree (`praxis components freeze` prints them). On the 10-component tree of
+pairs and the base rate are the tree's and are re-measured by `praxis show components` on
+the current tree (`praxis set components` prints them). On the 10-component tree of
 2026-10-19 they were 17 edges among 90 ordered pairs (base rate 0.189), with `store`
 imported by 5 components, `cli` importing 6 (`.` included), and of the 73 non-edge pairs 7
 reaching their target through another component and 66 with no path at all; at e9b5e3a, 14
@@ -239,6 +246,48 @@ runtime data flow without a judge and without any test assertion. Both drafts tr
 data-flow items as judge-only; a search of the standard library (`sys.setprofile`,
 `sys.settrace`) shows they are not [CR]. Coverage, overhead and determinism need measuring
 (E05).
+
+Example: a scenario file for praxis itself, with four operations. Each argv runs with the
+clone's root as its working directory, so a fixture path is relative to the repository
+root. The two `sh -c` scenarios put the clone path and the home directory into the
+recorded payloads in place of `<repo>` and `<home>`. `praxis` must be on `PATH`. The
+console script that `uv tool install` writes starts Python without -I, so the clone's
+code is the code that runs (`scenarios.py`). Each scenario gets its own clone and its own
+`PRAXIS_HOME`, so the ledger that the hook writes is deleted with the clone.
+
+```toml
+[[scenario]]
+id = "version"
+argv = ["praxis", "--version"]
+
+[[scenario]]
+id = "status"
+argv = ["praxis", "show", "status"]
+
+[[scenario]]
+id = "hook-session-start"
+argv = ["sh", "-c", '''sed "s#<repo>#$PWD#g; s#<home>#$HOME#g" fixtures/claude/2.1.303/session_start.json | praxis hook''']
+
+[[scenario]]
+id = "hook-edit"
+argv = ["sh", "-c", '''
+f=fixtures/claude/2.1.303
+fill() { sed "s#<repo>#$PWD#g; s#<home>#$HOME#g" "$f/$1.json"; }
+fill session_start | praxis hook
+fill pre_tool_use_edit | praxis hook
+printf 'one more line\n' >> README.md
+fill post_tool_use_edit | praxis hook
+fill stop | praxis hook
+''']
+```
+
+Measured on 2026-10-19 with `praxis run scenarios` on a committed copy of the wave 4
+working tree, with the mechanical map of 20 product components. All four scenarios ended
+with exit code 0. `version` entered `.` and `cli`, and `status` entered 11 components.
+Each hook scenario entered `.`, `cli`, `gitdiff`, `hooks`, `recorder`, `schema` and
+`store`, and the Edit scenario recorded one agent delta. Each scenario took 65 to 619 ms.
+The set that `status` enters depends on the imports that `doctor.py` runs when Python
+loads it, so the set changes when those imports change.
 
 ### 3.3 X3: persistent data (candidate)
 
@@ -271,7 +320,7 @@ An **item** is (relation, A, B[, scenario or table]). Relations: D1 direct impor
 reach-through, RT runtime call or execution, TB table write. The item supply is finite and
 binding:
 
-- The D1 pairs are n(n - 1) over the product components, re-measured by `praxis
+- The D1 pairs are n(n - 1) over the product components, re-measured by `praxis show
   components` on the current tree (90 on the 10-component tree, 182 at e9b5e3a, 306 with
   stage B). On the 10-component tree D2 had 7 positives against 66 negatives, so a
   constant 0.1 forecast nearly aces it; D2 is reported but never pooled into the primary
@@ -279,9 +328,9 @@ binding:
 - An item is consumed by its first exposure (section 6). It is re-admitted as a new item
   only when its truth flips (a new epoch), which the recorder's edge history detects.
 - At 4 items consumed per task (section 6.2 defaults), a D1 pool lasts its items / 4
-  tasks; `praxis components` prints the tasks left (22 on the 10-component tree, 90 / 4,
+  tasks; `praxis show components` prints the tasks left (22 on the 10-component tree, 90 / 4,
   derived).
-- `praxis components` reports the supply per repository (its pool line). The power
+- `praxis show components` reports the supply per repository (its pool line). The power
   simulation (section 6.6) takes the supply as an input, and a repository whose supply
   cannot reach the simulated count over the study is declared infeasible for the
   confirmatory analysis, not run underpowered.
@@ -334,7 +383,7 @@ Shared conventions:
 
 ### 4.1 P1: delayed structural probe (primary outcome)
 
-**(a) What the owner does.** Runs `praxis probe` in a terminal in the repository, whenever
+**(a) What the owner does.** Runs `praxis test structure` in a terminal in the repository, whenever
 they choose, with no agent attached: the `attached_agents` check moves from `drill.py` to
 `unassisted.py`, an attached agent refuses the probe, and the refusal is recorded. praxis
 shows due items one at a time with a visible clock. Each names a relation and its
@@ -376,7 +425,7 @@ lookup is an assumption on every row.
   R_base mostly measures layering, learned once.
 - R_fam: for pair (A, B), an isotonic (PAV) function, fitted on earlier probe outcomes, of
   the share of the owner's bound segments in a trailing window that touched both A and B.
-  NULL until fitted.
+  NULL until fitted. The window is `TOUCH_WINDOW_WEEKS` (section 6.2).
 
 **(f) Scoring.** BS per item and per set; BSS against each reference; REL, RES, UNC;
 CORP. The confirmatory statistic is a randomized arm contrast (section 6.3), not a level.
@@ -402,7 +451,7 @@ the power simulation are met.
 A freeze probe in the SAGAT family, which has the strongest sensitivity evidence in the
 situation-awareness literature: about 94 percent across 243 studies (Endsley 2021 [LS]).
 
-- Weekly, inside `praxis probe`, praxis shows k items: true changed edges (pairs whose X1
+- Weekly, inside `praxis test changes`, praxis shows k items: true changed edges (pairs whose X1
   or X2 truth changed during the past week, from the recorder's edge history) mixed with
   foils (unchanged pairs matched on co-touch familiarity bucket). The owner gives, per
   item, a grid probability that it changed this week. k and the mixing share are design
@@ -414,6 +463,15 @@ situation-awareness literature: about 94 percent across 243 studies (Endsley 202
   is the skill to train), so S1 is also an intervention, applied equally in both arms.
 - Claim class: derived; skill comparative. Labelled "awareness of structural change",
   situation-awareness level 1 at structural grain.
+- Decision (wave 4, 2026-10-19): `drift_responses` keeps the simplified shape that
+  `praxis test changes` writes. For each product component and ISO week, the row holds a
+  yes or no answer (`said_changed`) and the observed change (`did_change`). The question is
+  whether the agent changed which components a component imports in the last 7 days, and
+  the recorder's edge history gives the truth. There are no foils, grid probabilities or
+  weights yet, so the weighted Brier and R_drift above apply only to the grid form.
+  Reason: S1 is a secondary measure, and the grid form can replace this shape before the
+  first pilot row exists. `report.py` does not score the table yet (searched for its
+  columns on 2026-10-19).
 
 ### 4.3 S2: boundary enforcement (reflexion model, associative)
 
@@ -425,9 +483,9 @@ After Murphy, Notkin and Sullivan 1995 [SE].
 - After each segment, the recorder's edge history lists divergences the agent introduced:
   a new edge on a `forbidden` pair, attributed to an agent delta in the segment.
 - Outcome per divergence: `caught` if, before the session ends, the edge is gone again or
-  the owner logged an amendment (`praxis components allow A B`, a decision row); otherwise
+  the owner logged an amendment (a decision row; the command for it is not built yet); otherwise
   `unnoticed`. praxis says nothing about divergences during the session; it reports them
-  in `praxis last` afterwards (both arms).
+  in `praxis show task` afterwards (both arms).
 - Reported: divergences per week, share caught, and the share of declared pairs that are
   `forbidden` (a model with nothing forbidden is vacuous and is flagged).
 - Claim class: associative. Assumptions on every row: an edge can be removed for reasons
@@ -439,7 +497,7 @@ After Murphy, Notkin and Sullivan 1995 [SE].
 
 ### 4.4 F1: component forecast (the candidate instrument, treatment arm only)
 
-**(a) What the owner does.** In `praxis task`, treatment arm only, before writing the
+**(a) What the owner does.** In `praxis start task`, treatment arm only, before writing the
 prompt: praxis draws r product components at random (r a design choice fixed from the cost
 measurement, E07) and the owner gives a grid probability for each that the agent will
 change it in the scored segment. A blank stays `unanswered`. There is no keystroke that
@@ -536,7 +594,7 @@ it. No owner-facing calibration is ever computed from this (see the dropped M4, 
   canonical option labels. Free-text option lists are excluded: telling offered options
   from steps needs a judge (of 44 assistant text blocks, 9 had numbered lines and 0 had
   option labels [MX]).
-- Administration in `praxis probe`: free recall first (the owner types what was decided and
+- Administration in `praxis test decisions`: free recall first (the owner types what was decided and
   why; the text is displayed and discarded, and nothing about it is kept except the boolean
   `recall_attempted`); then the real options in a seeded shuffle, with a grid probability
   per option; then immediate corrective feedback. Guessing first is what builds memory
@@ -548,7 +606,7 @@ it. No owner-facing calibration is ever computed from this (see the dropped M4, 
   decision trains recall of a mistake [RT].
 - Window: between L days and 30 days after the decision, because Claude Code deletes
   transcripts older than `cleanupPeriodDays`, default 30 [MX, RT]. Raising it means
-  editing `~/.claude/settings.json`, offered only through `praxis setup --apply` with
+  editing `~/.claude/settings.json`, offered only through `praxis install claude` with
   per-file consent (invariant 8). Codex has no documented AskUserQuestion equivalent
   [MX]: `unobservable`.
 - Scoring: multi-category Brier over the k options, with the 1/k floor printed beside it.
@@ -557,6 +615,14 @@ it. No owner-facing calibration is ever computed from this (see the dropped M4, 
   gameable (a reread of the transcript cannot be detected under relatime [RT]).
 - Supply: 0 AskUserQuestion and 0 ExitPlanMode calls among 241 tool uses in the one local
   transcript [MX]. If the pilot yields fewer than the Stage 1 minimum, S3 is counts only.
+- Decision (wave 4, 2026-10-19): `decision_responses` keeps the simplified shape that
+  `praxis test decisions` writes. The row holds the recalled option index
+  (`recalled_index`) or a skip, not a grid probability per option. Free recall comes first
+  and is discarded, and praxis shows the chosen option after the answer. The score is then
+  a hit or a miss, with the 1/k chance level beside it, not the multi-category Brier
+  above. Reason: S3 is a secondary measure, and the grid form can replace this shape
+  before the first pilot row exists. `report.py` does not score the table yet (searched
+  for its columns on 2026-10-19).
 
 ### 4.7 K: knockout localisation (validation criterion only)
 
@@ -569,6 +635,15 @@ Multi-category Brier. Used only in V7. A weakness, stated: where scenario names 
 one-to-one onto components the probe is a lookup; scenarios are therefore named by the
 owner for operations, not modules, and the share of scenarios that execute more than one
 component is reported. The owner's working tree is never written.
+
+Decision (wave 4, 2026-10-19): `knockouts` keeps the simplified shape that `praxis test
+knockout` writes. The row holds the components that the owner names
+(`components_named_json`) and whether the drawn component is one of them (`hit`). It holds
+no grid probability per component. As built, a scenario fails when its last successful
+trace on the current tree entered the drawn component. Praxis does not yet run a scratch
+clone in which the public names raise. Reason: K is a validation-only measure (V7), and
+the grid form can replace this shape before the first pilot row exists. `report.py` does
+not score the table yet (searched for its columns on 2026-10-19).
 
 ### 4.8 C1: Pathfinder map (convergent only)
 
@@ -634,7 +709,7 @@ mislabel exactly the quantities F1, S2 and S4 read [MX].
 - At each Stop: X1 edges of Python files the segment changed (section 3.4), under budget.
 - At PostToolUse for AskUserQuestion and ExitPlanMode: the decision pointer (S3).
 - At the Stop that closes a registered task's scored segment: one read of `tasks` and the
-  feedback notice (section 5.4).
+  result notice (section 5.4).
 
 ### 5.3 The scored segment
 
@@ -655,27 +730,33 @@ segment that ends at the next human prompt is therefore often empty. Definition:
 
 The pretesting benefit depends on prompt feedback (Hays, Kornell and Bjork 2013 [LS]),
 though delayed feedback still worked for trivia (Kornell 2014 [LS]), so latency is a
-measured covariate. Both drafts relied on the next `praxis task` alone, which can be hours
+measured covariate. Both drafts relied on the next `praxis start task` alone, which can be hours
 later or never. Claude Code hooks accept a `terminalSequence` output field (OSC 0, 1, 2, 9,
 99, 777 or BEL) that Claude Code itself writes to the owner's terminal, interactive only;
 "a successful hook's stdout is never shown in the transcript" (`code.claude.com/docs/en/hooks`,
 JSON output table and "Emit terminal notifications"; read 2026-10-19). So at the Stop that
 closes a registered task's segment, in both arms, the hook may emit one notification from a
-closed vocabulary ("praxis: feedback ready"), with no component id or other content. This
+closed vocabulary (`praxis: result ready`), with no component id or other content. This
 needs an amendment to invariant 7 and to the no-stdout promise in `hooks.py` lines 1-8. It
 never alters agent output bytes or exit code. Before use, an integration test on 2.1.303
 asserts that no user or assistant message in the transcript holds a praxis string after
 such a Stop: 2.1.303 writes every Stop hook's command path and a hook's stdout into the
 on-disk JSONL as system and attachment entries (measured by the live test in
 `test_recorder.py`), so a praxis string elsewhere in the file is expected. Codex support
-needs measuring; until then Codex feedback is `praxis last` only. `systemMessage` is not used:
+needs measuring; until then Codex feedback is `praxis show task` only. `systemMessage` is not used:
 whether it reaches model context needs verifying.
+
+Decision (wave 4, 2026-10-19): the notice text is `praxis: result ready`, in place of
+`praxis: feedback ready`. It stays the one fixed string in the closed vocabulary
+(`recorder.NOTICE`). Reason: the common rules of the language reference ask for literal
+words. `praxis show task` shows the result of the last closed task, so the notice and the
+command use one term.
 
 ## 6. Elicitation, intervention and control
 
-### 6.1 `praxis task`
+### 6.1 `praxis start task`
 
-1. Before writing a prompt for a piece of work, the owner runs `praxis task` in a terminal
+1. Before writing a prompt for a piece of work, the owner runs `praxis start task` in a terminal
    in the repository. The name is neutral on purpose: the same ritual in both arms should
    not cue silent prediction in control tasks [CR].
 2. It refuses without a frozen map.
@@ -685,10 +766,10 @@ whether it reaches model context needs verifying.
 4. Treatment: the owner enters the F1 forecast over r sampled components and answers the
    k_e bound items as prequestions (grid probabilities). Control: "registered", nothing
    asked.
-5. One append-only row with a timestamp. A second `praxis task` while one is unbound voids
+5. One append-only row with a timestamp. A second `praxis start task` while one is unbound voids
    the first as `superseded`. Rows are never edited.
 
-`praxis task` is a command, not a hook: its failure blocks nothing, and the prompt then
+`praxis start task` is a command, not a hook: its failure blocks nothing, and the prompt then
 counts as unregistered in the coverage denominator.
 
 Why this mechanism [MX]: a UserPromptSubmit cue puts the request, and so the answer, in the
@@ -713,6 +794,15 @@ sees the prediction and the words are the owner's by construction.
 - After the segment, whether each bound item's components were actually touched is
   recorded. It is a post-randomization variable, so analyses conditioned on it are
   exploratory only.
+- Decision (wave 4, 2026-10-19): the trailing window of the region is the constant
+  `task.TOUCH_WINDOW_WEEKS`. Its Stage 1 value is None, which means all history.
+  `task.register` and the R_fam reference of `report.py` read the same constant, and
+  each row names it in its assumptions. `derive.py` proposes the Stage 2 value, W_touch.
+  It is the window from {4, 8, 13, 26 weeks, all history} with the smallest leave-one-out
+  R1 Brier on the pilot's closed tasks. A tie keeps all history, then the longer window.
+  Reason: this section said "trailing" and gave no length. One constant keeps the region
+  and R_fam on the same history, and Stage 1 takes no window that the pilot has not
+  measured.
 
 This answers the fatal flaw in draft A, whose exposure pairs were random and unrelated to
 the work [CR]: the items are drawn where the agent is working, the same way in both arms.
@@ -721,8 +811,8 @@ prompt exists.
 
 ### 6.3 Arms, feedback and estimands
 
-Feedback, after the segment, through the notification and `praxis last` (also printed at
-the start of the next `praxis task`), the same in both arms: the components touched
+Feedback, after the segment, through the notification and `praxis show task` (also printed
+at the start of the next `praxis start task`), the same in both arms: the components touched
 (`o_first`, and later `o_final`), the structural changes the agent made (edges added or
 removed, from the edge history), any S2 divergences, and the truth of the k_e bound items.
 Treatment also sees its own forecasts and prequestion answers against the outcome,
@@ -781,6 +871,23 @@ a multiple baseline across repositories with randomized start points (Koehler an
   biasing the specific contrast toward zero [CR].
 - If the owner actively works in fewer than 3 repositories (needs measuring, Q1), the
   general effect is descriptive only.
+- Decision (wave 4, 2026-10-19), the start-week draw: on the first `praxis set components`
+  of a repository, praxis draws its start week. The candidates are the K_START = 6 ISO
+  weeks that start two weeks (START_GAP_WEEKS) after the freeze week. This is a design
+  choice that the assumptions record and that `derive.py` may replace. The generator is
+  `random.Random` seeded by sha256 of `task.SEED`, the repository id and `start`. One
+  append-only row in `repository_starts` records the draw. It keeps the repository id, the
+  map version, the draw time, the start week (`YYYY-Www`), the candidates as JSON and a
+  seed hash. A task registered before the start week is a control task, and its row
+  records `forced_control = 1`. The analysis can then separate forced control from drawn
+  control. `praxis start task` says only that the task is a control task: the owner must
+  not learn the schedule. The report computes the general effect with
+  `scoring.koehler_levin` over repositories with a start week and at least one P1 week on
+  each side. The series is the weekly mean Brier of first probes on never-exposed items,
+  and the eligible starts are the candidate sets. The result is None below 3 repositories
+  or when a series is shorter than 3 weeks. Reason: the test re-draws each start from its
+  candidates, so each start must be drawn at random before the data that it splits. The
+  first frozen map is the first point at which a repository can take tasks (6.1).
 
 ### 6.5 The weekly mode trial
 
@@ -924,7 +1031,7 @@ probe and forecast data before freezing [CR]. So:
 | G6 | Exploiting the scoring rule | Brier on a fixed grid; set-overlap descriptive only; resolution always beside calibration | CHECK: p in the grid |
 | G7 | Steering the agent toward the forecast | Primary outcome P1 does not depend on the segment's content; F1 scores the first segment only, with flags | prereg; assumptions field |
 | G8 | Backfilling | Append-only rows; `late_prediction` rejected | test: a task registered after a prompt binds to the next one |
-| G9 | Coarse map | Mechanical default, at least 5 components, frozen, file grain always reported | `praxis components freeze` refuses fewer than 5 |
+| G9 | Coarse map | Mechanical default, at least 5 components, frozen, file grain always reported | `praxis set components` refuses fewer than 5 |
 | G10 | Forecast or task leaks to the agent | No praxis path writes `additionalContext` for tasks; the Stop notice is closed vocabulary | test: hook stdout empty except the allowlisted notice, no component id in any hook output, no praxis string in any user or assistant message |
 | G11 | Free text leaks secrets or code | Closed vocabulary; no TEXT column for owner input | schema; test |
 | G12 | Lookup during a probe | One item at a time, clock, deadline, `slow` excluded | probe code; test |
@@ -932,7 +1039,7 @@ probe and forecast data before freezing [CR]. So:
 | G14 | Harder tasks over time | P1 probes fixed items; F1 stratified by R1 expected count | report |
 | G15 | Repository growth, stale map | New paths `unmapped` until a logged version; share reported | CHECK: map version on every row |
 | G16 | Model or CLI change | `version_change` opens a segment | test |
-| G17 | Friction makes forecasts a reflex | Median seconds and abandonment recorded from day one; redesign above the ten-minute daily median; forcing functions are liked less (Bucinca et al. 2021 [LS]) | doctor; report |
+| G17 | Friction makes forecasts a reflex | Median seconds and abandonment recorded from day one; redesign above the ten-minute daily median; forcing functions are liked less (Bucinca et al. 2021 [LS]) | `doctor.py` (`praxis show status`); report |
 | G18 | Optimizing for predictability over design | Cross-component task share and S2 reported; falling cross-component share with rising F1 flagged | report |
 | G19 | Reader leaks (tracebacks, caches) | Canary check over all of `$PRAXIS_HOME` | test |
 | G20 | Lures planted by S3 options | Free recall first, immediate feedback, reversed decisions void | probe code; test |
@@ -964,11 +1071,11 @@ No computed number is labelled observed, and nothing is labelled causal.
 | `src/praxis/unassisted.py` | new | Repository location and the attached-agent check |
 | `src/praxis/components.py` | new | Map derivation, override, freeze, pool, `map_version` |
 | `src/praxis/extract.py` | new | X1 with blind-spot counts and site attributes; X2 and X3 behind their experiments; scratch clones |
-| `src/praxis/task.py` | new | `praxis task`, the binding rule, arm draw, forecast entry, `praxis last` |
+| `src/praxis/task.py` | new | `praxis start task`, the binding rule, arm draw, forecast entry, `praxis show task` |
 | `src/praxis/probe.py` | new | P1, S1, S3, K and C1 administration, deadlines, debriefs |
 | `src/praxis/transcript.py` | new | Analysis-time reader returning derived structures only |
 | `src/praxis/report.py` | new | References, scores, decomposition, CORP, randomization tests, refusing below minimums |
-| `src/praxis/cli.py` | change | Replace the `drill` verb (lines 52-65, 80-81, 86-103) with `task`, `last`, `probe`, `components`, `report` |
+| `src/praxis/cli.py` | change | Replace the `drill` verb (lines 52-65, 80-81, 86-103) with the instrument commands. Wave 4 names them verb first: `start task`, `show task`, `test`, `show components`, `show report` |
 | `src/praxis/doctor.py` | change | Replace item and result counts (lines 74-75) and the backup check (lines 95-98) with maps, tasks, binding rate, probes, void reasons; import from `unassisted` |
 | `.pre-commit-config.yaml` | change | Line 325 pattern: drop `repo_config\|items\|results\|ratings`, add the new tables |
 | `tests/integration/test_drill.py` | delete | Replaced by `test_task.py`, `test_probe.py`, `test_components.py`, `test_extract.py`, driving the installed binary against real repositories with recorded payloads, each with the break-the-fix check |
@@ -982,14 +1089,14 @@ No computed number is labelled observed, and nothing is labelled causal.
 | # | Question | Measurement that settles it |
 |---|---|---|
 | Q1 | Registered tasks per week, coverage of human prompts that led to mutations, and repositories actively used | Pilot counts of `tasks` against UserPromptSubmit rows with `origin.kind = human` followed by mutating deltas; distinct repo ids per week |
-| Q2 | Seconds per `praxis task`, per probe item, per C1 administration; abandonment | Stored timestamps over the pilot (E07) |
+| Q2 | Seconds per `praxis start task`, per probe item, per C1 administration; abandonment | Stored timestamps over the pilot (E07) |
 | Q3 | Structured decisions per month | Tool-name counts over `~/.claude/projects/*/*.jsonl` and Codex rollouts (E08) |
-| Q4 | Item supply per repository and relation | `praxis components` on each repository; consumption from Q1 |
+| Q4 | Item supply per repository and relation | `praxis show components` on each repository; consumption from Q1 |
 | Q5 | X1 precision and recall at component level | V2 (E10) |
 | Q6 | R1 burn-in length | R1's leave-one-out Brier against earlier segment count |
 | Q7 | Footprint stability for identical prompts | V4 (E09) |
 | Q8 | Weekly drift supply for S1 and divergence supply for S2 | Edge-set differences in the recorder's edge history |
-| Q9 | Best lag L; does probing contaminate later probes | L = 2 against L = 7 days on validation-only items; first against repeat probe accuracy |
+| Q9 | Best lag L; does probing contaminate later probes | L = 2 against L = 7 days on exposed items (validation rows carry no lag by schema); first against repeat probe accuracy |
 | Q10 | Forecast against prequestions as separate components of the bundle | A later factorial variant |
 | Q11 | W, W_d, the survival threshold, the binding window, deadlines, the exclusion cap | Pilot distributions through `derive.py` |
 | Q12 | Codex payloads (apply_patch, failed commands), transcript location, terminalSequence support | Documented (learn.chatgpt.com/docs/hooks, read 2026-10-19): `tool_name` is `apply_patch` with the patch in `tool_input.command`; PostToolUse fires on a failed Bash but no exit-status field is documented; no terminalSequence; `systemMessage` is a UI warning. Interactive firing of all events is documented by omission only: one recorded interactive session still needed |
@@ -1013,7 +1120,7 @@ This design merges two drafts under a critic's verdict.
   detection latency as descriptive; extractor validation and map agreement; explicit or
   blank forecasts; the `o_first` and `o_final` split; closed vocabulary and the canary check;
   the falsification table.
-- Kept from draft B: the neutral `praxis task` command; binding as an analysis-time join
+- Kept from draft B: the neutral `praxis start task` command; binding as an analysis-time join
   with prompt_id and turn_id; R1 conditioned on prompt-named components; drift items with
   inverse-probability weights; no feedback on criterion items; task-shuffle and relabelling
   placebos; stratification by R1's expected count; the mechanical map always scored

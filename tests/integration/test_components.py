@@ -1,6 +1,7 @@
-"""Component maps derived from real git repositories, as `praxis components derive` sees
-them: `git ls-files` in a temporary repository, never a hand-built path list, except
-where a test names the list on purpose. Expected values are written before each run.
+"""Component maps derived from real git repositories, as `praxis make components`
+sees them: `git ls-files` in a temporary repository, never a hand-built path list,
+except where a test names the list on purpose. Expected values are written before each
+run.
 """
 
 from __future__ import annotations

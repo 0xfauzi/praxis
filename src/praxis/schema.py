@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
 
 if TYPE_CHECKING:
     import sqlite3
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
 CLAIM_CLASSES = ("observed", "derived", "comparative", "associative", "predictive")
 COVERAGES = ("full", "partial", "no_baseline")
@@ -51,6 +52,18 @@ CLAIMS = {
     "pathfinder_runs": "derived",
 }  # fmt: skip
 EV_COLS = ("coverage", "sources", "reducer_version", "assumptions", "warnings")
+# Store's reads of the item pool: unexposed items of the current epoch per pair, and
+# with parameter 3 false only those no probe has asked.
+POOL = (
+    "SELECT p.* FROM probe_items p WHERE p.repo_id = ? AND p.map_version = ?"
+    " AND NOT EXISTS (SELECT 1 FROM exposures e WHERE e.item_id = p.item_id)"
+    " AND (? OR NOT EXISTS (SELECT 1 FROM probe_responses r"
+    "  WHERE r.item_id = p.item_id)) AND p.epoch = (SELECT MAX(q.epoch) FROM"
+    " probe_items q WHERE q.repo_id = p.repo_id AND q.map_version = p.map_version"
+    "  AND q.relation = p.relation AND q.src_component = p.src_component"
+    "  AND q.dst_component = p.dst_component) ORDER BY p.item_id"
+)
+Files = dict[str, Counter[str]]
 
 
 def _in(values: Sequence[object]) -> str:
@@ -86,11 +99,15 @@ def _bit(column: str, null: bool = False) -> str:
 
 
 _REPO = f"repo_id TEXT NOT NULL {_hex('repo_id', 16)}"
+_WEEK = "GLOB '[0-9][0-9][0-9][0-9]-W[0-5][0-9]'"
 _MAP = f"map_version TEXT NOT NULL {_hex('map_version', 16)}"
 _MAP_FK = "FOREIGN KEY (repo_id, map_version) REFERENCES component_maps"
 _P = f"p REAL CHECK (p IN {_in(GRID)})"
 _SHA = _hex("head_sha", 40, 64)
 _TREE_HEX = f"TEXT {_hex('tree_hash', 40, 64)}"
+# Design 6.4: 1 is a task registered before its repository's start week, so control
+# by the schedule and not by the arm draw; NULL is a task written without the rule.
+_FORCED = _bit("forced_control", True)
 # Design 03 4.1 (b): X2 truth is for the HEAD tree its scratch clone ran, so a run
 # names that tree; only a run no Python process traced may lack it.
 _TREE = f"{_TREE_HEX} CHECK (tree_hash IS NOT NULL OR outcome = 'not_python')"
@@ -227,7 +244,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     ('unbound', 'bound', 'closed', 'superseded', 'void')),
   bound_session_id TEXT, bound_prompt_id TEXT, bound_ts TEXT, closed_ts TEXT,
   void_reason TEXT CHECK (void_reason IN {_in(VOID_REASONS)}), void_ts TEXT,
-  UNIQUE (repo_id, ordinal), {_MAP_FK},
+  {_FORCED}, UNIQUE (repo_id, ordinal), {_MAP_FK},
   CHECK ((bound_session_id IS NULL) = (bound_ts IS NULL)),
   CHECK ((void_reason IS NULL) = (void_ts IS NULL)),
   CHECK (CASE status
@@ -293,7 +310,7 @@ CREATE TABLE IF NOT EXISTS probe_responses (
 ) STRICT;
 CREATE TABLE IF NOT EXISTS drift_responses (
   id INTEGER PRIMARY KEY, {_REPO}, {_MAP},
-  week TEXT NOT NULL CHECK (week GLOB '[0-9][0-9][0-9][0-9]-W[0-5][0-9]'),
+  week TEXT NOT NULL CHECK (week {_WEEK}),
   component TEXT NOT NULL, {_bit("said_changed", True)}, {_bit("did_change", True)},
   ts TEXT NOT NULL, {_evidence("drift_responses")},
   UNIQUE (repo_id, map_version, week, component), {_MAP_FK}
@@ -333,6 +350,15 @@ CREATE TABLE IF NOT EXISTS pathfinder_runs (
   pfsim REAL CHECK (pfsim BETWEEN 0 AND 1), pfsim_minus_chance REAL,
   {_evidence("pathfinder_runs")}, {_MAP_FK}
 ) STRICT;
+-- Design 6.4: a repository is all control until its start week, drawn once from its
+-- candidate weeks when its first component map is set (task.draw_start).
+CREATE TABLE IF NOT EXISTS repository_starts (
+  {_REPO} PRIMARY KEY, {_MAP}, drawn_ts TEXT NOT NULL,
+  start_week TEXT NOT NULL CHECK (start_week {_WEEK}),
+  candidates_json TEXT NOT NULL {_array("candidates_json", non_empty=True)},
+  seed_hash TEXT NOT NULL {_hex("seed_hash", 64)},
+  CHECK (instr(candidates_json, '"' || start_week || '"') > 0), {_MAP_FK}
+) STRICT;
 CREATE TABLE IF NOT EXISTS flags (
   id INTEGER PRIMARY KEY, ts TEXT NOT NULL, repo_id TEXT {_hex("repo_id", 16)},
   session_id TEXT, task_id TEXT REFERENCES tasks,
@@ -360,8 +386,14 @@ def _once(*columns: str) -> str:
     )
 
 
-_APPEND_ONLY = ("boundary_rules", "exposures", "flags", *CLAIMS)
-_FIXED_TASK = "task_id, repo_id, map_version, ordinal, ts, arm, seed_hash, region_json"
+_APPEND_ONLY = ("boundary_rules", "exposures", "flags", "repository_starts", *CLAIMS)
+_FIXED_TASK = (
+    "task_id, repo_id, map_version, ordinal, ts, arm, seed_hash, region_json, stratum,"
+    " forced_control"
+)
+# migrate() drops and runs it again: IF NOT EXISTS keeps an older ledger's trigger,
+# which does not name the columns added since.
+_FIXED_TRIGGER = _refuse("tasks", f"UPDATE OF {_FIXED_TASK}")
 _TASK_MOVE = (
     "OLD.status IN ('superseded', 'void') OR (OLD.status = 'closed'"
     " AND NEW.status <> 'void') OR (OLD.status = 'bound' AND NEW.status = 'unbound')"
@@ -370,7 +402,7 @@ SCHEMA += "".join(_refuse(t, "UPDATE") for t in _APPEND_ONLY)
 SCHEMA += "".join(
     _refuse(t, "DELETE") for t in (*_APPEND_ONLY, "tasks", "component_maps")
 )
-SCHEMA += _refuse("tasks", f"UPDATE OF {_FIXED_TASK}, stratum")
+SCHEMA += _FIXED_TRIGGER
 SCHEMA += _refuse(
     "tasks",
     "UPDATE",
@@ -386,8 +418,9 @@ SCHEMA_VERSION = int(hashlib.sha256(SCHEMA.encode()).hexdigest()[:7], 16)
 
 
 def migrate(db: sqlite3.Connection) -> None:
-    """Add the pointer and tree_hash columns to a ledger created before they existed
-    and drop the rejected drill's tables (repo_config holds an owner-typed test
+    """Add the pointer, tree_hash and forced_control columns to a ledger created before
+    they existed, renew the trigger that fixes a task's columns, and drop the rejected
+    drill's tables (repo_config holds an owner-typed test
     command, which invariant 5 forbids the ledger to keep). Runs inside open()'s BEGIN
     IMMEDIATE, so two hooks cannot both add a column."""
     # secure_delete zeroes the freed pages: a DROP alone leaves the text in the file.
@@ -403,12 +436,15 @@ def migrate(db: sqlite3.Connection) -> None:
         "hook_events": {**pointers, "head_sha": f"TEXT {_SHA}"},
         "agent_deltas": pointers,
         "scenario_runs": {"tree_hash": tree},
+        "tasks": {"forced_control": _FORCED.removeprefix("forced_control ")},
     }
     for table, columns in added.items():
         have = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
         for column, kind in columns.items():
             if column not in have:
                 db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+    db.execute("DROP TRIGGER IF EXISTS tasks_update_never")
+    db.execute(_FIXED_TRIGGER)
 
 
 @dataclass(frozen=True)
@@ -434,6 +470,17 @@ class Evidence:
     def columns(self) -> tuple[str, ...]:
         s, a, w = (json.dumps(list(v)) for v in self._lists())
         return (self.coverage, s, self.reducer_version, a, w)
+
+
+def files_of(rows: Iterable[Sequence[Any]]) -> Files:
+    """(file, line_hash, count) rows of a snapshot table as per-file multisets."""
+    files: Files = {}
+    for file, h, n in rows:
+        if file == "" and h == "":
+            # The marker row that tells an empty snapshot from no snapshot at all.
+            continue
+        files.setdefault(file, Counter())[h] += n
+    return files
 
 
 def item_id(
@@ -522,6 +569,15 @@ class Task(MapRow):
     arm: str
     seed_hash: str
     stratum: str
+    forced_control: NotRequired[bool]
+
+
+class RepositoryStart(TypedDict):
+    repo_id: str
+    map_version: str
+    drawn_ts: str
+    start_week: str
+    seed_hash: str
 
 
 class ItemBatch(TypedDict):

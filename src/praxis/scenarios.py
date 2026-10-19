@@ -1,12 +1,12 @@
-"""Runtime scenarios, X2 (design 03 sections 3.2, 3.5 and 4.7): `praxis scenarios run`
+"""Runtime scenarios, X2 (design 03 sections 3.2, 3.5 and 4.7): `praxis run scenarios`
 runs each scenario the owner names in `$PRAXIS_HOME/scenarios/<repo_id>.toml` in a
-scratch clone of HEAD and records which components it entered; `praxis scenarios`
+scratch clone of HEAD and records which components it entered; `praxis show scenarios`
 lists them with the last run of each. The file is a closed shape, refused whole when it
 holds anything else:
 
     [[scenario]]
     id = "hook-edit"
-    argv = ["python3", "-m", "praxis", "hook"]
+    argv = ["praxis", "hook"]
 
 An id is stored, so it is an identifier (a-z, 0-9, `.`, `_`, `-`), never text. The argv
 is never stored, only its hash. It runs with no stdin and the clone's root as its
@@ -63,9 +63,9 @@ ASSUMPTIONS = (
     " in it",
     "a failed run's trace ends where the run ended",
 )
-RUN = "praxis scenarios run"
-SHOW = "praxis scenarios"
-NO_MAP = "no frozen map; `praxis components freeze` freezes one"
+RUN = "praxis run scenarios"
+SHOW = "praxis show scenarios"
+NO_MAP = "no set component map. To set one, run `praxis set components`."
 Ctx = tuple[Store, Repo, ComponentMap, str]
 
 
@@ -112,7 +112,7 @@ def _scenario(table: object, where: Path) -> Scenario:
 
 
 def run(repo_root: Path, praxis_home: Path, stdout: TextIO, now: str) -> int:
-    """`praxis scenarios run`: one scenario_runs row per scenario, or a refusal (exit
+    """`praxis run scenarios`: one scenario_runs row per scenario, or a refusal (exit
     2) that writes nothing: outside a repository, without a valid scenario file,
     without a frozen map or without a commit to clone."""
     repo = locate(repo_root)
@@ -238,7 +238,7 @@ def _line(trace: Trace, tree: str) -> str:
 
 
 def show(repo_root: Path, praxis_home: Path, stdout: TextIO) -> int:
-    """`praxis scenarios`: each configured scenario and its last run on the frozen
+    """`praxis show scenarios`: each configured scenario and its last run on the frozen
     map. Read-only: it never creates or migrates the ledger."""
     repo = locate(repo_root)
     if repo is None:
@@ -260,7 +260,8 @@ def show(repo_root: Path, praxis_home: Path, stdout: TextIO) -> int:
 
 
 def summary(praxis_home: Path, repo_id: str) -> str:
-    """The doctor's line: scenarios configured and their last run on the frozen map."""
+    """The `praxis show status` line: scenarios configured and their last run on the
+    frozen map."""
     try:
         scenarios = load(praxis_home, repo_id)
     except ValueError:
@@ -303,7 +304,7 @@ def _last_runs(
     try:
         frozen = ledger.component_map_frozen(repo_id)
         if frozen is None:
-            return "unknown: no frozen map"
+            return "unknown: no set component map"
         version = from_json(frozen).version
         rows = ledger.scenario_runs_for(repo_id, version)
     finally:

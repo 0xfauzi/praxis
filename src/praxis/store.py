@@ -16,12 +16,14 @@ import os
 import sqlite3
 from collections import Counter
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Unpack
+from typing import TYPE_CHECKING, Unpack
 
-from praxis.schema import CLAIMS, EV_COLS, SCHEMA_VERSION, migrate
+from praxis.schema import CLAIMS, EV_COLS, POOL, SCHEMA_VERSION, migrate
 from praxis.schema import SCHEMA as SCHEMA
 from praxis.schema import Attribution as Attribution
 from praxis.schema import Evidence as Evidence
+from praxis.schema import Files as Files
+from praxis.schema import files_of as _files
 from praxis.schema import item_id as item_id
 
 if TYPE_CHECKING:
@@ -39,24 +41,13 @@ if TYPE_CHECKING:
         PathfinderRun,
         Pointers,
         ProbeResponse,
+        RepositoryStart,
         Scan,
         ScenarioRun,
         Task,
     )
 
 REDUCER_VERSION = "attribution-v1"
-# Unexposed items of the current epoch per pair; parameter 3 true keeps asked ones too.
-_POOL = (
-    "SELECT p.* FROM probe_items p WHERE p.repo_id = ? AND p.map_version = ?"
-    " AND NOT EXISTS (SELECT 1 FROM exposures e WHERE e.item_id = p.item_id)"
-    " AND (? OR NOT EXISTS (SELECT 1 FROM probe_responses r"
-    "  WHERE r.item_id = p.item_id)) AND p.epoch = (SELECT MAX(q.epoch) FROM"
-    " probe_items q WHERE q.repo_id = p.repo_id AND q.map_version = p.map_version"
-    "  AND q.relation = p.relation AND q.src_component = p.src_component"
-    "  AND q.dst_component = p.dst_component) ORDER BY p.item_id"
-)
-
-Files = dict[str, Counter[str]]
 Values = dict[str, object]
 Rows = list[sqlite3.Row]
 
@@ -427,6 +418,22 @@ class Store:
             self._insert("exposures", None, exposed)
         return None if old is None else str(old["task_id"])
 
+    def repository_start_put(
+        self, *, candidates: Sequence[str], **row: Unpack[RepositoryStart]
+    ) -> None:
+        """Design 6.4: one start week per repository; a second is refused."""
+        if len(set(candidates)) != len(candidates):
+            raise ValueError("a candidate week is listed twice")
+        start = {**row, "candidates_json": json.dumps(list(candidates))}
+        self._insert("repository_starts", None, [start])
+
+    def repository_starts(self) -> Rows:
+        return self._all("SELECT * FROM repository_starts ORDER BY repo_id")
+
+    def repository_start(self, repo_id: str) -> sqlite3.Row | None:
+        sql = "SELECT * FROM repository_starts WHERE repo_id = ?"
+        return self._one(sql, repo_id)
+
     def task_bind(
         self, task_id: str, session_id: str, prompt_id: str | None, ts: str
     ) -> None:
@@ -588,12 +595,12 @@ class Store:
 
     def probe_items_unexposed(self, repo_id: str, map_version: str) -> Rows:
         """Items of the current epoch for their pair that no task has exposed."""
-        return self._all(_POOL, repo_id, map_version, True)
+        return self._all(POOL, repo_id, map_version, True)
 
     def probe_items_unprobed(self, repo_id: str, map_version: str) -> Rows:
         """Unexposed items no probe has asked either: an asked item is not blind, so
         it is out of the binding pool and the never-drawn draw (design 6.2, 6.3)."""
-        return self._all(_POOL, repo_id, map_version, False)
+        return self._all(POOL, repo_id, map_version, False)
 
     def probe_item(self, item_id: str) -> sqlite3.Row | None:
         return self._one("SELECT * FROM probe_items WHERE item_id = ?", item_id)
@@ -785,13 +792,3 @@ class Store:
         return self._all(
             "SELECT event, tool_use_id, head_sha FROM hook_events WHERE session_id = ?"
             " AND head_sha IS NOT NULL ORDER BY id", session_id)  # fmt: skip
-
-
-def _files(rows: Iterable[Sequence[Any]]) -> Files:
-    files: Files = {}
-    for file, h, n in rows:
-        if file == "" and h == "":
-            # The marker row that tells an empty snapshot from no snapshot at all.
-            continue
-        files.setdefault(file, Counter())[h] += n
-    return files

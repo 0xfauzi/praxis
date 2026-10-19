@@ -488,7 +488,7 @@ def test_every_hook_records_its_own_duration(tmp_path: Path) -> None:
 # (code.claude.com/docs/en/hooks; the Codex hooks reference) and say so where built.
 
 V303 = FIXTURES.parent / "2.1.303"
-NOTICE = b'{"terminalSequence": "\\u001b]9;praxis: feedback ready\\u0007"}'
+NOTICE = b'{"terminalSequence": "\\u001b]9;praxis: result ready\\u0007"}'
 PAST = "2000-01-01T00:00:00.000Z"
 
 
@@ -722,7 +722,7 @@ def test_segment_closes_at_the_first_stop_after_a_delta(tmp_path: Path) -> None:
     flags = s.rows("SELECT code, task_id FROM flags")
     assert [tuple(f) for f in flags] == [("owner_answered_question", task)] * 2
     blob = b"".join(p.read_bytes() for p in s.praxis_home.rglob("*") if p.is_file())
-    for canary in (b"CANARY", b"qq-77", b"zx81", b"feedback ready"):
+    for canary in (b"CANARY", b"qq-77", b"zx81", b"result ready"):
         assert canary not in blob, canary
 
 

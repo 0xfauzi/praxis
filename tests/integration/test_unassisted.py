@@ -1,6 +1,6 @@
 """The attached-agent check, driven against real processes: a Python script named
 `claude` started with its cwd inside a real git repository, read back both in-process
-and from a separate interpreter, as `praxis probe` will. Expected values are written
+and from a separate interpreter, as `praxis test` does. Expected values are written
 first.
 """
 
