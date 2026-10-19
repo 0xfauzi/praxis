@@ -290,6 +290,121 @@ def test_probe_decision_and_other_responses_round_trip(db: Store) -> None:
     for table, claim in CLAIMS.items():
         sql = f"SELECT DISTINCT claim_class FROM {table}"  # noqa: S608
         assert {r[0] for r in db.db.execute(sql)} <= {claim}, table
+
+
+# -- the readers the recorder, task, probe and report modules ask through ------------
+
+
+def hook(s: Store, event: str, ts: str, **more: Any) -> None:
+    row: dict[str, Any] = {"session_id": "s1", "event": event, "tool_name": None,
+                           "tool_use_id": None, "ts": ts, "duration_ms": 1.0,
+                           "outcome": "ok", "note": None}
+    s.hook_event(**{**row, **more})
+
+
+def test_recorder_readers_round_trip(db: Store) -> None:
+    assert (db.session_base("s1"), db.last_stop_ts("s1")) == (None, None)
+    assert (db.deltas_files_since("s1", None), db.head_sequence("s1")) == ([], [])
+    assert (db.recorder_gaps("s1", ""), db.task_bound_to("s1")) == (0, None)
+    hook(db, "SessionStart", "t1", head_sha=SHA)
+    hook(db, "SessionStart", "t1", head_sha="d" * 40)  # the first baseline holds
+    hook(db, "PreToolUse", "t2", tool_use_id="tu1", head_sha=SHA)
+    hook(db, "Stop", "t3")
+    hook(db, "Stop", "t5", outcome="unobservable")
+    hook(db, "Stop", "t9", session_id="s2")
+    db.agent_delta("s1", "tu1", "Edit", "t2", [("f.py", "h", 1), ("g.py", "h", 1)])
+    db.agent_delta("s1", "tu2", "Edit", "t4", [("g.py", "h", 1), ("h.py", "h", 2)])
+    db.agent_delta("s2", "tu3", "Edit", "t4", [("z.py", "h", 1)])
+    db.pending_put("s1", "tu4", "t4", {})
+    assert db.session_base("s1") == SHA
+    assert db.last_stop_ts("s1") == "t5"
+    assert db.deltas_files_since("s1", None) == ["f.py", "g.py", "h.py"]
+    assert db.deltas_files_since("s1", "t3") == ["g.py", "h.py"]
+    assert db.recorder_gaps("s1", "t3") == 2  # the unobservable Stop, the waiting Pre
+    assert db.recorder_gaps("s1", "t6") == 0
+    assert [tuple(r) for r in db.head_sequence("s1")] == [
+        ("SessionStart", None, SHA), ("SessionStart", None, "d" * 40),
+        ("PreToolUse", "tu1", SHA),
+    ]
+    world(db)
+    db.task_bind("T1", "s1", "p1", "t6")
+    assert some(db.task_bound_to("s1"))["task_id"] == "T1"
+    assert db.task_bound_to("s2") is None
+
+
+def test_the_session_reads_use_the_hook_events_index(db: Store) -> None:
+    plan = " ".join(str(r[-1]) for r in db.db.execute(
+        "EXPLAIN QUERY PLAN SELECT MAX(ts) FROM hook_events WHERE session_id = ?"
+        " AND event = 'Stop'", ("s1",)))
+    assert "hook_events_session" in plan
+
+
+def test_segment_close_is_one_transaction(db: Store) -> None:
+    world(db)
+    rows = [("a", True, None, 1, 0), ("b", False, None, None, None)]
+    with pytest.raises(sqlite3.IntegrityError):  # T1 is unbound: it cannot close
+        db.segment_close("T1", rows, "t3", ev=EV)
+    assert db.outcomes_of("T1") == []  # so its outcomes rolled back with it
+    assert some(db.task_open(REPO))["status"] == "unbound"
+    db.task_bind("T1", "s1", "p1", "t2")
+    db.segment_close("T1", rows, "t3", ev=EV)
+    assert [(r["component"], r["o_first"]) for r in db.outcomes_of("T1")] == [
+        ("a", 1), ("b", 0)]
+    assert some(db.task_last_closed(REPO))["closed_ts"] == "t3"
+
+
+def test_task_probe_and_report_readers_round_trip(db: Store) -> None:
+    ids = world(db)
+    common: dict[str, Any] = {"repo_id": REPO, "map_version": V, "ts": "t", "ev": EV}
+    db.divergence(**common, session_id="s1", task_id="T1", src_component="b",
+                  dst_component="a", rule_allowed=False, noticed=None)
+    db.divergence(**common, session_id="s1", task_id=None, src_component="c",
+                  dst_component="a", rule_allowed=True, noticed=None)
+    got = [(r["src_component"], r["rule_allowed"]) for r in db.divergences_of("T1")]
+    assert got == [("b", 0)]
+    db.flag(ts="t", code="late_prediction", detail={}, task_id="T1")
+    db.flag(ts="t", code="owner_answered_question", detail={}, task_id="T1")
+    db.flag(ts="t", code="agent_previewed", detail={}, repo_id=REPO)
+    db.flag(ts="t", code="transcript_swept", detail={"decision_id": 1},
+            session_id="s1")
+    db.flag(ts="t", code="reversed", detail={}, session_id="s1")
+    db.flag(ts="t", code="abandoned", detail={"decision_id": 7}, repo_id=REPO)
+    assert db.tasks_flagged(["late_prediction", "agent_previewed"]) == {"T1"}
+    assert db.tasks_flagged(["agent_previewed"]) == frozenset()
+    assert db.decisions_flagged(["transcript_swept", "reversed"]) == {1}
+    (due,) = db.exposures_unanswered(REPO, V)
+    assert (due["item_id"], due["task_id"], due["role"], due["exposed_ts"]) == (
+        ids[0], "T1", "bound", "t1")
+    answer: dict[str, Any] = {
+        "seconds": 1.0, "deadline_met": True, "truth_at_probe": True,
+        "truth_changed": False, "head_sha": None, "tree_hash": None, "dirty": None,
+        "extractor_version": "x1-v1", "ev": EV,
+    }
+    db.probe_response(item_id=ids[1], task_id=None, ts="t8", p=0.3, lag_days=None,
+                      **answer)
+    db.probe_response(item_id=ids[0], task_id="T1", ts="t7", p=0.9, lag_days=7.0,
+                      **answer)
+    assert db.exposures_unanswered(REPO, V) == []
+    answered = [(r["item_id"], r["p"], r["role"], r["exposed_task"], r["relation"])
+                for r in db.probe_responses_of(REPO, V)]
+    assert answered == [(ids[0], 0.9, "bound", "T1", "D1"),
+                        (ids[1], 0.3, None, None, "D1")]
+    assert db.probe_responses_of(REPO, "f" * 16) == []
+    assert sorted(tuple(r) for r in db.probe_items_d1(REPO, V)) == [
+        ("a", "b", 1, "t0"), ("b", "a", 0, "t0")]
+    assert db.drift_responses_for(REPO, V, "2026-W42") == []
+    db.drift_response(**common, week="2026-W42", component="a", said_changed=True,
+                      did_change=None)
+    assert [r["component"] for r in db.drift_responses_for(REPO, V, "2026-W42")] == [
+        "a"]
+    assert db.drift_responses_for(REPO, V, "2026-W43") == []
+    for ts, scenario in (("t2", "late"), ("t1", "early")):
+        db.scenario_run(**common | {"ts": ts}, scenario_id=scenario,
+                        command_hash="0" * 16, outcome="ok", exit_code=0,
+                        duration_ms=1.0, components=["a"], call_edges={},
+                        extractor_version="x2-v1")
+    assert [r["scenario_id"] for r in db.scenario_runs_for(REPO, V)] == [
+        "early", "late"]
 # fmt: on
 
 

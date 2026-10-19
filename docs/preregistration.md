@@ -54,8 +54,8 @@ component map:
 
 - Recorder rows: snapshots, agent deltas, attributions, edge history at Stop, decision
   pointers, hook latency.
-- Component maps and pool supply: `praxis components freeze` and `praxis components pool`
-  per repository.
+- Component maps and pool supply: `praxis components freeze` and `praxis components` per
+  repository.
 - Tasks: registration time, sampled components, F1 forecasts, prequestion answers, the
   bound, related-untested and drawn-not-shown items, flags, seconds spent, abandonment.
 - P1 probes: every first probe of an exposed item, with response time, deadline result,
@@ -63,8 +63,10 @@ component map:
   days apart (V1); a validation-only comparison of L = 2 against L = 7 days (Q9 of the
   design).
 - S1 drift probes weekly, S2 boundary rules and divergences, S4 removals, S3 decision
-  pointers and responses where structured decisions occur, K knockouts for V7. C1 is not
-  computed until the closeness formula is checked (design Q13).
+  pointers and responses where structured decisions occur, K knockouts for V7. C1
+  Pathfinder runs are stored as PFSIM and PFSIM minus chance against the X1 referent,
+  with the component count (`scoring.pfsim`, which replaced the unchecked closeness
+  formula of design Q13); the ratings themselves are discarded.
 - V3: one pilot week of the owner's real changes labelled by hand at their own grain.
 - Owner-machine measurements, reported by `praxis doctor` and the pilot: repositories
   active per week, structured-decision supply, empty-segment rate, Codex payloads. Nothing
@@ -149,8 +151,41 @@ on the pilot and the results are committed.
 | V8 F1 skill | BSS_R1 and the task-shuffle placebo | BSS_R1 interval excludes zero; the true pairing's BSS_R1 exceeds the 95th percentile of the shuffled distribution | See 1.8 |
 | V9 feasibility | Pool supply, registration rate, skip rate, cost | simulated minimum detectable effect at most the g = 0.28 equivalent; daily median of task plus probe time at most ten minutes | See 1.8; above ten minutes, redesign before Stage 2 |
 
-Not yet fixed, and required before Stage 1 is frozen: the interval level used in V5 and
-V8, and the rule inside `derive.py` for each row marked "set by derive.py".
+#### Interval level for V5 and V8 [proposed, needs owner decision]
+
+A 90 percent two-sided percentile interval by cluster bootstrap over tasks, because
+forecasts within a task are not independent. B = 2000 resamples, seed committed in Stage
+2. "The interval excludes zero" is then the one-sided test at alpha 0.05, the level fixed
+in 1.4, so the validity checks and rule PR-1 use one error rate.
+
+#### Rules derive.py applies [proposed, needs owner decision]
+
+Each rule is a function in `experiments/prereg/derive.py`. It reads pilot weeks 2 and 3
+only: from 7 to 21 days after the first registered task. A rule whose minimum input is
+missing prints None with its reason. The 1.4 value then stands where the table says so,
+and otherwise the parameter stays unset in Stage 2. No rule falls back to a default.
+`derive.py --selfcheck` checks every rule on a pilot planted by hand.
+
+| Parameter or threshold | Rule | Minimum pilot input |
+|---|---|---|
+| L | 2 days only if the split-half reliability (days as groups) of first-probe Brier at lags under 7 days is at least 0.10 above that at 7 days or more; otherwise 7 stands. probe.py has no short-lag mode yet, so as built this rule leaves L at 7 | 3 days with 2 or more probes in each lag group |
+| L_max | the smallest of 14, 21 and 28 days at which at most 10 percent of the exposed items that old were never probed within it (a skip is a probe); none of them means infeasible (V9) | 20 exposures old enough |
+| Probe deadline, per relation | the 90th percentile (nearest rank) of seconds over answered first probes, rounded up to 5 s; otherwise the provisional 60 s stands | 30 answers |
+| W | the 95th percentile of registration-to-bind seconds, rounded up to the minute | 10 bound tasks |
+| W_d | the 95th percentile of agent-addition-to-removal seconds, rounded up to the hour; each removed copy of a line pairs with the earliest unpaired added copy of the same line in the same file; a removal of a line the agent never added is not an S4 event | 30 removals |
+| Decision survival threshold | Otsu's two-class cut over the decisions' survival fractions (the share of the following prompt's agent lines that survive to the session's last boundary, by multiset) | 10 decisions with 2 distinct fractions |
+| Co-touch cut (V5) | per item, on closed tasks before its exposure: the median co-touch share over product pairs that both have outcome rows; a share at the median is low | none: a rule, applied at analysis time |
+| Familiarity buckets (S1) | never co-touched; at or below the median nonzero co-touch share; above it | none: a rule |
+| R1 burn-in | the start of the first block of 5 earlier-segment counts whose mean leave-one-out R1 Brier improves on the next block's by at most 0.01 | 10 pilot tasks whose bound prompt is found in its transcript |
+| Exclusion cap | the one-sided 95 percent Wilson upper bound of the share of pilot tasks flagged `agent_previewed`, `late_prediction` or `version_change`, rounded up to 0.01 | 10 tasks |
+| N, sessions per week (2.5) | half the mean weekly session count of pilot weeks 2 and 3, rounded down | 1 session |
+| Minimum probes per week | the count that gives a 95 percent half-width of 0.10 Brier at the pilot's per-item SD | 30 first probes |
+| S3 minimum decisions | the count that gives a 95 percent half-width of 0.10 on recall accuracy at the pilot's accuracy; below the minimum input S3 is counts only | 10 decision responses |
+| V1 floor | split-half reliability at least 0.70. Days stand in for weeks, because two pilot weeks cannot give the 3 groups a split-half correlation needs | 3 days with 2 or more probes |
+| V3 threshold | Cohen's kappa at least 0.60 between the hand labels and the mechanical map | the V3 hand labels, which the ledger does not hold |
+| V5 congruent-accuracy level | "high" when the lower end of the congruent BSS-against-R_base interval is above zero | as V5 |
+| Q1 re-draw rule | arms are drawn Bernoulli(0.5) per task. `scoring.randomization_test` re-draws with the treated count fixed at its observed value. Given the count, every allocation of that size is equally likely under the Bernoulli rule, so the conditional test is exact and therefore valid unconditionally | none |
+| Power counts (1.6) | simulation through `scoring.randomization_test` of per-task mean Brier over answered bound items. Week effects are AR(1) over lag-1 values {-0.2, 0, 0.2}, because two pilot weeks cannot estimate it. A task effect gives the measured ICC, and an ICC below 0 is simulated as 0. Arms are Bernoulli(0.5). 200 simulated studies, 200 draws each, seed 20261019. The Stage 2 count is the largest over the lag-1 grid, at 80 percent power and one-sided alpha 0.05 | per-item SD (30 probes), ICC (10 tasks with 2 bound answers), between-week SD (2 weeks of 5 or more probes), registration rate, answer rate (bound items giving a primary observation over bound items probed or past L_max unprobed; 10 such items), pool supply |
 
 ### 1.8 Falsification table (design 8.1)
 
@@ -259,3 +294,5 @@ same pilot and confirmatory study on their own machine and produce comparable ro
 |---|---|---|---|
 | 2026-10-18 | all | Skeleton created, before any data. | Phase 0. |
 | 2026-10-19 | all | Rewritten for docs/design/03-measurement.md before any data, as Stage 1 (pilot) and the Stage 2 frame | The owner rejected write-it drills and test scoring; Glicko-2 is unidentifiable at n = 1. |
+| 2026-10-19 | 1.7 | Interval level for V5/V8 and the derive.py rules proposed, each [proposed, needs owner decision] | derive.py committed with its rules (invariant 11); no data exists |
+| 2026-10-19 | 1.3 | C1 stated as PFSIM (`scoring.pfsim`) in place of the unchecked closeness formula; pool supply read with `praxis components` | The wording follows the instrument as built; no data exists |

@@ -2,9 +2,12 @@
 
 AGENTS.md invariant 7. This process runs inside the owner's agent session. Whatever
 happens here (bad JSON, no repository, git hanging, a full disk) is recorded in the
-ledger when it can be and is otherwise dropped; nothing is printed to stdout, so nothing
-reaches the agent's context, and the exit code is 0 so the tool call it wraps is
-unaffected.
+ledger when it can be and is otherwise dropped. The exit code is 0 so the tool call it
+wraps is unaffected, and stdout stays empty, so nothing reaches the agent's context,
+with one exception: at the Claude Code Stop that closes a registered task's segment it
+prints exactly ``{"terminalSequence": "\\u001b]9;praxis: feedback ready\\u0007"}``,
+which Claude Code writes to the owner's terminal and never to the agent (design 5.4).
+That Stop hook must be synchronous: an async hook's JSON fields reach the model.
 """
 
 from __future__ import annotations
@@ -14,12 +17,15 @@ import json
 import signal
 import sys
 import time
-from typing import TYPE_CHECKING, Any, BinaryIO
+from typing import TYPE_CHECKING, Any, BinaryIO, TextIO
 
 from praxis import recorder, store
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from praxis.schema import Pointers
+
 
 # A hook payload is a few KB; the recorded Edit body in fixtures/ is under 4 KB.
 # Anything past this is not a payload we understand; reading it would only cost time.
@@ -37,13 +43,15 @@ def _alarm(_signum: int, _frame: object) -> None:
     raise _Watchdog
 
 
+def now_iso() -> str:
+    """The ledger's timestamp: UTC, milliseconds, a trailing Z."""
+    stamp = dt.datetime.now(dt.UTC).isoformat(timespec="milliseconds")
+    return stamp.replace("+00:00", "Z")
+
+
 def run(stdin: BinaryIO, praxis_home: Path) -> int:
     started = time.perf_counter()
-    now = (
-        dt.datetime.now(dt.UTC)
-        .isoformat(timespec="milliseconds")
-        .replace("+00:00", "Z")
-    )
+    now = now_iso()
     session: str | None = None
     event: str | None = None
     tool: str | None = None
@@ -51,6 +59,8 @@ def run(stdin: BinaryIO, praxis_home: Path) -> int:
     ledger: store.Store | None = None
     outcome = "error"
     note: str | None = None
+    marks: Pointers = {}
+    head: str | None = None
     previous = None
     try:
         previous = signal.signal(signal.SIGALRM, _alarm)
@@ -71,8 +81,12 @@ def run(stdin: BinaryIO, praxis_home: Path) -> int:
                 event = _field(payload, "hook_event_name")
                 tool = _field(payload, "tool_name")
                 tool_use_id = _field(payload, "tool_use_id")
+                marks = recorder.pointers(payload)
                 result = recorder.handle(payload, ledger, now)
                 outcome, note = result.outcome, result.note
+                head = result.head_sha
+                if result.notice:
+                    _notify(sys.stdout)
     except _Watchdog:
         outcome, note = "error", f"watchdog: hook exceeded {WATCHDOG_S} s"
     except BaseException as exc:  # fail open is the contract; see the module docstring
@@ -92,8 +106,15 @@ def run(stdin: BinaryIO, praxis_home: Path) -> int:
             started,
             outcome,
             note,
+            marks,
+            head,
         )
     return 0
+
+
+def _notify(out: TextIO) -> None:
+    out.write(json.dumps({"terminalSequence": recorder.NOTICE}))
+    out.flush()
 
 
 def _record(
@@ -107,6 +128,8 @@ def _record(
     started: float,
     outcome: str,
     note: str | None,
+    marks: Pointers,
+    head: str | None,
 ) -> None:
     try:
         if ledger is None:
@@ -120,6 +143,8 @@ def _record(
             duration_ms=(time.perf_counter() - started) * 1000.0,
             outcome=outcome,
             note=note,
+            head_sha=head,
+            **marks,
         )
         ledger.close()
     except Exception:  # there is nowhere left to report to

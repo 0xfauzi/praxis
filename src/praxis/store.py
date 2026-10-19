@@ -363,6 +363,11 @@ class Store:
         sql = "SELECT * FROM file_edges WHERE repo_id = ? ORDER BY ts, id"
         return self._all(sql, repo_id)
 
+    def scenario_runs_for(self, repo_id: str, map_version: str) -> Rows:
+        sql = ("SELECT * FROM scenario_runs WHERE repo_id = ? AND map_version = ?"
+               " ORDER BY ts, id")  # fmt: skip
+        return self._all(sql, repo_id, map_version)
+
     def scenario_run(
         self,
         *,
@@ -448,6 +453,12 @@ class Store:
             repo_id,
         )
 
+    def task_bound_to(self, session_id: str) -> sqlite3.Row | None:
+        """The task bound to this session whose segment is still open."""
+        sql = ("SELECT * FROM tasks WHERE status = 'bound' AND bound_session_id = ?"
+               " ORDER BY bound_ts DESC LIMIT 1")  # fmt: skip
+        return self._one(sql, session_id)
+
     def task_last_closed(self, repo_id: str) -> sqlite3.Row | None:
         return self._one(
             "SELECT * FROM tasks WHERE repo_id = ? AND status = 'closed'"
@@ -518,6 +529,31 @@ class Store:
         sql = "SELECT * FROM outcomes WHERE task_id = ? ORDER BY component"
         return self._all(sql, task_id)
 
+    def segment_close(
+        self,
+        task_id: str,
+        rows: Iterable[tuple[str, bool, bool | None, int | None, int | None]],
+        ts: str,
+        *,
+        ev: Evidence,
+    ) -> None:
+        """The segment's outcomes and the task's close, in one transaction: a task is
+        never closed without its outcomes, nor are outcomes left on a bound task."""
+        with self._tx():
+            self.outcome(task_id, rows, ts, ev=ev)
+            self.task_close(task_id, ts)
+
+    def divergences_of(self, task_id: str) -> Rows:
+        sql = "SELECT * FROM divergences WHERE task_id = ? ORDER BY id"
+        return self._all(sql, task_id)
+
+    def tasks_flagged(self, codes: Sequence[str]) -> frozenset[str]:
+        """Ids of the tasks a flag with one of these codes names."""
+        rows = self._all(
+            "SELECT task_id FROM flags WHERE task_id IS NOT NULL AND code IN"
+            " (SELECT value FROM json_each(?))", json.dumps(list(codes)))  # fmt: skip
+        return frozenset(str(r[0]) for r in rows)
+
     # -- probes ---------------------------------------------------------------------
 
     def probe_items_put(
@@ -556,6 +592,37 @@ class Store:
     def probe_item(self, item_id: str) -> sqlite3.Row | None:
         return self._one("SELECT * FROM probe_items WHERE item_id = ?", item_id)
 
+    def probe_items_d1(self, repo_id: str, map_version: str) -> Rows:
+        """(src_component, dst_component, truth, truth_ts) of every D1 item, every
+        epoch: each is one X1 read of its pair at its truth_ts."""
+        return self._all(
+            "SELECT src_component, dst_component, truth, truth_ts FROM probe_items"
+            " WHERE repo_id = ? AND map_version = ? AND relation = 'D1'",
+            repo_id, map_version)  # fmt: skip
+
+    def exposures_unanswered(self, repo_id: str, map_version: str) -> Rows:
+        """Exposed items on this map with no probe response, oldest exposure first."""
+        return self._all(
+            "SELECT e.item_id, e.task_id, e.role, e.ts AS exposed_ts, p.relation,"
+            " p.src_component, p.dst_component, p.truth, p.epoch, p.map_version"
+            " FROM exposures e JOIN probe_items p USING (item_id)"
+            " WHERE p.repo_id = ? AND p.map_version = ? AND NOT EXISTS"
+            " (SELECT 1 FROM probe_responses r WHERE r.item_id = e.item_id)"
+            " ORDER BY e.ts, e.id", repo_id, map_version)  # fmt: skip
+
+    def probe_responses_of(self, repo_id: str, map_version: str) -> Rows:
+        """Every response to an item on this map, with the item and its exposure
+        (role and exposed_task NULL for an item no task exposed), by ts."""
+        return self._all(
+            "SELECT r.id, r.item_id, r.task_id, r.ts, r.p, r.deadline_met,"
+            " r.truth_at_probe, r.truth_changed, r.lag_days, r.coverage, r.warnings,"
+            " p.relation, p.src_component, p.dst_component, e.role,"
+            " e.task_id AS exposed_task"
+            " FROM probe_responses r JOIN probe_items p USING (item_id)"
+            " LEFT JOIN exposures e USING (item_id)"
+            " WHERE p.repo_id = ? AND p.map_version = ? ORDER BY r.ts, r.id",
+            repo_id, map_version)  # fmt: skip
+
     def probe_response(self, *, ev: Evidence, **row: Unpack[ProbeResponse]) -> int:
         """p None is a skip. Only called after the attached-agent check found none."""
         values: Values = {**row, "skipped": row["p"] is None, "agent_attached": 0}
@@ -563,6 +630,11 @@ class Store:
 
     def drift_response(self, *, ev: Evidence, **row: Unpack[DriftResponse]) -> None:
         self._insert("drift_responses", ev, [dict(row)])
+
+    def drift_responses_for(self, repo_id: str, map_version: str, week: str) -> Rows:
+        sql = ("SELECT * FROM drift_responses WHERE repo_id = ? AND map_version = ?"
+               " AND week = ? ORDER BY id")  # fmt: skip
+        return self._all(sql, repo_id, map_version, week)
 
     def divergence(self, *, ev: Evidence, **row: Unpack[Divergence]) -> None:
         self._insert("divergences", ev, [dict(row)])
@@ -577,6 +649,14 @@ class Store:
             " ORDER BY d.ts, d.id",
             repo_id,
         )
+
+    def decisions_flagged(self, codes: Sequence[str]) -> frozenset[int]:
+        """Ids of the decisions a flag with one of these codes names."""
+        rows = self._all(
+            "SELECT json_extract(detail_json, '$.decision_id') FROM flags"
+            " WHERE code IN (SELECT value FROM json_each(?))",
+            json.dumps(list(codes)))  # fmt: skip
+        return frozenset(int(r[0]) for r in rows if r[0] is not None)
 
     def decision_response(
         self, *, ev: Evidence, **row: Unpack[DecisionResponse]
@@ -664,6 +744,41 @@ class Store:
                 " GROUP BY session_id ORDER BY MIN(ts)"
             )
         ]
+
+    def session_base(self, session_id: str) -> str | None:
+        """HEAD when the session's baseline was taken; None without one."""
+        row = self._one(
+            "SELECT head_sha FROM hook_events WHERE session_id = ?"
+            " AND event = 'SessionStart' AND head_sha IS NOT NULL ORDER BY id LIMIT 1",
+            session_id)  # fmt: skip
+        return None if row is None else str(row[0])
+
+    def last_stop_ts(self, session_id: str) -> str | None:
+        sql = "SELECT MAX(ts) FROM hook_events WHERE session_id = ? AND event = 'Stop'"
+        row = self._one(sql, session_id)
+        return None if row is None or row[0] is None else str(row[0])
+
+    def deltas_files_since(self, session_id: str, since: str | None) -> list[str]:
+        """Files with an agent delta in this session at or after ``since``."""
+        sql = ("SELECT DISTINCT file FROM agent_deltas WHERE session_id = ? AND ts >= ?"
+               " ORDER BY file")  # fmt: skip
+        rows = self._all(sql, session_id, since or "")
+        return [str(r[0]) for r in rows]
+
+    def recorder_gaps(self, session_id: str, since: str) -> int:
+        """Hook rows since ``since`` that are not ok, plus PreToolUse snapshots still
+        waiting for their PostToolUse."""
+        row = self._one(
+            "SELECT (SELECT COUNT(*) FROM hook_events WHERE session_id = ? AND ts >= ?"
+            " AND outcome <> 'ok') + (SELECT COUNT(*) FROM pending WHERE session_id = ?"
+            " AND ts >= ?)", *(session_id, since) * 2)  # fmt: skip
+        return 0 if row is None else int(row[0])
+
+    def head_sequence(self, session_id: str) -> Rows:
+        """(event, tool_use_id, head_sha) of each hook row that saw a HEAD, in order."""
+        return self._all(
+            "SELECT event, tool_use_id, head_sha FROM hook_events WHERE session_id = ?"
+            " AND head_sha IS NOT NULL ORDER BY id", session_id)  # fmt: skip
 
 
 def _files(rows: Iterable[Sequence[Any]]) -> Files:

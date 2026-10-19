@@ -29,6 +29,8 @@ ALL_CLAUDE_EVENTS = {
     "PostToolUse",
     "PostToolUseFailure",
 }
+TOOLS = "Edit|Write|MultiEdit|NotebookEdit|Bash"
+MATCHED = ("PreToolUse", "PostToolUse", "PostToolUseFailure")
 OTHER_HOOK = {
     "matcher": "Bash",
     "hooks": [{"type": "command", "command": "echo other"}],
@@ -138,11 +140,15 @@ def test_apply_creates_the_file_when_absent_after_a_yes(tmp_path: Path) -> None:
     assert set(data["hooks"]) == ALL_CLAUDE_EVENTS
     for event in ALL_CLAUDE_EVENTS:
         assert len(praxis_entries(data, event)) == 1
-    assert (
-        data["hooks"]["PreToolUse"][0]["matcher"]
-        == "Edit|Write|MultiEdit|NotebookEdit|Bash"
-    )
+    assert {e: data["hooks"][e][0].get("matcher") for e in MATCHED} == {
+        "PreToolUse": TOOLS,
+        "PostToolUse": f"{TOOLS}|AskUserQuestion|ExitPlanMode",
+        "PostToolUseFailure": TOOLS,
+    }
     assert data["hooks"]["Stop"][0]["hooks"][0]["timeout"] == 10
+    # The Stop notice must come from a synchronous hook: an async one's JSON reaches
+    # the model (design 5.4).
+    assert "async" not in json.dumps(data)
     # Nothing to back up when the file did not exist.
     assert not (h.praxis_home / "settings-backups").exists()
 
@@ -231,6 +237,9 @@ def test_codex_block_has_no_post_tool_use_failure(tmp_path: Path) -> None:
     assert code == 0, out
     data = json.loads((h.home / ".codex" / "hooks.json").read_text())
     assert set(data["hooks"]) == ALL_CLAUDE_EVENTS - {"PostToolUseFailure"}
+    # Codex has no question tools; its Edit and Write matchers also fire for
+    # apply_patch.
+    assert {data["hooks"][e][0]["matcher"] for e in MATCHED[:2]} == {TOOLS}
 
 
 def test_doctor_is_read_only_and_reports_state(tmp_path: Path) -> None:
@@ -263,3 +272,24 @@ def test_doctor_is_read_only_and_reports_state(tmp_path: Path) -> None:
         timeout=60,
     )
     assert "claude: praxis hooks installed on all 6 events" in again.stdout
+
+
+def test_setup_prints_a_valid_snippet_and_refuses_to_apply(tmp_path: Path) -> None:
+    h = Home(tmp_path)
+    found = shutil.which("praxis")
+    assert found is not None
+    out = subprocess.run(
+        [found, "setup", "claude", "--print"],
+        capture_output=True, check=True, env=h.env(),
+    )  # fmt: skip
+    block = json.loads(out.stdout)
+    assert set(block["hooks"]) == ALL_CLAUDE_EVENTS
+    assert block["hooks"]["PostToolUse"][0]["matcher"] == (
+        f"{TOOLS}|AskUserQuestion|ExitPlanMode"
+    )
+    assert block["hooks"]["Stop"][0]["hooks"][0]["command"].endswith("praxis hook")
+    # Without a terminal there is no consent, so --apply refuses and writes nothing.
+    refused = h.piped("claude", "--apply")
+    assert refused.returncode == 2
+    assert "invariant 8" in refused.stdout
+    assert sorted(h.home.rglob("*")) == [], "setup wrote under HOME"

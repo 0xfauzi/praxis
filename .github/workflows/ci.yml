@@ -101,6 +101,12 @@ jobs:
       - name: scan the tree for secrets
         run: uv run pre-commit run --hook-stage manual gitleaks-tree --all-files
 
+      # The ONLY place the cognitive complexity limit runs on a server, for the same
+      # reason: the pre-commit complexipy hook diffs the STAGED index against HEAD, which
+      # is empty on a fresh checkout. Five functions over 15 reached HEAD 62fbe9f that way.
+      - name: cognitive complexity over the tree
+        run: uv run pre-commit run --hook-stage manual complexipy-tree --all-files
+
       # `live` is excluded on purpose: those tests need an agent binary or a judge key and
       # spend tokens a CI runner has neither the credentials nor the permission to spend.
       - name: pytest (integration)

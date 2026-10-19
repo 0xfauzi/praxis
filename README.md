@@ -6,12 +6,17 @@ switched off, and chooses, per prompt, which mode the agent runs in: tutor, coll
 delegate. It records its own evidence through the agent's hooks, as line-hash snapshots of
 the working tree: hashes and counts, never text.
 
-Status: the recorder. `praxis hook` attributes every line in the working tree to the agent,
-the owner, the state before the session, or ambiguous, at every prompt boundary. The
-instrument is being rebuilt to docs/design/03-measurement.md: delayed structural probes
-about your components, scored by deterministic extractors and never by tests, and a per-task
-randomized prediction step before the agent acts. The write-it drill is withdrawn. No
-scores, no claims about anyone yet.
+Status: the recorder and the instrument of docs/design/03-measurement.md, before the pilot.
+`praxis hook` attributes every line in the working tree to the agent, the owner, the state
+before the session, or ambiguous, at every prompt boundary, and records import edges and
+the scored segment of a registered task. `praxis components freeze` fixes a repository's
+component map and fills its pool of structural items, and `praxis components` shows them.
+`praxis task` registers a task before its prompt (a per-task randomized prediction step)
+and `praxis last` gives feedback on the last closed one. `praxis probe structural`, `drift`,
+`decision`, `knockout` and `pathfinder` ask unassisted questions, refused while an agent is
+attached and scored by deterministic extractors, never by tests. `praxis report` prints
+scores and the pre-registered tests, refusing a block below its minimum. The write-it drill
+is withdrawn. No scores, no claims about anyone yet.
 
 ## Install, on the machine where the agents run
 

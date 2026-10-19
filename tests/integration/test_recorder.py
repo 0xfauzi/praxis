@@ -11,6 +11,7 @@ independent source from the git diff the recorder reads.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -73,7 +74,9 @@ class Session:
             ["git", "-C", str(self.repo), *args], check=True, capture_output=True
         )
 
-    def hook(self, payload: Any) -> subprocess.CompletedProcess[bytes]:
+    def hook(
+        self, payload: Any, stdout: bytes = b""
+    ) -> subprocess.CompletedProcess[bytes]:
         found = shutil.which("praxis")
         assert found is not None, "no `praxis` on PATH: run `uv sync` first"
         raw = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
@@ -89,16 +92,18 @@ class Session:
                 "PATH": os.environ.get("PATH", ""),
             },
         )
-        # Invariant 7, checked on every call: exit 0 and nothing on stdout, whatever
-        # came in.
+        # Invariant 7, checked on every call: exit 0, and nothing on stdout but the
+        # one allowlisted notice where a test expects it.
         assert done.returncode == 0, done.stderr
-        assert done.stdout == b"", done.stdout
+        assert done.stdout == stdout, done.stdout
         return done
 
     # payloads
 
-    def recorded(self, name: str, **override: Any) -> dict[str, Any]:
-        text = (FIXTURES / f"{name}.json").read_text()
+    def recorded(
+        self, name: str, fixtures: Path = FIXTURES, **override: Any
+    ) -> dict[str, Any]:
+        text = (fixtures / f"{name}.json").read_text()
         text = text.replace("<repo>", str(self.repo)).replace("<home>", str(self.home))
         body: dict[str, Any] = json.loads(text)
         body["session_id"] = self.session_id
@@ -474,31 +479,314 @@ def test_every_hook_records_its_own_duration(tmp_path: Path) -> None:
     assert all(d > 0 for d in durations)
 
 
-def test_setup_prints_a_valid_snippet_and_refuses_to_apply(tmp_path: Path) -> None:
-    found = shutil.which("praxis")
-    assert found is not None
-    env = {"HOME": str(tmp_path), "PATH": os.environ.get("PATH", "")}
-    out = subprocess.run(
-        [found, "setup", "claude", "--print"], capture_output=True, check=True, env=env
+# -- design 03 section 5: base-commit diffing, pointers, edges, decisions, segments ----
+#
+# Payloads from fixtures/claude/2.1.303/ were recorded on this machine from Claude Code
+# 2.1.303 run with `-p` against a scratch repository (2026-10-19), paths replaced by
+# <repo> and <home>. AskUserQuestion and ExitPlanMode are unavailable in -p, and no
+# Codex binary is installed here, so those payloads are built from the documented fields
+# (code.claude.com/docs/en/hooks; the Codex hooks reference) and say so where built.
+
+V303 = FIXTURES.parent / "2.1.303"
+NOTICE = b'{"terminalSequence": "\\u001b]9;praxis: feedback ready\\u0007"}'
+PAST = "2000-01-01T00:00:00.000Z"
+
+
+class Mapped(Session):
+    """A five-module package, so the mechanical map has components a to e."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        super().__init__(tmp_path, with_repo=False)
+        (self.repo / "pkg").mkdir()
+        (self.repo / "pkg" / "__init__.py").write_text("")
+        for name in "abcde":
+            (self.repo / "pkg" / f"{name}.py").write_text(f"{name.upper()} = 1\n")
+        self.git("init", "-q")
+        self.git("config", "user.email", "t@example.invalid")
+        self.git("config", "user.name", "t")
+        self.commit("base")
+
+    def commit(self, message: str) -> str:
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", message)
+        return self.head()
+
+    def head(self) -> str:
+        return subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()  # fmt: skip
+
+    def v303(self, name: str, **override: Any) -> dict[str, Any]:
+        return self.recorded(name, V303, **override)
+
+    def bash(self, mutate: Any, tid: str, **extra: Any) -> None:
+        self.hook(self.v303("pre_tool_use_bash_commit", tool_use_id=tid, **extra))
+        mutate()
+        self.hook(self.v303("post_tool_use_bash_commit", tool_use_id=tid, **extra))
+
+    def append(self, name: str, text: str, tid: str, **extra: Any) -> None:
+        def write() -> None:
+            with (self.repo / "pkg" / f"{name}.py").open("a") as f:
+                f.write(text)
+
+        self.bash(write, tid, **extra)
+
+    def ledger_store(self) -> Any:
+        from praxis import store
+
+        return store.Store(self.praxis_home / "ledger.db").open()
+
+    def freeze(self) -> Any:
+        from praxis import components, gitdiff
+
+        top = gitdiff.toplevel(self.repo)
+        assert top is not None
+        cmap = components.derive(self.repo, gitdiff.repo_id(top))
+        db = self.ledger_store()
+        db.component_map_freeze(
+            cmap.repo_id, db.component_map_put(components.to_json(cmap), PAST), PAST
+        )
+        db.close()
+        return cmap
+
+    def register(self, cmap: Any, ts: str = PAST) -> str:
+        db = self.ledger_store()
+        db.task_register(
+            region=[], bound=[], related=[], drawn=[], task_id="task-1",
+            repo_id=cmap.repo_id, map_version=cmap.version, ordinal=1, ts=ts,
+            arm="control", seed_hash="ab" * 32, stratum="empty",
+        )  # fmt: skip
+        db.close()
+        return "task-1"
+
+    def rows(self, sql: str, *params: object) -> list[sqlite3.Row]:
+        db = self.ledger()
+        try:
+            return db.execute(sql, params).fetchall()
+        finally:
+            db.close()
+
+
+def test_an_agent_commit_inside_bash_moves_no_line(tmp_path: Path) -> None:
+    s = Mapped(tmp_path)
+    base = s.head()
+    s.hook(s.v303("session_start"))
+    s.hook(s.v303("user_prompt_submit"))
+    s.hook(s.v303("pre_tool_use_edit"))
+    (s.repo / "pkg" / "a.py").write_text("A = 2\n")
+    s.hook(s.v303("post_tool_use_edit"))
+    tid = "toolu_commit"
+    s.bash(lambda: s.commit("agent commit"), tid)
+    s.hook(s.v303("stop"))
+    assert s.head() != base
+    # The commit is the agent's, inside one Bash call: it changes no line against base.
+    assert s.rows("SELECT * FROM agent_deltas WHERE tool_use_id = ?", tid) == []
+    row = s.latest("Stop")["pkg/a.py"]
+    want = {"agent": 2, "human": 0, "preexisting": 0, "ambiguous": 0, "reverted": 0}
+    assert counts(row) == want
+    assert (row["coverage"], json.loads(row["warnings"])) == ("full", [])
+    heads = {r["event"]: r["head_sha"] for r in s.events() if r["head_sha"]}
+    assert heads["SessionStart"] == base
+    assert heads["Stop"] == s.head()
+
+
+def test_head_moved_outside_a_tool_call_is_partial(tmp_path: Path) -> None:
+    s = Mapped(tmp_path)
+    s.hook(s.v303("session_start"))
+    s.append("a", "AGENT = 1\n", "toolu_a")
+    (s.repo / "pkg" / "b.py").write_text("OWNER = 1\n")
+    s.commit("owner commit between tool calls")
+    s.hook(s.v303("stop"))
+    rows = s.latest("Stop")
+    assert {f: r["coverage"] for f, r in rows.items()} == {
+        "pkg/a.py": "partial", "pkg/b.py": "partial"}  # fmt: skip
+    assert json.loads(rows["pkg/b.py"]["warnings"]) == ["head_moved_outside_tool"]
+    assert counts(rows["pkg/b.py"])["human"] == 2  # the owner's - and + line
+
+
+def test_head_off_the_base_history_is_unobservable_and_voids_the_task(
+    tmp_path: Path,
+) -> None:
+    s = Mapped(tmp_path)
+    first = s.head()
+    (s.repo / "pkg" / "a.py").write_text("A = 3\n")
+    s.commit("second")
+    cmap = s.freeze()
+    s.hook(s.v303("session_start"))
+    s.register(cmap)
+    s.hook(s.v303("user_prompt_submit"))
+    s.git("checkout", "-q", first)
+    s.hook(s.v303("stop"))
+    assert s.events()[-1]["outcome"] == "unobservable"
+    assert s.events()[-1]["note"].startswith("head_not_descendant")
+    (task,) = s.rows("SELECT status, void_reason FROM tasks")
+    assert tuple(task) == ("void", "head_not_descendant")
+
+
+def test_pointers_are_stored_on_events_and_deltas(tmp_path: Path) -> None:
+    s = Mapped(tmp_path)
+    s.hook(s.v303("session_start"))
+    s.hook(s.v303("pre_tool_use_edit_subagent"))
+    (s.repo / "pkg" / "a.py").write_text("A = 4\n")
+    s.hook(s.v303("post_tool_use_edit_subagent"))
+    # Codex, built from the documented fields: apply_patch with a turn_id.
+    codex = {"turn_id": "turn-7", "tool_name": "apply_patch", "prompt_id": None,
+             "permission_mode": None, "agent_id": None}  # fmt: skip
+    s.append("b", "B2 = 2\n", "call_patch", **codex)
+    deltas = s.rows(
+        "SELECT DISTINCT tool_name, prompt_id, turn_id, permission_mode, agent_id,"
+        " cli_version FROM agent_deltas ORDER BY id"
     )
-    block = json.loads(out.stdout)
-    assert set(block["hooks"]) == {
-        "SessionStart",
-        "UserPromptSubmit",
-        "Stop",
-        "PreToolUse",
-        "PostToolUse",
-        "PostToolUseFailure",
-    }
-    assert (
-        block["hooks"]["PreToolUse"][0]["matcher"]
-        == "Edit|Write|MultiEdit|NotebookEdit|Bash"
+    sub = json.loads((V303 / "pre_tool_use_edit_subagent.json").read_text())
+    assert [tuple(r) for r in deltas] == [
+        ("Edit", sub["prompt_id"], None, "bypassPermissions", sub["agent_id"], None),
+        ("apply_patch", None, "turn-7", None, None, None),
+    ]
+    marks = {r["tool_use_id"]: r["prompt_id"] for r in s.events()}
+    assert marks[sub["tool_use_id"]] == sub["prompt_id"]
+
+
+def ask(s: Mapped, labels: list[str], *, tid: str, answer: str | None) -> None:
+    """AskUserQuestion's PostToolUse, built from the documented tool_input."""
+    options = [{"label": x, "description": "d"} for x in labels]
+    question = {"question": "Which?", "header": "P", "multiSelect": False,
+                "options": options}  # fmt: skip
+    answers = {"Which?": answer} if answer else {}
+    body = s.v303("post_tool_use_edit", tool_name="AskUserQuestion", tool_use_id=tid)
+    body["tool_input"] = {"questions": [question]}
+    body["tool_response"] = {"questions": [question], "answers": answers}
+    s.hook(body)
+
+
+def test_decision_pointer_keeps_counts_an_index_and_a_hash(tmp_path: Path) -> None:
+    from praxis.transcript import options_hash
+
+    s = Mapped(tmp_path)
+    ask(s, ["CANARY-red", "CANARY-blue"], tid="toolu_q1", answer="CANARY-blue")
+    ask(s, ["x", "y", "z"], tid="toolu_q2", answer=None)
+    plan = {"plan": "CANARY-PLAN step one"}
+    body = s.v303("post_tool_use_edit", tool_name="ExitPlanMode", tool_use_id="toolu_p")
+    s.hook({**body, "tool_input": plan, "tool_response": plan})
+    got = s.rows(
+        "SELECT tool_use_id, option_count, chosen_index, options_hash, coverage"
+        " FROM decisions ORDER BY id"
     )
-    assert block["hooks"]["Stop"][0]["hooks"][0]["command"].endswith("praxis hook")
-    # Without a terminal there is no consent, so --apply refuses and writes nothing.
-    refused = subprocess.run(
-        [found, "setup", "claude", "--apply"], capture_output=True, check=False, env=env
-    )
-    assert refused.returncode == 2
-    assert b"invariant 8" in refused.stdout
-    assert sorted(Path(tmp_path).rglob("*")) == [], "setup wrote under HOME"
+    assert [tuple(r) for r in got] == [
+        ("toolu_q1", 2, 1, options_hash(["CANARY-red", "CANARY-blue"]), "full"),
+        ("toolu_q2", 3, None, options_hash(["x", "y", "z"]), "partial"),
+        ("toolu_p", 2, 0, options_hash(["CANARY-PLAN step one"]), "full"),
+    ]
+
+
+def test_stop_writes_file_edges_through_the_frozen_map(tmp_path: Path) -> None:
+    s = Mapped(tmp_path)
+    s.hook(s.v303("session_start"))
+    s.append("a", "from pkg import b, c\n", "toolu_1")
+    s.hook(s.v303("stop"))
+    assert s.events()[-1]["note"].endswith("edges: no_frozen_map")
+    assert s.rows("SELECT * FROM file_edges") == []
+    s.freeze()
+    s.append("a", "from pkg import d\n", "toolu_2")
+    s.hook(s.v303("stop"))
+    got = s.rows("SELECT src_file, src_component, dst_component, sites, module_level"
+                 " FROM file_edges ORDER BY dst_component")  # fmt: skip
+    assert [tuple(r) for r in got] == [
+        ("pkg/a.py", "a", "b", 1, 1), ("pkg/a.py", "a", "c", 1, 1),
+        ("pkg/a.py", "a", "d", 1, 1)]  # fmt: skip
+
+
+def test_segment_closes_at_the_first_stop_after_a_delta(tmp_path: Path) -> None:
+    s = Mapped(tmp_path)
+    cmap = s.freeze()
+    s.hook(s.v303("session_start"))
+    s.append("a", "CANARY_LINE = 'qq-77'\n", "toolu_warm")
+    s.hook(s.v303("stop"))  # scans pkg/a.py: the edge history's before
+    task = s.register(cmap)
+    s.hook(s.v303("user_prompt_submit", prompt="CANARY-PROMPT-zx81"))
+    s.hook(s.v303("stop"))  # no delta since the bind: the segment stays open
+    s.hook(s.v303("user_prompt_submit", prompt_id="p-2", prompt="yes, go on"))
+    ask(s, ["CANARY-red", "CANARY-blue"], tid="toolu_q", answer="CANARY-red")
+    s.append("a", "from pkg import b\n", "toolu_imp")
+    s.hook(s.v303("stop", last_assistant_message="CANARY-REPLY"), stdout=NOTICE)
+    s.hook(s.v303("stop"))  # closed already: nothing more is printed
+    (row,) = s.rows("SELECT status, bound_prompt_id FROM tasks")
+    prompt = json.loads((V303 / "user_prompt_submit.json").read_text())["prompt_id"]
+    assert tuple(row) == ("closed", prompt)
+    got = s.rows("SELECT component, o_first, o_final, edges_added, edges_removed,"
+                 " coverage FROM outcomes WHERE task_id = ?", task)  # fmt: skip
+    assert [tuple(r) for r in got] == [
+        ("a", 1, None, 1, 0, "full"),
+        *((c, 0, None, 0, 0, "full") for c in "bcde"),
+    ]
+    flags = s.rows("SELECT code, task_id FROM flags")
+    assert [tuple(f) for f in flags] == [("owner_answered_question", task)] * 2
+    blob = b"".join(p.read_bytes() for p in s.praxis_home.rglob("*") if p.is_file())
+    for canary in (b"CANARY", b"qq-77", b"zx81", b"feedback ready"):
+        assert canary not in blob, canary
+
+
+def test_a_task_binds_only_to_a_prompt_after_it(tmp_path: Path) -> None:
+    s = Mapped(tmp_path)
+    s.register(s.freeze(), ts="2999-01-01T00:00:00.000+00:00")  # G8
+    s.hook(s.v303("user_prompt_submit"))
+    assert [tuple(r) for r in s.rows("SELECT status FROM tasks")] == [("unbound",)]
+
+
+def test_codex_segment_closes_without_a_notice(tmp_path: Path) -> None:
+    s = Mapped(tmp_path)
+    cmap = s.freeze()
+    codex = {"turn_id": "turn-1", "prompt_id": None}
+    s.hook(s.v303("session_start"))
+    s.register(cmap)
+    s.hook(s.v303("user_prompt_submit", **codex))
+    s.append("c", "from pkg import e\n", "call_1", tool_name="apply_patch", **codex)
+    s.hook(s.v303("stop", **codex))  # Codex has no terminalSequence: stdout stays empty
+    (row,) = s.rows("SELECT status, bound_prompt_id FROM tasks")
+    assert tuple(row) == ("closed", None)
+    got = s.rows("SELECT component, o_first, edges_added FROM outcomes"
+                 " WHERE o_first = 1")  # fmt: skip
+    assert [tuple(r) for r in got] == [("c", 1, None)]  # no earlier scan of pkg/c.py
+
+
+@pytest.mark.live
+def test_live_notice_stays_out_of_messages(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    """Claude Code itself, -p, praxis hooks via --settings, a registered task. In -p the
+    terminalSequence is ignored; 2.1.303 still writes the hook's stdout and command
+    path to the JSONL as hook_success and stop_hook_summary entries, so the assertion
+    is that no user or assistant message holds a praxis string."""
+    from praxis import install
+
+    # The module's integration mark also lands here; spend tokens only under -m live.
+    if "live" not in str(request.config.getoption("markexpr")):
+        pytest.skip("spends tokens: run with -m live")
+    s = Mapped(tmp_path)
+    s.register(s.freeze())
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps(install.snippet("claude")))
+    drop = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_REMOTE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION")  # fmt: skip
+    env = {k: v for k, v in os.environ.items() if k not in drop}
+    run = subprocess.run(
+        ["claude", "-p", "Use the Edit tool on pkg/a.py to replace 'A = 1' with"
+         " 'from pkg import b'. Then reply with the single word done.",
+         "--settings", str(settings), "--model", "haiku", "--output-format", "json",
+         "--permission-mode", "bypassPermissions"],
+        cwd=s.repo, env={**env, "PRAXIS_HOME": str(s.praxis_home)},
+        stdin=subprocess.DEVNULL, capture_output=True, timeout=110, check=True,
+    )  # fmt: skip
+    sid = json.loads(run.stdout)["session_id"]
+    (path,) = Path.home().glob(f".claude/projects/*/{sid}.jsonl")
+    lines = path.read_bytes().splitlines()
+    path.unlink()
+    with contextlib.suppress(OSError):
+        path.parent.rmdir()  # only when the run left nothing else there
+    assert [tuple(r) for r in s.rows("SELECT status FROM tasks")] == [("closed",)]
+    entries = [json.loads(line) for line in lines if b"praxis" in line]
+    assert entries, "2.1.303 records hook commands; none found"
+    for entry in entries:
+        assert entry["type"] in ("attachment", "system"), entry["type"]
+        out = entry.get("attachment", {}).get("stdout")
+        assert out in (None, NOTICE.decode()), out

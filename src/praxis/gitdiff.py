@@ -5,7 +5,12 @@ diff kind (``+`` or ``-``) and the exact bytes of the line. A line the agent add
 line it removed are therefore different things, and two identical added lines count
 twice. Nothing here keeps a line: the hash is computed and the bytes are dropped.
 
-Design: docs/design/01-recorder.md.
+The diff is against the session's base commit, so a commit made during the session moves
+no line: committed lines stay changed lines. HEAD is read on every snapshot; a HEAD that
+is no longer a descendant of the base (a checkout, a rebase) makes the snapshot
+unobservable, because lines of another history would read as the session's work.
+
+Design: docs/design/01-recorder.md, docs/design/03-measurement.md section 5.1.
 """
 
 from __future__ import annotations
@@ -27,18 +32,23 @@ Files = dict[str, Counter[str]]
 
 @dataclass(frozen=True)
 class Snap:
-    """One working-tree snapshot. ``skipped`` holds "path: reason" per file left out."""
+    """One working-tree snapshot against ``base``. ``skipped`` holds "path: reason" per
+    file left out; ``head`` is HEAD when the snapshot was taken."""
 
     toplevel: str
     files: Files
     skipped: tuple[str, ...]
+    head: str
+    base: str
 
 
 @dataclass(frozen=True)
 class Unobservable:
-    """Why no snapshot could be taken. The caller records it and attributes nothing."""
+    """Why no snapshot could be taken. The caller records it and attributes nothing.
+    ``toplevel`` is set when the repository itself was found."""
 
     reason: str
+    toplevel: str | None = None
 
 
 def line_hash(kind: bytes, line: bytes) -> str:
@@ -85,51 +95,77 @@ def _git(
     )
 
 
-def snapshot(cwd: str | Path, timeout_s: float = GIT_TIMEOUT_S) -> Snap | Unobservable:
+def snapshot(
+    cwd: str | Path, base: str | None = None, timeout_s: float = GIT_TIMEOUT_S
+) -> Snap | Unobservable:
+    """The working tree against ``base``, or against HEAD when there is no base yet
+    (the snapshot that becomes the base, and sessions without a baseline)."""
     try:
-        top = _git(cwd, "rev-parse", "--show-toplevel", timeout=timeout_s)
+        found = _where(cwd, timeout_s)
+        if isinstance(found, Unobservable):
+            return found
+        top, head = found
+        if base is not None and base != head:
+            moved = _descends(top, base, head, timeout_s)
+            if moved is not None:
+                return Unobservable(moved, top)
+        diff, others = _listings(top, base or head, timeout_s)
     except FileNotFoundError:
         return Unobservable("git not found")
     except subprocess.TimeoutExpired:
         return Unobservable("git timed out")
     except OSError as exc:
         return Unobservable(f"cannot run git: {type(exc).__name__}")
-    if top.returncode != 0:
-        return Unobservable("not a git repository")
-    toplevel = top.stdout.decode("utf-8", "surrogateescape").strip()
-    try:
-        diff = _git(
-            toplevel,
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-renames",
-            "--no-prefix",
-            "--unified=0",
-            "--diff-algorithm=myers",
-            "HEAD",
-            timeout=timeout_s,
-        )
-        others = _git(
-            toplevel,
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z",
-            timeout=timeout_s,
-        )
-    except subprocess.TimeoutExpired:
-        return Unobservable("git timed out")
     if diff.returncode != 0:
         err = diff.stderr.decode("utf-8", "replace")
-        if "ambiguous argument 'HEAD'" in err or "bad revision" in err:
-            return Unobservable("no HEAD commit")
-        return Unobservable(f"git diff failed: {err.strip()[:120]}")
+        return Unobservable(f"git diff failed: {err.strip()[:120]}", top)
     if others.returncode != 0:
-        return Unobservable("git ls-files failed")
+        return Unobservable("git ls-files failed", top)
     files, skipped = _parse_diff(diff.stdout)
-    _add_untracked(Path(toplevel), others.stdout, files, skipped)
-    return Snap(toplevel=toplevel, files=files, skipped=tuple(skipped))
+    _add_untracked(Path(top), others.stdout, files, skipped)
+    return Snap(top, files, tuple(skipped), head, base or head)
+
+
+def _where(cwd: str | Path, timeout_s: float) -> tuple[str, str] | Unobservable:
+    """(toplevel, HEAD sha) in one git call. Without a commit git still prints the
+    toplevel before it fails on HEAD, which is how the two refusals are told apart."""
+    done = _git(cwd, "rev-parse", "--show-toplevel", "HEAD", timeout=timeout_s)
+    lines = done.stdout.decode("utf-8", "surrogateescape").splitlines()
+    if done.returncode == 0 and len(lines) == 2:
+        return lines[0], lines[1]
+    if lines:
+        return Unobservable("no HEAD commit", lines[0])
+    return Unobservable("not a git repository")
+
+
+def _descends(top: str, base: str, head: str, timeout_s: float) -> str | None:
+    """None when ``head`` descends from ``base``, else the reason it cannot be used."""
+    done = _git(top, "merge-base", "--is-ancestor", base, head, timeout=timeout_s)
+    if done.returncode == 0:
+        return None
+    return "head_not_descendant" if done.returncode == 1 else "base commit missing"
+
+
+def _listings(
+    top: str, against: str, timeout_s: float
+) -> tuple[subprocess.CompletedProcess[bytes], subprocess.CompletedProcess[bytes]]:
+    diff = _git(
+        top,
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-renames",
+        "--no-prefix",
+        "--unified=0",
+        "--diff-algorithm=myers",
+        against,
+        "--",
+        timeout=timeout_s,
+    )
+    others = _git(
+        top, "ls-files", "--others", "--exclude-standard", "-z", timeout=timeout_s
+    )
+    return diff, others
 
 
 @dataclass
