@@ -18,7 +18,11 @@ from pathlib import Path
 from typing import Any, TextIO
 
 HOOK_TIMEOUT_S = 10
+# Codex's Edit and Write matchers also fire for its apply_patch (design 5.1).
 MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash"
+# The decision pointer (design 5.2) reads Claude Code's two question tools after they
+# return; Codex has neither.
+DECISION_MATCHER = f"{MATCHER}|AskUserQuestion|ExitPlanMode"
 # Claude Code fires PostToolUseFailure; the Codex hooks reference lists no such event,
 # so the Codex block leaves it out rather than hand Codex an event name it may reject.
 EVENTS: dict[str, dict[str, tuple[str, ...]]] = {
@@ -66,7 +70,9 @@ def snippet(agent: str) -> dict[str, Any]:
     for event in EVENTS[agent]["unmatched"]:
         block[event] = [{"hooks": [entry]}]
     for event in EVENTS[agent]["matched"]:
-        block[event] = [{"matcher": MATCHER, "hooks": [entry]}]
+        decisions = agent == "claude" and event == "PostToolUse"
+        matcher = DECISION_MATCHER if decisions else MATCHER
+        block[event] = [{"matcher": matcher, "hooks": [entry]}]
     return {"hooks": block}
 
 
