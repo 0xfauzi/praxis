@@ -31,6 +31,7 @@ dev = [
   # real subprocesses, where the failure mode is a hang rather than an assertion.
   "pytest-timeout",
   "ruff",
+  "systemap",
   "vulture",
 ]
 
@@ -139,10 +140,15 @@ testpaths = ["tests/integration"]
 known_first_party = ["praxis"]
 # experiments/E01 imports telltale from a sibling checkout by sys.path; it is not a
 # dependency of this package and deptry would report it as one.
-extend_exclude = ["experiments/.*"]
+# map/ is the systemap model: data that systemap reads without running it. Its one import,
+# the systemap tool package, is a dev dependency and never a runtime one.
+extend_exclude = ["experiments/.*", "map/.*"]
 
 [tool.deptry.per_rule_ignores]
 # DEP004 is "a dev dependency imported in production code". pytest is imported by
 # tests/integration/conftest.py, which deptry's default exclude drops today; the entry is
 # what keeps the answer the same on the day this file sets its own `extend_exclude`.
 DEP004 = ["pytest"]
+
+[tool.uv.sources]
+systemap = { git = "https://github.com/0xfauzi/systemap", rev = "main" }
