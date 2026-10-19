@@ -270,7 +270,11 @@ Shared conventions:
 
 - Every probability is on the grid {0.1, 0.3, 0.5, 0.7, 0.9}. On this grid the Brier score
   keeps honest reporting optimal (the nearest grid point is best for every one of 999
-  beliefs except 2 exact-midpoint ties); the log score does not (31 of 999) [MS, derived].
+  beliefs q = i/1000, with exact ties at the 4 midpoints 0.2, 0.4, 0.6 and 0.8); the log
+  score does not (for 30 of the 999 no nearest grid point is log-optimal, 34 counting the
+  midpoints where the log score picks one side) [MS, derived; re-measured by exact Fraction
+  enumeration in `tests/integration/test_scoring.py`, which replaced the first figures of 2
+  ties and 31 failures].
   The log score is stored as a secondary number only, with the clip named in the
   assumptions field.
 - Brier of one binary forecast: `BS = (p - o)^2`. A set forecast is one binary forecast per
