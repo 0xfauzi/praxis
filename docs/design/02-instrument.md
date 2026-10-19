@@ -1,5 +1,11 @@
 # 02: the instrument, write-it items
 
+Status: REJECTED on 2026-10-19 by the owner, before any real data. Two grounds: it measured
+code-level fluency (retyping a function the agent wrote), which is the work the agent is for;
+and it scored by the project's tests, which are code-level, often agent-written, and absent
+for most design decisions. Replaced by `docs/design/03-measurement.md`. Kept as the record
+of the attempt, as E01 keeps its rejections.
+
 ## What it answers
 
 Can the owner, with no agent present, produce the body of a function the agent wrote for
