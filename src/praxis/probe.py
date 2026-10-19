@@ -1,6 +1,10 @@
-"""`praxis probe <kind>`: unassisted elicitation, design 03 sections 4.1 (P1
-structural), 4.2 (S1 drift), 4.6 (S3 decision recall), 4.7 (K knockout) and 4.8 (C1
-Pathfinder).
+"""`praxis test <object>`: unassisted elicitation, design 03 sections 4.1 (P1
+structural, `test structure`), 4.2 (S1 drift, `test changes`), 4.6 (S3 decision recall,
+`test decisions`), 4.7 (K knockout, `test knockout`) and 4.8 (C1 Pathfinder, `test
+pathfinder`). The kinds below keep the design's names, which a flag's `kind` records.
+
+Owner-facing text is written to the ASD-STE100 common rules (one instruction per
+sentence, literal words); dictionary acceptance needs the official dictionary.
 
 Every kind refuses while an agent process works in the repository, records the refusal
 as an `agent_attached` flag and writes no response. An answer is closed vocabulary;
@@ -57,14 +61,22 @@ DRIFT_DAYS = 7
 # A design choice: its cost in owner time and in pool supply needs measuring (E07).
 N_VALIDATION = 2
 REDUCER_VERSION = "probe-v1"
+VERB = "praxis test"
+UNREAD = "Praxis cannot read the working tree."
 SKIP = "s"
 GRID_KEYS = {"1": 0.1, "3": 0.3, "5": 0.5, "7": 0.7, "9": 0.9}
 YES_NO = {"y": True, "n": False, SKIP: None}
-SAID = {True: "yes", False: "no", None: "unknown"}
+SAID = {True: "yes", False: "no", None: "skipped"}
+FOUND = {True: "yes", False: "no", None: "unknown"}
 QUESTION = {
     "D1": "Does code in {} import code in {}?",
-    "D2": "Does code in {} reach code in {} through other components' imports?",
+    "D2": "Does code in {} import code in {} through other components?",
 }
+GRID_HELP = (
+    "Type 9 if you are almost sure that the answer is yes.\n"
+    "Type 1 if you are almost sure that the answer is no.\n"
+    "Type 3, 5 or 7 for the levels between them. Type s to skip a question.\n"
+)
 DECISION_VOIDS = ("transcript_changed", "transcript_swept", "reversed")
 STRUCTURAL_ASSUMPTIONS = (
     "truth is X1 on the working tree at probe time; an absent edge may be an "
@@ -135,13 +147,14 @@ class _Probe:
             try:
                 return parse(line.strip())
             except ValueError:
-                self.out.write("  not one of the answers offered\n")
+                self.out.write("  Type one of the answers in the brackets.\n")
 
     def abandon(self, kind: str, **counts: int) -> int:
         self.ledger.flag(ts=_stamp(self.now()), code="abandoned",
                          detail={"kind": kind, **counts},
                          repo_id=self.repo.repo_id)  # fmt: skip
-        self.out.write("stopped; what was not answered is not recorded\n")
+        self.out.write("Stopped. Praxis records no result for a question that you "
+                       "did not answer.\n")  # fmt: skip
         return 0
 
 
@@ -189,10 +202,11 @@ def administer(
     kind: str,
 ) -> int:
     if kind not in _KINDS:
-        raise ValueError(f"probe kinds are {', '.join(_KINDS)}")
+        raise ValueError(f"the probe kinds are {', '.join(_KINDS)}")
     repo = locate(repo_root)
     if repo is None:
-        stdout.write("praxis probe: not inside a git repository\n")
+        stdout.write(f"{VERB}: this directory is not in a git repository. Run the "
+                     "command in a repository.\n")  # fmt: skip
         return 2
     start = _when(now)
     ledger = Store(praxis_home / "ledger.db").open()
@@ -215,14 +229,15 @@ def _administer(
         ledger.flag(ts=_stamp(start), code="agent_attached",
                     detail={"kind": kind, "agents": len(agents)},
                     repo_id=repo.repo_id)  # fmt: skip
-        out.write("praxis probe: an agent is attached to this repository; nothing "
-                  "was asked and the refusal is recorded\n")  # fmt: skip
+        out.write(f"{VERB}: an agent runs in this repository. Praxis asked no "
+                  "question and recorded the refusal.\n")  # fmt: skip
         out.writelines(f"  {a}\n" for a in agents)
+        out.write("Stop the agent, then run the command again.\n")
         return 2
     frozen = ledger.component_map_frozen(repo.repo_id)
     if frozen is None:
-        out.write("praxis probe: no frozen component map; run `praxis components "
-                  "freeze` first\n")  # fmt: skip
+        out.write(f"{VERB}: the component map of this repository is not set. Run "
+                  "`praxis set components` first.\n")  # fmt: skip
         return 2
     return _KINDS[kind](_Probe(ledger, repo, from_json(frozen), stdin, out, start))
 
@@ -241,15 +256,16 @@ def _structural(p: _Probe) -> int:
     ]
     asks += [(i, None) for i in _validation(p.ledger, repo_id, version, p.start)]
     if not asks:
-        p.out.write("no structural item is due\n")
+        p.out.write("No question is due.\n")
         return 0
     tree = _read_tree(p.repo.root, p.cmap)
     if tree is None:
-        p.out.write("the working tree could not be read; every item stays due\n")
+        p.out.write(UNREAD + " Every question stays due.\n")
         return 0
     product = product_components(p.cmap)
-    p.out.write(f"{len(asks)} items due, one at a time, {DEADLINE_S:.0f} s each. "
-                "No answer is shown until the block's debrief.\n")  # fmt: skip
+    p.out.write(f"Questions due: {len(asks)}. Answer each question in "
+                f"{DEADLINE_S:.0f} seconds.\n{GRID_HELP}"
+                "Praxis does not show the correct answers.\n")  # fmt: skip
     asked = unread = 0
     for ask in asks:
         truth = _truth(tree, ask[0], product)
@@ -261,7 +277,9 @@ def _structural(p: _Probe) -> int:
         except _Quit:
             return p.abandon("structural", answered=asked, due=len(asks))
         asked += 1
-    p.out.write(f"answered {asked}; {unread} could not be scored now and stay due\n")
+    p.out.write(f"Answered: {asked}. Not asked: {unread}. Praxis cannot find the "
+                "correct answers of these questions now, so they stay "
+                "due.\n")  # fmt: skip
     return 0
 
 
@@ -300,7 +318,7 @@ def _retests(
 def _answer(p: _Probe, tree: _Tree, ask: Ask, truth: bool) -> None:
     item, exposure = ask
     shown = time.monotonic()
-    prompt = f"{_question(item)} [1 3 5 7 9, s skips; {DEADLINE_S:.0f} s] "
+    prompt = f"{_question(item)} [1 3 5 7 9 s] "
     answer = p.ask(prompt, _grid)
     seconds = time.monotonic() - shown
     when = p.now()
@@ -384,18 +402,21 @@ def _drift(p: _Probe) -> int:
     repo_id, version = p.repo.repo_id, p.cmap.version
     week, _ = _week(p.start)
     if p.ledger.drift_responses_for(repo_id, version, week):
-        p.out.write(f"the drift probe for {week} is already answered\n")
+        p.out.write(f"You answered the questions for {week}. Run this command again "
+                    "next week.\n")  # fmt: skip
         return 0
     since = p.start - dt.timedelta(days=DRIFT_DAYS)
     history = p.ledger.edge_history(repo_id)
     changed, sessions = _changed(history, version, since, p.start)
     product = product_components(p.cmap)
-    p.out.write(f"In the {DRIFT_DAYS} days before now, did the agent change which "
-                "other components code in each of these imports?\n")  # fmt: skip
+    p.out.write(f"In the last {DRIFT_DAYS} days, did the agent change which other "
+                "components each component imports?\n"
+                "Type y for yes or n for no. Type s to skip a "
+                "component.\n")  # fmt: skip
     said: list[bool | None] = []
     for c in product:
         try:
-            said.append(p.ask(f"  {c} [y n, s skips] ", _yes_no))
+            said.append(p.ask(f"  {c} [y n s] ", _yes_no))
         except _Quit:
             return p.abandon("drift", answered=len(said), of=len(product))
     sources = [f"edge_history:{_stamp(since)}/{_stamp(p.start)}", *sessions]
@@ -406,7 +427,7 @@ def _drift(p: _Probe) -> int:
         p.ledger.drift_response(ev=ev, repo_id=repo_id, map_version=version,
                                 ts=_stamp(p.now()), week=week, component=c,
                                 said_changed=s, did_change=did)  # fmt: skip
-        p.out.write(f"  {c}: you said {SAID[s]}, changed: {SAID[did]}\n")
+        p.out.write(f"  {c}: your answer: {SAID[s]}. Changed: {FOUND[did]}.\n")
     return 0
 
 
@@ -475,7 +496,7 @@ def _decision(p: _Probe) -> int:
         and L_DAYS <= _days(d["ts"], p.start) <= DECISION_MAX_DAYS
     ]
     if not rows:
-        p.out.write("no decision is due\n")
+        p.out.write("No decision is due.\n")
         return 0
     projects = Path.home() / ".claude" / "projects"
     asked = 0
@@ -492,7 +513,7 @@ def _decision(p: _Probe) -> int:
         except _Quit:
             return p.abandon("decision", answered=asked, due=len(rows))
         asked += 1
-    p.out.write(f"answered {asked} of {len(rows)} due decisions\n")
+    p.out.write(f"Answered: {asked} of {len(rows)} due decisions.\n")
     return 0
 
 
@@ -513,17 +534,18 @@ def _transcript_state(decision: sqlite3.Row, projects: Path) -> str:
 
 def _recall(p: _Probe, d: sqlite3.Row) -> None:
     k = d["option_count"]
-    p.out.write(f"On {d['ts'][:10]} the agent's {d['tool_name']} offered {k} "
+    p.out.write(f"On {d['ts'][:10]}, the agent tool {d['tool_name']} showed you {k} "
                 "options.\n")  # fmt: skip
-    p.ask("  What was decided, and why? (shown, then discarded) ", _discard)
-    recalled = p.ask(f"  Which option was chosen? [1-{k}, s skips] ", partial(_pick, k))
+    p.ask("  Type what you decided and why. Praxis does not keep this text.\n  ",
+          _discard)  # fmt: skip
+    recalled = p.ask(f"  Which option did you select? [1-{k} s] ", partial(_pick, k))
     when = p.now()
     ev = Evidence("full", [f"decision:{d['session_id']}:{d['tool_use_id']}"],
                   REDUCER_VERSION, DECISION_ASSUMPTIONS, [])  # fmt: skip
     p.ledger.decision_response(ev=ev, decision_id=d["id"], ts=_stamp(when),
                                recalled_index=recalled,
                                lag_days=_days(d["ts"], when))  # fmt: skip
-    p.out.write(f"  It was option {d['chosen_index'] + 1}.\n")
+    p.out.write(f"  You selected option {d['chosen_index'] + 1}.\n")
 
 
 # -- K knockout ---------------------------------------------------------------------
@@ -535,29 +557,31 @@ def _knockout(p: _Probe) -> int:
     fresh = [r for r in p.ledger.scenario_runs_for(p.repo.repo_id, p.cmap.version)
              if head is not None and r["tree_hash"] == head]  # fmt: skip
     if not fresh:
-        p.out.write("no scenario run traced HEAD's tree; the traces are stale: run "
-                    "`praxis scenarios run`\n")  # fmt: skip
+        p.out.write(f"{VERB}: no scenario run is recorded for the files of the current "
+                    "commit. Run `praxis run scenarios` first.\n")  # fmt: skip
         return 2
     traced = _traced(fresh)
     if not traced:
-        p.out.write("no scenario has an ok run on HEAD's tree; the knockout needs "
-                    "one\n")  # fmt: skip
+        p.out.write(f"{VERB}: the knockout test needs a scenario whose last run on "
+                    "the current commit ended with exit code 0. No scenario has "
+                    "one.\n")  # fmt: skip
         return 2
     product = product_components(p.cmap)
     key = json.dumps([p.repo.repo_id, _stamp(p.start), "knockout"])
     knocked = Random(int(hashlib.sha256(key.encode()).hexdigest(), 16)).choice(product)
-    failed = [s for s, (comps, _) in traced.items() if knocked in comps]
-    p.out.write("One component is knocked out: every public name in it raises.\n"
-                f"Scenarios that fail: {', '.join(failed) or 'none'} "
-                f"(of {len(traced)})\n")  # fmt: skip
+    entered = [s for s, (comps, _) in traced.items() if knocked in comps]
+    p.out.write("Praxis selected one component. It did not run a scenario.\n"
+                "Scenarios that entered it in their last recorded run: "
+                f"{', '.join(entered) or 'none'} "
+                f"({len(entered)} of {len(traced)}).\n")  # fmt: skip
     p.out.writelines(f"  {i} {c}\n" for i, c in enumerate(product, 1))
-    prompt = "Which was knocked out? [numbers, space-separated; s skips] "
+    prompt = "Which component did Praxis select? [numbers with spaces between, or s] "
     try:
         named = p.ask(prompt, partial(_choices, len(product)))
     except _Quit:
         return p.abandon("knockout")
     if named is None:
-        p.out.write("skipped\n")
+        p.out.write("Skipped. Praxis recorded no result.\n")
         return 0
     names = [product[i] for i in named]
     ev = Evidence("full", [f"scenario_run:{r[1]}" for r in traced.values()],
@@ -566,7 +590,7 @@ def _knockout(p: _Probe) -> int:
                       map_version=p.cmap.version, ts=_stamp(p.now()),
                       component_knocked=knocked, scenario_id=None,
                       hit=knocked in names)  # fmt: skip
-    p.out.write("recorded\n")
+    p.out.write("Recorded.\n")
     return 0
 
 
@@ -584,15 +608,16 @@ def _pathfinder(p: _Probe) -> int:
     product = product_components(p.cmap)
     tree = _read_tree(p.repo.root, p.cmap)
     if tree is None:
-        p.out.write("the working tree could not be read; nothing was asked\n")
+        p.out.write(f"{VERB}: {UNREAD} Praxis asked no question.\n")
         return 2
     pairs = list(combinations(range(len(product)), 2))
-    p.out.write(f"How related is each pair, 1 (unrelated) to 9 (closely)? "
-                f"{len(pairs)} pairs.\n")  # fmt: skip
+    p.out.write("For each pair of components, type how closely they are related: "
+                f"1 (not related) to 9 (closely related). Pairs: {len(pairs)}.\n"
+                "Type s to stop.\n")  # fmt: skip
     dist = [[0.0] * len(product) for _ in product]
     for rated, (i, j) in enumerate(pairs):
         try:
-            r = p.ask(f"  {product[i]} - {product[j]} [1-9, s stops] ", _rating)
+            r = p.ask(f"  {product[i]} - {product[j]} [1-9 s] ", _rating)
         except _Quit:
             r = None
         if r is None:
@@ -607,7 +632,8 @@ def _pathfinder(p: _Probe) -> int:
     p.ledger.pathfinder_run(ev=ev, repo_id=p.repo.repo_id, map_version=p.cmap.version,
                             ts=_stamp(p.now()), n_components=len(product), pfsim=s,
                             pfsim_minus_chance=beyond)  # fmt: skip
-    p.out.write("recorded; the ratings are discarded\n")
+    p.out.write("Praxis recorded the similarity score. It did not keep your "
+                "ratings.\n")  # fmt: skip
     return 0
 
 

@@ -1,9 +1,11 @@
-"""Item supply: `praxis components freeze` fixes a repository's component map and fills
-its D1 pool; `praxis components` shows the map and what the pool has left (design 03
-sections 2.4, 3.1 and 3.5). The map frozen is the owner's toml when there is one, else
-the mechanical map; `praxis components derive` prints the mechanical map in the toml's
-format, so the owner overrides it by editing the draft. Freeze refuses fewer than 5 or
-more than 30 product components (design 2.2), printing a mechanical map's draft.
+"""Item supply: `praxis set components` fixes (freezes) a repository's component map and
+fills its D1 pool; `praxis show components` shows the map and what the pool has left
+(design 03 sections 2.4, 3.1 and 3.5). The map frozen is the owner's toml when there is
+one, else the mechanical map; `praxis make components` prints the mechanical map in the
+toml's format, so the owner overrides it by editing the draft. Freeze refuses fewer than
+5 or more than 30 product components (design 2.2), printing a mechanical map's draft.
+The first freeze of a repository also draws its start week (task.draw_start, design
+6.4), silently: the owner must not learn the schedule.
 
 A D1 item exists only for an ordered pair of product components that each have a
 Python file X1 parsed: a component it never parsed is unknown, so its pairs are counted
@@ -45,7 +47,7 @@ from praxis.components import (
 from praxis.extract import GIT_TIMEOUT_S, Edge, StaticGraph, reach, static_imports
 from praxis.schema import MAP_REASONS
 from praxis.store import Evidence, Store
-from praxis.task import K_E, K_P, K_R
+from praxis.task import K_E, K_P, K_R, draw_start
 from praxis.unassisted import Repo, locate
 
 if TYPE_CHECKING:
@@ -62,9 +64,10 @@ ASSUMPTIONS = (
     "a pair is an item only when both components have a Python file X1 parsed",
 )
 COUNT_KEYS = ("components", "pairs", "items", "positive", "unexposed", "tasks_left")
-FREEZE = "praxis components freeze"
-DERIVE = "praxis components derive"
-SHOW = "praxis components"
+FREEZE = "praxis set components"
+DERIVE = "praxis make components"
+SHOW = "praxis show components"
+NO_REPO = "run this command in a git repository."
 Row = tuple[str, str, str, bool, int, int | None, bool | None]
 
 
@@ -92,9 +95,9 @@ def freeze(
 ) -> int:
     repo = locate(repo_root)
     if repo is None:
-        return _refuse(stdout, FREEZE, "not inside a git repository")
+        return _refuse(stdout, FREEZE, NO_REPO)
     if reason is not None and reason not in MAP_REASONS:
-        return _refuse(stdout, FREEZE, f"--reason is one of {' '.join(MAP_REASONS)}")
+        return _refuse(stdout, FREEZE, f"write --reason as one of {_reasons()}.")
     ledger = Store(praxis_home / "ledger.db").open()
     try:
         return _freeze(ledger, repo, praxis_home, (stdout, now, reason))
@@ -105,7 +108,7 @@ def freeze(
 def show(repo_root: Path, praxis_home: Path, stdout: TextIO) -> int:
     repo = locate(repo_root)
     if repo is None:
-        return _refuse(stdout, SHOW, "not inside a git repository")
+        return _refuse(stdout, SHOW, NO_REPO)
     path = praxis_home / "ledger.db"
     frozen, counts = None, dict.fromkeys(COUNT_KEYS)
     if path.exists():  # a read never creates the ledger
@@ -117,20 +120,20 @@ def show(repo_root: Path, praxis_home: Path, stdout: TextIO) -> int:
             ledger.close()
     if frozen is None:
         stdout.write(
-            f"{SHOW}: no frozen map for repository {repo.repo_id};"
-            f" `{FREEZE}` derives and freezes one\n"
+            f"{SHOW}: repository {repo.repo_id} has no set component map. To set one,"
+            f" run `{FREEZE}`.\n"
         )
         return 0
     cmap = from_json(frozen)
     stdout.write(
-        f"map {cmap.version} ({cmap.source}),"
+        f"Set component map {cmap.version} ({cmap.source}):"
         f" {len(product_components(cmap))} product components\n"
     )
     for rule in cmap.rules:
-        fixed = " (fixed class)" if rule.id in RESERVED else ""
+        fixed = " (fixed component)" if rule.id in RESERVED else ""
         stdout.write(f"  {rule.id}{fixed}: {' '.join(rule.globs)}\n")
     for warning in cmap.warnings:
-        stdout.write(f"warning: {warning}\n")
+        stdout.write(f"Warning: {warning}\n")
     for line in _unmapped(repo.root, cmap):
         stdout.write(line + "\n")
     stdout.write(_supply_line(counts) + "\n")
@@ -138,15 +141,17 @@ def show(repo_root: Path, praxis_home: Path, stdout: TextIO) -> int:
 
 
 def draft(repo_root: Path, praxis_home: Path, stdout: TextIO, write: bool) -> int:
-    """`praxis components derive`: the mechanical map in the owner's toml format,
+    """`praxis make components`: the mechanical map in the owner's toml format,
     printed, or with ``write`` saved where load_owner reads it, never over a file."""
     repo = locate(repo_root)
     if repo is None:
-        return _refuse(stdout, DERIVE, "not inside a git repository")
+        return _refuse(stdout, DERIVE, NO_REPO)
     try:
         text = to_toml(derive(repo.root, repo.repo_id))
     except TooFewComponents as exc:
-        return _refuse(stdout, DERIVE, f"{exc}: no map to draft")
+        return _refuse(
+            stdout, DERIVE, f"the repository has {exc}. Praxis made no draft."
+        )
     if not write:
         stdout.write(text)
         return 0
@@ -156,8 +161,8 @@ def draft(repo_root: Path, praxis_home: Path, stdout: TextIO, write: bool) -> in
         with path.open("x", encoding="utf-8") as handle:
             handle.write(text)
     except FileExistsError:
-        return _refuse(stdout, DERIVE, f"{path} exists; edit it, or move it away")
-    stdout.write(f"wrote {path}; edit it, then `{FREEZE}`\n")
+        return _refuse(stdout, DERIVE, f"{path} exists. Edit that file, or delete it.")
+    stdout.write(f"Praxis wrote {path}. Edit it, then run `{FREEZE}`.\n")
     return 0
 
 
@@ -178,6 +183,10 @@ def pool_counts(praxis_home: Path, repo_id: str) -> dict[str, int | None]:
 def _refuse(stdout: TextIO, verb: str, why: str) -> int:
     stdout.write(f"{verb}: {why}\n")
     return 2
+
+
+def _reasons() -> str:
+    return ", ".join(MAP_REASONS)
 
 
 def _candidate(repo: Repo, praxis_home: Path) -> ComponentMap | None:
@@ -205,7 +214,7 @@ def _freeze(
         graph = static_imports(repo.root, partial(assign, cmap))
         tree, dirty = _tree(repo.root)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return _refuse(stdout, FREEZE, "git could not list the working tree")
+        return _refuse(stdout, FREEZE, "git cannot list the working tree.")
     try:
         ledger.component_map_put(to_json(cmap), now)
         ledger.component_map_freeze(
@@ -213,14 +222,16 @@ def _freeze(
         )
     except sqlite3.IntegrityError:
         return _refuse(
-            stdout, FREEZE, f"map {cmap.version} was superseded; it cannot be refrozen"
+            stdout, FREEZE, f"map {cmap.version} was replaced. You cannot set it again."
         )
     except ValueError:  # an unedited derive draft: the mechanical map's own rules
         return _refuse(
             stdout,
             FREEZE,
-            f"map {cmap.version} is stored as another source's map with the same rules",
+            f"map {cmap.version} has the same rules as a stored map from a different"
+            " source. Edit the owner map file, or delete it.",
         )
+    draw_start(ledger, repo.repo_id, cmap.version, now)
     product = product_components(cmap)
     supply = _supply(graph, product, partial(assign, cmap))
     sources = [f"extractor:{graph.extractor_version}", f"map:{cmap.version}"]
@@ -230,14 +241,16 @@ def _freeze(
     flipped = readmit(ledger, repo.repo_id, cmap, supply, (now, sources, notes))
     written, present = _put(ledger, repo.repo_id, cmap, supply, (now, sources, notes))
     stdout.write(
-        f"map {cmap.version} frozen ({cmap.source}),"
+        f"Praxis set component map {cmap.version} ({cmap.source}):"
         f" {len(product)} product components\n"
     )
     for line in _report(cmap, old, reason, supply, product):
         stdout.write(line + "\n")
     stdout.write(f"D1 items: {written} written at epoch 0, {present} already present\n")
     if present:
-        stdout.write(f"D1 truth flips re-admitted at the next epoch: {flipped}\n")
+        stdout.write(
+            f"D1 items added at the next epoch for a changed answer: {flipped}\n"
+        )
     stdout.write(_supply_line(_counts(ledger, repo.repo_id)) + "\n")
     return 0
 
@@ -266,8 +279,8 @@ def _accept(
         return _refuse(
             stdout,
             FREEZE,
-            f"map {old} is frozen; changing to {cmap.version} needs --reason,"
-            f" one of {' '.join(MAP_REASONS)}",
+            f"map {old} is set. To change to map {cmap.version}, write --reason as one"
+            f" of {_reasons()}.",
         )
     return cmap, old
 
@@ -297,13 +310,13 @@ def _size(
             ts=now, code="too_few_components", detail=detail, repo_id=repo.repo_id
         )
         why = f"fewer than {MIN_COMPONENTS}"
-    code = _refuse(stdout, FREEZE, f"{why} product components in the {source} map")
+    code = _refuse(stdout, FREEZE, f"the {source} map has {why} product components.")
     if cmap is not None and source == "mechanical":
         stdout.write(to_toml(cmap))
         stdout.write(
-            f"{FREEZE}: `{DERIVE} --write` saves this draft as"
-            f" {owner_path(praxis_home, repo.repo_id)}; merge or split"
-            " components there, then freeze again\n"
+            f"{FREEZE}: to write this draft to"
+            f" {owner_path(praxis_home, repo.repo_id)}, run `{DERIVE} --write`."
+            f" Merge or split components in that file. Then run `{FREEZE}` again.\n"
         )
     return code
 
@@ -455,24 +468,26 @@ def _report(
     product: list[str],
 ) -> list[str]:
     """The E03 figures for this map: pair pool, base rate, reach-through, gaps."""
-    lines = [f"warning: {w}" for w in cmap.warnings]
+    lines = [f"Warning: {w}" for w in cmap.warnings]
     if old is not None:
-        lines.append(f"superseded map {old} ({reason})")
+        lines.append(f"This map replaces map {old}. Reason: {reason}")
     pairs, edges = supply.pairs, len(supply.edges)
     rate = "unknown" if pairs == 0 else f"{edges / pairs:.3f}"
     through = len(supply.reach) - edges
     unknown = len(product) * (len(product) - 1) - pairs
     lines += [
-        f"X1 {supply.extractor_version}: {edges} edges among {pairs} ordered pairs,"
-        f" base rate {rate}",
-        f"  non-edge pairs: {through} reach through another component,"
-        f" {pairs - edges - through} no path",
-        f"  pairs not generated (a component with no parsed Python file): {unknown}",
+        f"X1 {supply.extractor_version}: imports in {edges} of {pairs} ordered pairs"
+        f" of components, base rate {rate}",
+        f"  pairs with no direct import: {through} connect through a different"
+        f" component, {pairs - edges - through} have no path",
+        "  pairs with no item, because a component has no parsed Python file:"
+        f" {unknown}",
     ]
     partial_ids = [c for c in supply.parsed if supply.partial[c]]
     if partial_ids:
         lines.append(
-            f"  partial (blind spot or parse failure): {' '.join(partial_ids)}"
+            "  components with partial coverage (a blind spot or a parse failure):"
+            f" {' '.join(partial_ids)}"
         )
     return lines
 
@@ -506,17 +521,17 @@ def _counts(ledger: Store, repo_id: str) -> dict[str, int | None]:
 
 def _supply_line(counts: dict[str, int | None]) -> str:
     if counts["items"] is None:
-        return "pool: unknown (no frozen map)"
+        return "Items: unknown (no set component map)"
     return (
-        f"pool: {counts['items']} items ({counts['positive']} true),"
-        f" {counts['unexposed']} unexposed, {counts['tasks_left']} tasks at"
-        f" {ITEMS_PER_TASK} items per task"
+        f"Items: {counts['items']} ({counts['positive']} true),"
+        f" {counts['unexposed']} not used by a task, enough for"
+        f" {counts['tasks_left']} tasks at {ITEMS_PER_TASK} items each"
     )
 
 
 _UNTIL = {
-    "owner": "the owner's toml assigns it",
-    "mechanical": "the mechanical map is derived again",
+    "owner": "add it to the owner map file. Then run",
+    "mechanical": "run",
 }
 
 
@@ -528,7 +543,7 @@ def _unmapped(root: Path, cmap: ComponentMap) -> list[str]:
     try:
         listed = _git(root, "ls-files", "-z")
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return ["unmapped tracked paths: unknown (git could not list them)"]
+        return ["Tracked paths with no component: unknown (git cannot list them)"]
     placed = [(p, assign(cmap, p)) for p in listed.split("\0") if p]
     lost = [p for p, cid in placed if cid == UNMAPPED]
     product = set(product_components(cmap))
@@ -539,14 +554,14 @@ def _unmapped(root: Path, cmap: ComponentMap) -> list[str]:
         if p.endswith(".py") and PurePosixPath(p).parent in mapped and _code(root / p)
     ]
     lines = [
-        f"unmapped tracked paths: {len(lost)} of {len(placed)}",
-        f"unmapped Python files beside mapped ones: {len(new)}",
+        f"Tracked paths with no component: {len(lost)} of {len(placed)}",
+        f"Python files with no component, beside files that have one: {len(new)}",
     ]
     lines += [f"  {p}" for p in new]
     if new:
         lines.append(
-            f"  each stays unmapped until {_UNTIL[cmap.source]} and"
-            f" `{FREEZE} --reason new_module` refreezes"
+            f"  To give each file a component, {_UNTIL[cmap.source]}"
+            f" `{FREEZE} --reason new_module`."
         )
     return lines
 

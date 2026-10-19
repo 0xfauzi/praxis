@@ -1,10 +1,10 @@
-"""`praxis setup <agent> --apply` and `--remove`: the one consented write outside the
-repository.
+"""`praxis install <agent>` and `praxis remove <agent>`: the one consented write outside
+the repository.
 
 AGENTS.md invariant 8. Exactly one named file is written, after the owner has seen the
 change and typed yes on a terminal. Without a terminal there is no yes, so there is no
 write. The previous bytes of the file are kept under $PRAXIS_HOME so the write can be
-undone by hand even when `--remove` cannot parse what a later tool did to the file.
+undone by hand even when `praxis remove` cannot parse what a later tool did to the file.
 """
 
 from __future__ import annotations
@@ -90,10 +90,10 @@ def load(path: Path) -> dict[str, Any]:
         parsed = json.loads(raw)
     except ValueError as exc:
         raise Refusal(
-            f"{path} is not valid JSON ({exc}); fix it by hand first"
+            f"{path} is not valid JSON ({exc}). Make it valid first."
         ) from exc
     if not isinstance(parsed, dict):
-        raise Refusal(f"{path} must hold a JSON object at the top level")
+        raise Refusal(f"{path} has no JSON object at the top level.")
     return parsed
 
 
@@ -104,7 +104,7 @@ def merged(data: dict[str, Any], agent: str) -> dict[str, Any]:
     if hooks is None:
         hooks = out["hooks"] = {}
     if not isinstance(hooks, dict):
-        raise Refusal("the file's 'hooks' key is not a JSON object")
+        raise Refusal("the 'hooks' key in the file is not a JSON object.")
     for event, ours in snippet(agent)["hooks"].items():
         existing = hooks.get(event)
         kept = (
@@ -146,11 +146,11 @@ def describe(before: dict[str, Any], after: dict[str, Any], agent: str) -> list[
         others = sum(1 for e in a_hooks.get(event, []) if not is_ours(e))
         if b_ours != a_ours:
             lines.append(
-                f"  {event}: praxis entries {b_ours} -> {a_ours}"
-                f" ({others} other entr{'y' if others == 1 else 'ies'} kept)"
+                f"  {event}: praxis hooks {b_ours} -> {a_ours},"
+                f" other hooks {others} with no change"
             )
     if not lines:
-        lines.append(f"  no change: the {agent} file already holds exactly this")
+        lines.append(f"  no change: the {agent} settings file needs no change")
     return lines
 
 
@@ -194,12 +194,17 @@ def apply(
     path = target_path(agent, home)
     tty = (stdin.isatty() and out.isatty()) if assume_tty is None else assume_tty
     if not tty:
+        verb = "remove" if remove else "install"
         out.write(
-            f"refused: `praxis setup {agent} {'--remove' if remove else '--apply'}`"
-            " writes a file outside this repository and needs your yes on a"
-            " terminal (AGENTS.md invariant 8). Run it interactively, or use --print"
-            " and paste.\n"
+            f"refused: `praxis {verb} {agent}` writes {path}, a file outside this"
+            " repository.\nIt writes only after you type yes on a terminal (AGENTS.md"
+            " invariant 8).\nRun the command again on a terminal.\n"
         )
+        if not remove:
+            out.write(
+                "To show the settings and write no file, run"
+                f" `praxis show install {agent}`.\n"
+            )
         return 2
     try:
         before = load(path)
@@ -212,15 +217,15 @@ def apply(
         out.write(line + "\n")
     if after == before:
         return 1
-    out.write("write this file? [y/N] ")
+    out.write("Type yes to write this file. [y/N] ")
     out.flush()
     answer = stdin.readline().strip().lower()
     if answer not in ("y", "yes"):
-        out.write("not written\n")
+        out.write("praxis did not write the file.\n")
         return 1
     kept = backup(path, praxis_home)
     write_atomic(path, after)
-    out.write(f"written {path}\n")
+    out.write(f"praxis wrote {path}.\n")
     if kept is not None:
-        out.write(f"previous contents kept at {kept}\n")
+        out.write(f"The file before this write is at {kept}.\n")
     return 0

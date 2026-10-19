@@ -1,7 +1,10 @@
-"""`praxis doctor`: what is installed, what is recorded, what is pending. Read-only: it
-opens the ledger with SQLite's read-only mode and never creates it. Probes due are read
+"""`praxis show status`: what is installed, what is recorded, what is due. Read-only: it
+opens the ledger with SQLite's read-only mode and never creates it. Items due are read
 through probe.due, which opens a Store; that open migrates when the schema version
-differs, so doctor asks for them only from a ledger at the current version."""
+differs, so this module asks for them only from a ledger at the current version.
+
+hooks, probe and scenarios are imported where they are used: the knockout tracer counts
+a module body that runs at import as a component that the scenario entered."""
 
 from __future__ import annotations
 
@@ -10,7 +13,7 @@ import sqlite3
 import subprocess
 from typing import TYPE_CHECKING, TextIO
 
-from praxis import hooks, install
+from praxis import install
 from praxis.schema import SCHEMA_VERSION
 from praxis.unassisted import Repo, attached_agents, locate
 
@@ -43,61 +46,60 @@ def _git_version() -> str:
         )
     except (OSError, subprocess.TimeoutExpired):
         return "git: not found"
-    return done.stdout.strip() or "git: no version reported"
+    return done.stdout.strip() or "git: no version in its output"
 
 
 def _hooks_state(agent: str, home: Path) -> str:
     path = install.target_path(agent, home)
+    run = f"To install the praxis hooks, run `praxis install {agent}`."
     if not path.exists():
-        return f"{agent}: {path} absent; `praxis setup {agent} --apply` installs"
+        return f"{agent}: {path} does not exist. {run}"
     try:
         data = install.load(path)
     except install.Refusal as exc:
         return f"{agent}: {exc.reason}"
     hooks = data.get("hooks")
     if not isinstance(hooks, dict):
-        return f"{agent}: no hooks in {path}; `praxis setup {agent} --apply` installs"
-    ours = sorted(
+        return f"{agent}: {path} has no hooks. {run}"
+    ours = {
         e
         for e, v in hooks.items()
         if isinstance(v, list) and any(map(install.is_ours, v))
-    )
+    }
     want = [*install.EVENTS[agent]["unmatched"], *install.EVENTS[agent]["matched"]]
     missing = [e for e in want if e not in ours]
-    if not ours:
-        return (
-            f"{agent}: hooks present, none are praxis; `praxis setup {agent} --apply`"
-        )
-    if missing:
-        return (
-            f"{agent}: praxis hooks on {len(ours)} events, missing {', '.join(missing)}"
-        )
-    return f"{agent}: praxis hooks installed on all {len(ours)} events"
+    if not missing:
+        return f"{agent}: all {len(want)} events have a praxis hook."
+    have = len(want) - len(missing)
+    return (
+        f"{agent}: {have} of {len(want)} events have a praxis hook. These events have"
+        f" none: {', '.join(missing)}. {run}"
+    )
 
 
 def _ledger_state(praxis_home: Path) -> list[str]:
     path = praxis_home / "ledger.db"
     if not path.exists():
-        return [f"ledger: {path} absent; the first hook event creates it"]
+        return [f"ledger: {path} does not exist. The first hook event makes it."]
     try:
         db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     except sqlite3.Error as exc:
-        return [f"ledger: {path} cannot be opened read-only ({exc})"]
+        return [f"ledger: praxis cannot read {path} ({exc})."]
     lines = [f"ledger: {path}"]
     try:
         for label, sql in (
             ("sessions", "SELECT COUNT(DISTINCT session_id) FROM hook_events"),
             ("hook events", "SELECT COUNT(*) FROM hook_events"),
             (
-                "unobservable or error events",
+                "hook events with the outcome unobservable or error",
                 ("SELECT COUNT(*) FROM hook_events WHERE outcome <> 'ok'"),
             ),
-            ("attribution rows", "SELECT COUNT(*) FROM attributions"),
+            ("line records", "SELECT COUNT(*) FROM attributions"),
         ):
             try:
                 (n,) = db.execute(sql).fetchone()
             except sqlite3.Error:
-                n = "table absent"
+                n = "no table"
             lines.append(f"  {label}: {n}")
         lines += _measurement(db)
     finally:
@@ -106,20 +108,25 @@ def _ledger_state(praxis_home: Path) -> list[str]:
 
 
 def _measurement(db: sqlite3.Connection) -> list[str]:
-    """The instrument's state: frozen maps, tasks, binding, voids and flags."""
+    """The instrument's state: set maps, tasks, binding, voids and flags."""
     try:
         maps = db.execute(_FROZEN).fetchall()
         registered, bound = db.execute(_BINDING).fetchone()
         grouped = [(label, db.execute(sql).fetchall()) for label, sql in _GROUPED]
     except sqlite3.Error:
-        return ["  measurement tables: absent; the next hook event adds them"]
+        return ["  measurement tables: none. The next hook event makes them."]
     lines = [
-        f"  repository {r}: frozen map {v} ({s})" if v is not None
-        else f"  repository {r}: no frozen map; `praxis components freeze`"
+        f"  repository {r}: set component map {v} ({s})" if v is not None
+        else f"  repository {r}: no set component map. To set one, run"
+             " `praxis set components` in that repository."
         for r, v, s in maps
     ]  # fmt: skip
-    rate = f"{bound} of {registered}" if registered else "no task registered"
-    lines.append(f"  binding rate (bound or closed over registered): {rate}")
+    rate = (
+        f"{bound} of {registered} recorded tasks have the status bound or closed"
+        if registered
+        else "no recorded task"
+    )
+    lines.append(f"  binding rate: {rate}")
     for label, rows in grouped:
         found = ", ".join(f"{k} {n}" for k, n in rows) or "none"
         lines.append(f"  {label}: {found}")
@@ -128,8 +135,9 @@ def _measurement(db: sqlite3.Connection) -> list[str]:
 
 def _due(repo: Repo, praxis_home: Path) -> str:
     path = praxis_home / "ledger.db"
+    label = "items due for `praxis test structure`"
     if not path.exists():
-        return "probes due: no ledger"
+        return f"{label}: no ledger"
     try:
         db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         try:
@@ -137,15 +145,14 @@ def _due(repo: Repo, praxis_home: Path) -> str:
         finally:
             db.close()
     except sqlite3.Error as exc:
-        return f"probes due: unknown, the ledger cannot be read ({exc})"
+        return f"{label}: unknown. Praxis cannot read the ledger ({exc})."
     if version != SCHEMA_VERSION:
-        return "probes due: unknown until the next hook event migrates the ledger"
-    # Imported here: cli imports this module, and every hook pays for what it imports.
-    from praxis import probe
+        return f"{label}: unknown until the next hook event updates the ledger"
+    from praxis import hooks, probe
 
     due = probe.due(praxis_home, repo.repo_id, hooks.now_iso(), probe.L_DAYS)
     window = f"{probe.L_DAYS:g} to {probe.L_MAX_DAYS:g} days after exposure"
-    return f"probes due now (structural, {window}): {len(due)}"
+    return f"{label} ({window}): {len(due)}"
 
 
 def run(*, cwd: Path, home: Path, praxis_home: Path, out: TextIO) -> int:
@@ -158,12 +165,13 @@ def run(*, cwd: Path, home: Path, praxis_home: Path, out: TextIO) -> int:
         out.write(line + "\n")
     repo = locate(cwd)
     if repo is None:
-        out.write("cwd: not inside a git repository\n")
+        out.write("current directory: not in a git repository\n")
     else:
         agents = attached_agents(repo.root)
-        out.write(f"cwd: repository {repo.repo_id}; agents attached: {len(agents)}\n")
+        out.write(f"current directory: repository {repo.repo_id}\n")
+        out.write(f"agents attached: {len(agents)}\n")
         out.write(_due(repo, praxis_home) + "\n")
-        from praxis import scenarios  # lazily, as probe: cli imports this module
+        from praxis import scenarios
 
         out.write(scenarios.summary(praxis_home, repo.repo_id) + "\n")
     return 0

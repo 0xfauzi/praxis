@@ -1,203 +1,230 @@
-"""The `praxis` command. A verb lands beside its integration test, never before it.
+"""The `praxis` command: a verb, then an object (`praxis show status`). A command lands
+beside its integration test, never before it.
 
 Argument parsing and dispatch only; every behaviour lives in the module that owns it.
-`praxis hook` runs inside every agent tool call, so a verb's module is imported inside
-its handler: task, probe, pool and report each cost a hook tens of milliseconds.
+Every praxis module is imported inside its handler, for two reasons: `praxis hook` runs
+inside every agent tool call and pays for each import, and the knockout tracer counts a
+module body that runs at import as a component the scenario entered.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
-from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple, NoReturn
 
-from praxis import __version__, doctor, hooks, install, store
-from praxis.schema import MAP_REASONS
-from praxis.unassisted import locate
+from praxis import __version__
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
+    from pathlib import Path
+
+# install.TARGETS names the same agents; parsing must not import install to learn them.
+AGENTS = ("claude", "codex")
+# The command object names the probe kind that the ledger stores (a technical identity).
+TEST_KINDS = {
+    "structure": "structural",
+    "changes": "drift",
+    "decisions": "decision",
+    "knockout": "knockout",
+    "pathfinder": "pathfinder",
+}
+
+
+class Option(NamedTuple):
+    name: str  # "--json" is a flag, "--session" takes a value, "agent" is positional
+    metavar: str | None
+
+
+class Command(NamedTuple):
+    verb: str
+    obj: str | None
+    args: str
+    help: str
+    handler: Callable[[argparse.Namespace], int]
+    options: tuple[Option, ...] = ()
+
+    @property
+    def name(self) -> str:
+        return " ".join(w for w in ("praxis", self.verb, self.obj) if w)
+
+    @property
+    def words(self) -> str:
+        return f"{self.name} {self.args}".rstrip()
+
+
+class _Parser(argparse.ArgumentParser):
+    """argparse with the help and the refusals in the praxis words: the usage is the
+    command list, and an unknown word prints that list."""
+
+    def format_help(self) -> str:
+        return self.format_usage()
+
+    def error(self, message: str) -> NoReturn:
+        option, _, problem = message.partition(": ")
+        if problem == "expected one argument":  # argparse's words for a bare option
+            message = f"write a value after {option.removeprefix('argument ')}."
+        self.print_usage(sys.stderr)
+        if not message.startswith("praxis "):
+            message = f"{self.prog}: {message}"
+        self.exit(2, message + "\n")
+
+    def _check_value(self, action: argparse.Action, value: object) -> None:
+        if action.choices is not None and value not in action.choices:
+            raise argparse.ArgumentError(None, f"{self.prog} {value} is not a command.")
 
 
 def main(argv: list[str] | None = None) -> int:
-    # One clock reading at command start: task seconds are measured from it (E07).
-    now = hooks.now_iso()
     parser = _parser()
-    args = parser.parse_args(argv)
-    verb = _VERBS.get(args.verb)
-    if verb is None:
+    args, extra = parser.parse_known_args(argv)
+    if args.verb is None:
         parser.print_usage(sys.stdout)
         return 0
-    return verb(args, now)
+    group = [c for c in COMMANDS if c.verb == args.verb]
+    found = [c for c in group if c.obj == args.object]
+    prog = " ".join(w for w in ("praxis", args.verb, args.object) if w)
+    problem = _problem(found, args, extra)
+    if problem is not None:
+        return _refuse(found or group, prog, problem)
+    (command,) = found
+    return command.handler(args)
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="praxis",
-        description=(
-            "Measures unassisted capability on the skills used with coding agents and "
-            "chooses the agent's mode per skill."
-        ),
-    )
-    parser.add_argument("--version", action="version", version=f"praxis {__version__}")
-    sub = parser.add_subparsers(dest="verb")
-
-    sub.add_parser(
-        "hook", help="run as an agent hook: reads one payload on stdin, exits 0"
-    )
-
-    setup = sub.add_parser("setup", help="print or install the hook block for an agent")
-    setup.add_argument("agent", choices=("claude", "codex"))
-    setup.add_argument(
-        "--print", action="store_true", dest="print_", help="print the block"
-    )
-    setup.add_argument(
-        "--apply",
-        action="store_true",
-        help="merge the block into the file, with consent",
-    )
-    setup.add_argument(
-        "--remove",
-        action="store_true",
-        help="take praxis out of the file, with consent",
-    )
-
-    sub.add_parser("doctor", help="what is installed, recorded and pending; read-only")
-
-    attr = sub.add_parser("attributions", help="attribution rows from the ledger")
-    attr.add_argument("--session", help="one session id")
-    attr.add_argument("--json", action="store_true", help="one JSON object per line")
-
-    sub.add_parser("sessions", help="sessions in the ledger with their latest totals")
-
-    sub.add_parser("task", help="register the next task, before its prompt")
-    sub.add_parser("last", help="feedback on the last closed task")
-    probe = sub.add_parser("probe", help="an unassisted probe, with no agent attached")
-    probe.add_argument("kind", help="which probe; an unknown kind lists them")
-    comps = sub.add_parser("components", help="the frozen component map and its pool")
-    actions = comps.add_subparsers(dest="action")
-    freeze = actions.add_parser(
-        "freeze", help="derive or load the map, freeze it and fill the item pool"
-    )
-    freeze.add_argument("--reason", choices=MAP_REASONS, help="why the map changed")
-    derive = actions.add_parser(
-        "derive", help="print the mechanical map as an owner map draft"
-    )
-    derive.add_argument(
-        "--write", action="store_true", help="save the draft as the owner map, once"
-    )
-    scenarios = sub.add_parser("scenarios", help="the owner's runtime scenarios")
-    scenarios.add_subparsers(dest="action").add_parser(
-        "run", help="run each scenario in a scratch clone of HEAD and record its trace"
-    )
-    sub.add_parser("report", help="scores, references and tests from the ledger")
-    return parser
+def _problem(
+    found: list[Command], args: argparse.Namespace, extra: list[str]
+) -> str | None:
+    if extra:
+        return f"these words are not part of a command: {' '.join(extra)}"
+    if not found:
+        return "the object is missing."
+    if _AGENT[0] in found[0].options and args.agent is None:
+        return "the agent is missing. Write claude or codex."
+    return None
 
 
-def _hook(_args: argparse.Namespace, _now: str) -> int:
-    return hooks.run(sys.stdin.buffer, store.home())
+def _refuse(group: Sequence[Command], prog: str, message: str) -> int:
+    sys.stderr.write(f"usage: {_usage(group)}\n{prog}: {message}\n")
+    return 2
 
 
-def _doctor(_args: argparse.Namespace, _now: str) -> int:
-    return doctor.run(
-        cwd=Path.cwd(), home=Path.home(), praxis_home=store.home(), out=sys.stdout
-    )
+def _usage(commands: Sequence[Command]) -> str:
+    width = max(len(c.words) for c in commands) + 2
+    lines = [f"  {c.words:<{width}}{c.help}" for c in commands]
+    if any("AGENT" in c.args for c in commands):
+        lines.append("  AGENT is claude or codex.")
+    return "\n".join(["praxis VERB OBJECT [OPTIONS]", "", *lines])
 
 
-def _task(_args: argparse.Namespace, now: str) -> int:
-    from praxis import task
-
-    return task.register(
-        Path.cwd(), store.home(), sys.stdin, sys.stdout, now, task.SEED
-    )
-
-
-def _last(_args: argparse.Namespace, _now: str) -> int:
-    from praxis import task
-
-    return task.last(Path.cwd(), store.home(), sys.stdout)
-
-
-def _probe(args: argparse.Namespace, now: str) -> int:
-    from praxis import probe
-
-    if args.kind not in probe.KINDS:
-        print(f"praxis probe: kinds are {', '.join(probe.KINDS)}", file=sys.stderr)
-        return 2
-    return probe.administer(
-        Path.cwd(), store.home(), sys.stdin, sys.stdout, now, args.kind
-    )
+def _parser() -> _Parser:
+    top = _Parser(prog="praxis", usage=_usage(COMMANDS), allow_abbrev=False)
+    top.add_argument("--version", action="version", version=f"praxis {__version__}")
+    verbs = top.add_subparsers(dest="verb", metavar="VERB", parser_class=_Parser)
+    for verb in dict.fromkeys(c.verb for c in COMMANDS):
+        group = [c for c in COMMANDS if c.verb == verb]
+        parser = verbs.add_parser(
+            verb, prog=f"praxis {verb}", usage=_usage(group), allow_abbrev=False
+        )
+        if group[0].obj is None:
+            parser.set_defaults(object=None)
+            _add_options(parser, group[0].options)
+            continue
+        objects = parser.add_subparsers(dest="object", metavar="OBJECT")
+        for c in group:
+            sub = objects.add_parser(
+                str(c.obj), prog=c.name, usage=_usage([c]), allow_abbrev=False
+            )
+            _add_options(sub, c.options)
+    return top
 
 
-def _components(args: argparse.Namespace, now: str) -> int:
-    from praxis import pool
-
-    if args.action == "freeze":
-        return pool.freeze(Path.cwd(), store.home(), sys.stdout, now, args.reason)
-    if args.action == "derive":
-        return pool.draft(Path.cwd(), store.home(), sys.stdout, args.write)
-    return pool.show(Path.cwd(), store.home(), sys.stdout)
-
-
-def _scenarios(args: argparse.Namespace, now: str) -> int:
-    from praxis import scenarios
-
-    if args.action == "run":
-        return scenarios.run(Path.cwd(), store.home(), sys.stdout, now)
-    return scenarios.show(Path.cwd(), store.home(), sys.stdout)
+def _add_options(parser: argparse.ArgumentParser, options: tuple[Option, ...]) -> None:
+    for o in options:
+        if not o.name.startswith("-"):
+            # Optional to argparse so that a missing agent gets the praxis refusal.
+            parser.add_argument(o.name, nargs="?", choices=AGENTS)
+        elif o.metavar is None:
+            parser.add_argument(o.name, action="store_true")
+        else:
+            parser.add_argument(o.name, metavar=o.metavar)
 
 
-def _report(_args: argparse.Namespace, _now: str) -> int:
-    from praxis import report, task
+def _now() -> str:
+    # One clock reading at command start, before any prompt: task seconds are measured
+    # from it (E07).
+    from praxis.hooks import now_iso
 
-    repo = locate(Path.cwd())
-    if repo is None:
-        print("praxis report: not inside a git repository")
-        return 2
-    ledger = store.Store(store.home() / "ledger.db").open()
-    try:
-        scores = report.scores(ledger, repo.repo_id, seed=task.SEED, draws=report.DRAWS)
-    finally:
-        ledger.close()
-    try:
-        report.render(scores, sys.stdout)
-    except ValueError as exc:  # a refused word with no met rule: nothing was written
-        print(exc, file=sys.stderr)
-        return 1
+    return now_iso()
+
+
+def _home() -> Path:
+    from praxis.store import home
+
+    return home()
+
+
+def _cwd() -> Path:
+    from pathlib import Path
+
+    return Path.cwd()
+
+
+def _hook(_args: argparse.Namespace) -> int:
+    from praxis import hooks
+
+    return hooks.run(sys.stdin.buffer, _home())
+
+
+def _show_install(args: argparse.Namespace) -> int:
+    import json
+
+    from praxis import install
+
+    print(json.dumps(install.snippet(args.agent), indent=2))
     return 0
 
 
-def _setup(args: argparse.Namespace, _now: str) -> int:
-    agent = args.agent
-    if args.apply or args.remove:
-        return install.apply(
-            agent=agent,
-            remove=args.remove,
-            home=Path.home(),
-            praxis_home=store.home(),
-            stdin=sys.stdin,
-            out=sys.stdout,
-        )
-    target = f"~/{install.TARGETS[agent]}"
-    if not args.print_:
-        print(
-            f"praxis setup {agent} --print   # the block to merge into {target}\n"
-            f"praxis setup {agent} --apply   # merge it there, after your yes"
-        )
-        return 0
-    print(json.dumps(install.snippet(agent), indent=2))
-    return 0
+def _install(args: argparse.Namespace) -> int:
+    return _write_settings(args.agent, remove=False)
 
 
-def _attributions(args: argparse.Namespace, _now: str) -> int:
-    ledger = store.Store(store.home() / "ledger.db").open()
+def _remove(args: argparse.Namespace) -> int:
+    return _write_settings(args.agent, remove=True)
+
+
+def _write_settings(agent: str, *, remove: bool) -> int:
+    from pathlib import Path
+
+    from praxis import install
+
+    return install.apply(
+        agent=agent,
+        remove=remove,
+        home=Path.home(),
+        praxis_home=_home(),
+        stdin=sys.stdin,
+        out=sys.stdout,
+    )
+
+
+def _show_status(_args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from praxis import doctor
+
+    return doctor.run(cwd=_cwd(), home=Path.home(), praxis_home=_home(), out=sys.stdout)
+
+
+def _show_lines(args: argparse.Namespace) -> int:
+    from praxis.store import Store
+
+    ledger = Store(_home() / "ledger.db").open()
     try:
         rows = ledger.attribution_rows(args.session)
     finally:
         ledger.close()
     if args.json:
+        import json
+
         for r in rows:
             print(json.dumps(dict(r)))
         return 0
@@ -214,15 +241,16 @@ def _attributions(args: argparse.Namespace, _now: str) -> int:
     return 0
 
 
-def _sessions(_args: argparse.Namespace, _now: str) -> int:
-    ledger = store.Store(store.home() / "ledger.db").open()
+def _show_sessions(_args: argparse.Namespace) -> int:
+    from praxis.store import Store
+
+    ledger = Store(_home() / "ledger.db").open()
     try:
-        sessions = ledger.sessions()
         print(
-            "session  boundaries  agent  human  preexisting  ambiguous  reverted"
-            "  (latest boundary)"
+            "session  hook events  agent  human  preexisting  ambiguous  reverted"
+            "  (at the last hook event)"
         )
-        for s in sessions:
+        for s in ledger.sessions():
             rows = ledger.attribution_rows(s)
             if not rows:
                 print(f"{s[:8]}  0  -  -  -  -  -")
@@ -255,16 +283,126 @@ def _sum_opt(values: list[int | None]) -> str:
     )
 
 
-_VERBS: dict[str, Callable[[argparse.Namespace, str], int]] = {
-    "hook": _hook,
-    "setup": _setup,
-    "doctor": _doctor,
-    "attributions": _attributions,
-    "sessions": _sessions,
-    "task": _task,
-    "last": _last,
-    "probe": _probe,
-    "components": _components,
-    "scenarios": _scenarios,
-    "report": _report,
-}
+def _show_components(_args: argparse.Namespace) -> int:
+    from praxis import pool
+
+    return pool.show(_cwd(), _home(), sys.stdout)
+
+
+def _set_components(args: argparse.Namespace) -> int:
+    now = _now()
+    from praxis import pool
+
+    return pool.freeze(_cwd(), _home(), sys.stdout, now, args.reason)
+
+
+def _make_components(args: argparse.Namespace) -> int:
+    from praxis import pool
+
+    return pool.draft(_cwd(), _home(), sys.stdout, args.write)
+
+
+def _start_task(_args: argparse.Namespace) -> int:
+    now = _now()
+    from praxis import task
+
+    return task.register(_cwd(), _home(), sys.stdin, sys.stdout, now, task.SEED)
+
+
+def _show_task(_args: argparse.Namespace) -> int:
+    from praxis import task
+
+    return task.last(_cwd(), _home(), sys.stdout)
+
+
+def _test(args: argparse.Namespace) -> int:
+    now = _now()
+    from praxis import probe
+
+    kind = TEST_KINDS[args.object]
+    return probe.administer(_cwd(), _home(), sys.stdin, sys.stdout, now, kind)
+
+
+def _show_scenarios(_args: argparse.Namespace) -> int:
+    from praxis import scenarios
+
+    return scenarios.show(_cwd(), _home(), sys.stdout)
+
+
+def _run_scenarios(_args: argparse.Namespace) -> int:
+    now = _now()
+    from praxis import scenarios
+
+    return scenarios.run(_cwd(), _home(), sys.stdout, now)
+
+
+def _show_report(_args: argparse.Namespace) -> int:
+    from praxis import report, task
+    from praxis.store import Store
+    from praxis.unassisted import locate
+
+    repo = locate(_cwd())
+    if repo is None:
+        print("praxis show report: run this command in a git repository.")
+        return 2
+    ledger = Store(_home() / "ledger.db").open()
+    try:
+        scores = report.scores(ledger, repo.repo_id, seed=task.SEED, draws=report.DRAWS)
+    finally:
+        ledger.close()
+    try:
+        report.render(scores, sys.stdout)
+    except ValueError as exc:  # a refused word with no met rule: nothing was written
+        print(exc, file=sys.stderr)
+        return 1
+    return 0
+
+
+_AGENT = (Option("agent", "AGENT"),)
+# The grammar, in the order that the usage prints it: one line each, and each help is
+# 20 words or fewer (test_cli counts them).
+COMMANDS: tuple[Command, ...] = (
+    Command("show", "status", "", "Show the hooks, the ledger counts, the component "
+            "maps, the tasks and the tests to do.", _show_status),
+    Command("show", "install", "AGENT", "Show the hook settings that the agent needs. "
+            "This command writes no file.", _show_install, _AGENT),
+    Command("install", None, "AGENT", "Write the hook settings into the agent settings "
+            "file after you type yes.", _install, _AGENT),
+    Command("remove", None, "AGENT", "Remove the praxis hook settings from the agent "
+            "settings file after you type yes.", _remove, _AGENT),
+    Command("make", "components", "[--write]", "Make a component map draft from the "
+            "imports. With --write, write it to a file that you can edit.",
+            _make_components, (Option("--write", None),)),
+    Command("set", "components", "[--reason REASON]", "Set the component map and the "
+            "test items for this repository.", _set_components,
+            (Option("--reason", "REASON"),)),
+    Command("show", "components", "", "Show the set component map and the count of "
+            "test items that are left.", _show_components),
+    Command("start", "task", "", "Record a task before you write its prompt. A "
+            "treatment task asks for your predictions.", _start_task),
+    Command("show", "task", "", "Show the result of the last closed task.", _show_task),
+    Command("test", "structure", "", "Answer questions about the imports between "
+            "components, with no agent attached.", _test),
+    Command("test", "changes", "", "Select the components that changed in the last "
+            "week, with no agent attached.", _test),
+    Command("test", "decisions", "", "Select the answer that you gave to a past agent "
+            "question, with no agent attached.", _test),
+    Command("test", "knockout", "", "Select the component that a scenario cannot run "
+            "without, with no agent attached.", _test),
+    Command("test", "pathfinder", "", "Give a number for how closely each pair of "
+            "components is related, with no agent attached.", _test),
+    Command("show", "scenarios", "", "Show each scenario in the scenario file and its "
+            "last run.", _show_scenarios),
+    Command("run", "scenarios", "", "Run each scenario in a scratch clone of the "
+            "repository. Praxis records the components that it enters.",
+            _run_scenarios),
+    Command("show", "report", "", "Show the scores and their analysis for this "
+            "repository.", _show_report),
+    Command("show", "lines", "[--session ID] [--json]", "Show the line counts by "
+            "author for each file at each hook event.", _show_lines,
+            (Option("--session", "ID"), Option("--json", None))),
+    Command("show", "sessions", "", "Show each session with its line counts at its "
+            "last hook event.", _show_sessions),
+    Command("hook", None, "", "Record one hook event from the agent. Only the agent "
+            "runs this command.", _hook),
+)  # fmt: skip

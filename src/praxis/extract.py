@@ -7,6 +7,8 @@ leaves this module. X1 truth is for the working tree (tracked and untracked-not-
 files that exist on disk); X2 runs in a scratch clone of HEAD, so the owner's repository
 is never written. A static graph misses dynamic, configuration and SQL wiring: an absent
 edge may be a blind spot, which is why blind spots are counted rather than assumed zero.
+An import under ``if TYPE_CHECKING:`` that resolves is an edge and not a blind spot: X1
+resolves it statically, so the owner can be asked about it (design 3.1).
 
 Design: docs/design/03-measurement.md, sections 3.1 to 3.3 and 3.5.
 """
@@ -33,7 +35,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-EXTRACTOR_VERSION = "x1-v1"
+# x1-v2: a resolved TYPE_CHECKING import stopped counting as a blind spot.
+EXTRACTOR_VERSION = "x1-v2"
 # The runtime tracer's version (X2, run_scenario); scenario_runs rows carry it.
 X2_VERSION = "x2-v1"
 # A cap against a hung git, not a measured bound: clone time on the owner's largest
@@ -54,18 +57,21 @@ class Edge:
 
 @dataclass(frozen=True)
 class StaticGraph:
-    """``blind_spots`` has a key for every component with at least one parsed file, so
-    a 0 there was looked for; a component absent from it was never parsed. Its counts
-    are importlib/__import__ calls, TYPE_CHECKING imports that resolve into another
-    component, and import statements whose module name matches two files. String plugin
-    registries are not detected at all.
+    """``blind_spots`` and ``type_only`` each have a key for every component with at
+    least one parsed file, so a 0 there was looked for; a component absent from them was
+    never parsed. A blind spot is what X1 cannot resolve: an importlib/__import__ call,
+    or an import statement whose module name matches two files. String plugin registries
+    are not detected at all, so each count is a lower bound.
 
-    A TYPE_CHECKING import is an edge (design 3.1: any import that resolves) but never
-    runs, so its sites never make ``module_level`` true: that flag means a site that
-    executes when the module is imported."""
+    A TYPE_CHECKING import that resolves into another component is an edge (design 3.1:
+    any import that resolves) and is counted in ``type_only``, one per statement, so a
+    report can stratify by it; nothing reads that count yet. It never runs, so its sites
+    never make ``module_level`` true: that flag means a site that executes when the
+    module is imported."""
 
     edges: tuple[Edge, ...]
     blind_spots: dict[str, int]
+    type_only: dict[str, int]
     parse_failures: tuple[str, ...]
     extractor_version: str
 
@@ -238,15 +244,18 @@ class _Lift:
     sites: Counter[tuple[str, str]] = field(default_factory=Counter)
     at_import: set[tuple[str, str]] = field(default_factory=set)
     blind: Counter[str] = field(default_factory=Counter)
+    typed: Counter[str] = field(default_factory=Counter)
 
     def add(self, path: str, tree: ast.Module) -> None:
         src, visitor = self.assign(path), _Sites()
         visitor.visit(tree)
         self.blind[src] += visitor.dynamic
+        self.typed[src] += 0
         for node, runs, typing_only in visitor.imports:
             found, ambiguous = self.index.targets(path, node)
             dsts = {self.assign(f) for f in found} - {src}
-            self.blind[src] += ambiguous or (typing_only and bool(dsts))
+            self.blind[src] += ambiguous
+            self.typed[src] += typing_only and bool(dsts)
             for dst in dsts:
                 self.sites[src, dst] += 1
                 if runs:
@@ -285,7 +294,11 @@ def static_imports(
         for (s, d), n in sorted(lift.sites.items())
     )
     return StaticGraph(
-        edges, dict(sorted(lift.blind.items())), tuple(failures), EXTRACTOR_VERSION
+        edges,
+        dict(sorted(lift.blind.items())),
+        dict(sorted(lift.typed.items())),
+        tuple(failures),
+        EXTRACTOR_VERSION,
     )
 
 

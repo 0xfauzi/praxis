@@ -95,8 +95,11 @@ the distinctive strings written to the repository appear in it.
 `praxis hook` exits 0 on every input: valid, garbage, empty, oversize, a cwd that is not a
 repository, a repository with no commits, git missing, git hanging (2 s per call, 20 s
 watchdog on the whole hook). Each of those is a hook_events row with outcome
-`unobservable` or `error` and a note. It never prints to stdout, so it never adds context
-to the agent's conversation, and it never changes the tool's output or exit code.
+`unobservable` or `error` and a note. It adds no context to the agent's conversation, and
+it never changes the tool's output or exit code. Its stdout stays empty, with one exception
+(design 03 section 5.4). At the Stop that closes a registered task's scored segment, it
+prints the `terminalSequence` notice `praxis: result ready`. Claude Code writes this notice
+to the owner's terminal, never to the agent.
 
 ## Cost
 

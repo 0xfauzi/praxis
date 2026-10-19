@@ -572,6 +572,9 @@ def bases(ids: list[str]) -> dict[str, dict[str, object]]:
                             "pfsim_minus_chance": 0.1, **ev("pathfinder_runs")},
         "flags": {"ts": "t", "repo_id": REPO, "session_id": None, "task_id": None,
                   "code": "abandoned", "detail_json": "{}"},
+        "repository_starts": {**m, "drawn_ts": "t", "start_week": "2026-W45",
+                              "candidates_json": '["2026-W44", "2026-W45"]',
+                              "seed_hash": SEED},
     }
 
 
@@ -668,6 +671,12 @@ CASES: list[Case] = [
     ("pathfinder_runs", {"n_components": 1}), ("pathfinder_runs", {"pfsim": 1.5}),
     ("flags", {"repo_id": CANARY}), ("flags", {"code": "whatever"}),
     ("flags", {"detail_json": "[]"}), ("flags", {"repo_id": None}),
+    ("tasks", {"forced_control": 2}),
+    ("repository_starts", {"start_week": "2026-45"}),
+    ("repository_starts", {"start_week": "2026-W46"}),  # not a candidate
+    ("repository_starts", {"candidates_json": "[]"}),
+    ("repository_starts", {"seed_hash": CANARY}),
+    ("repository_starts", {"map_version": "f" * 16}), ("repository_starts", TWICE),
 ]
 # fmt: on
 
@@ -701,6 +710,7 @@ TRIGGERS = [
     "UPDATE tasks SET arm = 'control'",
     "UPDATE tasks SET status = 'unbound', bound_session_id = NULL, bound_ts = NULL",
     "UPDATE tasks SET bound_session_id = 's9'",
+    "UPDATE tasks SET forced_control = 1",
     "UPDATE component_maps SET rules_json = '[[\"x\"]]'",
     "UPDATE component_maps SET frozen_ts = 'later'",
     "DELETE FROM component_maps",

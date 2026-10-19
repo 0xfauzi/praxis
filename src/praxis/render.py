@@ -1,4 +1,5 @@
-"""The shapes `praxis report` returns and their text (report.py computes them).
+"""The shapes `praxis show report` returns and their text (report.py and general.py
+compute them).
 
 The text refuses the words cause, impact and would unless a pre-registered rule says
 met, and then names the rule (AGENTS.md invariant 3); no component id, path or prompt
@@ -31,21 +32,38 @@ CLAIMS = {"brier": "derived", "decomposition": "derived", "bss": "comparative",
           "arm contrast": "comparative", "test-retest": "derived"}  # fmt: skip
 TEST_ASSUMPTIONS = (
     "arm contrasts: control minus treatment, per-task mean Brier as the unit, "
-    "one-sided, treated task count fixed (C(n, k), exact at 70 or fewer); Stage 2 "
-    "names the rule re-drawn",
-    "pipeline placebo: first probes of drawn-not-shown items (both arms, the P1 "
-    "exclusions) against first probes of never-drawn validation items (skipped, "
-    "slow and truth-changed excluded), Brier per item, two-sided, the count per "
-    f"label fixed; p below {ALPHA:g} suspends every P1 contrast. Design 6.3 says "
-    "within arm: pooling the arms admits the treatment arm's untargeted transfer",
-    "f1_shuffle: share of task pairings of forecasts whose BSS against R1 reaches "
-    "the true pairing's",
+    "one-sided, with the treated task count fixed. The C(n, k) allocations are "
+    "enumerated at 70 or fewer. Stage 2 names the allocation rule that the test draws "
+    "again.",
+    "pipeline placebo: first probes of drawn-not-shown items, in both arms and with "
+    "the P1 exclusions, against first probes of never-drawn validation items. It "
+    "excludes skipped, slow and truth-changed answers. It uses the Brier score per "
+    "item, two-sided, with the count per label fixed. A p below "
+    f"{ALPHA:g} suspends every P1 contrast. Design 6.3 says within arm. Pooling the "
+    "arms admits the untargeted transfer of the treatment arm.",
+    "f1_shuffle: the share of task pairings of forecasts whose BSS against R1 reaches "
+    "the BSS of the true pairing.",
 )
 RETEST_ASSUMPTIONS = (
-    "V1 test-retest: a never-drawn item's first two probes in different ISO weeks, "
-    "both answered on time with one truth and unchanged truth; agreement is "
-    f"Pearson's r of their Brier scores, NULL below {MIN_PAIRS} pairs or with a "
-    "constant side; validation items never enter a confirmatory test",
+    "V1 test-retest: the first two probes of a never-drawn item in different ISO "
+    "weeks, both on time, with one truth that did not change. Agreement is Pearson's "
+    f"r of their Brier scores, NULL below {MIN_PAIRS} pairs or with a constant side. "
+    "Validation items never enter a confirmatory test.",
+)
+GENERAL_ASSUMPTIONS = (
+    "general effect: each repository draws its start week once from its committed "
+    "candidate weeks, uniformly and independently of the other repositories. The test "
+    "draws the start weeks again by this scheme (Marascuilo-Busk).",
+    "general effect: the series is the mean Brier score per ISO week of first probes "
+    "of never-drawn items, without skipped, slow and truth-changed answers. A week "
+    "with no probe is left out, never zero.",
+    "general effect: a candidate week that leaves a phase empty is dropped. A "
+    "repository is left out when it has fewer than 3 weeks or no week on one side of "
+    "its start. A repository is also left out when two candidate weeks give one "
+    "split, because the earlier candidate week has no probe.",
+    "general effect: the statistic is the mean over repositories of the mean Brier "
+    "score before the start minus the mean after it, one-sided. It reads the set "
+    "component map of each repository only.",
 )
 _REFUSED = re.compile(r"\b(caus\w*|impact\w*|would)\b", re.IGNORECASE)
 
@@ -83,6 +101,16 @@ class Rule:
 
 
 @dataclass(frozen=True)
+class General:
+    """Design 6.4: the multiple-baseline test across repositories."""
+
+    p: float | None
+    repositories: int  # included in the test
+    left_out: Mapping[str, int]  # reason code -> repositories
+    run: bool  # False without the committed seed and draw count
+
+
+@dataclass(frozen=True)
 class Scores:
     repo_id: str
     map_version: str | None
@@ -93,6 +121,7 @@ class Scores:
     tests: Mapping[str, tuple[float, int] | None]
     rules: tuple[Rule, ...]
     retest: tuple[int, float | None]  # V1: (pairs, agreement r)
+    general: General
 
 
 def suspended(tests: Mapping[str, tuple[float, int] | None]) -> bool:
@@ -107,7 +136,7 @@ def _num(x: float | None, digits: int = 3) -> str:
 def _block_lines(b: Block) -> list[str]:
     head = f"{b.measure} {b.role} {b.arm}: n {b.n}, tasks {b.tasks}"
     if b.refused is not None:
-        return [f"{head}, refused {b.refused} (needs {MIN_FORECASTS})"]
+        return [f"{head}, not scored: {b.refused} (needs {MIN_FORECASTS})"]
     skill = "; ".join(f"{ref} {_num(v)} (n {n})" for ref, (v, n) in b.skill.items())
     lines = [f"{head}, Brier {_num(b.brier)}, coverage {b.ev.coverage}",
              f"  skill: {skill}"]  # fmt: skip
@@ -124,28 +153,40 @@ def _block_lines(b: Block) -> list[str]:
 
 def _test_lines(tests: Mapping[str, tuple[float, int] | None]) -> list[str]:
     if not tests:
-        return ["tests: not run (needs the committed seed and draw count)"]
+        return ["tests: not run. They need the committed seed and the draw count."]
     stop = suspended(tests)
 
     def one(name: str, r: tuple[float, int] | None) -> str:
         if stop and name in CONTRASTS:
             return f"{name} {SUSPENDED}"
         if r is None:
-            return f"{name} not computable"
+            return f"{name} p unknown"
         return f"{name} p {_num(r[0], 4)} over {r[1]} allocations"
 
     return ["tests: " + "; ".join(one(name, r) for name, r in tests.items())]
 
 
+def _general_line(g: General) -> str:
+    head = "general effect across repositories:"
+    if not g.run:
+        return f"{head} not run. It needs the committed seed and the draw count."
+    left = "; ".join(f"{k} {n}" for k, n in g.left_out.items()) or "none"
+    needs = "" if g.p is not None else " (needs 3)"
+    return (
+        f"{head} p {_num(g.p, 4)}, repositories {g.repositories}{needs}, "
+        f"left out: {left}"
+    )
+
+
 def _lines(s: Scores) -> list[str]:
-    lines = [f"praxis report: repository {s.repo_id}, component map "
+    lines = [f"Report for repository {s.repo_id}, set component map "
              f"{s.map_version or 'none'}"]  # fmt: skip
     if s.refused is not None:
-        lines.append(f"refused: {s.refused}")
+        lines.append(f"no scores: {s.refused}")
     lines.append("claims: " + ", ".join(f"{k} {v}" for k, v in CLAIMS.items()))
     lines.append(
-        "P1 is accuracy on structural items about components bound to "
-        "tasks, no more; F1 is calibration on forecasts of agent work"
+        "P1 is accuracy on structural items about components bound to tasks, and "
+        "nothing more. F1 is calibration on forecasts of agent work."
     )
     weeks = ", ".join(f"{w} {n}" for w, n in s.weeks.items()) or "none"
     lines.append(f"first probes by week: {weeks}")
@@ -157,6 +198,7 @@ def _lines(s: Scores) -> list[str]:
     pairs, agreement = s.retest
     needs = "" if agreement is not None else f" (needs {MIN_PAIRS})"
     lines.append(f"V1 test-retest: pairs {pairs}, agreement r {_num(agreement)}{needs}")
+    lines.append(_general_line(s.general))
     for r in s.rules:
         lines.append(f"rule {r.name} met: {r.claim}" if r.met
                      else f"rule {r.name} not met: {', '.join(r.reasons)}")  # fmt: skip
@@ -165,6 +207,8 @@ def _lines(s: Scores) -> list[str]:
         notes.update(dict.fromkeys(TEST_ASSUMPTIONS))
     if s.refused is None:
         notes.update(dict.fromkeys(RETEST_ASSUMPTIONS))
+    if s.general.run:
+        notes.update(dict.fromkeys(GENERAL_ASSUMPTIONS))
     lines += ["assumptions:", *(f"  - {a}" for a in notes)] if notes else []
     return lines
 

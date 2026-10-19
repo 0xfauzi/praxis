@@ -16,7 +16,10 @@ sessions per week), checks the pure rules on hand-worked inputs, and checks the 
 simulation against the normal-theory answer in the case it has one (no ICC, no week
 effect, every item answered: 44 tasks give power 0.80 at g = 0.54, one-sided alpha
 0.05, Bernoulli arms). Each must hold; the simulated power within 0.72 to 0.88 (four
-Monte Carlo standard errors at 400 runs).
+Monte Carlo standard errors at 400 runs). Added with N_VALIDATION, the exposed-only
+lag rule and W_touch (2026-10-19, before any pilot row): the planted pilot gives
+N_VALIDATION 0 and W_touch None, and each of the three has a case worked by hand. The
+self-check lives in selfcheck.py and the pure statistics in stats.py, beside this file.
 
 Usage: uv run python experiments/prereg/derive.py [--selfcheck] [--home DIR] [--now ISO]
 [--projects DIR] [--sims N] [--draws N] [--seed N] [--prior-supply TASKS]
@@ -29,19 +32,34 @@ import datetime as dt
 import itertools
 import json
 import math
-import random
 import statistics
 import sys
 import tempfile
-from collections import Counter, defaultdict, deque
-from dataclasses import dataclass, field
+from collections import Counter, defaultdict
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from stats import (  # experiments/prereg/stats.py, beside this script on sys.path
+    Inputs,
+    ceil_to,
+    fifo_gaps,
+    half_width_n,
+    icc1,
+    mde,
+    min_tasks,
+    nearest_rank,
+    otsu,
+    power,
+    when,
+    wilson_upper,
+    worst,
+)
+
 from praxis import scoring
 from praxis.components import ComponentMap, Rule, assign, product_components
-from praxis.store import Evidence, Store, home
+from praxis.store import Store, home
 from praxis.transcript import TranscriptError, locate, read
 
 if TYPE_CHECKING:
@@ -51,8 +69,7 @@ if TYPE_CHECKING:
     Rows = Sequence[sqlite3.Row]
 
 # Design choices (docs/preregistration.md 1.4) that the rules start from.
-L_DAYS, L_MAX_DAYS, DEADLINE_S, K_E, ITEMS_PER_TASK = 7.0, 28.0, 60.0, 2, 4
-ALPHA, POWER = 0.05, 0.80
+L_DAYS, L_MAX_DAYS, DEADLINE_S, ITEMS_PER_TASK = 7.0, 28.0, 60.0, 4
 G_TARGETS = (0.54, 0.28)
 RHO_GRID = (-0.2, 0.0, 0.2)
 CONTAMINATION = ("agent_previewed", "late_prediction", "version_change")
@@ -64,9 +81,14 @@ W_Q, MIN_BOUND = 0.95, 10
 WD_Q, MIN_PAIRS = 0.95, 30
 MIN_DECISIONS, MIN_TASKS, MIN_PROBES = 10, 10, 30
 BLOCK, BURN_TOL = 5, 0.01
-Z_ONE_SIDED, Z_TWO_SIDED, HALF_WIDTH = 1.645, 1.96, 0.10
+SHORT_LAG = 2.0
+# N_VALIDATION: a year of validation draws stays under 1 / POOL_SHARE of the D1 pool.
+WEEKS_PER_YEAR, POOL_SHARE = 52, 4
+# W_touch candidates in weeks; "all" (all history, the Stage 1 rule) first, so a tie
+# keeps it, then the longer window.
+TOUCH_WINDOWS: tuple[int | str, ...] = ("all", 26, 13, 8, 4)
 V1_FLOOR, V3_KAPPA = 0.70, 0.60
-BOOT, INTERVAL, N_CAP = 2000, 0.90, 4000
+BOOT, INTERVAL = 2000, 0.90
 
 
 @dataclass(frozen=True)
@@ -75,6 +97,7 @@ class Param:
     value: object  # None: the rule could not be applied
     n: int  # the pilot rows it read
     note: str
+    statement: str = ""  # the Stage 2 statement, with its data, when the rule has one
 
 
 @dataclass(frozen=True)
@@ -90,57 +113,15 @@ class Pilot:
         return (when(ts) - self.start).days // 7 + 1
 
 
-@dataclass
-class Inputs:
-    """The power simulation's inputs; None is not measured."""
-
-    sd_item: float | None = None
-    icc: float | None = None
-    sd_week: float | None = None
-    rate: float | None = None
-    answer: float | None = None
-    supply: int | None = None
-    measured: dict[str, int] = field(default_factory=dict)
-
-
-def when(ts: str) -> dt.datetime:
-    if (stamp := dt.datetime.fromisoformat(ts)).tzinfo is None:
-        raise ValueError("a ledger timestamp without a zone is refused")
-    return stamp
-
-
 # -- the pure rules -------------------------------------------------------------------
-def nearest_rank(xs: Sequence[float], q: float) -> float:
-    ordered = sorted(xs)
-    return ordered[max(1, math.ceil(q * len(ordered))) - 1]
 
 
-def ceil_to(x: float, step: float) -> float:
-    return math.ceil(x / step - 1e-9) * step
-
-
-def wilson_upper(k: int, n: int, z: float = Z_ONE_SIDED) -> float:
-    p, z2 = k / n, z * z
-    centre = p + z2 / (2 * n)
-    half = z * math.sqrt(p * (1 - p) / n + z2 / (4 * n * n))
-    return (centre + half) / (1 + z2 / n)
-
-
-def otsu(xs: Sequence[float]) -> float | None:
-    """The cut between two classes that maximizes between-class variance, at the
-    midpoint of the gap it falls in; None with one distinct value."""
-    ordered = sorted(xs)
-    best: tuple[float, float] | None = None
-    for i in range(1, len(ordered)):
-        if ordered[i] == ordered[i - 1]:
-            continue
-        low, high = ordered[:i], ordered[i:]
-        between = (
-            len(low) * len(high) * (statistics.fmean(low) - statistics.fmean(high)) ** 2
-        )
-        if best is None or between > best[0]:
-            best = (between, (ordered[i - 1] + ordered[i]) / 2)
-    return None if best is None else best[1]
+def n_validation(pool: int, tasks_per_week: float) -> int:
+    """The largest N whose yearly draw, WEEKS_PER_YEAR * N, stays under a quarter of
+    the D1 pool; 0 when the pool is smaller than a year of tasks at ITEMS_PER_TASK."""
+    if pool < ITEMS_PER_TASK * tasks_per_week * WEEKS_PER_YEAR:
+        return 0
+    return max(0, (pool - 1) // (POOL_SHARE * WEEKS_PER_YEAR))
 
 
 def burn_in(by_j: Sequence[tuple[int, float]]) -> int | None:
@@ -155,108 +136,6 @@ def burn_in(by_j: Sequence[tuple[int, float]]) -> int | None:
         if statistics.fmean(blocks[a]) - statistics.fmean(blocks[b]) <= BURN_TOL:
             return a * BLOCK
     return None
-
-
-def icc1(groups: Sequence[Sequence[float]]) -> float | None:
-    """One-way random-effects ICC(1) for unequal group sizes (groups of 2 or more)."""
-    groups = [g for g in groups if len(g) >= 2]
-    g, n = len(groups), sum(len(x) for x in groups)
-    if g < 2:
-        return None
-    grand = math.fsum(map(math.fsum, groups)) / n
-    msb = math.fsum(len(x) * (statistics.fmean(x) - grand) ** 2 for x in groups) / (
-        g - 1
-    )
-    msw = math.fsum((v - statistics.fmean(x)) ** 2 for x in groups for v in x) / (n - g)
-    n0 = (n - math.fsum(len(x) ** 2 for x in groups) / n) / (g - 1)
-    den = msb + (n0 - 1) * msw
-    return None if den == 0 else (msb - msw) / den
-
-
-def fifo_gaps(events: Sequence[tuple[str, str, int, str]]) -> list[tuple[str, float]]:
-    """(added ts, seconds to removal) per agent line removed, from (file, hash, delta,
-    ts) in time order. Each removed copy pairs with the earliest unpaired added copy of
-    the same line in the same file; a removal with no added copy is not an S4 event."""
-    queues: dict[tuple[str, str], deque[str]] = defaultdict(deque)
-    gaps: list[tuple[str, float]] = []
-    for file, h, delta, ts in events:
-        q = queues[file, h]
-        if delta > 0:
-            q.extend([ts] * delta)
-            continue
-        for _ in range(min(-delta, len(q))):
-            added = q.popleft()
-            gaps.append((added, (when(ts) - when(added)).total_seconds()))
-    return gaps
-
-
-def half_width_n(sd: float, design_effect: float = 1.0) -> int:
-    return math.ceil((Z_TWO_SIDED * sd / HALF_WIDTH) ** 2 * design_effect)
-
-
-# -- the power simulation -------------------------------------------------------------
-def study(
-    n: int, delta: float, x: Inputs, rho: float, rng: random.Random
-) -> tuple[list[float], list[int]]:
-    """One simulated confirmatory study: per-task mean Brier of answered bound items,
-    week effects AR(1), a task effect for the ICC, Bernoulli(0.5) arms."""
-    sd, icc, sd_w = x.sd_item or 0.0, max(x.icc or 0.0, 0.0), x.sd_week or 0.0
-    rate, answer = x.rate or 1.0, 1.0 if x.answer is None else x.answer
-    weeks = math.ceil(n / rate)
-    effect, effects = rng.gauss(0, sd_w), []
-    for _ in range(weeks):
-        effects.append(effect)
-        effect = rho * effect + math.sqrt(1 - rho * rho) * rng.gauss(0, sd_w)
-    values, arms = [], []
-    for i in range(n):
-        arm = int(rng.random() < 0.5)
-        task = effects[int(i // rate)] + rng.gauss(0, math.sqrt(icc) * sd)
-        items = [
-            task + rng.gauss(0, math.sqrt(1 - icc) * sd) - delta * arm
-            for _ in range(K_E)
-            if rng.random() < answer
-        ]
-        if items:
-            values.append(statistics.fmean(items))
-            arms.append(arm)
-    return values, arms
-
-
-def power(
-    n: int, delta: float, x: Inputs, rho: float, sims: int, draws: int, seed: int
-) -> float:
-    """Share of simulated studies whose randomization test gives p below ALPHA; a study
-    with one arm empty cannot be tested and counts as no rejection."""
-    rng = random.Random(seed)
-    hits = 0
-    for _ in range(sims):
-        values, arms = study(n, delta, x, rho, rng)
-        if 0 < sum(arms) < len(arms):
-            p, _ = scoring.randomization_test(values, arms, rng.getrandbits(32), draws)
-            hits += p < ALPHA
-    return hits / sims
-
-
-def min_tasks(power_at: Callable[[int], float]) -> int | None:
-    lo, hi = 4, 8
-    while power_at(hi) < POWER:
-        lo, hi = hi, hi * 2
-        if hi > N_CAP:
-            return None
-    while hi - lo > max(2, hi // 50):
-        mid = (lo + hi) // 2
-        lo, hi = (lo, mid) if power_at(mid) >= POWER else (mid, hi)
-    return hi
-
-
-def mde(power_at: Callable[[float], float]) -> float | None:
-    lo, hi = 0.0, 3.0
-    if power_at(hi) < POWER:
-        return None
-    while hi - lo > 0.01:
-        mid = (lo + hi) / 2
-        lo, hi = (lo, mid) if power_at(mid) >= POWER else (mid, hi)
-    return round(hi, 2)
 
 
 # -- the ledger readers ---------------------------------------------------------------
@@ -291,15 +170,32 @@ def by_day(rows: Sequence[sqlite3.Row]) -> list[list[float]]:
 
 
 def rule_lag(probes: Sequence[sqlite3.Row]) -> Param:
-    ok = primary(probes)
-    short = scoring.split_half(by_day([r for r in ok if r["lag_days"] < L_DAYS]))
-    long = scoring.split_half(by_day([r for r in ok if r["lag_days"] >= L_DAYS]))
-    if short is None or long is None:
-        return Param(
-            "L days", L_DAYS, len(ok), "7 stands: L 2 against 7 not computable"
-        )
-    value = 2.0 if short >= long + L_MARGIN else L_DAYS
-    return Param("L days", value, len(ok), f"split-half {short:.3f} and {long:.3f}")
+    """L = 2 against L = 7 on exposed items only. A validation row has task_id and
+    lag_days NULL together by schema (CHECK in probe_responses), so it has no lag to
+    compare and is left out by its task_id."""
+    ok = [r for r in primary(probes) if r["task_id"] is not None]
+    short = by_day([r for r in ok if SHORT_LAG <= r["lag_days"] < L_DAYS])
+    long = by_day([r for r in ok if r["lag_days"] >= L_DAYS])
+    rel = (scoring.split_half(short), scoring.split_half(long))
+    if rel[0] is None or rel[1] is None:
+        value, note = L_DAYS, "7 stands: L 2 against 7 not computable"
+    else:
+        value = SHORT_LAG if rel[0] >= rel[1] + L_MARGIN else L_DAYS
+        note = f"split-half {rel[0]:.3f} and {rel[1]:.3f}"
+    said = [shown(x) for x in rel]
+    statement = (
+        f"L is {value:g} days. Split-half reliability (days as groups) of first-probe"
+        f" Brier on exposed items: {said[0]} at lags of {SHORT_LAG:g} to {L_DAYS:g}"
+        f" days ({len(short)} days), {said[1]} at {L_DAYS:g} days or more"
+        f" ({len(long)} days). L is {SHORT_LAG:g} only when the first is at least"
+        f" {L_MARGIN} above the second. Validation rows carry no lag by schema, so"
+        " they are not compared."
+    )
+    return Param("L days", value, len(ok), note, statement)
+
+
+def shown(x: float | None) -> str:
+    return "not computable" if x is None else f"{x:.3f}"
 
 
 def rule_lmax(db: sqlite3.Connection, pilot: Pilot) -> Param:
@@ -442,12 +338,20 @@ def named(
     return frozenset(found)
 
 
-def rule_burn_in(ledger: Store, pilot: Pilot, projects: Path) -> Param:
-    """R1 leave-one-out Brier per pilot task against j, the count of earlier closed
-    tasks on the same map whose prompt-named flags are known (R1's history)."""
-    db, by_j = ledger.db, []
-    history: dict[tuple[str, str], list[tuple[str, bool, int]]] = defaultdict(list)
-    segments: Counter[tuple[str, str]] = Counter()
+@dataclass(frozen=True)
+class Segment:
+    """A closed task R1 can read: its map, when it was registered, the product
+    components its bound prompt named, and o_first per product component."""
+
+    key: tuple[str, str]
+    ts: str
+    said: frozenset[str]
+    outcomes: dict[str, int]
+
+
+def segments(ledger: Store, projects: Path) -> list[Segment]:
+    """Closed tasks by repository and ordinal whose bound prompt is found."""
+    db, found = ledger.db, []
     for t in db.execute(
         "SELECT * FROM tasks WHERE status = 'closed' ORDER BY repo_id, ordinal"
     ).fetchall():
@@ -462,15 +366,104 @@ def rule_burn_in(ledger: Store, pilot: Pilot, projects: Path) -> Param:
             for r in ledger.outcomes_of(t["task_id"])
             if r["component"] in product
         }
+        found.append(Segment(key, t["ts"], said, outcomes))
+    return found
+
+
+def r1_briers(
+    segs: Sequence[Segment], weeks: int | None
+) -> list[tuple[int, float, str]]:
+    """(history size, mean R1 Brier, ts) per segment with outcomes. R1's history is
+    the earlier segments on the same map at most ``weeks`` before it, all when None:
+    the segment itself is never in it."""
+    span = None if weeks is None else dt.timedelta(weeks=weeks)
+    out = []
+    for i, seg in enumerate(segs):
+        history = [h for h in segs[:i] if h.key == seg.key and within(h, seg, span)]
+        cells = [(c, c in h.said, o) for h in history for c, o in h.outcomes.items()]
         scores = [
-            (r1(history[key], c, c in said) - o) ** 2 for c, o in outcomes.items()
+            (r1(cells, c, c in seg.said) - o) ** 2 for c, o in seg.outcomes.items()
         ]
-        if scores and pilot.inside(t["ts"]):
-            by_j.append((segments[key], statistics.fmean(scores)))
-        history[key].extend((c, c in said, o) for c, o in outcomes.items())
-        segments[key] += 1
+        if scores:
+            out.append((len(history), statistics.fmean(scores), seg.ts))
+    return out
+
+
+def within(earlier: Segment, seg: Segment, span: dt.timedelta | None) -> bool:
+    return span is None or when(seg.ts) - when(earlier.ts) <= span
+
+
+def rule_burn_in(segs: Sequence[Segment], pilot: Pilot) -> Param:
+    """R1 leave-one-out Brier per pilot task against j, the count of earlier closed
+    tasks on the same map whose prompt-named flags are known (R1's history)."""
+    by_j = [(j, b) for j, b, ts in r1_briers(segs, None) if pilot.inside(ts)]
     value = burn_in(by_j) if len(by_j) >= MIN_TASKS else None
     return Param("R1 burn-in segments", value, len(by_j), "block rule")
+
+
+def touch_window(
+    segs: Sequence[Segment], inside: Callable[[str], bool], minimum: int = MIN_TASKS
+) -> tuple[int | str, dict[int | str, float]] | None:
+    """The TOUCH_WINDOWS entry whose R1 history gives the smallest mean leave-one-out
+    Brier over the segments ``inside`` accepts, with every window's mean; None below
+    ``minimum`` such segments. A tie keeps the earlier entry."""
+    means: dict[int | str, float] = {}
+    for weeks in TOUCH_WINDOWS:
+        span = weeks if isinstance(weeks, int) else None
+        scores = [b for _, b, ts in r1_briers(segs, span) if inside(ts)]
+        if len(scores) < minimum:
+            return None
+        means[weeks] = statistics.fmean(scores)
+    return min(means, key=means.__getitem__), means
+
+
+def rule_touch_window(segs: Sequence[Segment], pilot: Pilot) -> Param:
+    n = sum(pilot.inside(ts) for _, _, ts in r1_briers(segs, None))
+    found = touch_window(segs, pilot.inside)
+    if found is None:
+        why = f"fewer than {MIN_TASKS} pilot tasks whose bound prompt is found"
+        statement = f"W_touch stays all history, the Stage 1 rule: {why} ({n})."
+        return Param("W_touch weeks", None, n, f"all history stands: {why}", statement)
+    best, means = found
+    listed = ", ".join(f"{w}: {b:.4f}" for w, b in means.items())
+    statement = (
+        f"W_touch is {best} weeks. Mean leave-one-out R1 Brier on {n} pilot tasks, by"
+        f" trailing window in weeks: {listed}. The smallest wins; a tie keeps all"
+        " history, then the longer window. task.TOUCH_WINDOW_WEEKS takes this value,"
+        " None for all history."
+    )
+    return Param("W_touch weeks", best, n, f"smallest of {listed}", statement)
+
+
+def rule_validation(ledger: Store, pilot: Pilot, tasks: Rows) -> Param:
+    """N_VALIDATION: per repository with a frozen map, n_validation over its D1 items
+    no task exposed and no probe asked, at its pilot task rate; the smallest wins."""
+    sql = "SELECT seconds, ts FROM probe_responses WHERE task_id IS NULL"
+    secs = [r[0] for r in ledger.db.execute(sql) if pilot.inside(r[1])]
+    median = statistics.median(secs) if secs else None
+    per: dict[str, tuple[int, float, int]] = {}
+    for repo, version in frozen_maps(ledger):
+        items = ledger.probe_items_unprobed(repo, version)
+        pool = sum(i["relation"] == "D1" for i in items)
+        rate = sum(t["repo_id"] == repo for t in tasks) / 2
+        per[repo] = (pool, rate, n_validation(pool, rate))
+    cost = "not measured" if median is None else f"{median:.1f} s"
+    if not per:
+        why = "no repository has a frozen map"
+        return Param("N_VALIDATION", None, 0, why, f"N_VALIDATION is unset: {why}.")
+    value = min(n for _, _, n in per.values())
+    listed = "; ".join(
+        f"{r}: pool {pool}, {rate:g} tasks a week, N {n}"
+        for r, (pool, rate, n) in sorted(per.items())
+    )
+    statement = (
+        f"N_VALIDATION is {value} a week. Per repository, N is the largest count whose"
+        f" {WEEKS_PER_YEAR} weeks of draws stay under a quarter of the unasked D1"
+        f" pool, or 0 when that pool is smaller than {WEEKS_PER_YEAR} weeks of tasks at"
+        f" {ITEMS_PER_TASK} items each; the smallest N wins ({listed}). Median"
+        f" seconds per validation item: {cost} ({len(secs)} answers)."
+    )
+    return Param("N_VALIDATION", value, len(secs), f"median {cost}", statement)
 
 
 def r1(history: Sequence[tuple[str, bool, int]], component: str, said: bool) -> float:
@@ -528,15 +521,19 @@ def answer_rate(
     return len(answered) / resolved if resolved >= MIN_TASKS else None
 
 
+def frozen_maps(ledger: Store) -> list[tuple[str, str]]:
+    """(repo_id, version) of every repository's frozen, unsuperseded map."""
+    sql = "SELECT repo_id, version FROM component_maps WHERE frozen_ts IS NOT NULL"
+    found = ledger.db.execute(sql + " AND superseded_ts IS NULL ORDER BY repo_id")
+    return [(r[0], r[1]) for r in found]
+
+
 def supply(ledger: Store) -> int | None:
-    sql = "SELECT repo_id FROM component_maps WHERE frozen_ts IS NOT NULL"
-    repos = [r[0] for r in ledger.db.execute(sql + " AND superseded_ts IS NULL")]
-    if not repos:
+    maps = frozen_maps(ledger)
+    if not maps:
         return None
     total = 0
-    for repo in repos:
-        frozen = ledger.component_map_frozen(repo)
-        version = json.loads(frozen or "{}").get("version")
+    for repo, version in maps:
         total += len(ledger.probe_items_unexposed(repo, version)) // ITEMS_PER_TASK
     return total
 
@@ -570,12 +567,6 @@ def simulate(x: Inputs, sims: int, draws: int, seed: int) -> list[Param]:
     part = partial(effect_power, n=n, sd=sd, x=x, run=run)
     found = [mde(partial(part, rho=rho)) for rho in RHO_GRID]
     return [*out, Param("MDE g at supply", worst(found), n, f"per lag {found}")]
-
-
-def worst(values: Sequence[float | None]) -> float | None:
-    """The largest over the lag-1 grid; unknown if any grid point is unknown."""
-    known = [v for v in values if v is not None]
-    return max(known) if known and len(known) == len(values) else None
 
 
 STAGE2 = (
@@ -616,8 +607,10 @@ def derive(
         probes = first_probes(db, pilot)
         params = [rule_lag(probes), rule_lmax(db, pilot), *rule_deadlines(probes)]
         params += [rule_window(tasks), rule_wd(db, pilot), rule_survival(ledger, pilot)]
-        params += [rule_burn_in(ledger, pilot, projects), rule_cap(db, tasks)]
-        params += [rule_sessions(db, pilot)]
+        segs = segments(ledger, projects)
+        params += [rule_burn_in(segs, pilot), rule_touch_window(segs, pilot)]
+        params += [rule_cap(db, tasks), rule_sessions(db, pilot)]
+        params += [rule_validation(ledger, pilot, tasks)]
         params += minimums(ledger, probes, pilot)
         x = power_inputs(ledger, pilot, probes, tasks)
         params += [Param(f"input {k}", v, 0, "measured") for k, v in vars(x).items()]
@@ -649,118 +642,8 @@ def show(params: list[Param] | None) -> None:
     for p in params:
         print(f"{p.name}: {p.value}  (n {p.n}; {p.note})")
     print("Stage 2 statements:")
-    for line in STAGE2:
+    for line in [*STAGE2, *(p.statement for p in params if p.statement)]:
         print(f"- {line}")
-
-
-# -- the self-check: a planted pilot with hand-worked answers -------------------------
-
-S0 = dt.datetime(2026, 1, 5, 9, tzinfo=dt.UTC)
-REPO = "0123456789abcdef"
-EV = Evidence("full", ["selfcheck"], "selfcheck-v1", [], [])
-FLAGS = {1: ("agent_previewed", "late_prediction"), 2: ("version_change",)}
-FLAGS |= {3: ("late_prediction",), 4: ("abandoned",)}
-
-
-def stamp(days: float = 0, minutes: float = 0) -> str:
-    return (S0 + dt.timedelta(days=days, minutes=minutes)).isoformat()
-
-
-def plant(home: Path, repo: Path) -> None:
-    """Eleven tasks (one in week 1), 30 D1 items, one response each, four flagged
-    tasks (three contaminated), 4 sessions in week 2 and 6 in week 3."""
-    import subprocess
-
-    from praxis.components import derive as derive_map
-    from praxis.components import to_json
-
-    (repo / "pkg").mkdir(parents=True)
-    (repo / "pkg" / "__init__.py").write_text("")
-    for i in range(1, 7):
-        (repo / "pkg" / f"m{i}.py").write_text("X = 1\n")
-    for cmd in (["init", "-q"], ["add", "."]):
-        subprocess.run(["git", "-C", str(repo), *cmd], check=True)
-    led = Store(home / "ledger.db").open()
-    version = led.component_map_put(to_json(derive_map(repo, REPO)), stamp())
-    led.component_map_freeze(REPO, version, stamp())
-    comps = [f"m{i}" for i in range(1, 7)]
-    pairs = [(a, b) for a in comps for b in comps if a != b]
-    truth = [k % 3 == 0 for k in range(len(pairs))]
-    rows = [
-        ("D1", a, b, t, 0, t or None, t or None)
-        for (a, b), t in zip(pairs, truth, strict=True)
-    ]
-    items = led.probe_items_put(rows=rows, ev=EV, repo_id=REPO, truth_ts=stamp(),
-                                map_version=version,
-                                extractor_version="x1-v1")  # fmt: skip
-    for i in range(11):
-        plant_task(led, version, i, [] if i == 0 else items[3 * (i - 1) : 3 * i], truth)
-    seen = [(7, "a"), (8, "a"), (8, "b"), (9, "c"), (10, "d")]
-    for day, sid in seen + [(15, f"w3-{n}") for n in range(6)]:
-        led.hook_event(session_id=sid, event="Stop", tool_name=None, tool_use_id=None,
-                       ts=stamp(day), duration_ms=1.0, outcome="ok",
-                       note=None)  # fmt: skip
-    led.close()
-
-
-def plant_task(
-    led: Store, version: str, i: int, mine: list[str], truth: list[bool]
-) -> None:
-    """Task i: bound at i minutes, closed, flagged per FLAGS, every item answered."""
-    day, tid = (0 if i == 0 else 6 + i), f"{i + 1:016x}"
-    led.task_register(region=[], bound=mine[:2], related=[], drawn=mine[2:],
-                      task_id=tid, repo_id=REPO, map_version=version, ordinal=i + 1,
-                      ts=stamp(day), arm="treatment", seed_hash=f"{i:064x}",
-                      stratum="uniform")  # fmt: skip
-    led.task_bind(tid, f"s{i}", None, stamp(day, max(i, 1)))
-    led.task_close(tid, stamp(day, 120))
-    for code in FLAGS.get(i, ()):
-        led.flag(ts=stamp(day), code=code, detail={}, task_id=tid)
-    for k, item in enumerate(mine, start=3 * (i - 1)):
-        led.probe_response(ev=EV, item_id=item, task_id=tid, ts=stamp(day + 8),
-                           p=scoring.GRID[k % 5], seconds=k + 1.0, lag_days=8.0,
-                           deadline_met=True, truth_at_probe=truth[k],
-                           truth_changed=False, head_sha=None, tree_hash=None,
-                           dirty=None, extractor_version="x1-v1")  # fmt: skip
-
-
-def selfcheck(tmp: Path) -> int:
-    bad: list[str] = []
-
-    def expect(name: str, got: object, want: object) -> None:
-        same = (
-            math.isclose(got, want)
-            if isinstance(got, float) and isinstance(want, float)
-            else got == want
-        )
-        print(f"{'ok  ' if same else 'FAIL'} {name}: got {got}, want {want}")
-        if not same:
-            bad.append(name)
-
-    expect("P90 nearest rank of 1..30", nearest_rank(range(1, 31), 0.9), 27)
-    expect("27 s up to 5 s", ceil_to(27.0, 5.0), 30.0)
-    expect("Wilson 3 of 10, up to 0.01", ceil_to(wilson_upper(3, 10), 0.01), 0.56)
-    expect("Otsu cut", otsu([0.0, 0.05, 0.1, 0.9, 0.95, 1.0]), 0.5)
-    means = (0.30, 0.22, 0.215)
-    expect("burn-in", burn_in([(j, means[j // 5]) for j in range(15)]), 5)
-    expect("ICC identical pairs", icc1([[1, 1], [2, 2], [3, 3]]), 1.0)
-    expect("ICC opposed pairs", icc1([[1, 2], [1, 2], [1, 2]]), -1.0)
-    t0, t1, t2 = stamp(0), stamp(1), stamp(3)
-    events = [("f", "h", 1, t0), ("f", "h", 1, t1), ("f", "h", -1, t2)]
-    events.append(("f", "g", -1, t2))
-    expect("FIFO pairs the first copy", fifo_gaps(events), [(t0, 3 * 86400.0)])
-    plant(tmp / "home", tmp / "repo")
-    params = derive(tmp / "home", S0 + dt.timedelta(days=60), tmp, (2, 20, 1))
-    got = {p.name: p.value for p in params or []}
-    wanted = {"W s": 600.0, "deadline D1 s": 30.0, "L days": 7.0, "L_max days": 14.0}
-    wanted |= {"exclusion cap": 0.56, "N sessions per week": 2}
-    for name, want in wanted.items():
-        expect(name, got.get(name), want)
-    x = Inputs(sd_item=0.25, icc=0.0, sd_week=0.0, rate=10.0, answer=1.0)
-    pw = power(44, 0.54 * 0.25, x, 0.0, 400, 200, 7)
-    expect("power 44 tasks g 0.54 within 0.72 to 0.88", 0.72 <= pw <= 0.88, True)
-    print(f"simulated power {pw:.3f}; {'PASS' if not bad else 'FAIL'}")
-    return 1 if bad else 0
 
 
 def main(argv: list[str]) -> int:
@@ -782,6 +665,8 @@ def main(argv: list[str]) -> int:
         show([prior, *simulate(x, args.sims, args.draws, args.seed)])
         return 0
     if args.selfcheck:
+        from selfcheck import selfcheck  # beside this script; it imports this module
+
         with tempfile.TemporaryDirectory() as tmp:
             return selfcheck(Path(tmp))
     sim = (args.sims, args.draws, args.seed)

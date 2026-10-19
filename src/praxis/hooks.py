@@ -5,7 +5,7 @@ happens here (bad JSON, no repository, git hanging, a full disk) is recorded in 
 ledger when it can be and is otherwise dropped. The exit code is 0 so the tool call it
 wraps is unaffected, and stdout stays empty, so nothing reaches the agent's context,
 with one exception: at the Claude Code Stop that closes a registered task's segment it
-prints exactly ``{"terminalSequence": "\\u001b]9;praxis: feedback ready\\u0007"}``,
+prints exactly ``{"terminalSequence": "\\u001b]9;praxis: result ready\\u0007"}``,
 which Claude Code writes to the owner's terminal and never to the agent (design 5.4).
 That Stop hook must be synchronous: an async hook's JSON fields reach the model.
 """

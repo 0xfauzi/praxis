@@ -1,28 +1,31 @@
-"""`praxis components freeze`, `praxis components` and the pool counts, driven through
-pool.py against a real git repository and a real ledger under a temporary $PRAXIS_HOME.
-The CLI verbs land in stage C, so these call the module with the stdout the verbs will
-pass. Every expected figure is written here, from the files planted, before the run.
+"""`praxis set components`, `praxis show components` and the pool counts, driven
+through pool.py against a real git repository and a real ledger under a temporary
+$PRAXIS_HOME, with the stdout that the commands pass. Every expected figure is written
+here, from the files planted, before the run.
 
 The planted package `app` (depth 1 under src/) has seven product components: `.` (a
 non-empty __init__.py), a, b, c, d, data.json and the directory sub. data.json holds no
 Python, so its 12 ordered pairs are not generated; d's only import is under
-TYPE_CHECKING (a blind spot) and sub holds a file that does not parse, so the 18 items
-touching d or sub are partial and the other 12 are full.
+TYPE_CHECKING, an edge and not a blind spot (design 3.1), and sub holds a file that does
+not parse, so the 10 items touching sub are partial and the other 20 are full.
 """
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
+import random
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from praxis import pool
+from praxis import pool, task
 from praxis.components import assign, derive, product_components
+from praxis.extract import EXTRACTOR_VERSION as X1
 from praxis.store import Store
 from praxis.unassisted import locate
 
@@ -60,7 +63,7 @@ EDGES = {
     ("d", "a"): (1, False),
     ("sub", "c"): (1, True),
 }
-PARTIAL = {"d": "blind_spots:d:1", "sub": "parse_failures:sub:1"}
+PARTIAL = {"sub": "parse_failures:sub:1"}
 
 
 def git(root: Path, *args: str) -> str:
@@ -132,13 +135,14 @@ def test_freeze_writes_the_d1_pool(repo: Path, home: Path) -> None:
 
     assert code == 0, out
     assert out.splitlines() == [
-        f"map {version} frozen (mechanical), 7 product components",
-        "X1 x1-v1: 6 edges among 30 ordered pairs, base rate 0.200",
-        "  non-edge pairs: 4 reach through another component, 20 no path",
-        "  pairs not generated (a component with no parsed Python file): 12",
-        "  partial (blind spot or parse failure): d sub",
+        f"Praxis set component map {version} (mechanical): 7 product components",
+        f"X1 {X1}: imports in 6 of 30 ordered pairs of components, base rate 0.200",
+        "  pairs with no direct import: 4 connect through a different component,"
+        " 20 have no path",
+        "  pairs with no item, because a component has no parsed Python file: 12",
+        "  components with partial coverage (a blind spot or a parse failure): sub",
         "D1 items: 30 written at epoch 0, 0 already present",
-        "pool: 30 items (6 true), 30 unexposed, 7 tasks at 4 items per task",
+        "Items: 30 (6 true), 30 not used by a task, enough for 7 tasks at 4 items each",
     ]
     assert git_state(repo) == before, "freeze wrote under the owner's .git"
     maps = rows(home, "SELECT version, source, frozen_ts FROM component_maps")
@@ -160,7 +164,7 @@ def test_freeze_writes_the_d1_pool(repo: Path, home: Path) -> None:
         assert json.loads(str(r["warnings"])) == want
         assert r["coverage"] == ("partial" if want else "full")
         assert json.loads(str(r["sources"])) == [
-            "extractor:x1-v1",
+            f"extractor:{X1}",
             f"map:{version}",
             f"tree:{tree}",
         ]
@@ -185,8 +189,8 @@ def test_refreeze_adds_nothing_and_a_change_needs_a_reason_code(
     code, out = run_freeze(repo, home)
     assert code == 2
     assert out == (
-        f"praxis components freeze: map {old} is frozen; changing to {new} needs"
-        " --reason, one of new_module regrouped renamed correction\n"
+        f"praxis set components: map {old} is set. To change to map {new}, write"
+        " --reason as one of new_module, regrouped, renamed, correction.\n"
     )
     code, out = run_freeze(repo, home, reason=CANARY_REASON)
     assert code == 2
@@ -195,8 +199,11 @@ def test_refreeze_adds_nothing_and_a_change_needs_a_reason_code(
     code, out = run_freeze(repo, home, reason="new_module")
     assert code == 0, out
     lines = out.splitlines()
-    assert f"superseded map {old} (new_module)" in lines
-    assert "X1 x1-v1: 7 edges among 42 ordered pairs, base rate 0.167" in lines
+    assert f"This map replaces map {old}. Reason: new_module" in lines
+    assert (
+        f"X1 {X1}: imports in 7 of 42 ordered pairs of components, base rate 0.167"
+        in (lines)
+    )
     assert "D1 items: 42 written at epoch 0, 0 already present" in lines
     maps = rows(
         home,
@@ -227,8 +234,8 @@ def test_too_few_components_refuses_and_flags(tmp_path: Path, home: Path) -> Non
     code, out = run_freeze(root, home)
     assert (code, out) == (
         2,
-        "praxis components freeze: fewer than 5 product components in the"
-        " mechanical map\n",
+        "praxis set components: the mechanical map has fewer than 5 product"
+        " components.\n",
     )
     flags = rows(home, "SELECT repo_id, code, detail_json FROM flags")
     assert flags == [
@@ -273,7 +280,7 @@ def test_owner_map_is_frozen_with_its_source(repo: Path, home: Path) -> None:
     write({**groups, "sub": ["src/app/sub/*"]})
     code, out = run_freeze(repo, home)
     assert code == 0, out
-    assert out.splitlines()[0].endswith("frozen (owner), 5 product components")
+    assert out.splitlines()[0].endswith("(owner): 5 product components")
     items = rows(
         home,
         "SELECT src_component, dst_component, sites, module_level FROM probe_items"
@@ -299,7 +306,10 @@ def test_show_and_pool_counts(repo: Path, home: Path) -> None:
     assert pool.pool_counts(home, repo_id) == unknown
     out = io.StringIO()
     assert pool.show(repo, home, out) == 0
-    assert "no frozen map" in out.getvalue()
+    assert out.getvalue() == (
+        f"praxis show components: repository {repo_id} has no set component map."
+        " To set one, run `praxis set components`.\n"
+    )
     assert not (home / "ledger.db").exists(), "a read created the ledger"
 
     assert run_freeze(repo, home)[0] == 0
@@ -315,16 +325,15 @@ def test_show_and_pool_counts(repo: Path, home: Path) -> None:
     out = io.StringIO()
     assert pool.show(repo, home, out) == 0
     lines = out.getvalue().splitlines()
-    assert lines[0] == f"map {version} (mechanical), 7 product components"
+    assert lines[0] == f"Set component map {version} (mechanical): 7 product components"
     assert (
-        "  tests (fixed class): tests/* test/* */tests/* */test/* test_*.py"
+        "  tests (fixed component): tests/* test/* */tests/* */test/* test_*.py"
         " */test_*.py *_test.py" in lines
     )
     assert "  sub: src/app/sub/*" in lines
-    assert f"unmapped tracked paths: 1 of {len(FILES)}" in lines
-    assert (
-        lines[-1] == "pool: 30 items (6 true), 30 unexposed, 7 tasks at 4 items"
-        " per task"
+    assert f"Tracked paths with no component: 1 of {len(FILES)}" in lines
+    assert lines[-1] == (
+        "Items: 30 (6 true), 30 not used by a task, enough for 7 tasks at 4 items each"
     )
 
     ids = [
@@ -370,12 +379,12 @@ def test_praxis_itself(home: Path) -> None:
 
     assert code == 0, out
     lines = out.splitlines()
-    assert lines[0].endswith(f"frozen (mechanical), {len(product)} product components")
+    assert lines[0].endswith(f"(mechanical): {len(product)} product components")
     assert f"D1 items: {k * (k - 1)} written at epoch 0, 0 already present" in lines
     unknown = len(product) * (len(product) - 1) - k * (k - 1)
     assert (
-        f"  pairs not generated (a component with no parsed Python file): {unknown}"
-        in lines
+        "  pairs with no item, because a component has no parsed Python file:"
+        f" {unknown}" in lines
     )
     assert pool.pool_counts(home, repo_id)["items"] == k * (k - 1)
 
@@ -407,28 +416,28 @@ def test_show_names_a_module_the_owner_map_does_not_map(repo: Path, home: Path) 
     out = io.StringIO()
     assert pool.show(repo, home, out) == 0
     lines = out.getvalue().splitlines()
-    assert lines[0].endswith("(owner), 5 product components")
-    assert "unmapped tracked paths: 3 of 13" in lines
-    assert "unmapped Python files beside mapped ones: 0" in lines
+    assert lines[0].endswith("(owner): 5 product components")
+    assert "Tracked paths with no component: 3 of 13" in lines
+    assert "Python files with no component, beside files that have one: 0" in lines
 
     plant(repo, {"src/app/e.py": "X = 1\n", "src/app/sub/new.py": "Y = 1\n"})
     out = io.StringIO()
     assert pool.show(repo, home, out) == 0
     lines = out.getvalue().splitlines()
-    assert "unmapped tracked paths: 5 of 15" in lines
-    at = lines.index("unmapped Python files beside mapped ones: 2")
+    assert "Tracked paths with no component: 5 of 15" in lines
+    at = lines.index("Python files with no component, beside files that have one: 2")
     assert lines[at + 1 : at + 4] == [
         "  src/app/e.py",
         "  src/app/sub/new.py",
-        "  each stays unmapped until the owner's toml assigns it and"
-        " `praxis components freeze --reason new_module` refreezes",
+        "  To give each file a component, add it to the owner map file. Then run"
+        " `praxis set components --reason new_module`.",
     ]
     code, again = run_freeze(repo, home)
     assert code == 0, again
     assert "D1 items: 0 written at epoch 0, 20 already present" in again.splitlines()
 
 
-# `praxis components derive` and the refusal outside 5 to 30, through the installed
+# `praxis make components` and the refusal outside 5 to 30, through the installed
 # binary. The flat package has 32 one-file children with no prefix in common and no
 # import edge, so the grouped map keeps 32 components and freeze refuses it.
 
@@ -469,28 +478,30 @@ def test_derive_drafts_the_owner_map_and_freeze_prints_it(
         )
     )
 
-    done = praxis("components", "freeze", cwd=root, home=home)
+    done = praxis("set", "components", cwd=root, home=home)
     assert (done.returncode, done.stderr) == (2, "")
     assert done.stdout == (
-        "praxis components freeze: more than 30 product components in the"
-        f" mechanical map\n{draft}praxis components freeze: `praxis components derive"
-        f" --write` saves this draft as {path}; merge or split components there,"
-        " then freeze again\n"
+        "praxis set components: the mechanical map has more than 30 product"
+        f" components.\n{draft}praxis set components: to write this draft to {path},"
+        " run `praxis make components --write`. Merge or split components in that"
+        " file. Then run `praxis set components` again.\n"
     )
     assert rows(home, "SELECT * FROM component_maps") == []
     assert rows(home, "SELECT * FROM flags") == []
 
-    done = praxis("components", "derive", cwd=root, home=home)
+    done = praxis("make", "components", cwd=root, home=home)
     assert (done.returncode, done.stdout, done.stderr) == (0, draft, "")
     assert not path.exists()
-    done = praxis("components", "derive", "--write", cwd=root, home=home)
+    done = praxis("make", "components", "--write", cwd=root, home=home)
     assert (done.returncode, done.stderr) == (0, "")
-    assert done.stdout == f"wrote {path}; edit it, then `praxis components freeze`\n"
+    assert done.stdout == (
+        f"Praxis wrote {path}. Edit it, then run `praxis set components`.\n"
+    )
     assert path.read_text() == draft
-    done = praxis("components", "derive", "--write", cwd=root, home=home)
+    done = praxis("make", "components", "--write", cwd=root, home=home)
     assert (done.returncode, done.stderr) == (2, "")
     assert done.stdout == (
-        f"praxis components derive: {path} exists; edit it, or move it away\n"
+        f"praxis make components: {path} exists. Edit that file, or delete it.\n"
     )
     assert path.read_text() == draft
 
@@ -499,18 +510,18 @@ def test_derive_drafts_the_owner_map_and_freeze_prints_it(
     path.write_text(
         owner_toml({"m00": ["src/flat/m00.py", "src/flat/m01.py"], **groups})
     )
-    done = praxis("components", "freeze", cwd=root, home=home)
+    done = praxis("set", "components", cwd=root, home=home)
     assert (done.returncode, done.stdout) == (
         2,
-        "praxis components freeze: more than 30 product components in the owner map\n",
+        "praxis set components: the owner map has more than 30 product components.\n",
     )
     # And m02 too: 30, which freezes as the owner's map.
     del groups["m02"]
     merged = ["src/flat/m00.py", "src/flat/m01.py", "src/flat/m02.py"]
     path.write_text(owner_toml({"m00": merged, **groups}))
-    done = praxis("components", "freeze", cwd=root, home=home)
+    done = praxis("set", "components", cwd=root, home=home)
     assert done.returncode == 0, done.stdout
-    assert done.stdout.splitlines()[0].endswith("frozen (owner), 30 product components")
+    assert done.stdout.splitlines()[0].endswith("(owner): 30 product components")
     assert CANARY.encode() not in home_bytes(home)
 
 
@@ -525,8 +536,8 @@ def test_an_unedited_draft_of_the_frozen_mechanical_map_is_refused(
     code, out_text = run_freeze(repo, home)
     assert (code, out_text) == (
         2,
-        f"praxis components freeze: map {version} is stored as another source's map"
-        " with the same rules\n",
+        f"praxis set components: map {version} has the same rules as a stored map"
+        " from a different source. Edit the owner map file, or delete it.\n",
     )
     assert rows(home, "SELECT source FROM component_maps") == [{"source": "mechanical"}]
 
@@ -568,7 +579,7 @@ def test_a_truth_flip_readmits_the_pair_at_the_next_epoch(
     lines = refreeze(repo, home, FLIP)
 
     assert "D1 items: 0 written at epoch 0, 30 already present" in lines
-    assert "D1 truth flips re-admitted at the next epoch: 1" in lines
+    assert "D1 items added at the next epoch for a changed answer: 1" in lines
     after = rows(home, "SELECT * FROM probe_items ORDER BY item_id")
     assert [r for r in after if r in before] == before, "an item was changed"
     (new,) = [r for r in after if r not in before]
@@ -590,7 +601,7 @@ def test_a_truth_flip_readmits_the_pair_at_the_next_epoch(
         "full",
     )
     assert json.loads(str(new["sources"])) == [
-        "extractor:x1-v1",
+        f"extractor:{X1}",
         f"map:{version}",
         f"tree:{tree}",
     ]
@@ -599,12 +610,12 @@ def test_a_truth_flip_readmits_the_pair_at_the_next_epoch(
     assert (counts["items"], counts["positive"], counts["unexposed"]) == (30, 7, 30)
 
     lines = refreeze(repo, home, BACK)
-    assert "D1 truth flips re-admitted at the next epoch: 0" in lines
+    assert "D1 items added at the next epoch for a changed answer: 0" in lines
     assert len(rows(home, "SELECT item_id FROM probe_items")) == 31
 
     plant(repo, {"src/app/c.py": FILES["src/app/c.py"]})
     lines = refreeze(repo, home, "2026-02-02T09:00:00.000Z")
-    assert "D1 truth flips re-admitted at the next epoch: 1" in lines
+    assert "D1 items added at the next epoch for a changed answer: 1" in lines
     epochs = rows(home, pair + " ORDER BY epoch")
     assert [(r["epoch"], r["truth"], r["sites"]) for r in epochs] == [
         (0, 0, None),
@@ -620,6 +631,30 @@ def test_a_pair_x1_no_longer_parses_is_not_readmitted(repo: Path, home: Path) ->
     # parsed file, so its pairs are unknown, not flipped to 0.
     plant(repo, {"src/app/c.py": "def (:\n"})
     lines = refreeze(repo, home, FLIP)
-    assert "D1 truth flips re-admitted at the next epoch: 0" in lines
+    assert "D1 items added at the next epoch for a changed answer: 0" in lines
     assert "D1 items: 0 written at epoch 0, 20 already present" in lines
     assert len(rows(home, "SELECT item_id FROM probe_items WHERE epoch > 0")) == 0
+
+
+def test_the_first_set_draws_the_start_week_once_and_silently(
+    repo: Path, home: Path
+) -> None:
+    repo_id = locate(repo).repo_id  # type: ignore[union-attr]
+    version = derive(repo, repo_id).version
+    code, out = run_freeze(repo, home)  # NOW is Monday of 2026-W02
+    assert code == 0, out
+    # Design 6.4 as task.py fixes it: 6 candidate weeks from 2 weeks after the set week.
+    weeks = [f"2026-W{w:02d}" for w in range(4, 10)]
+    key = hashlib.sha256(json.dumps([task.SEED, repo_id, "start"]).encode()).hexdigest()
+    week = random.Random(int(key, 16)).choice(weeks)
+    first = {"repo_id": repo_id, "map_version": version, "drawn_ts": NOW,
+             "start_week": week, "candidates_json": json.dumps(weeks),
+             "seed_hash": key}  # fmt: skip
+    assert rows(home, "SELECT * FROM repository_starts") == [first]
+    shown = io.StringIO()
+    assert pool.show(repo, home, shown) == 0
+    assert not [w for w in weeks if w in out + shown.getvalue()], "a week is named"
+    plant(repo, {"src/app/e.py": "from app import d\n"})
+    again = io.StringIO()
+    assert pool.freeze(repo, home, again, LATER, reason="new_module") == 0
+    assert rows(home, "SELECT * FROM repository_starts") == [first]

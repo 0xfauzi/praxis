@@ -126,12 +126,17 @@ def test_x1_built_repository(built: Path) -> None:
         Edge("tests", "core", 1, True),
         Edge("tests", "sub", 1, True),
     )
+    # sub's one TYPE_CHECKING import resolves (to core): an edge, not a blind spot.
     assert graph.blind_spots == {
         "core": 0, "extra": 0, "pkg/.": 0, "scripts": 1,
-        "sub": 1, "tests": 0, "tools": 0, "util": 2,
+        "sub": 0, "tests": 0, "tools": 0, "util": 2,
+    }  # fmt: skip
+    assert graph.type_only == {
+        "core": 0, "extra": 0, "pkg/.": 0, "scripts": 0,
+        "sub": 1, "tests": 0, "tools": 0, "util": 0,
     }  # fmt: skip
     assert graph.parse_failures == ("pkg/broken.py",)
-    assert graph.extractor_version == "x1-v1"
+    assert graph.extractor_version == "x1-v2"
     assert reach(graph, ["core", "util", "sub", "extra"]) == {
         ("core", "sub"), ("core", "util"), ("sub", "util"), ("sub", "core"),
         ("extra", "core"), ("extra", "sub"), ("extra", "util"),
@@ -141,18 +146,65 @@ def test_x1_built_repository(built: Path) -> None:
 def test_x1_given_files_resolve_against_the_whole_tree(built: Path) -> None:
     graph = static_imports(built, built_assign, files=["pkg/sub/deep.py"])
     assert graph.edges == (Edge("sub", "core", 1, False), Edge("sub", "util", 1, True))
-    assert graph.blind_spots == {"sub": 1}
+    assert (graph.blind_spots, graph.type_only) == ({"sub": 0}, {"sub": 1})
     assert graph.parse_failures == ()
     with pytest.raises(ValueError, match="twice"):
         static_imports(built, built_assign, files=["pkg/util.py", "pkg/util.py"])
+
+
+TYPED = {
+    "app/__init__.py": "",
+    "app/base.py": "VALUE = 1\n",
+    "app/model.py": (
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n    from app.base import VALUE\n    from app import view\n"
+        "    import os\n    import shared\n"
+    ),
+    "app/view.py": (
+        "import typing\n"
+        "if typing.TYPE_CHECKING:\n    from app import base\n"
+        "from app import base as runtime\n"
+    ),
+    "one/shared.py": "",
+    "two/shared.py": "",
+}
+
+
+def typed_assign(path: str) -> str:
+    return path.rsplit("/", 1)[-1][:-3] if path.startswith("app/") else "elsewhere"
+
+
+def test_x1_type_checking_imports_are_edges_not_blind_spots(tmp_path: Path) -> None:
+    """Decision (design 3.1): X1 resolves a TYPE_CHECKING import statically, so it is a
+    known edge the owner can be asked about. Only what X1 cannot resolve is a blind
+    spot: here ``import shared``, which names two files."""
+    repo = tmp_path / "typed"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    write(repo, TYPED)
+    graph = static_imports(repo, typed_assign)
+    assert graph.edges == (
+        Edge("model", "base", 1, False),
+        Edge("model", "view", 1, False),
+        Edge("view", "base", 2, True),
+    )
+    assert graph.blind_spots == {
+        "__init__": 0, "base": 0, "elsewhere": 0, "model": 1, "view": 0,
+    }  # fmt: skip
+    # One per statement that resolves into another component: model has two such
+    # statements (os and the ambiguous shared do not resolve), view has one.
+    assert graph.type_only == {
+        "__init__": 0, "base": 0, "elsewhere": 0, "model": 2, "view": 1,
+    }  # fmt: skip
 
 
 def test_reach_excludes_self_pairs_on_a_cycle() -> None:
     cycle = StaticGraph(
         (Edge("a", "b", 1, True), Edge("b", "a", 1, True), Edge("b", "x", 1, True)),
         {},
+        {},
         (),
-        "x1-v1",
+        "x1-v2",
     )
     assert reach(cycle, ["a", "b"]) == {("a", "b"), ("b", "a")}
 
@@ -188,10 +240,13 @@ def test_x1_praxis_at_the_measured_commit(tmp_path: Path) -> None:
     assert sum(e.src == "cli" for e in product) == 5
     assert len(reach(graph, PRAXIS_COMPONENTS)) == 16 + 7
     assert graph.parse_failures == ()
-    # spans imports store only under TYPE_CHECKING (the design calls it function-level);
-    # the TYPE_CHECKING pathlib imports in doctor, hooks and spans name no component.
+    # spans imports store only under TYPE_CHECKING (the design calls it function-level):
+    # an edge X1 resolves, so not a blind spot. The TYPE_CHECKING pathlib imports in
+    # doctor, hooks and spans name no component.
     blind = {c: graph.blind_spots[c] for c in PRAXIS_COMPONENTS}
-    assert blind == {**dict.fromkeys(PRAXIS_COMPONENTS, 0), "spans": 1}
+    assert blind == dict.fromkeys(PRAXIS_COMPONENTS, 0)
+    typed = {c: graph.type_only[c] for c in PRAXIS_COMPONENTS}
+    assert typed == {**dict.fromkeys(PRAXIS_COMPONENTS, 0), "spans": 1}
 
 
 PROGRAM = {
