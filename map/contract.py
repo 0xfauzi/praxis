@@ -20,9 +20,9 @@ from systemap import (  # type: ignore[import-not-found, unused-ignore]
 INVARIANTS: tuple[Invariant, ...] = (
     Invariant(
         1,
-        "A praxis hook exits 0 on every input and never changes the output or exit code of the agent. Its stdout is empty, except one fixed terminalSequence notice, recorder.NOTICE, at the Claude Code Stop that closes a registered task segment (AGENTS.md, invariant 7; src/praxis/hooks.py docstring and _notify; src/praxis/recorder.py NOTICE).",
+        "A praxis hook exits 0 on every input and never changes the output or exit code of the agent. Its stdout is empty, except one fixed terminalSequence notice, 'praxis: result ready', at the Claude Code Stop that closes a registered task segment (AGENTS.md, invariant 7; src/praxis/hooks.py docstring and _notify; src/praxis/recorder.py:42 NOTICE).",
         governs=("HookEntry", "Recorder"),
-        reason="The hook runs inside the agent session of the owner, so a failure in praxis must not change that session (src/praxis/hooks.py docstring). Claude Code writes a terminalSequence to the owner terminal and never to the agent, so the one notice is permitted. The notice has no component id or other content (AGENTS.md, invariant 7; docs/design/03-measurement.md, section 5.4).",
+        reason="The hook runs inside the agent session of the owner, so a failure in praxis must not change that session (src/praxis/hooks.py docstring). Claude Code writes a terminalSequence to the owner terminal and never to the agent, so the one notice is permitted. The notice has no component id or other content, and its closed vocabulary has this one string (AGENTS.md, invariant 7; docs/design/03-measurement.md, section 5.4).",
     ),
     Invariant(
         2,
@@ -56,7 +56,7 @@ INVARIANTS: tuple[Invariant, ...] = (
     ),
     Invariant(
         4,
-        "Without a baseline, the human, pre-existing, and reverted counts are NULL and the coverage is no_baseline. A CHECK constraint keeps the two together (AGENTS.md, invariant 4; src/praxis/schema.py:162-165).",
+        "Without a baseline, the human, pre-existing, and reverted counts are NULL and the coverage is no_baseline. A CHECK constraint keeps the two together (AGENTS.md, invariant 4; src/praxis/schema.py:179-182).",
         governs=("Recorder", "Ledger"),
         reason="Unknown stays unknown: a missing value is None through the model, the ledger, and the report (AGENTS.md, invariant 4; docs/design/01-recorder.md, Attribution).",
     ),
@@ -68,15 +68,15 @@ INVARIANTS: tuple[Invariant, ...] = (
     ),
     Invariant(
         6,
-        "praxis setup PRINTS the hook block. With --apply or --remove, it writes exactly one named file after an interactive yes, and it refuses when stdin is not a terminal (AGENTS.md, invariant 8; src/praxis/install.py:195-203).",
+        "praxis show install PRINTS the hook block. praxis install and praxis remove write exactly one named file after an interactive yes, and they refuse when stdin is not a terminal (AGENTS.md, invariant 8; src/praxis/install.py:194-208).",
         governs=("ConsentedInstall",),
         reason="Global configuration outside the repository and $PRAXIS_HOME is read-only unless the owner gives consent for each file (AGENTS.md, invariant 8).",
     ),
     Invariant(
         7,
-        "praxis doctor never creates the ledger and counts its rows in SQLite read-only mode. It asks probe.due for probes due only when the ledger is at SCHEMA_VERSION, so the Store that probe.due opens runs no migration. The scenario summary that it prints opens a Store only at SCHEMA_VERSION too (src/praxis/doctor.py docstring, _ledger_state, and _due; src/praxis/scenarios.py summary and _last_runs).",
+        "praxis show status never creates the ledger and counts its rows in SQLite read-only mode. It asks probe.due for items due only when the ledger is at SCHEMA_VERSION, so the Store that probe.due opens runs no migration. The scenario summary that it prints opens a Store only at SCHEMA_VERSION too (src/praxis/doctor.py docstring, _ledger_state, and _due; src/praxis/scenarios.py summary and _last_runs).",
         governs=("Doctor", "Probe", "ScenarioRunner"),
-        reason="The doctor reports state and must not change the state that it reports (src/praxis/doctor.py docstring). Store.open runs the DDL and migrate when PRAGMA user_version differs from SCHEMA_VERSION. Thus the version check keeps the probes-due read and the scenario summary from changing the ledger (src/praxis/store.py, Store.open; src/praxis/scenarios.py _last_runs).",
+        reason="The doctor reports state and must not change the state that it reports (src/praxis/doctor.py docstring). Store.open runs the DDL and migrate when PRAGMA user_version differs from SCHEMA_VERSION. Thus the version check keeps the items-due read and the scenario summary from changing the ledger (src/praxis/store.py, Store.open; src/praxis/scenarios.py _last_runs).",
     ),
     Invariant(
         8,
@@ -103,7 +103,7 @@ INVARIANTS: tuple[Invariant, ...] = (
     ),
     Invariant(
         9,
-        "Code that must run for a measurement runs in a scratch clone under $PRAXIS_HOME that the caller deletes. The working tree and .git of the owner are never written. praxis scenarios run gives each scenario its own clone and deletes it after the scenario, also on failure. PRAXIS_HOME points into the clone (AGENTS.md, invariant 5; src/praxis/extract.py scratch_clone docstring; src/praxis/scenarios.py docstring and _run_one).",
+        "Code that must run for a measurement runs in a scratch clone under $PRAXIS_HOME that the caller deletes. The working tree and .git of the owner are never written. praxis run scenarios gives each scenario its own clone and deletes it after the scenario, also on failure. PRAXIS_HOME points into the clone (AGENTS.md, invariant 5; src/praxis/extract.py scratch_clone docstring; src/praxis/scenarios.py docstring and _run_one).",
         governs=("Extractors", "ScenarioRunner"),
         reason="A git worktree would write .git/worktrees into the repository of the owner, so the design uses git clone --local (docs/design/03-measurement.md, section 3.5).",
     ),
@@ -115,13 +115,13 @@ INVARIANTS: tuple[Invariant, ...] = (
     ),
     Invariant(
         11,
-        "The attached-agent check looks for claude or codex processes with a working directory in the repository. Where /proc is missing, it counts any such process anywhere. praxis probe runs the check first, and when it finds an agent it records an agent_attached flag and asks nothing (AGENTS.md, invariant 9; src/praxis/unassisted.py attached_agents; src/praxis/probe.py docstring and _administer).",
+        "The attached-agent check looks for claude or codex processes with a working directory in the repository. Where /proc is missing, it counts any such process anywhere. praxis test runs the check first, and when it finds an agent it records an agent_attached flag and asks nothing (AGENTS.md, invariant 9; src/praxis/unassisted.py attached_agents; src/praxis/probe.py docstring and _administer).",
         governs=("AgentCheck", "Probe"),
         reason="A probe answered with an agent attached is not unassisted, so the harness refuses it and records the refusal (AGENTS.md, invariant 9; docs/kickoff.md, Phase 3).",
     ),
     Invariant(
         12,
-        "praxis report writes nothing when its text holds the words cause, impact, or would and no pre-registered rule is met. The text names each rule with its result (AGENTS.md, invariant 3; src/praxis/render.py docstring, _REFUSED, and render).",
+        "praxis show report writes nothing when its text holds the words cause, impact, or would and no pre-registered rule is met. The text names each rule with its result (AGENTS.md, invariant 3; src/praxis/render.py docstring, _REFUSED, and render).",
         governs=("Report",),
         reason="A claim class is never upgraded. A report may narrow a claim or drop it, and it refuses these words unless the pre-registered decision rule was met (AGENTS.md, invariant 3; docs/preregistration.md).",
     ),

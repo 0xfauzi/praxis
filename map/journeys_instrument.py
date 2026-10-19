@@ -1,5 +1,5 @@
 # ruff: noqa: E501
-"""The sequences of the instrument verbs: praxis task, last, probe, components, scenarios, and report.
+"""The sequences of the instrument commands: start task, show task, test, the components and scenarios commands, and show report.
 
 Split from journeys.py so that no map file passes the 800-line limit. journeys.py lists
 these sequences in JOURNEYS; systemap puts this folder on the import path while it loads
@@ -15,12 +15,12 @@ from systemap import (  # type: ignore[import-not-found, unused-ignore]
 
 Steps = tuple[Step, ...]
 
-_TASK_REGISTER: Steps = (
+_START_TASK: Steps = (
     Step(
         ("Owner",),
         (),
         ("Owner", "CommandSurface"),
-        "Before the prompt of the next task, the owner types praxis task.",
+        "Before the prompt of the next task, the owner types praxis start task.",
     ),
     Step(
         ("CommandSurface",),
@@ -38,7 +38,7 @@ _TASK_REGISTER: Steps = (
         ("TaskRegistration",),
         ("Ledger",),
         ("Ledger", "TaskRegistration"),
-        "The task registration loads the frozen map, and it refuses when there is none.",
+        "The task registration loads the frozen map and the start week of the repository. If one of them is missing, it refuses.",
     ),
     Step(
         ("TaskRegistration",),
@@ -50,19 +50,19 @@ _TASK_REGISTER: Steps = (
         ("TaskRegistration",),
         (),
         ("TaskRegistration", "Extractors"),
-        "It shows the feedback of the last closed task first, with the truth of each bound item read again now.",
+        "The task registration shows the result of the last closed task first, with the truth of each bound item read again now.",
     ),
     Step(
         ("TaskRegistration",),
         ("Ledger",),
         ("Ledger", "TaskRegistration"),
-        "The task registration loads the closed-task outcomes and the unexposed items, and it draws the bound, related, and drawn items.",
+        "The task registration loads the outcomes of the closed tasks in the touch window and the unexposed items. Then it draws the bound, related, and drawn items.",
     ),
     Step(
         ("TaskRegistration",),
         ("Ledger",),
         ("TaskRegistration", "Ledger"),
-        "The task registration stores the task with its exposures, its arm, and its seed hash.",
+        "The task registration stores the task with its exposures, arm, seed hash, and forced_control. A task before the start week is a control task.",
     ),
     Step(
         ("Owner",),
@@ -78,12 +78,12 @@ _TASK_REGISTER: Steps = (
     ),
 )
 
-_LAST_FEEDBACK: Steps = (
+_SHOW_TASK: Steps = (
     Step(
         ("Owner",),
         (),
         ("Owner", "CommandSurface"),
-        "The owner types praxis last.",
+        "The owner types praxis show task.",
     ),
     Step(
         ("CommandSurface",),
@@ -113,22 +113,22 @@ _LAST_FEEDBACK: Steps = (
         ("TaskRegistration",),
         (),
         ("TaskRegistration", "Extractors"),
-        "The task registration reads the D1 truth of each bound item now, and it prints the feedback.",
+        "The task registration reads the D1 truth of each bound item now, and it prints the result.",
     ),
 )
 
-_PROBE: Steps = (
+_TEST: Steps = (
     Step(
         ("Owner",),
         (),
         ("Owner", "CommandSurface"),
-        "The owner types praxis probe with a kind: structural, drift, decision, knockout, or pathfinder.",
+        "The owner types praxis test with an object: structure, changes, decisions, knockout, or pathfinder.",
     ),
     Step(
         ("CommandSurface",),
         (),
         ("CommandSurface", "Probe"),
-        "The command surface refuses an unknown kind and calls administer.",
+        "The command surface changes the object into a probe kind and calls administer with it.",
     ),
     Step(
         ("Probe",),
@@ -152,7 +152,7 @@ _PROBE: Steps = (
         ("Probe",),
         ("Ledger",),
         ("TaskRegistration", "Probe"),
-        "After the due items, a structural probe ranks the unprobed items with the committed seed and adds this week's validation items and retests.",
+        "After the due items, a structural probe ranks the unprobed items with task.SEED and adds the validation items and retests of this week.",
     ),
     Step(
         ("Probe",),
@@ -198,12 +198,12 @@ _PROBE: Steps = (
     ),
 )
 
-_COMPONENTS_FREEZE: Steps = (
+_SET_COMPONENTS: Steps = (
     Step(
         ("Owner",),
         (),
         ("Owner", "CommandSurface"),
-        "The owner types praxis components freeze, with --reason when the map changes.",
+        "The owner types praxis set components, with --reason when the map changes.",
     ),
     Step(
         ("CommandSurface",),
@@ -266,6 +266,18 @@ _COMPONENTS_FREEZE: Steps = (
         "The item pool stores the map and freezes it.",
     ),
     Step(
+        ("ItemPool",),
+        ("TaskRegistration",),
+        ("ItemPool", "TaskRegistration"),
+        "The item pool calls draw_start. It prints nothing, so the owner does not learn the start week.",
+    ),
+    Step(
+        ("TaskRegistration",),
+        ("Ledger",),
+        ("TaskRegistration", "Ledger"),
+        "At the first freeze of the repository, draw_start draws the start week from the candidate weeks and stores it.",
+    ),
+    Step(
         ("Ledger",),
         (),
         ("Ledger", "ComponentMap"),
@@ -285,12 +297,12 @@ _COMPONENTS_FREEZE: Steps = (
     ),
 )
 
-_COMPONENTS_SHOW: Steps = (
+_SHOW_COMPONENTS: Steps = (
     Step(
         ("Owner",),
         (),
         ("Owner", "CommandSurface"),
-        "The owner types praxis components.",
+        "The owner types praxis show components.",
     ),
     Step(
         ("CommandSurface",),
@@ -324,18 +336,24 @@ _COMPONENTS_SHOW: Steps = (
     ),
 )
 
-_REPORT: Steps = (
+_SHOW_REPORT: Steps = (
     Step(
         ("Owner",),
         (),
         ("Owner", "CommandSurface"),
-        "The owner types praxis report.",
+        "The owner types praxis show report.",
     ),
     Step(
         ("CommandSurface",),
         (),
         ("CommandSurface", "AgentCheck"),
         "The command surface finds the repository and its hashed id.",
+    ),
+    Step(
+        ("CommandSurface",),
+        (),
+        ("CommandSurface", "TaskRegistration"),
+        "The command surface reads the committed seed, task.SEED.",
     ),
     Step(
         ("CommandSurface",),
@@ -347,7 +365,7 @@ _REPORT: Steps = (
         ("Report",),
         ("Ledger",),
         ("Ledger", "Report"),
-        "The report reads the frozen map, the tasks, the outcomes, the forecasts, and the probe responses, also those of never-drawn validation items.",
+        "The report reads the frozen map, the tasks, the outcomes, the forecasts, the probe responses with the never-drawn ones, and the repository starts.",
     ),
     Step(
         ("Report",),
@@ -363,24 +381,30 @@ _REPORT: Steps = (
     ),
     Step(
         ("Report",),
+        ("TaskRegistration",),
+        ("TaskRegistration", "Report"),
+        "For R_fam, the report counts only the closed tasks in the touch window.",
+    ),
+    Step(
+        ("Report",),
         (),
         ("Report", "Scoring"),
-        "The report computes skill scores, decompositions, CORP bands, the randomization tests, and the pipeline placebo.",
+        "The report computes skill scores, decompositions, CORP bands, the randomization tests, and the pipeline placebo. praxis.general tests the general effect with koehler_levin.",
     ),
     Step(
         ("CommandSurface",),
         (),
         ("CommandSurface", "Report"),
-        "The command surface calls render. A placebo below ALPHA suspends the arm contrasts. A refused word without a met rule writes nothing.",
+        "The command surface calls render, which adds the general-effect line. A placebo below ALPHA suspends the arm contrasts. A refused word without a met rule writes nothing.",
     ),
 )
 
-_COMPONENTS_DERIVE: Steps = (
+_MAKE_COMPONENTS: Steps = (
     Step(
         ("Owner",),
         (),
         ("Owner", "CommandSurface"),
-        "The owner types praxis components derive, with --write to save the draft.",
+        "The owner types praxis make components, with --write to save the draft.",
     ),
     Step(
         ("CommandSurface",),
@@ -420,7 +444,7 @@ _COMPONENTS_DERIVE: Steps = (
     ),
 )
 
-_SCENARIOS_RUN: Steps = (
+_RUN_SCENARIOS: Steps = (
     Step(
         ("Owner",),
         (),
@@ -431,7 +455,7 @@ _SCENARIOS_RUN: Steps = (
         ("Owner",),
         (),
         ("Owner", "CommandSurface"),
-        "The owner types praxis scenarios run.",
+        "The owner types praxis run scenarios.",
     ),
     Step(
         ("CommandSurface",),
@@ -513,12 +537,12 @@ _SCENARIOS_RUN: Steps = (
     ),
 )
 
-_SCENARIOS_SHOW: Steps = (
+_SHOW_SCENARIOS: Steps = (
     Step(
         ("Owner",),
         (),
         ("Owner", "CommandSurface"),
-        "The owner types praxis scenarios.",
+        "The owner types praxis show scenarios.",
     ),
     Step(
         ("CommandSurface",),
@@ -558,74 +582,74 @@ _SCENARIOS_SHOW: Steps = (
     ),
 )
 
-TASK_REGISTER = Journey(
-    id="task-register",
-    label="The owner registers a task",
-    starts="praxis task (subcommand)",
-    steps=_TASK_REGISTER,
-    covers=('["subcommand","praxis.cli","praxis","task"]',),
+START_TASK = Journey(
+    id="start-task",
+    label="The owner starts a task",
+    starts="praxis (console script)",
+    steps=_START_TASK,
+    covers=('["console_script","praxis.cli","main","praxis"]',),
 )
 
-LAST_FEEDBACK = Journey(
-    id="last-feedback",
-    label="The owner reads the last feedback",
-    starts="praxis last (subcommand)",
-    steps=_LAST_FEEDBACK,
-    covers=('["subcommand","praxis.cli","praxis","last"]',),
+SHOW_TASK = Journey(
+    id="show-task",
+    label="The owner shows the last task result",
+    starts="praxis (console script)",
+    steps=_SHOW_TASK,
+    covers=('["console_script","praxis.cli","main","praxis"]',),
 )
 
-PROBE = Journey(
-    id="probe",
-    label="The owner answers an unassisted probe",
-    starts="praxis probe (subcommand)",
-    steps=_PROBE,
-    covers=('["subcommand","praxis.cli","praxis","probe"]',),
+TEST = Journey(
+    id="test",
+    label="The owner answers an unassisted test",
+    starts="praxis (console script)",
+    steps=_TEST,
+    covers=('["console_script","praxis.cli","main","praxis"]',),
 )
 
-COMPONENTS_FREEZE = Journey(
-    id="components-freeze",
-    label="The owner freezes the component map",
-    starts="praxis freeze (subcommand)",
-    steps=_COMPONENTS_FREEZE,
-    covers=('["subcommand","praxis.cli","praxis","freeze"]',),
+SET_COMPONENTS = Journey(
+    id="set-components",
+    label="The owner sets the component map",
+    starts="praxis (console script)",
+    steps=_SET_COMPONENTS,
+    covers=('["console_script","praxis.cli","main","praxis"]',),
 )
 
-COMPONENTS_SHOW = Journey(
-    id="components-show",
-    label="The owner reads the map and its pool",
-    starts="praxis components (subcommand)",
-    steps=_COMPONENTS_SHOW,
-    covers=('["subcommand","praxis.cli","praxis","components"]',),
+SHOW_COMPONENTS = Journey(
+    id="show-components",
+    label="The owner shows the map and its pool",
+    starts="praxis (console script)",
+    steps=_SHOW_COMPONENTS,
+    covers=('["console_script","praxis.cli","main","praxis"]',),
 )
 
-REPORT = Journey(
-    id="report",
-    label="The owner reads the report",
-    starts="praxis report (subcommand)",
-    steps=_REPORT,
-    covers=('["subcommand","praxis.cli","praxis","report"]',),
+SHOW_REPORT = Journey(
+    id="show-report",
+    label="The owner shows the report",
+    starts="praxis (console script)",
+    steps=_SHOW_REPORT,
+    covers=('["console_script","praxis.cli","main","praxis"]',),
 )
 
-COMPONENTS_DERIVE = Journey(
-    id="components-derive",
-    label="The owner drafts an owner map",
-    starts="praxis derive (subcommand)",
-    steps=_COMPONENTS_DERIVE,
-    covers=('["subcommand","praxis.cli","praxis","derive"]',),
+MAKE_COMPONENTS = Journey(
+    id="make-components",
+    label="The owner makes an owner map draft",
+    starts="praxis (console script)",
+    steps=_MAKE_COMPONENTS,
+    covers=('["console_script","praxis.cli","main","praxis"]',),
 )
 
-SCENARIOS_RUN = Journey(
-    id="scenarios-run",
+RUN_SCENARIOS = Journey(
+    id="run-scenarios",
     label="The owner runs the scenarios",
-    starts="praxis run (subcommand)",
-    steps=_SCENARIOS_RUN,
-    covers=('["subcommand","praxis.cli","praxis","run"]',),
+    starts="praxis (console script)",
+    steps=_RUN_SCENARIOS,
+    covers=('["console_script","praxis.cli","main","praxis"]',),
 )
 
-SCENARIOS_SHOW = Journey(
-    id="scenarios-show",
-    label="The owner reads the scenario runs",
-    starts="praxis scenarios (subcommand)",
-    steps=_SCENARIOS_SHOW,
-    covers=('["subcommand","praxis.cli","praxis","scenarios"]',),
+SHOW_SCENARIOS = Journey(
+    id="show-scenarios",
+    label="The owner shows the scenario runs",
+    starts="praxis (console script)",
+    steps=_SHOW_SCENARIOS,
+    covers=('["console_script","praxis.cli","main","praxis"]',),
 )

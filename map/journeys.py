@@ -3,7 +3,7 @@
 
 Split from model.py so that neither file passes the 800-line limit. model.py imports
 JOURNEYS from here; systemap puts this folder on the import path while it loads the model.
-The sequences of the instrument verbs are in journeys_instrument.py, for the same limit.
+The sequences of the instrument commands are in journeys_instrument.py, for the same limit.
 """
 
 from __future__ import annotations
@@ -307,18 +307,18 @@ DECISION_POINTER: Steps = (
     ),
 )
 
-CONSENTED_INSTALL: Steps = (
+INSTALL: Steps = (
     Step(
         ("Owner",),
         (),
         ("Owner", "CommandSurface"),
-        "The owner types praxis setup claude --apply on a terminal.",
+        "The owner types praxis install claude on a terminal.",
     ),
     Step(
         ("CommandSurface",),
         (),
         ("CommandSurface", "ConsentedInstall"),
-        "The command surface calls the install consent flow.",
+        "The command surface calls apply.",
     ),
     Step(
         ("Owner",),
@@ -340,8 +340,13 @@ CONSENTED_INSTALL: Steps = (
     ),
 )
 
-DOCTOR: Steps = (
-    Step(("Owner",), (), ("Owner", "CommandSurface"), "The owner types praxis doctor."),
+SHOW_STATUS: Steps = (
+    Step(
+        ("Owner",),
+        (),
+        ("Owner", "CommandSurface"),
+        "The owner types praxis show status.",
+    ),
     Step(
         ("CommandSurface",),
         (),
@@ -370,7 +375,7 @@ DOCTOR: Steps = (
         ("Doctor",),
         ("Probe",),
         ("Doctor", "Probe"),
-        "If the ledger is at the current schema version, the doctor reports the number of structural probes due now.",
+        "If the ledger is at the current schema version, the doctor reports the number of items due now for praxis test structure.",
     ),
     Step(
         ("Doctor",),
@@ -386,18 +391,18 @@ DOCTOR: Steps = (
     ),
 )
 
-LEDGER_ROWS: Steps = (
+SHOW_LINES: Steps = (
     Step(
         ("Owner",),
         (),
         ("Owner", "CommandSurface"),
-        "The owner types praxis attributions or praxis sessions.",
+        "The owner types praxis show lines or praxis show sessions.",
     ),
     Step(
         ("CommandSurface",),
         ("Ledger",),
         ("Ledger", "CommandSurface"),
-        "The command surface prints the attribution rows, and prints unknown for each NULL count.",
+        "The command surface prints the line counts of each file at each hook event, and prints unknown for each NULL count.",
     ),
 )
 
@@ -405,65 +410,62 @@ JOURNEYS: tuple[Journey, ...] = (
     Journey(
         id="hook-delta",
         label="A tool call becomes an agent delta",
-        starts="praxis hook (subcommand)",
+        starts="praxis (console script)",
         steps=HOOK_DELTA,
         covers=(
-            '["subcommand","praxis.cli","praxis","hook"]',
             '["console_script","praxis.cli","main","praxis"]',
+            '["main_function","praxis.cli","main","main"]',
         ),
     ),
     Journey(
         id="stop-attribution",
         label="A Stop attributes the lines and closes a segment",
-        starts="praxis hook (subcommand)",
+        starts="praxis (console script)",
         steps=STOP_ATTRIBUTION,
-        covers=('["subcommand","praxis.cli","praxis","hook"]',),
+        covers=('["console_script","praxis.cli","main","praxis"]',),
     ),
     Journey(
         id="prompt-bind",
         label="A prompt binds the registered task",
-        starts="praxis hook (subcommand)",
+        starts="praxis (console script)",
         steps=PROMPT_BIND,
-        covers=('["subcommand","praxis.cli","praxis","hook"]',),
+        covers=('["console_script","praxis.cli","main","praxis"]',),
     ),
     Journey(
         id="decision-pointer",
         label="An agent question becomes a decision row",
-        starts="praxis hook (subcommand)",
+        starts="praxis (console script)",
         steps=DECISION_POINTER,
-        covers=('["subcommand","praxis.cli","praxis","hook"]',),
+        covers=('["console_script","praxis.cli","main","praxis"]',),
     ),
     Journey(
-        id="consented-install",
+        id="install",
         label="The owner installs the hooks",
-        starts="praxis setup (subcommand)",
-        steps=CONSENTED_INSTALL,
-        covers=('["subcommand","praxis.cli","praxis","setup"]',),
+        starts="praxis (console script)",
+        steps=INSTALL,
+        covers=('["console_script","praxis.cli","main","praxis"]',),
     ),
     Journey(
-        id="doctor",
-        label="The doctor reports the state",
-        starts="praxis doctor (subcommand)",
-        steps=DOCTOR,
-        covers=('["subcommand","praxis.cli","praxis","doctor"]',),
+        id="show-status",
+        label="The owner shows the status",
+        starts="praxis (console script)",
+        steps=SHOW_STATUS,
+        covers=('["console_script","praxis.cli","main","praxis"]',),
     ),
     Journey(
-        id="ledger-rows",
-        label="The owner reads ledger rows",
-        starts="CommandSurface",
-        steps=LEDGER_ROWS,
-        covers=(
-            '["subcommand","praxis.cli","praxis","attributions"]',
-            '["subcommand","praxis.cli","praxis","sessions"]',
-        ),
+        id="show-lines",
+        label="The owner shows the line counts",
+        starts="praxis (console script)",
+        steps=SHOW_LINES,
+        covers=('["console_script","praxis.cli","main","praxis"]',),
     ),
-    journeys_instrument.TASK_REGISTER,
-    journeys_instrument.LAST_FEEDBACK,
-    journeys_instrument.PROBE,
-    journeys_instrument.COMPONENTS_FREEZE,
-    journeys_instrument.COMPONENTS_SHOW,
-    journeys_instrument.COMPONENTS_DERIVE,
-    journeys_instrument.SCENARIOS_RUN,
-    journeys_instrument.SCENARIOS_SHOW,
-    journeys_instrument.REPORT,
+    journeys_instrument.START_TASK,
+    journeys_instrument.SHOW_TASK,
+    journeys_instrument.TEST,
+    journeys_instrument.SET_COMPONENTS,
+    journeys_instrument.SHOW_COMPONENTS,
+    journeys_instrument.MAKE_COMPONENTS,
+    journeys_instrument.RUN_SCENARIOS,
+    journeys_instrument.SHOW_SCENARIOS,
+    journeys_instrument.SHOW_REPORT,
 )
