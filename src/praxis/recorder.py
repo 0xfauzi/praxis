@@ -253,6 +253,19 @@ def decision_shape(tool: str, payload: dict[str, Any]) -> Shape | None:
         if plan is None and isinstance(response, dict):
             plan = _str(response, "plan")
         return None if plan is None else (2, 0, options_hash([plan]))
+    asked = _single_select(tool_input)
+    if asked is None:
+        return None
+    question, labels = asked
+    answers = _answers(tool_input, response)
+    answer = answers.get(question.get("question")) if answers is not None else None
+    chosen = labels.index(answer) if labels.count(answer) == 1 else None
+    return len(labels), chosen, options_hash([str(label) for label in labels])
+
+
+def _single_select(tool_input: dict[str, Any]) -> tuple[Any, list[Any]] | None:
+    """The one question and its option labels, when the call asks exactly one
+    single-select question whose every option has a string label; else None."""
     questions = tool_input.get("questions")
     if not (isinstance(questions, list) and len(questions) == 1):
         return None
@@ -263,10 +276,7 @@ def decision_shape(tool: str, payload: dict[str, Any]) -> Shape | None:
     labels = [o.get("label") if isinstance(o, dict) else None for o in options]
     if not labels or not all(isinstance(label, str) for label in labels):
         return None
-    answers = _answers(tool_input, response)
-    answer = answers.get(question.get("question")) if answers is not None else None
-    chosen = labels.index(answer) if labels.count(answer) == 1 else None
-    return len(labels), chosen, options_hash([str(label) for label in labels])
+    return question, labels
 
 
 def _answers(tool_input: dict[str, Any], response: object) -> dict[str, Any] | None:

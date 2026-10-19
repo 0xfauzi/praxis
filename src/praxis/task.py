@@ -154,10 +154,7 @@ def _bind(
     ledger: Store, repo_id: str, version: str, product: Sequence[str], rng: Random
 ) -> Draw:
     region = _region(ledger, repo_id, version, product, rng)
-    pool = ledger.probe_items_unexposed(repo_id, version)
-    pair = {r["item_id"]: {r["src_component"], r["dst_component"]} for r in pool}
-    if len(pair) != len(pool):
-        raise ValueError("an unexposed item is listed twice")
+    pair = _pairs(ledger.probe_items_unexposed(repo_id, version))
     ids = list(pair)
     near = [i for i in ids if pair[i] & set(region)]
     bound = rng.sample(near, min(K_E, len(near)))
@@ -169,13 +166,24 @@ def _bind(
     related = rng.sample(linked, min(K_R, len(linked)))
     left = [i for i in ids if i not in bound and i not in related]
     drawn = rng.sample(left, min(K_P, len(left)))
-    # A fill item cannot touch the region (the region stratum was exhausted first), so
-    # each bound item's stratum is recoverable from region_json; the task's is the
-    # weakest of them.
-    stratum = "empty" if not bound else "region"
-    if bound and not set(bound) <= set(near):
-        stratum = "uniform"
-    return Draw(region, bound, related, drawn, stratum)
+    return Draw(region, bound, related, drawn, _stratum(bound, near))
+
+
+def _pairs(pool: Sequence[sqlite3.Row]) -> dict[str, set[str]]:
+    """Each unexposed item's pair of components, refusing an item listed twice."""
+    pair = {r["item_id"]: {r["src_component"], r["dst_component"]} for r in pool}
+    if len(pair) != len(pool):
+        raise ValueError("an unexposed item is listed twice")
+    return pair
+
+
+def _stratum(bound: Sequence[str], near: Sequence[str]) -> str:
+    """A fill item cannot touch the region (the region stratum was exhausted first), so
+    each bound item's stratum is recoverable from region_json; the task's is the
+    weakest of them."""
+    if not bound:
+        return "empty"
+    return "region" if set(bound) <= set(near) else "uniform"
 
 
 def _ask(stdin: TextIO, out: TextIO, prompt: str) -> float | None:

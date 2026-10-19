@@ -21,6 +21,7 @@ import re
 import statistics
 from collections import Counter
 from dataclasses import dataclass
+from functools import partial
 from graphlib import CycleError, TopologicalSorter
 from itertools import pairwise, permutations
 from pathlib import Path
@@ -504,8 +505,19 @@ def _bands(rows: Sequence[_Scored]) -> dict[float, tuple[float, float] | None]:
     clusters: dict[str, list[float]] = {}
     for s in rows:
         clusters.setdefault(s.task, []).append(s.p)
+    drawn = _resampled(clusters, sorted({s.p for s in rows}))
+    # "inclusive" is R's type 7, reliabilitydiag's quantile; n cut points at 1/n steps.
+    cuts = round(2 / (1 - BAND_LEVEL))
+    edges = {v: statistics.quantiles(d, n=cuts, method="inclusive")
+             for v, d in drawn.items() if len(d) > 1}  # fmt: skip
+    return {v: (edges[v][0], edges[v][-1]) if v in edges else None for v in drawn}
+
+
+def _resampled(
+    clusters: Mapping[str, Sequence[float]], values: Sequence[float]
+) -> dict[float, list[float]]:
+    """Per forecast value, its PAV rate in each task-cluster resample that spans it."""
     keys = sorted(clusters)
-    values = sorted({s.p for s in rows})
     drawn: dict[float, list[float]] = {v: [] for v in values}
     rng = random.Random(BAND_SEED)
     for _ in range(BAND_DRAWS):
@@ -515,11 +527,7 @@ def _bands(rows: Sequence[_Scored]) -> dict[float, tuple[float, float] | None]:
             rate = _at(fit, v)
             if rate is not None:
                 drawn[v].append(rate)
-    # "inclusive" is R's type 7, reliabilitydiag's quantile; n cut points at 1/n steps.
-    cuts = round(2 / (1 - BAND_LEVEL))
-    edges = {v: statistics.quantiles(d, n=cuts, method="inclusive")
-             for v, d in drawn.items() if len(d) > 1}  # fmt: skip
-    return {v: (edges[v][0], edges[v][-1]) if v in edges else None for v in drawn}
+    return drawn
 
 
 def _evidence(rows: Sequence[_Scored], fallback: str, notes: Sequence[str]) -> Evidence:
@@ -641,19 +649,28 @@ def _shuffle(
              for t in tasks}  # fmt: skip
     r1 = {t: {c: _r1(view, view.tasks[t], c) for c in view.names.product}
           for t in tasks}  # fmt: skip
-
-    def stat(order: Sequence[str]) -> float | None:
-        owner, against = [], []
-        for t, u in zip(tasks, order, strict=True):
-            outcome = view.touched[u]
-            for c, p in given[t]:
-                ref = r1[u][c]
-                if c in outcome and ref is not None and any(outcome.values()):
-                    owner.append((p - outcome[c]) ** 2)
-                    against.append((ref - outcome[c]) ** 2)
-        return scoring.bss(math.fsum(owner), math.fsum(against)) if owner else None
-
+    stat = partial(_shuffled_skill, view.touched, tasks, given, r1)
     return _placebo(stat, tasks, seed, draws)
+
+
+def _shuffled_skill(
+    touched: Mapping[str, Mapping[str, int]],
+    tasks: Sequence[str],
+    given: Mapping[str, Sequence[tuple[str, float]]],
+    r1: Mapping[str, Mapping[str, float | None]],
+    order: Sequence[str],
+) -> float | None:
+    """Skill of each task's forecasts against the outcome of the task order puts in
+    its place."""
+    owner, against = [], []
+    for t, u in zip(tasks, order, strict=True):
+        outcome = touched[u]
+        for c, p in given[t]:
+            ref = r1[u][c]
+            if c in outcome and ref is not None and any(outcome.values()):
+                owner.append((p - outcome[c]) ** 2)
+                against.append((ref - outcome[c]) ** 2)
+    return scoring.bss(math.fsum(owner), math.fsum(against)) if owner else None
 
 
 def _placebo(

@@ -362,18 +362,7 @@ def _changed(
 ) -> tuple[Callable[[str], bool | None], list[str]]:
     """Per component, whether a scan in [since, until] found a file's set of imported
     components different from that file's previous scan; and the scans' sessions."""
-    scans: dict[tuple[str, str], set[str]] = {}
-    owner: dict[str, str] = {}
-    sessions: set[str] = set()
-    for row in history:
-        if row["map_version"] != version:
-            continue
-        dsts = scans.setdefault((row["ts"], row["src_file"]), set())
-        if row["dst_component"] is not None:
-            dsts.add(row["dst_component"])
-        owner[row["src_file"]] = row["src_component"]
-        if row["session_id"] is not None and since <= _when(row["ts"]) <= until:
-            sessions.add(row["session_id"])
+    scans, owner, sessions = _scans(history, version, since, until)
     before: dict[str, frozenset[str]] = {}
     found: dict[str, bool | None] = {}
     active = False
@@ -386,6 +375,29 @@ def _changed(
             found[owner[path]] = _either(found.get(owner[path], False), verdict)
         before[path] = state
     return (lambda c: found.get(c, False) if active else None), sorted(sessions)
+
+
+def _scans(
+    history: Sequence[sqlite3.Row],
+    version: str,
+    since: dt.datetime,
+    until: dt.datetime,
+) -> tuple[dict[tuple[str, str], set[str]], dict[str, str], set[str]]:
+    """The map version's scans as (ts, file) -> imported components, each file's
+    component, and the sessions of the scans in [since, until]."""
+    scans: dict[tuple[str, str], set[str]] = {}
+    owner: dict[str, str] = {}
+    sessions: set[str] = set()
+    for row in history:
+        if row["map_version"] != version:
+            continue
+        dsts = scans.setdefault((row["ts"], row["src_file"]), set())
+        if row["dst_component"] is not None:
+            dsts.add(row["dst_component"])
+        owner[row["src_file"]] = row["src_component"]
+        if row["session_id"] is not None and since <= _when(row["ts"]) <= until:
+            sessions.add(row["session_id"])
+    return scans, owner, sessions
 
 
 def _either(a: bool | None, b: bool | None) -> bool | None:

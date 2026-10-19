@@ -97,6 +97,24 @@ repos:
         # rule. Measured at 5 ms. An agent shown "exit code 1" silences the hook.
         args: [--staged, --max-complexity-allowed, "15", --suggest-refactors, --color, "no"]
         exclude: *evidence
+      # The same rev and the same limit, pointed at the tree instead of the staged
+      # diff, because the staged scan CANNOT work on a server, the reason the
+      # gitleaks-tree hook gives below: CI has a clean checkout with nothing staged,
+      # so `pre-commit run --all-files` there checked nothing and the limit was never
+      # enforced past a local commit. Measured, not assumed: five functions over 15
+      # reached HEAD 62fbe9f, the highest at 22.
+      #
+      # stages: [manual], so a local commit keeps the staged ratchet alone; measured
+      # at 0.71 s over src and tests, against the staged hook's 5 ms. The copy
+      # that counts is `pre-commit run --hook-stage manual complexipy-tree
+      # --all-files` in CI.
+      - id: complexipy
+        alias: complexipy-tree
+        name: cognitive complexity anywhere in the tree
+        args: [src, tests, --max-complexity-allowed, "15", --suggest-refactors, --color, "no"]
+        pass_filenames: false
+        always_run: true
+        stages: [manual]
 
   # --- rot ------------------------------------------------------------------
   - repo: https://github.com/codespell-project/codespell
