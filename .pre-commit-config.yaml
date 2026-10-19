@@ -350,3 +350,26 @@ repos:
         # cannot reach.
         entry: 'this file must live under tests/integration/'
         files: '^tests/(?!integration/).*test_.*\.py$'
+      # The two ratchets above compare the index with HEAD, so on a CI checkout, where
+      # nothing is staged, `pre-commit run --all-files` checks nothing: the gap
+      # complexipy-tree and gitleaks-tree close for theirs. These are the same scripts
+      # with --tree, which drops the ratchet for a flat limit over every file passed.
+      # Flat is affordable here, not in the shared block above: measured on b208014
+      # plus wave 3's edits, no function in this tree is over cyclomatic 10 and no
+      # Python file is over 800 lines. stages: [manual]; CI runs them.
+      - id: cyclomatic-ratchet
+        alias: cyclomatic-ratchet-tree
+        name: cyclomatic complexity anywhere in the tree
+        language: system
+        entry: python3 scripts/precommit/cyclomatic_ratchet.py --tree
+        types: [python]
+        exclude: *evidence
+        stages: [manual]
+      - id: file-length-ratchet
+        alias: file-length-tree
+        name: no file anywhere in the tree past 800 lines
+        language: system
+        entry: python3 scripts/precommit/file_length_ratchet.py --tree
+        types: [python]
+        exclude: *vendored
+        stages: [manual]

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -225,7 +227,8 @@ def test_too_few_components_refuses_and_flags(tmp_path: Path, home: Path) -> Non
     code, out = run_freeze(root, home)
     assert (code, out) == (
         2,
-        "praxis components freeze: fewer than 5 product components\n",
+        "praxis components freeze: fewer than 5 product components in the"
+        " mechanical map\n",
     )
     flags = rows(home, "SELECT repo_id, code, detail_json FROM flags")
     assert flags == [
@@ -375,3 +378,248 @@ def test_praxis_itself(home: Path) -> None:
         in lines
     )
     assert pool.pool_counts(home, repo_id)["items"] == k * (k - 1)
+
+
+def owner_toml(table: dict[str, list[str]]) -> str:
+    return "".join(
+        f"[[component]]\nid = {cid!r}\nglobs = {json.dumps(globs)}\n"
+        for cid, globs in table.items()
+    )
+
+
+def test_show_names_a_module_the_owner_map_does_not_map(repo: Path, home: Path) -> None:
+    repo_id = locate(repo).repo_id  # type: ignore[union-attr]
+    owner = home / "components" / f"{repo_id}.toml"
+    owner.parent.mkdir(parents=True)
+    owner.write_text(
+        owner_toml(
+            {
+                "pkg": ["src/app/__init__.py"],
+                "core": ["src/app/a.py", "src/app/b.py"],
+                "leaf": ["src/app/c.py"],
+                "types": ["src/app/d.py"],
+                "sub": ["src/app/sub/ok.py", "src/app/sub/bad.py"],
+            }
+        )
+    )
+    assert run_freeze(repo, home)[0] == 0
+    # Unmapped of the 13 planted: data.json, the empty sub/__init__.py, scripts/run.sh.
+    out = io.StringIO()
+    assert pool.show(repo, home, out) == 0
+    lines = out.getvalue().splitlines()
+    assert lines[0].endswith("(owner), 5 product components")
+    assert "unmapped tracked paths: 3 of 13" in lines
+    assert "unmapped Python files beside mapped ones: 0" in lines
+
+    plant(repo, {"src/app/e.py": "X = 1\n", "src/app/sub/new.py": "Y = 1\n"})
+    out = io.StringIO()
+    assert pool.show(repo, home, out) == 0
+    lines = out.getvalue().splitlines()
+    assert "unmapped tracked paths: 5 of 15" in lines
+    at = lines.index("unmapped Python files beside mapped ones: 2")
+    assert lines[at + 1 : at + 4] == [
+        "  src/app/e.py",
+        "  src/app/sub/new.py",
+        "  each stays unmapped until the owner's toml assigns it and"
+        " `praxis components freeze --reason new_module` refreezes",
+    ]
+    code, again = run_freeze(repo, home)
+    assert code == 0, again
+    assert "D1 items: 0 written at epoch 0, 20 already present" in again.splitlines()
+
+
+# `praxis components derive` and the refusal outside 5 to 30, through the installed
+# binary. The flat package has 32 one-file children with no prefix in common and no
+# import edge, so the grouped map keeps 32 components and freeze refuses it.
+
+FLAT = {f"src/flat/m{i:02}.py": "" for i in range(32)}
+FLAT["src/flat/m00.py"] = f"SECRET = {CANARY!r}\n"
+FLAT["src/flat/__init__.py"] = ""
+
+
+def praxis(*args: str, cwd: Path, home: Path) -> subprocess.CompletedProcess[str]:
+    found = shutil.which("praxis")
+    assert found is not None, "no `praxis` on PATH: run `uv sync` first"
+    env = {
+        "HOME": str(home.parent),
+        "PRAXIS_HOME": str(home),
+        "PATH": os.environ["PATH"],
+    }
+    return subprocess.run(
+        [found, *args], capture_output=True, text=True, cwd=cwd, env=env, check=False
+    )
+
+
+def test_derive_drafts_the_owner_map_and_freeze_prints_it(
+    tmp_path: Path, home: Path
+) -> None:
+    root = tmp_path / "flat"
+    root.mkdir()
+    git(root, "init", "-q")
+    plant(root, FLAT)
+    repo_id = locate(root).repo_id  # type: ignore[union-attr]
+    cmap = derive(root, repo_id)
+    path = home / "components" / f"{repo_id}.toml"
+    draft = (
+        f"# praxis component map {cmap.version} (mechanical), {repo_id}\n"
+        "# warnings: grouped_by_prefix_and_imports above_30_after_grouping\n"
+        + "".join(
+            f'\n[[component]]\nid = "m{i:02}"\nglobs = ["src/flat/m{i:02}.py"]\n'
+            for i in range(32)
+        )
+    )
+
+    done = praxis("components", "freeze", cwd=root, home=home)
+    assert (done.returncode, done.stderr) == (2, "")
+    assert done.stdout == (
+        "praxis components freeze: more than 30 product components in the"
+        f" mechanical map\n{draft}praxis components freeze: `praxis components derive"
+        f" --write` saves this draft as {path}; merge or split components there,"
+        " then freeze again\n"
+    )
+    assert rows(home, "SELECT * FROM component_maps") == []
+    assert rows(home, "SELECT * FROM flags") == []
+
+    done = praxis("components", "derive", cwd=root, home=home)
+    assert (done.returncode, done.stdout, done.stderr) == (0, draft, "")
+    assert not path.exists()
+    done = praxis("components", "derive", "--write", cwd=root, home=home)
+    assert (done.returncode, done.stderr) == (0, "")
+    assert done.stdout == f"wrote {path}; edit it, then `praxis components freeze`\n"
+    assert path.read_text() == draft
+    done = praxis("components", "derive", "--write", cwd=root, home=home)
+    assert (done.returncode, done.stderr) == (2, "")
+    assert done.stdout == (
+        f"praxis components derive: {path} exists; edit it, or move it away\n"
+    )
+    assert path.read_text() == draft
+
+    # The owner merges m00 and m01: 31 components, still one too many, and no draft.
+    groups = {f"m{i:02}": [f"src/flat/m{i:02}.py"] for i in range(2, 32)}
+    path.write_text(
+        owner_toml({"m00": ["src/flat/m00.py", "src/flat/m01.py"], **groups})
+    )
+    done = praxis("components", "freeze", cwd=root, home=home)
+    assert (done.returncode, done.stdout) == (
+        2,
+        "praxis components freeze: more than 30 product components in the owner map\n",
+    )
+    # And m02 too: 30, which freezes as the owner's map.
+    del groups["m02"]
+    merged = ["src/flat/m00.py", "src/flat/m01.py", "src/flat/m02.py"]
+    path.write_text(owner_toml({"m00": merged, **groups}))
+    done = praxis("components", "freeze", cwd=root, home=home)
+    assert done.returncode == 0, done.stdout
+    assert done.stdout.splitlines()[0].endswith("frozen (owner), 30 product components")
+    assert CANARY.encode() not in home_bytes(home)
+
+
+def test_an_unedited_draft_of_the_frozen_mechanical_map_is_refused(
+    repo: Path, home: Path
+) -> None:
+    repo_id = locate(repo).repo_id  # type: ignore[union-attr]
+    version = derive(repo, repo_id).version
+    assert run_freeze(repo, home)[0] == 0
+    out = io.StringIO()
+    assert pool.draft(repo, home, out, write=True) == 0
+    code, out_text = run_freeze(repo, home)
+    assert (code, out_text) == (
+        2,
+        f"praxis components freeze: map {version} is stored as another source's map"
+        " with the same rules\n",
+    )
+    assert rows(home, "SELECT source FROM component_maps") == [{"source": "mechanical"}]
+
+
+# epoch re-admission
+
+FLIP = "2026-01-19T09:00:00.000Z"
+BACK = "2026-01-26T09:00:00.000Z"
+
+
+def refreeze(repo: Path, home: Path, now: str) -> list[str]:
+    out = io.StringIO()
+    assert pool.freeze(repo, home, out, now) == 0, out.getvalue()
+    return out.getvalue().splitlines()
+
+
+def test_a_truth_flip_readmits_the_pair_at_the_next_epoch(
+    repo: Path, home: Path
+) -> None:
+    repo_id = locate(repo).repo_id  # type: ignore[union-attr]
+    version = derive(repo, repo_id).version
+    assert run_freeze(repo, home)[0] == 0
+    pair = "SELECT * FROM probe_items WHERE src_component = 'c' AND dst_component = 'b'"
+    (old,) = rows(home, pair)
+    assert (old["truth"], old["epoch"]) == (0, 0)
+    ledger = Store(home / "ledger.db").open()
+    try:
+        ledger.task_register(
+            region=[], bound=[str(old["item_id"])], related=[], drawn=[],
+            task_id="t1", repo_id=repo_id, map_version=version, ordinal=1, ts=LATER,
+            arm="control", seed_hash="ab" * 32, stratum="uniform",
+        )  # fmt: skip
+    finally:
+        ledger.close()
+    exposures = rows(home, "SELECT * FROM exposures")
+    before = rows(home, "SELECT * FROM probe_items ORDER BY item_id")
+
+    plant(repo, {"src/app/c.py": FILES["src/app/c.py"] + "from app import b\n"})
+    lines = refreeze(repo, home, FLIP)
+
+    assert "D1 items: 0 written at epoch 0, 30 already present" in lines
+    assert "D1 truth flips re-admitted at the next epoch: 1" in lines
+    after = rows(home, "SELECT * FROM probe_items ORDER BY item_id")
+    assert [r for r in after if r in before] == before, "an item was changed"
+    (new,) = [r for r in after if r not in before]
+    tree = git(repo, "rev-parse", "HEAD^{tree}").strip()
+    assert {k: new[k] for k in ("relation", "src_component", "dst_component")} == {
+        "relation": "D1",
+        "src_component": "c",
+        "dst_component": "b",
+    }
+    assert (new["truth"], new["epoch"], new["sites"], new["module_level"]) == (
+        1,
+        1,
+        1,
+        1,
+    )
+    assert (new["truth_ts"], new["map_version"], new["coverage"]) == (
+        FLIP,
+        version,
+        "full",
+    )
+    assert json.loads(str(new["sources"])) == [
+        "extractor:x1-v1",
+        f"map:{version}",
+        f"tree:{tree}",
+    ]
+    assert rows(home, "SELECT * FROM exposures") == exposures
+    counts = pool.pool_counts(home, repo_id)
+    assert (counts["items"], counts["positive"], counts["unexposed"]) == (30, 7, 30)
+
+    lines = refreeze(repo, home, BACK)
+    assert "D1 truth flips re-admitted at the next epoch: 0" in lines
+    assert len(rows(home, "SELECT item_id FROM probe_items")) == 31
+
+    plant(repo, {"src/app/c.py": FILES["src/app/c.py"]})
+    lines = refreeze(repo, home, "2026-02-02T09:00:00.000Z")
+    assert "D1 truth flips re-admitted at the next epoch: 1" in lines
+    epochs = rows(home, pair + " ORDER BY epoch")
+    assert [(r["epoch"], r["truth"], r["sites"]) for r in epochs] == [
+        (0, 0, None),
+        (1, 1, 1),
+        (2, 0, None),
+    ]
+    assert CANARY.encode() not in home_bytes(home)
+
+
+def test_a_pair_x1_no_longer_parses_is_not_readmitted(repo: Path, home: Path) -> None:
+    assert run_freeze(repo, home)[0] == 0
+    # c stops parsing: a -> c, b -> c and sub -> c still resolve to c.py, but c has no
+    # parsed file, so its pairs are unknown, not flipped to 0.
+    plant(repo, {"src/app/c.py": "def (:\n"})
+    lines = refreeze(repo, home, FLIP)
+    assert "D1 truth flips re-admitted at the next epoch: 0" in lines
+    assert "D1 items: 0 written at epoch 0, 20 already present" in lines
+    assert len(rows(home, "SELECT item_id FROM probe_items WHERE epoch > 0")) == 0

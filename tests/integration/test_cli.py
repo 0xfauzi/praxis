@@ -131,12 +131,25 @@ def test_every_measurement_verb_reaches_its_module(tmp_path: Path) -> None:
     done = run("components", "freeze", "--reason", "whim")
     assert done.returncode == 2
     assert "invalid choice: 'whim'" in done.stderr
+    where = home / "praxis-home" / "scenarios" / f"{repo_id}.toml"
+    done = run("scenarios")
+    assert (done.returncode, done.stdout) == (
+        0, f"no scenarios configured; {where} names them\n")  # fmt: skip
+    done = run("scenarios", "run")
+    assert (done.returncode, done.stdout) == (
+        2, f"praxis scenarios run: no scenarios; {where} names them\n")  # fmt: skip
     done = run("task")
     assert (done.returncode, done.stdout) == (0, "no closed task yet\nregistered\n")
     done = run("last")
     assert (done.returncode, done.stdout) == (0, "no closed task yet\n")
-    done = run("probe", "structural", stdin=f"s\n{CANARY}\n")
-    assert (done.returncode, done.stdout) == (0, "no structural item is due\n")
+    # Nothing exposed is due, so the two never-drawn validation items are asked.
+    done = run("probe", "structural", stdin=f"s\n{CANARY}\ns\n")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.startswith("2 items due, one at a time")
+    assert done.stdout.endswith(
+        "] answered 2; 0 could not be scored now and stay due\n"
+    )
+    assert done.stdout.count("  not one of the answers offered") == 1
     done = run("probe", "recall")
     assert done.returncode == 2
     assert "kinds are structural, drift, decision, knockout, pathfinder" in done.stderr
@@ -159,9 +172,13 @@ def test_every_measurement_verb_reaches_its_module(tmp_path: Path) -> None:
     ledger = Store(home / "praxis-home" / "ledger.db").open()
     try:
         (registered,) = ledger.task_rows(repo_id)
+        version = ledger.task_rows(repo_id)[0]["map_version"]
+        asked = ledger.probe_responses_of(repo_id, version)
     finally:
         ledger.close()
     assert (registered["arm"], registered["status"]) == ("control", "unbound")
+    assert [(r["task_id"], r["exposed_task"], r["p"]) for r in asked] == [
+        (None, None, None)] * 2  # fmt: skip
     files = [p for p in (home / "praxis-home").rglob("*") if p.is_file()]
     assert files, "nothing was written under $PRAXIS_HOME"
     for path in files:

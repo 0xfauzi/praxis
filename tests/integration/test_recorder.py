@@ -790,3 +790,11 @@ def test_live_notice_stays_out_of_messages(
         assert entry["type"] in ("attachment", "system"), entry["type"]
         out = entry.get("attachment", {}).get("stdout")
         assert out in (None, NOTICE.decode()), out
+
+
+def test_a_multi_select_question_is_unscorable(tmp_path: Path) -> None:
+    s, q = Mapped(tmp_path), {"multiSelect": True, "options": [{"label": "a"}]}
+    body = s.v303("post_tool_use_edit", tool_name="AskUserQuestion", tool_use_id="q")
+    s.hook({**body, "tool_input": {"questions": [q]}})
+    got = s.rows("SELECT option_count, coverage FROM decisions")
+    assert [tuple(r) for r in got] == [(None, "unobservable")]

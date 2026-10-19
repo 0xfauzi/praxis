@@ -8,14 +8,11 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
 from praxis import components as c
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 pytestmark = pytest.mark.integration
 
@@ -206,3 +203,106 @@ def test_version_and_json_round_trip(tmp_path: Path) -> None:
     doc["rules"][-1][1] = "src/app/z.py"
     with pytest.raises(ValueError, match="does not match"):
         c.from_json(json.dumps(doc))
+
+
+# The flat-package rule (design 2.2 step 5): 31 children at depth 1, so the cut would
+# fall to depth 0. Expected groups, from the files below: page gains render (two edges
+# to page against one to store) and then leaf (whose only edge is to render, so it
+# moves in the second round); cli, a directory, gains __main__; config.py, config_a and
+# config_b share the reserved token config; hub has one edge to page and one to store,
+# a tie, so it stays alone; ".", data.json and the 16 fillers have no edge to a group.
+FILLERS = [f"f{i:02}" for i in range(15)] + ['q"t']
+FLAT = {
+    "src/flat/__init__.py": "X = 1\n",
+    "src/flat/__main__.py": "from flat.cli import main\n",
+    "src/flat/cli/__init__.py": "",
+    "src/flat/cli/main.py": "",
+    "src/flat/cli/run.py": "from flat.cli import main\n",
+    "src/flat/page.py": "",
+    "src/flat/page_a.py": "",
+    "src/flat/page_b.py": "from flat import page\n",
+    "src/flat/store_x.py": "",
+    "src/flat/store_y.py": "from flat import store_x\n",
+    "src/flat/config.py": "",
+    "src/flat/config_a.py": "",
+    "src/flat/config_b.py": "",
+    "src/flat/render.py": "from flat import page_a, page_b, store_x, leaf\n",
+    "src/flat/leaf.py": "",
+    "src/flat/hub.py": "from flat import store_x, page\n",
+    "src/flat/data.json": "{}\n",
+    **{f"src/flat/{name}.py": "" for name in FILLERS},
+}
+PAGE = tuple(f"src/flat/{m}.py" for m in ("leaf", "page", "page_a", "page_b", "render"))
+CONFIG = tuple(f"src/flat/{m}.py" for m in ("config", "config_a", "config_b"))
+FLAT_RULES = [
+    c.Rule(".", ("src/flat/__init__.py",)),
+    c.Rule("cli", ("src/flat/__main__.py", "src/flat/cli/*")),
+    c.Rule("config*", CONFIG),
+    c.Rule("data.json", ("src/flat/data.json",)),
+    *(c.Rule(name, (f"src/flat/{name}.py",)) for name in FILLERS[:-1]),
+    c.Rule("hub", ("src/flat/hub.py",)),
+    c.Rule("page", PAGE),
+    c.Rule('q"t', ('src/flat/q"t.py',)),
+    c.Rule("store", ("src/flat/store_x.py", "src/flat/store_y.py")),
+]
+
+
+def test_flat_package_groups_by_prefix_then_imports(tmp_path: Path) -> None:
+    root = repo(tmp_path, {**FLAT, **AROUND})
+    cmap = c.derive(root, "r9")
+    assert (cmap.source, cmap.warnings) == ("mechanical", (c.GROUPED,))
+    assert cmap.rules == c.FIXED + tuple(FLAT_RULES)
+    expected = {
+        "src/flat/render.py": "page",
+        "src/flat/leaf.py": "page",
+        "src/flat/hub.py": "hub",
+        "src/flat/__main__.py": "cli",
+        "src/flat/cli/new.py": "cli",
+        "src/flat/config.py": "config*",
+        "src/flat/page_c.py": "unmapped",
+        "src/flat/cli/__init__.py": "cli",
+        "tests/test_a.py": "tests",
+    }
+    assert {p: c.assign(cmap, p) for p in expected} == expected
+
+    # Thirty-one children with no prefix in common and no import edge stay 31.
+    tmp = tmp_path / "wide"
+    tmp.mkdir()
+    files = {f"src/w/m{i:02}.py": "" for i in range(31)}
+    wide = repo(tmp, {**files, "src/w/__init__.py": ""})
+    above = c.derive(wide, "r10")
+    assert above.warnings == (c.GROUPED, c.ABOVE)
+    assert len(c.product_components(above)) == 31
+
+
+def test_to_toml_round_trips_through_load_owner(tmp_path: Path) -> None:
+    root = repo(tmp_path, {**FLAT, **AROUND})
+    cmap = c.derive(root, "r11")
+    text = c.to_toml(cmap)
+    assert text.splitlines()[:2] == [
+        f"# praxis component map {cmap.version} (mechanical), r11",
+        f"# warnings: {c.GROUPED}",
+    ]
+    assert 'id = "q\\"t"' in text.splitlines()
+    home = tmp_path / "home"
+    c.owner_path(home, "r11").parent.mkdir(parents=True)
+    c.owner_path(home, "r11").write_text(text)
+    owner = c.load_owner(home, "r11")
+    assert owner is not None
+    assert (owner.source, owner.rules) == ("owner", cmap.rules)
+    assert owner.version == cmap.version
+
+
+def test_praxis_itself_still_cuts_at_depth_one() -> None:
+    root = Path(__file__).resolve().parents[2]
+    listed = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z", "src/praxis"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split("\0")
+    modules = [p for p in listed if p.count("/") == 2 and (root / p).stat().st_size]
+    cmap = c.derive(root, "r12")
+    assert cmap.warnings == ()
+    assert len(c.product_components(cmap)) == len(modules)
+    assert {c.assign(cmap, p) for p in modules} == set(c.product_components(cmap))

@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 EXTRACTOR_VERSION = "x1-v1"
+# The runtime tracer's version (X2, run_scenario); scenario_runs rows carry it.
+X2_VERSION = "x2-v1"
 # A cap against a hung git, not a measured bound: clone time on the owner's largest
 # repository needs measuring (E05).
 GIT_TIMEOUT_S = 60.0

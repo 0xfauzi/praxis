@@ -196,7 +196,11 @@ def classify(
 
 
 def main(argv: list[str]) -> int:
-    compare_from = WORKTREE if "--worktree" in argv else ""
+    # --tree compares the working tree with an empty HEAD, so every function is NEW
+    # and the limit is flat: the copy a CI checkout needs, where the index, the
+    # working tree and HEAD are one tree and the ratchet sees no change at all.
+    tree = "--tree" in argv
+    compare_from = WORKTREE if tree or "--worktree" in argv else ""
     paths = [p for p in argv if p.endswith(".py")]
     if not paths:
         return 0
@@ -216,33 +220,37 @@ def main(argv: list[str]) -> int:
         index = Path(tmp) / "index"
         head.mkdir()
         index.mkdir()
-        materialise(rel, repo, "HEAD", head)
+        materialise([] if tree else rel, repo, "HEAD", head)
         materialise(rel, repo, compare_from, index)
         failures, notes = classify(census(head), census(index))
 
-    if not failures:
-        for note in notes:
-            emit(note)
-        return 0
+    if failures:
+        explain(failures, tree)
+    for note in notes:
+        emit(note)
+    return 1 if failures else 0
 
-    emit("Cyclomatic complexity ratchet: this commit adds or worsens branching")
-    emit("past the limit.")
+
+def explain(failures: list[str], tree: bool) -> None:
+    """Name each failing function and say how to fix it."""
+    if tree:
+        emit("Cyclomatic complexity: a function in the tree is past the limit.")
+    else:
+        emit("Cyclomatic complexity ratchet: this commit adds or worsens branching")
+        emit(f"past the limit. Functions already over {MAX_COMPLEXITY} are")
+        emit("grandfathered; this only refuses to let the number grow.")
     emit()
     for failure in failures:
         emit(failure)
     emit()
     emit("Cyclomatic complexity counts independent paths through a function, so")
     emit("the number above is roughly how many tests it needs for branch")
-    emit(f"coverage. Functions already over {MAX_COMPLEXITY} are grandfathered; this")
-    emit("only refuses to let the number grow.")
+    emit("coverage.")
     emit()
     emit("Split the function, or replace a long if/elif chain with a lookup")
     emit("table. If it is genuinely irreducible, `# noqa: C901` on the `def` line")
     emit("is the escape hatch, and it shows up in review as the deliberate")
     emit("choice it is.")
-    for note in notes:
-        emit(note)
-    return 1
 
 
 if __name__ == "__main__":

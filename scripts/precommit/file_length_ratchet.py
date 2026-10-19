@@ -94,7 +94,19 @@ def classify(repo: Path, rel: str) -> tuple[str | None, str | None]:
     return None, None
 
 
-def survey(repo: Path, paths: list[str]) -> tuple[list[str], list[str]]:
+def over_limit(repo: Path, rel: str) -> tuple[str | None, None]:
+    """The --tree verdict: the file as it sits on disk against the flat limit, with
+    nothing grandfathered."""
+    on_disk = repo / rel
+    if not on_disk.is_file():
+        return None, None
+    now = on_disk.read_bytes().count(b"\n")
+    if now <= MAX_LINES:
+        return None, None
+    return f"  OVER     {rel}  {now} lines  (limit {MAX_LINES})", None
+
+
+def survey(repo: Path, paths: list[str], tree: bool) -> tuple[list[str], list[str]]:
     """Split every path into blocking failures and informational notes."""
     failures: list[str] = []
     notes: list[str] = []
@@ -104,7 +116,7 @@ def survey(repo: Path, paths: list[str]) -> tuple[list[str], list[str]]:
         except ValueError:
             # A path outside this repo. Nothing here to compare it against.
             continue
-        failure, note = classify(repo, rel)
+        failure, note = over_limit(repo, rel) if tree else classify(repo, rel)
         if failure:
             failures.append(failure)
         if note:
@@ -113,6 +125,9 @@ def survey(repo: Path, paths: list[str]) -> tuple[list[str], list[str]]:
 
 
 def main(argv: list[str]) -> int:
+    # --tree: the copy a CI checkout needs, where the index equals HEAD and the
+    # ratchet sees no change at all.
+    tree = "--tree" in argv
     paths = [p for p in argv if p.endswith(".py")]
     if not paths:
         return 0
@@ -121,23 +136,25 @@ def main(argv: list[str]) -> int:
     if repo is None:
         return 0
 
-    failures, notes = survey(repo, paths)
+    failures, notes = survey(repo, paths, tree)
 
     if not failures:
         for note in notes:
             emit(note)
         return 0
 
-    emit(f"File length: this commit takes a file past {MAX_LINES} lines.")
+    where = "a file in the tree is over" if tree else "this commit takes a file past"
+    emit(f"File length: {where} {MAX_LINES} lines.")
     emit("")
     for failure in failures:
         emit(failure)
     emit("")
     emit("Split it. A file this long has more than one job in it, and the split")
     emit("is cheapest now, while you still remember what the new part does.")
-    emit("")
-    emit("Files already over the limit are grandfathered and are not failed for")
-    emit("growing; set FREEZE_OVERSIZE = True in this script to change that.")
+    if not tree:
+        emit("")
+        emit("Files already over the limit are grandfathered and are not failed for")
+        emit("growing; set FREEZE_OVERSIZE = True in this script to change that.")
     for note in notes:
         emit(note)
     return 1

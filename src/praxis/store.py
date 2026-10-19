@@ -45,6 +45,16 @@ if TYPE_CHECKING:
     )
 
 REDUCER_VERSION = "attribution-v1"
+# Unexposed items of the current epoch per pair; parameter 3 true keeps asked ones too.
+_POOL = (
+    "SELECT p.* FROM probe_items p WHERE p.repo_id = ? AND p.map_version = ?"
+    " AND NOT EXISTS (SELECT 1 FROM exposures e WHERE e.item_id = p.item_id)"
+    " AND (? OR NOT EXISTS (SELECT 1 FROM probe_responses r"
+    "  WHERE r.item_id = p.item_id)) AND p.epoch = (SELECT MAX(q.epoch) FROM"
+    " probe_items q WHERE q.repo_id = p.repo_id AND q.map_version = p.map_version"
+    "  AND q.relation = p.relation AND q.src_component = p.src_component"
+    "  AND q.dst_component = p.dst_component) ORDER BY p.item_id"
+)
 
 Files = dict[str, Counter[str]]
 Values = dict[str, object]
@@ -578,16 +588,12 @@ class Store:
 
     def probe_items_unexposed(self, repo_id: str, map_version: str) -> Rows:
         """Items of the current epoch for their pair that no task has exposed."""
-        return self._all(
-            "SELECT p.* FROM probe_items p WHERE p.repo_id = ? AND p.map_version = ?"
-            " AND NOT EXISTS (SELECT 1 FROM exposures e WHERE e.item_id = p.item_id)"
-            " AND p.epoch = (SELECT MAX(q.epoch) FROM probe_items q"
-            "  WHERE q.repo_id = p.repo_id AND q.map_version = p.map_version"
-            "  AND q.relation = p.relation AND q.src_component = p.src_component"
-            "  AND q.dst_component = p.dst_component) ORDER BY p.item_id",
-            repo_id,
-            map_version,
-        )
+        return self._all(_POOL, repo_id, map_version, True)
+
+    def probe_items_unprobed(self, repo_id: str, map_version: str) -> Rows:
+        """Unexposed items no probe has asked either: an asked item is not blind, so
+        it is out of the binding pool and the never-drawn draw (design 6.2, 6.3)."""
+        return self._all(_POOL, repo_id, map_version, False)
 
     def probe_item(self, item_id: str) -> sqlite3.Row | None:
         return self._one("SELECT * FROM probe_items WHERE item_id = ?", item_id)

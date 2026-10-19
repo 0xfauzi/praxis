@@ -77,10 +77,21 @@ def _parser() -> argparse.ArgumentParser:
     probe = sub.add_parser("probe", help="an unassisted probe, with no agent attached")
     probe.add_argument("kind", help="which probe; an unknown kind lists them")
     comps = sub.add_parser("components", help="the frozen component map and its pool")
-    freeze = comps.add_subparsers(dest="action").add_parser(
+    actions = comps.add_subparsers(dest="action")
+    freeze = actions.add_parser(
         "freeze", help="derive or load the map, freeze it and fill the item pool"
     )
     freeze.add_argument("--reason", choices=MAP_REASONS, help="why the map changed")
+    derive = actions.add_parser(
+        "derive", help="print the mechanical map as an owner map draft"
+    )
+    derive.add_argument(
+        "--write", action="store_true", help="save the draft as the owner map, once"
+    )
+    scenarios = sub.add_parser("scenarios", help="the owner's runtime scenarios")
+    scenarios.add_subparsers(dest="action").add_parser(
+        "run", help="run each scenario in a scratch clone of HEAD and record its trace"
+    )
     sub.add_parser("report", help="scores, references and tests from the ledger")
     return parser
 
@@ -125,7 +136,17 @@ def _components(args: argparse.Namespace, now: str) -> int:
 
     if args.action == "freeze":
         return pool.freeze(Path.cwd(), store.home(), sys.stdout, now, args.reason)
+    if args.action == "derive":
+        return pool.draft(Path.cwd(), store.home(), sys.stdout, args.write)
     return pool.show(Path.cwd(), store.home(), sys.stdout)
+
+
+def _scenarios(args: argparse.Namespace, now: str) -> int:
+    from praxis import scenarios
+
+    if args.action == "run":
+        return scenarios.run(Path.cwd(), store.home(), sys.stdout, now)
+    return scenarios.show(Path.cwd(), store.home(), sys.stdout)
 
 
 def _report(_args: argparse.Namespace, _now: str) -> int:
@@ -244,5 +265,6 @@ _VERBS: dict[str, Callable[[argparse.Namespace, str], int]] = {
     "last": _last,
     "probe": _probe,
     "components": _components,
+    "scenarios": _scenarios,
     "report": _report,
 }

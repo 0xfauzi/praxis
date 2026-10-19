@@ -154,7 +154,8 @@ def _bind(
     ledger: Store, repo_id: str, version: str, product: Sequence[str], rng: Random
 ) -> Draw:
     region = _region(ledger, repo_id, version, product, rng)
-    pair = _pairs(ledger.probe_items_unexposed(repo_id, version))
+    # A validation-probed item is no longer blind (design 6.2, 6.3): out of the pool.
+    pair = _pairs(ledger.probe_items_unprobed(repo_id, version))
     ids = list(pair)
     near = [i for i in ids if pair[i] & set(region)]
     bound = rng.sample(near, min(K_E, len(near)))
@@ -170,7 +171,7 @@ def _bind(
 
 
 def _pairs(pool: Sequence[sqlite3.Row]) -> dict[str, set[str]]:
-    """Each unexposed item's pair of components, refusing an item listed twice."""
+    """Each pool item's pair of components, refusing an item listed twice."""
     pair = {r["item_id"]: {r["src_component"], r["dst_component"]} for r in pool}
     if len(pair) != len(pool):
         raise ValueError("an unexposed item is listed twice")
