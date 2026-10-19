@@ -8,7 +8,8 @@ import sqlite3
 import subprocess
 from typing import TYPE_CHECKING, TextIO
 
-from praxis import drill, install
+from praxis import install
+from praxis.unassisted import attached_agents, locate
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -71,8 +72,6 @@ def _ledger_state(praxis_home: Path) -> list[str]:
                 ("SELECT COUNT(*) FROM hook_events WHERE outcome <> 'ok'"),
             ),
             ("attribution rows", "SELECT COUNT(*) FROM attributions"),
-            ("items", "SELECT COUNT(*) FROM items"),
-            ("results", "SELECT COUNT(*) FROM results"),
         ):
             try:
                 (n,) = db.execute(sql).fetchone()
@@ -92,15 +91,10 @@ def run(*, cwd: Path, home: Path, praxis_home: Path, out: TextIO) -> int:
         out.write(_hooks_state(agent, home) + "\n")
     for line in _ledger_state(praxis_home):
         out.write(line + "\n")
-    pending = drill.pending_backups(praxis_home)
-    if pending:
-        out.write(
-            f"drill backups pending: {len(pending)}; run `praxis drill --restore`\n"
-        )
-    repo = drill.locate(cwd)
+    repo = locate(cwd)
     if repo is None:
         out.write("cwd: not inside a git repository\n")
     else:
-        agents = drill.attached_agents(repo.root)
+        agents = attached_agents(repo.root)
         out.write(f"cwd: repository {repo.repo_id}; agents attached: {len(agents)}\n")
     return 0

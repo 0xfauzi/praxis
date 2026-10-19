@@ -1,12 +1,11 @@
 """The ledger: one SQLite file under $PRAXIS_HOME, and the only module that INSERTs.
 
 AGENTS.md invariant 2: every derived number is an Evidence written through here, so the
-CHECK constraints and the one constructor are the only way in. The
-derived-writes-only-in-store pre-commit hook refuses an INSERT into these tables
-anywhere else.
-
-Nothing in this file stores a line of text from a repository, a prompt or a tool. Hashes
-and counts only.
+CHECK constraints (schema.py) and the one constructor per table are the only way in.
+The derived-writes-only-in-store pre-commit hook refuses an INSERT into these tables
+anywhere else. A writer's keywords are its columns (the TypedDicts in schema.py) and
+become the row, so a signature is the schema it writes; nothing here stores a line of
+text.
 """
 
 from __future__ import annotations
@@ -16,181 +15,44 @@ import json
 import os
 import sqlite3
 from collections import Counter
-from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, Unpack
+
+from praxis.schema import CLAIMS, EV_COLS, SCHEMA_VERSION, migrate
+from praxis.schema import SCHEMA as SCHEMA
+from praxis.schema import Attribution as Attribution
+from praxis.schema import Evidence as Evidence
+from praxis.schema import item_id as item_id
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
+
+    from praxis.schema import (
+        Decision,
+        DecisionResponse,
+        Divergence,
+        DriftResponse,
+        Flag,
+        HookEvent,
+        ItemBatch,
+        Knockout,
+        PathfinderRun,
+        Pointers,
+        ProbeResponse,
+        Scan,
+        ScenarioRun,
+        Task,
+    )
 
 REDUCER_VERSION = "attribution-v1"
-CLAIM_CLASSES = ("observed", "derived", "comparative", "associative", "predictive")
-COVERAGES = ("full", "partial", "no_baseline")
 
 Files = dict[str, Counter[str]]
+Values = dict[str, object]
+Rows = list[sqlite3.Row]
 
 
 def home() -> Path:
     return Path(os.environ.get("PRAXIS_HOME") or Path.home() / ".praxis")
-
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS hook_events (
-  id          INTEGER PRIMARY KEY,
-  session_id  TEXT,
-  event       TEXT,
-  tool_name   TEXT,
-  tool_use_id TEXT,
-  ts          TEXT NOT NULL,
-  duration_ms REAL NOT NULL CHECK (duration_ms >= 0),
-  outcome     TEXT NOT NULL CHECK (outcome IN ('ok', 'unobservable', 'error')),
-  note        TEXT
-) STRICT;
-CREATE TABLE IF NOT EXISTS baselines (
-  session_id TEXT NOT NULL,
-  file       TEXT NOT NULL,
-  line_hash  TEXT NOT NULL,
-  count      INTEGER NOT NULL CHECK (count > 0)
-) STRICT;
-CREATE INDEX IF NOT EXISTS baselines_session ON baselines (session_id);
--- Scratch, not an observation: a PreToolUse snapshot waiting for its PostToolUse. The
--- one table rows are deleted from.
-CREATE TABLE IF NOT EXISTS pending (
-  session_id  TEXT NOT NULL,
-  tool_use_id TEXT NOT NULL,
-  ts          TEXT NOT NULL,
-  file        TEXT NOT NULL,
-  line_hash   TEXT NOT NULL,
-  count       INTEGER NOT NULL CHECK (count > 0)
-) STRICT;
-CREATE INDEX IF NOT EXISTS pending_key ON pending (session_id, tool_use_id);
-CREATE TABLE IF NOT EXISTS agent_deltas (
-  id          INTEGER PRIMARY KEY,
-  session_id  TEXT NOT NULL,
-  tool_use_id TEXT NOT NULL,
-  tool_name   TEXT NOT NULL,
-  ts          TEXT NOT NULL,
-  file        TEXT NOT NULL,
-  line_hash   TEXT NOT NULL,
-  delta       INTEGER NOT NULL CHECK (delta <> 0)
-) STRICT;
-CREATE INDEX IF NOT EXISTS agent_deltas_session ON agent_deltas (session_id);
-CREATE TABLE IF NOT EXISTS attributions (
-  id              INTEGER PRIMARY KEY,
-  session_id      TEXT NOT NULL,
-  ts              TEXT NOT NULL,
-  trigger         TEXT NOT NULL,
-  file            TEXT NOT NULL,
-  agent           INTEGER NOT NULL CHECK (agent >= 0),
-  human           INTEGER CHECK (human IS NULL OR human >= 0),
-  preexisting     INTEGER CHECK (preexisting IS NULL OR preexisting >= 0),
-  ambiguous       INTEGER NOT NULL CHECK (ambiguous >= 0),
-  reverted        INTEGER CHECK (reverted IS NULL OR reverted >= 0),
-  claim_class     TEXT NOT NULL CHECK (claim_class IN
-                    ('observed', 'derived', 'comparative', 'associative',
-                     'predictive')),
-  coverage        TEXT NOT NULL CHECK (coverage IN ('full', 'partial', 'no_baseline')),
-  sources         TEXT NOT NULL CHECK (json_valid(sources) AND sources <> '[]'),
-  reducer_version TEXT NOT NULL,
-  assumptions     TEXT NOT NULL CHECK (json_valid(assumptions)),
-  warnings        TEXT NOT NULL CHECK (json_valid(warnings)),
-  -- Unknown stays unknown: the two counts a baseline separates are NULL together with
-  -- the coverage that says why, never one without the other.
-  CHECK ((coverage = 'no_baseline') = (human IS NULL AND preexisting IS NULL
-                                        AND reverted IS NULL))
-) STRICT;
-CREATE INDEX IF NOT EXISTS attributions_session ON attributions (session_id);
--- Which repository a session worked in, by hashed toplevel. Written on every snapshot.
-CREATE TABLE IF NOT EXISTS session_repos (
-  session_id TEXT NOT NULL,
-  repo_id    TEXT NOT NULL,
-  ts         TEXT NOT NULL,
-  PRIMARY KEY (session_id, repo_id)
-) STRICT;
-CREATE TABLE IF NOT EXISTS repo_config (
-  repo_id  TEXT PRIMARY KEY,
-  test_cmd TEXT NOT NULL,
-  ts       TEXT NOT NULL
-) STRICT;
-CREATE TABLE IF NOT EXISTS items (
-  item_id      TEXT PRIMARY KEY,
-  repo_id      TEXT NOT NULL,
-  created_ts   TEXT NOT NULL,
-  kind         TEXT NOT NULL CHECK (kind IN ('write-it')),
-  file         TEXT,
-  qualname     TEXT,
-  agent_lines  INTEGER CHECK (agent_lines IS NULL OR agent_lines >= 0),
-  total_lines  INTEGER CHECK (total_lines IS NULL OR total_lines > 0),
-  min_fraction REAL NOT NULL CHECK (min_fraction >= 0 AND min_fraction <= 1),
-  validation   TEXT NOT NULL,
-  claim_class  TEXT NOT NULL CHECK (claim_class = 'derived'),
-  sources      TEXT NOT NULL CHECK (json_valid(sources) AND sources <> '[]'),
-  reducer_version TEXT NOT NULL,
-  assumptions  TEXT NOT NULL CHECK (json_valid(assumptions)),
-  -- A refused drill records an item with no function; a function always has a file.
-  CHECK ((file IS NULL) = (qualname IS NULL))
-) STRICT;
-CREATE TABLE IF NOT EXISTS results (
-  id            INTEGER PRIMARY KEY,
-  item_id       TEXT NOT NULL REFERENCES items (item_id),
-  ts            TEXT NOT NULL,
-  outcome       TEXT NOT NULL CHECK (outcome IN ('pass', 'fail', 'aborted', 'refused')),
-  elapsed_s     REAL NOT NULL CHECK (elapsed_s >= 0),
-  test_cmd_hash TEXT NOT NULL,
-  claim_class   TEXT NOT NULL CHECK (claim_class = 'observed'),
-  coverage      TEXT NOT NULL CHECK (coverage = 'full'),
-  sources       TEXT NOT NULL CHECK (json_valid(sources) AND sources <> '[]'),
-  reducer_version TEXT NOT NULL,
-  warnings      TEXT NOT NULL CHECK (json_valid(warnings))
-) STRICT;
-"""
-
-ITEM_ASSUMPTIONS = [
-    "a function's lines are the agent's when their hashes match agent deltas recorded"
-    " for this repository, so a line the owner retyped identically still counts as the"
-    " agent's",
-    "the tests the owner configured are the only judge of a body",
-]
-
-
-@dataclass(frozen=True)
-class Attribution:
-    session_id: str
-    ts: str
-    trigger: str
-    file: str
-    agent: int
-    human: int | None
-    preexisting: int | None
-    ambiguous: int
-    reverted: int | None
-    coverage: str
-    sources: list[str]
-    assumptions: list[str]
-    warnings: list[str] = field(default_factory=list)
-    claim_class: str = "derived"
-
-
-@dataclass(frozen=True)
-class ItemRow:
-    item_id: str
-    repo_id: str
-    created_ts: str
-    kind: str
-    file: str | None
-    qualname: str | None
-    agent_lines: int | None
-    total_lines: int | None
-    min_fraction: float
-    sources: list[str]
-    validation: str
-
-
-@dataclass(frozen=True)
-class ResultRow:
-    item_id: str
-    ts: str
-    outcome: str
-    elapsed_s: float
-    test_cmd_hash: str
-    sources: list[str]
-    warnings: list[str]
 
 
 class Store:
@@ -205,10 +67,19 @@ class Store:
         # Hooks are separate processes and subagents run tools concurrently, so two
         # hooks can write at once. WAL plus a busy timeout is what lets both finish.
         db = sqlite3.connect(self.path, timeout=2.0, isolation_level=None)
+        db.row_factory = sqlite3.Row
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA busy_timeout=2000")
-        db.executescript(SCHEMA)
+        db.execute("PRAGMA foreign_keys=ON")
         self._db = db
+        (version,) = db.execute("PRAGMA user_version").fetchone()
+        if version != SCHEMA_VERSION:
+            # Every statement is IF NOT EXISTS, so two first opens both succeed;
+            # executescript commits any open transaction, so it runs before one opens.
+            db.executescript(SCHEMA)
+            with self._tx():
+                migrate(db)
+                db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         return self
 
     def close(self) -> None:
@@ -222,48 +93,73 @@ class Store:
             raise RuntimeError("store is not open")
         return self._db
 
-    # -- writes ---------------------------------------------------------------------
+    @contextlib.contextmanager
+    def _tx(self) -> Iterator[sqlite3.Connection]:
+        # isolation_level=None is autocommit, where `with connection:` opens nothing:
+        # a multi-row write is atomic only inside an explicit BEGIN. Nested use joins
+        # the outer transaction.
+        db = self.db
+        if db.in_transaction:
+            yield db
+            return
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            yield db
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
 
-    def hook_event(
-        self,
-        *,
-        session_id: str | None,
-        event: str | None,
-        tool_name: str | None,
-        tool_use_id: str | None,
-        ts: str,
-        duration_ms: float,
-        outcome: str,
-        note: str | None,
-    ) -> None:
-        self.db.execute(
-            "INSERT INTO hook_events (session_id, event, tool_name, tool_use_id, ts,"
-            " duration_ms, outcome, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (session_id, event, tool_name, tool_use_id, ts, duration_ms, outcome, note),
+    def _insert(
+        self, table: str, ev: Evidence | None, rows: Sequence[Values]
+    ) -> list[int]:
+        if not rows:
+            return []
+        names = list(rows[0])
+        extra = () if ev is None else (CLAIMS[table], *ev.columns())
+        columns = names + ([] if ev is None else ["claim_class", *EV_COLS])
+        # The one string-built statement: the table is a literal at every call site
+        # and the columns are the calling writer's own parameter names.
+        sql = (
+            f"INSERT INTO {table} ({', '.join(columns)})"  # noqa: S608
+            f" VALUES ({', '.join('?' * len(columns))})"
         )
+        ids: list[int] = []
+        with self._tx() as db:
+            for r in rows:
+                rowid = db.execute(sql, [*(r[c] for c in names), *extra]).lastrowid
+                if rowid is None:
+                    raise RuntimeError(f"{table}: no row id after INSERT")
+                ids.append(rowid)
+        return ids
+
+    def _all(self, sql: str, *params: object) -> Rows:
+        return list(self.db.execute(sql, params))
+
+    def _one(self, sql: str, *params: object) -> sqlite3.Row | None:
+        row: sqlite3.Row | None = self.db.execute(sql, params).fetchone()
+        return row
+
+    # -- the recorder ---------------------------------------------------------------
+
+    def hook_event(self, **row: Unpack[HookEvent]) -> None:
+        self._insert("hook_events", None, [dict(row)])
 
     def has_baseline(self, session_id: str) -> bool:
-        row = self.db.execute(
-            "SELECT 1 FROM baselines WHERE session_id = ? LIMIT 1", (session_id,)
-        ).fetchone()
-        return row is not None
+        sql = "SELECT 1 FROM baselines WHERE session_id = ? LIMIT 1"
+        return self._one(sql, session_id) is not None
 
     def baseline(self, session_id: str, files: Files) -> None:
         rows = [
             (session_id, f, h, n) for f, c in files.items() for h, n in c.items() if n
         ]
-        with self.db:
+        with self._tx() as db:
             # An empty tree still needs a baseline row to say "observed, nothing dirty":
             # absence of rows must not read as absence of a baseline.
-            self.db.execute(
+            db.executemany(
                 "INSERT INTO baselines (session_id, file, line_hash, count)"
                 " VALUES (?, ?, ?, ?)",
-                (session_id, "", "", 1),
-            )
-            self.db.executemany(
-                "INSERT INTO baselines (session_id, file, line_hash, count)"
-                " VALUES (?, ?, ?, ?)",
-                rows,
+                [(session_id, "", "", 1), *rows],
             )
 
     def pending_put(
@@ -275,33 +171,26 @@ class Store:
             for h, n in c.items()
             if n
         ]
-        with self.db:
-            self.db.execute(
+        with self._tx() as db:
+            db.executemany(
                 "INSERT INTO pending (session_id, tool_use_id, ts, file, line_hash,"
                 " count) VALUES (?, ?, ?, ?, ?, ?)",
-                (session_id, tool_use_id, ts, "", "", 1),
-            )
-            self.db.executemany(
-                "INSERT INTO pending (session_id, tool_use_id, ts, file, line_hash,"
-                " count) VALUES (?, ?, ?, ?, ?, ?)",
-                rows,
+                [(session_id, tool_use_id, ts, "", "", 1), *rows],
             )
 
     def pending_take(self, session_id: str, tool_use_id: str) -> Files | None:
         """The pre-snapshot for one tool call, consumed. None without a PreToolUse."""
-        with self.db:
-            rows = self.db.execute(
+        key = (session_id, tool_use_id)
+        with self._tx() as db:
+            rows = db.execute(
                 "SELECT file, line_hash, count FROM pending"
                 " WHERE session_id = ? AND tool_use_id = ?",
-                (session_id, tool_use_id),
+                key,
             ).fetchall()
-            if not rows:
-                return None
-            self.db.execute(
-                "DELETE FROM pending WHERE session_id = ? AND tool_use_id = ?",
-                (session_id, tool_use_id),
+            db.execute(
+                "DELETE FROM pending WHERE session_id = ? AND tool_use_id = ?", key
             )
-        return _files(rows)
+        return _files(rows) if rows else None
 
     def agent_delta(
         self,
@@ -310,45 +199,30 @@ class Store:
         tool_name: str,
         ts: str,
         changes: list[tuple[str, str, int]],
+        **pointers: Unpack[Pointers],
     ) -> None:
-        with self.db:
-            self.db.executemany(
-                "INSERT INTO agent_deltas (session_id, tool_use_id, tool_name, ts,"
-                " file, line_hash, delta) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [
-                    (session_id, tool_use_id, tool_name, ts, f, h, d)
-                    for f, h, d in changes
-                ],
-            )
+        call = {"session_id": session_id, "tool_use_id": tool_use_id,
+                "tool_name": tool_name, "ts": ts, **pointers}  # fmt: skip
+        rows = [{**call, "file": f, "line_hash": h, "delta": d} for f, h, d in changes]
+        self._insert("agent_deltas", None, rows)
 
     def attributions(self, rows: list[Attribution]) -> None:
-        with self.db:
-            self.db.executemany(
+        with self._tx() as db:
+            db.executemany(
                 "INSERT INTO attributions (session_id, ts, trigger, file, agent, human,"
                 " preexisting, ambiguous, reverted, claim_class, coverage, sources,"
                 " reducer_version, assumptions, warnings)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
-                        r.session_id,
-                        r.ts,
-                        r.trigger,
-                        r.file,
-                        r.agent,
-                        r.human,
-                        r.preexisting,
-                        r.ambiguous,
-                        r.reverted,
-                        r.claim_class,
-                        r.coverage,
-                        json.dumps(r.sources),
-                        REDUCER_VERSION,
-                        json.dumps(r.assumptions),
-                        json.dumps(r.warnings),
+                        r.session_id, r.ts, r.trigger, r.file, r.agent, r.human,
+                        r.preexisting, r.ambiguous, r.reverted, r.claim_class,
+                        r.coverage, json.dumps(r.sources), REDUCER_VERSION,
+                        json.dumps(r.assumptions), json.dumps(r.warnings),
                     )
                     for r in rows
                 ],
-            )
+            )  # fmt: skip
 
     def touch_session_repo(self, session_id: str, repo_id: str, ts: str) -> None:
         self.db.execute(
@@ -357,109 +231,394 @@ class Store:
             (session_id, repo_id, ts),
         )
 
-    def set_test_cmd(self, repo_id: str, test_cmd: str, ts: str) -> None:
+    def decision(self, *, ev: Evidence, **row: Unpack[Decision]) -> int:
+        return self._insert("decisions", ev, [dict(row)])[0]
+
+    def survival(self, session_ids: Sequence[str], probe: Counter[str]) -> Counter[str]:
+        """How many of each probed line hash are the agent's in these sessions: deltas
+        summed per (file, hash) across the sessions and clipped at zero, as
+        agent_multiset does, then summed over files and intersected with ``probe`` as
+        multisets (min of counts). Two identical lines are two lines."""
+        if len(set(session_ids)) != len(session_ids):
+            raise ValueError("a session id is listed twice")
+        agent: Counter[str] = Counter()
+        for h, total in self.db.execute(
+            "SELECT line_hash, SUM(delta) FROM agent_deltas WHERE session_id IN"
+            " (SELECT value FROM json_each(?)) GROUP BY file, line_hash",
+            (json.dumps(list(session_ids)),),
+        ):
+            if total > 0:
+                agent[h] += total
+        return agent & probe
+
+    # -- component maps, rules and edges --------------------------------------------
+
+    def component_map_put(self, cmap_json: str, ts: str) -> str:
+        """Store a map (components.to_json) and return its version. The same rules
+        twice are one map; the same rules under another source are refused."""
+        # Imported here: every hook opens a Store and must not pay for this module.
+        from praxis.components import from_json
+
+        cmap = from_json(cmap_json)
+        rules = json.dumps([[r.id, *r.globs] for r in cmap.rules])
         self.db.execute(
-            "INSERT OR REPLACE INTO repo_config (repo_id, test_cmd, ts)"
-            " VALUES (?, ?, ?)",
-            (repo_id, test_cmd, ts),
+            "INSERT INTO component_maps (repo_id, version, source, rules_json,"
+            " warnings_json, created_ts) VALUES (?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT (repo_id, version) DO NOTHING",
+            (cmap.repo_id, cmap.version, cmap.source, rules,
+             json.dumps(list(cmap.warnings)), ts),
+        )  # fmt: skip
+        stored = self._one(
+            "SELECT source FROM component_maps WHERE repo_id = ? AND version = ?",
+            cmap.repo_id,
+            cmap.version,
+        )
+        if stored is None or stored[0] != cmap.source:
+            raise ValueError("these rules are stored under another source")
+        return cmap.version
+
+    def component_map_freeze(
+        self, repo_id: str, version: str, ts: str, *, reason: str | None = None
+    ) -> None:
+        """Freeze a stored map. Freezing another version supersedes the frozen one and
+        needs a reason code; refreezing the frozen version changes nothing."""
+        set_ = "UPDATE component_maps SET {} WHERE repo_id = ? AND version = ?"
+        with self._tx() as db:
+            now = self._frozen(repo_id)
+            if now is not None and now["version"] == version:
+                return
+            if now is not None:
+                if reason is None:
+                    raise ValueError("a map change needs a reason code")
+                db.execute(
+                    set_.format("superseded_ts = ?"), (ts, repo_id, now["version"])
+                )
+            done = db.execute(
+                set_.format("frozen_ts = ?, reason = ?"), (ts, reason, repo_id, version)
+            )
+            if done.rowcount != 1:
+                raise KeyError(f"no stored map {version}")
+
+    def _frozen(self, repo_id: str) -> sqlite3.Row | None:
+        return self._one(
+            "SELECT * FROM component_maps WHERE repo_id = ?"
+            " AND frozen_ts IS NOT NULL AND superseded_ts IS NULL",
+            repo_id,
         )
 
-    def item(self, row: ItemRow) -> None:
-        self.db.execute(
-            "INSERT INTO items (item_id, repo_id, created_ts, kind, file, qualname,"
-            " agent_lines, total_lines, min_fraction, validation, claim_class, sources,"
-            " reducer_version, assumptions)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'derived', ?, ?, ?)",
-            (
-                row.item_id,
-                row.repo_id,
-                row.created_ts,
-                row.kind,
-                row.file,
-                row.qualname,
-                row.agent_lines,
-                row.total_lines,
-                row.min_fraction,
-                row.validation,
-                json.dumps(row.sources),
-                REDUCER_VERSION,
-                json.dumps(ITEM_ASSUMPTIONS),
-            ),
+    def component_map_frozen(self, repo_id: str) -> str | None:
+        """The frozen map as components.to_json wrote it, or None."""
+        row = self._frozen(repo_id)
+        if row is None:
+            return None
+        doc = {
+            "repo_id": row["repo_id"],
+            "source": row["source"],
+            "rules": json.loads(row["rules_json"]),
+            "version": row["version"],
+            "warnings": json.loads(row["warnings_json"]),
+        }
+        return json.dumps(doc, sort_keys=True, separators=(",", ":"))
+
+    def boundary_rule_put(
+        self, repo_id: str, map_version: str, src: str, dst: str, allowed: bool, ts: str
+    ) -> None:
+        row: Values = {"repo_id": repo_id, "map_version": map_version,
+                       "src_component": src, "dst_component": dst,
+                       "allowed": allowed, "ts": ts}  # fmt: skip
+        self._insert("boundary_rules", None, [row])
+
+    def boundary_rules(self, repo_id: str, map_version: str) -> Rows:
+        return self._all(
+            "SELECT * FROM boundary_rules WHERE repo_id = ? AND map_version = ?"
+            " ORDER BY src_component, dst_component",
+            repo_id,
+            map_version,
         )
 
-    def result(self, row: ResultRow) -> None:
-        self.db.execute(
-            "INSERT INTO results (item_id, ts, outcome, elapsed_s, test_cmd_hash,"
-            " claim_class, coverage, sources, reducer_version, warnings)"
-            " VALUES (?, ?, ?, ?, ?, 'observed', 'full', ?, ?, ?)",
-            (
-                row.item_id,
-                row.ts,
-                row.outcome,
-                row.elapsed_s,
-                row.test_cmd_hash,
-                json.dumps(row.sources),
-                REDUCER_VERSION,
-                json.dumps(row.warnings),
-            ),
+    def file_edges(
+        self,
+        *,
+        scanned: Mapping[str, str],
+        edges: Sequence[tuple[str, str, int, bool]],
+        ev: Evidence,
+        **scan: Unpack[Scan],
+    ) -> None:
+        """X1 at file grain for one scan. ``scanned`` maps every parsed file to its
+        component; ``edges`` are (src_file, dst_component, sites, module_level), one
+        per pair. A scanned file with no edge gets a row with a NULL destination."""
+        seen = Counter((s, d) for s, d, _, _ in edges)
+        if any(n > 1 for n in seen.values()):
+            raise ValueError("an edge is listed twice; sum its sites first")
+        bare = sorted(set(scanned) - {s for s, _ in seen})
+        found = [*edges, *((f, None, None, None) for f in bare)]
+        rows: list[Values] = [
+            {**scan, "src_file": s, "src_component": scanned[s], "dst_component": d,
+             "sites": n, "module_level": m}
+            for s, d, n, m in found
+        ]  # fmt: skip
+        self._insert("file_edges", ev, rows)
+
+    def edge_history(self, repo_id: str) -> Rows:
+        sql = "SELECT * FROM file_edges WHERE repo_id = ? ORDER BY ts, id"
+        return self._all(sql, repo_id)
+
+    def scenario_run(
+        self,
+        *,
+        components: Sequence[str],
+        call_edges: Mapping[tuple[str, str], int],
+        ev: Evidence,
+        **run: Unpack[ScenarioRun],
+    ) -> None:
+        if len(set(components)) != len(components):
+            raise ValueError("a component is listed twice")
+        edges = sorted([s, d, n] for (s, d), n in call_edges.items())
+        row: Values = {**run, "components_json": json.dumps(sorted(components)),
+                       "call_edges_json": json.dumps(edges)}  # fmt: skip
+        self._insert("scenario_runs", ev, [row])
+
+    # -- tasks ----------------------------------------------------------------------
+
+    def task_register(
+        self,
+        *,
+        region: Sequence[str],
+        bound: Sequence[str],
+        related: Sequence[str],
+        drawn: Sequence[str],
+        **task: Unpack[Task],
+    ) -> str | None:
+        """One task and its exposures, atomically, against the frozen map only.
+        Supersedes the repository's open task in the same transaction and returns its
+        id, or None. An item listed twice is refused: exposure consumes it."""
+        repo_id, ts = task["repo_id"], task["ts"]
+        row: Values = {**task, "region_json": json.dumps(list(region)),
+                       "status": "unbound"}  # fmt: skip
+        roles = {"bound": bound, "related": related, "drawn_not_shown": drawn}
+        exposed: list[Values] = [
+            {"item_id": i, "task_id": task["task_id"], "ts": ts, "role": role}
+            for role, ids in roles.items()
+            for i in ids
+        ]
+        with self._tx():
+            frozen = self._frozen(repo_id)
+            if frozen is None or frozen["version"] != task["map_version"]:
+                raise ValueError("a task needs the repository's frozen map")
+            old = self.task_open(repo_id)
+            if old is not None:
+                self.task_void(old["task_id"], "superseded", ts)
+            self._insert("tasks", None, [row])
+            self._insert("exposures", None, exposed)
+        return None if old is None else str(old["task_id"])
+
+    def task_bind(
+        self, task_id: str, session_id: str, prompt_id: str | None, ts: str
+    ) -> None:
+        self._move(
+            "UPDATE tasks SET status = 'bound', bound_session_id = ?,"
+            " bound_prompt_id = ?, bound_ts = ? WHERE task_id = ?",
+            (session_id, prompt_id, ts, task_id),
         )
+
+    def task_close(self, task_id: str, ts: str) -> None:
+        self._move(
+            "UPDATE tasks SET status = 'closed', closed_ts = ? WHERE task_id = ?",
+            (ts, task_id),
+        )
+
+    def task_void(self, task_id: str, reason: str, ts: str) -> None:
+        status = "superseded" if reason == "superseded" else "void"
+        self._move(
+            "UPDATE tasks SET status = ?, void_reason = ?, void_ts = ?"
+            " WHERE task_id = ?",
+            (status, reason, ts, task_id),
+        )
+
+    def _move(self, sql: str, values: tuple[object, ...]) -> None:
+        # The triggers and the status CHECK refuse a second set or a wrong transition.
+        if self.db.execute(sql, values).rowcount != 1:
+            task_id = values[-1]
+            raise KeyError(f"no task {task_id}")
+
+    def task_open(self, repo_id: str) -> sqlite3.Row | None:
+        """The unbound or bound task; a partial unique index keeps it to one."""
+        return self._one(
+            "SELECT * FROM tasks WHERE repo_id = ? AND status IN ('unbound', 'bound')",
+            repo_id,
+        )
+
+    def task_last_closed(self, repo_id: str) -> sqlite3.Row | None:
+        return self._one(
+            "SELECT * FROM tasks WHERE repo_id = ? AND status = 'closed'"
+            " ORDER BY closed_ts DESC, ordinal DESC LIMIT 1",
+            repo_id,
+        )
+
+    def task_rows(self, repo_id: str) -> Rows:
+        sql = "SELECT * FROM tasks WHERE repo_id = ? ORDER BY ordinal"
+        return self._all(sql, repo_id)
+
+    def task_count(self, repo_id: str) -> int:
+        row = self._one("SELECT COUNT(*) FROM tasks WHERE repo_id = ?", repo_id)
+        return 0 if row is None else int(row[0])
+
+    def exposures_of(self, task_id: str) -> Rows:
+        return self._all(
+            "SELECT e.item_id, e.role, e.ts, p.relation, p.src_component,"
+            " p.dst_component, p.truth, p.epoch FROM exposures e"
+            " JOIN probe_items p USING (item_id) WHERE e.task_id = ? ORDER BY e.id",
+            task_id,
+        )
+
+    def forecast(
+        self,
+        task_id: str,
+        rows: Iterable[tuple[str | None, float | None, str, str | None]],
+        ts: str,
+        *,
+        ev: Evidence,
+    ) -> None:
+        """(component, p, kind, item_id) per row: a 'forecast' names a component, a
+        'prequestion' an item. p None is shown and unanswered."""
+        self._insert(
+            "forecasts",
+            ev,
+            [
+                {"task_id": task_id, "kind": kind, "component": component,
+                 "item_id": item, "p": p, "ts": ts}
+                for component, p, kind, item in rows
+            ],
+        )  # fmt: skip
+
+    def forecasts_of(self, task_id: str) -> Rows:
+        sql = "SELECT * FROM forecasts WHERE task_id = ? ORDER BY id"
+        return self._all(sql, task_id)
+
+    def outcome(
+        self,
+        task_id: str,
+        rows: Iterable[tuple[str, bool, bool | None, int | None, int | None]],
+        ts: str,
+        *,
+        ev: Evidence,
+    ) -> None:
+        """(component, o_first, o_final, edges_added, edges_removed) per component."""
+        self._insert(
+            "outcomes",
+            ev,
+            [
+                {"task_id": task_id, "ts": ts, "component": c, "o_first": first,
+                 "o_final": final, "edges_added": added, "edges_removed": removed}
+                for c, first, final, added, removed in rows
+            ],
+        )  # fmt: skip
+
+    def outcomes_of(self, task_id: str) -> Rows:
+        sql = "SELECT * FROM outcomes WHERE task_id = ? ORDER BY component"
+        return self._all(sql, task_id)
+
+    # -- probes ---------------------------------------------------------------------
+
+    def probe_items_put(
+        self,
+        *,
+        rows: Iterable[tuple[str, str, str, bool, int, int | None, bool | None]],
+        ev: Evidence,
+        **batch: Unpack[ItemBatch],
+    ) -> list[str]:
+        """(relation, src, dst, truth, epoch, sites, module_level) per item; returns
+        the item ids, derived from the key, so putting an item twice is refused."""
+        key = (batch["repo_id"], batch["map_version"])
+        items: list[Values] = [
+            {**batch, "item_id": item_id(*key, rel, src, dst, epoch),
+             "relation": rel, "src_component": src, "dst_component": dst,
+             "truth": truth, "epoch": epoch, "sites": sites,
+             "module_level": module_level}
+            for rel, src, dst, truth, epoch, sites, module_level in rows
+        ]  # fmt: skip
+        self._insert("probe_items", ev, items)
+        return [str(i["item_id"]) for i in items]
+
+    def probe_items_unexposed(self, repo_id: str, map_version: str) -> Rows:
+        """Items of the current epoch for their pair that no task has exposed."""
+        return self._all(
+            "SELECT p.* FROM probe_items p WHERE p.repo_id = ? AND p.map_version = ?"
+            " AND NOT EXISTS (SELECT 1 FROM exposures e WHERE e.item_id = p.item_id)"
+            " AND p.epoch = (SELECT MAX(q.epoch) FROM probe_items q"
+            "  WHERE q.repo_id = p.repo_id AND q.map_version = p.map_version"
+            "  AND q.relation = p.relation AND q.src_component = p.src_component"
+            "  AND q.dst_component = p.dst_component) ORDER BY p.item_id",
+            repo_id,
+            map_version,
+        )
+
+    def probe_item(self, item_id: str) -> sqlite3.Row | None:
+        return self._one("SELECT * FROM probe_items WHERE item_id = ?", item_id)
+
+    def probe_response(self, *, ev: Evidence, **row: Unpack[ProbeResponse]) -> int:
+        """p None is a skip. Only called after the attached-agent check found none."""
+        values: Values = {**row, "skipped": row["p"] is None, "agent_attached": 0}
+        return self._insert("probe_responses", ev, [values])[0]
+
+    def drift_response(self, *, ev: Evidence, **row: Unpack[DriftResponse]) -> None:
+        self._insert("drift_responses", ev, [dict(row)])
+
+    def divergence(self, *, ev: Evidence, **row: Unpack[Divergence]) -> None:
+        self._insert("divergences", ev, [dict(row)])
+
+    def decisions_unprobed(self, repo_id: str) -> Rows:
+        """Decisions with an option list, in sessions on this repository, that have no
+        response yet. A session recorded on two repositories lists under both."""
+        return self._all(
+            "SELECT d.* FROM decisions d JOIN session_repos s USING (session_id)"
+            " WHERE s.repo_id = ? AND d.option_count IS NOT NULL AND NOT EXISTS"
+            " (SELECT 1 FROM decision_responses r WHERE r.decision_id = d.id)"
+            " ORDER BY d.ts, d.id",
+            repo_id,
+        )
+
+    def decision_response(
+        self, *, ev: Evidence, **row: Unpack[DecisionResponse]
+    ) -> None:
+        """recalled_index None is a skip. An index outside the option list is refused
+        here: the one check the schema cannot make across tables."""
+        index = row["recalled_index"]
+        found = self._one(
+            "SELECT option_count FROM decisions WHERE id = ?", row["decision_id"]
+        )
+        count = None if found is None else found[0]
+        if index is not None and not (count is not None and 0 <= index < count):
+            raise ValueError("recalled index outside the decision's options")
+        self._insert("decision_responses", ev, [{**row, "skipped": index is None}])
+
+    def knockout(
+        self,
+        *,
+        components_named: Sequence[str],
+        ev: Evidence,
+        **row: Unpack[Knockout],
+    ) -> None:
+        named = json.dumps(list(components_named))
+        self._insert("knockouts", ev, [{**row, "components_named_json": named}])
+
+    def pathfinder_run(self, *, ev: Evidence, **row: Unpack[PathfinderRun]) -> None:
+        self._insert("pathfinder_runs", ev, [dict(row)])
+
+    def flag(
+        self, *, ts: str, code: str, detail: Mapping[str, object], **on: Unpack[Flag]
+    ) -> None:
+        row: Values = {**on, "ts": ts, "code": code,
+                       "detail_json": json.dumps(dict(detail))}  # fmt: skip
+        self._insert("flags", None, [row])
 
     # -- reads ----------------------------------------------------------------------
 
-    def test_cmd(self, repo_id: str) -> str | None:
-        row = self.db.execute(
-            "SELECT test_cmd FROM repo_config WHERE repo_id = ?", (repo_id,)
-        ).fetchone()
-        return None if row is None else str(row[0])
-
-    def agent_files(self, repo_id: str) -> list[str]:
-        return [
-            str(r[0])
-            for r in self.db.execute(
-                "SELECT DISTINCT d.file FROM agent_deltas d"
-                " JOIN session_repos s ON s.session_id = d.session_id"
-                " WHERE s.repo_id = ? ORDER BY d.file",
-                (repo_id,),
-            )
-        ]
-
-    def agent_hashes(self, repo_id: str, file: str) -> tuple[set[str], list[str]]:
-        """Line hashes the agent added to one file across every session on the repo, and
-        the sessions they came from. A hash the agent later removed (sum <= 0) is not
-        the agent's any more."""
-        hashes: set[str] = set()
-        for h, total in self.db.execute(
-            "SELECT d.line_hash, SUM(d.delta) FROM agent_deltas d"
-            " JOIN session_repos s ON s.session_id = d.session_id"
-            " WHERE s.repo_id = ? AND d.file = ? GROUP BY d.line_hash",
-            (repo_id, file),
-        ):
-            if total > 0:
-                hashes.add(str(h))
-        sessions = [
-            str(r[0])
-            for r in self.db.execute(
-                "SELECT DISTINCT d.session_id FROM agent_deltas d"
-                " JOIN session_repos s ON s.session_id = d.session_id"
-                " WHERE s.repo_id = ? AND d.file = ? ORDER BY d.session_id",
-                (repo_id, file),
-            )
-        ]
-        return hashes, sessions
-
-    def item_rows(self) -> list[sqlite3.Row]:
-        self.db.row_factory = sqlite3.Row
-        return list(self.db.execute("SELECT * FROM items ORDER BY created_ts"))
-
-    def result_rows(self) -> list[sqlite3.Row]:
-        self.db.row_factory = sqlite3.Row
-        return list(self.db.execute("SELECT * FROM results ORDER BY id"))
-
     def baseline_of(self, session_id: str) -> Files | None:
-        rows = self.db.execute(
+        rows = self._all(
             "SELECT file, line_hash, count FROM baselines WHERE session_id = ?",
-            (session_id,),
-        ).fetchall()
+            session_id,
+        )
         return _files(rows) if rows else None
 
     def agent_multiset(self, session_id: str) -> tuple[Files, dict[str, list[str]]]:
@@ -485,39 +644,29 @@ class Store:
             sources.setdefault(file, set()).add(tool_use_id)
         return files, {f: sorted(ids) for f, ids in sources.items()}
 
-    def attribution_rows(self, session_id: str | None = None) -> list[sqlite3.Row]:
-        self.db.row_factory = sqlite3.Row
+    def attribution_rows(self, session_id: str | None = None) -> Rows:
         if session_id is None:
-            return list(self.db.execute("SELECT * FROM attributions ORDER BY id"))
-        return list(
-            self.db.execute(
-                "SELECT * FROM attributions WHERE session_id = ? ORDER BY id",
-                (session_id,),
-            )
-        )
+            return self._all("SELECT * FROM attributions ORDER BY id")
+        sql = "SELECT * FROM attributions WHERE session_id = ? ORDER BY id"
+        return self._all(sql, session_id)
 
-    def hook_event_rows(self, session_id: str | None = None) -> list[sqlite3.Row]:
-        self.db.row_factory = sqlite3.Row
+    def hook_event_rows(self, session_id: str | None = None) -> Rows:
         if session_id is None:
-            return list(self.db.execute("SELECT * FROM hook_events ORDER BY id"))
-        return list(
-            self.db.execute(
-                "SELECT * FROM hook_events WHERE session_id = ? ORDER BY id",
-                (session_id,),
-            )
-        )
+            return self._all("SELECT * FROM hook_events ORDER BY id")
+        sql = "SELECT * FROM hook_events WHERE session_id = ? ORDER BY id"
+        return self._all(sql, session_id)
 
     def sessions(self) -> list[str]:
         return [
             r[0]
-            for r in self.db.execute(
+            for r in self._all(
                 "SELECT session_id FROM hook_events WHERE session_id IS NOT NULL"
                 " GROUP BY session_id ORDER BY MIN(ts)"
             )
         ]
 
 
-def _files(rows: list[tuple[str, str, int]]) -> Files:
+def _files(rows: Iterable[Sequence[Any]]) -> Files:
     files: Files = {}
     for file, h, n in rows:
         if file == "" and h == "":
