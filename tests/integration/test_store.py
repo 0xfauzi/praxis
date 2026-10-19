@@ -178,7 +178,7 @@ def test_edges_scenarios_and_rules_round_trip(db: Store) -> None:
         repo_id=REPO, map_version=V, ts="t", scenario_id="hook-edit",
         command_hash="0" * 16, outcome="ok", exit_code=0, duration_ms=12.0,
         components=["b", "a"], call_edges={("a", "b"): 3},
-        extractor_version="x2-v1", ev=EV,
+        extractor_version="x2-v1", tree_hash="ab" * 20, ev=EV,
     )
     (run,) = db.db.execute("SELECT * FROM scenario_runs")
     assert json.loads(run["components_json"]) == ["a", "b"]
@@ -402,10 +402,31 @@ def test_task_probe_and_report_readers_round_trip(db: Store) -> None:
         db.scenario_run(**common | {"ts": ts}, scenario_id=scenario,
                         command_hash="0" * 16, outcome="ok", exit_code=0,
                         duration_ms=1.0, components=["a"], call_edges={},
-                        extractor_version="x2-v1")
+                        extractor_version="x2-v1", tree_hash="ab" * 20)
     assert [r["scenario_id"] for r in db.scenario_runs_for(REPO, V)] == [
         "early", "late"]
 # fmt: on
+
+
+def test_unprobed_items_leave_out_asked_exposed_and_old_epoch_items(
+    db: Store,
+) -> None:
+    ids = world(db)  # ids[0] is exposed by T1
+    assert [r["item_id"] for r in db.probe_items_unprobed(REPO, V)] == sorted(ids[1:])
+    db.probe_response(
+        ev=EV, item_id=ids[1], task_id=None, ts="t5", p=None, seconds=1.0,
+        lag_days=None, deadline_met=True, truth_at_probe=False, truth_changed=False,
+        head_sha=None, tree_hash=None, dirty=None, extractor_version="x1-v1",
+    )  # fmt: skip
+    assert [r["item_id"] for r in db.probe_items_unprobed(REPO, V)] == sorted(ids[2:])
+    assert [r["item_id"] for r in db.probe_items_unexposed(REPO, V)] == sorted(ids[1:])
+    (flipped,) = db.probe_items_put(
+        rows=[("D2", "a", "c", True, 1, None, None)], ev=EV, repo_id=REPO,
+        map_version=V, truth_ts="t6", extractor_version="x1-v1",
+    )  # fmt: skip
+    unprobed = [r["item_id"] for r in db.probe_items_unprobed(REPO, V)]
+    assert unprobed == sorted([flipped, ids[3]])
+    assert db.probe_items_unprobed(REPO, "f" * 16) == []
 
 
 def test_reopen_skips_the_ddl_and_keeps_rows(home: Path) -> None:
@@ -507,7 +528,7 @@ def bases(ids: list[str]) -> dict[str, dict[str, object]]:
                           "ts": "t", "outcome": "failed", "exit_code": 1,
                           "duration_ms": 1.0, "components_json": "[]",
                           "call_edges_json": "[]", "extractor_version": "x2",
-                          **ev("scenario_runs")},
+                          "tree_hash": "ab" * 20, **ev("scenario_runs")},
         "tasks": {**m, "task_id": "T7", "ordinal": 7, "ts": "t", "arm": "control",
                   "seed_hash": SEED, "region_json": "[]", "stratum": "empty",
                   "status": "closed", "bound_session_id": "s1",

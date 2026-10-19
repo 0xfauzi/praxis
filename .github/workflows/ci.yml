@@ -107,6 +107,13 @@ jobs:
       - name: cognitive complexity over the tree
         run: uv run pre-commit run --hook-stage manual complexipy-tree --all-files
 
+      # The cyclomatic and file-length ratchets compare the STAGED index with HEAD too,
+      # so they checked nothing here; their tree copies hold the flat limits instead.
+      - name: cyclomatic complexity over the tree
+        run: uv run pre-commit run --hook-stage manual cyclomatic-ratchet-tree --all-files
+      - name: file length over the tree
+        run: uv run pre-commit run --hook-stage manual file-length-tree --all-files
+
       # `live` is excluded on purpose: those tests need an agent binary or a judge key and
       # spend tokens a CI runner has neither the credentials nor the permission to spend.
       - name: pytest (integration)

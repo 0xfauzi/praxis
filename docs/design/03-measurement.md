@@ -138,6 +138,21 @@ stamped on every derived row. A map defines nodes only: every edge comes from an
    every depth: the repository gets forecasts but no structural items, recorded as
    `too_few_components`, never padded.
 4. A file directly in a directory that has components below it belongs to `<dir>/.`.
+5. Flat package: when depth 1 gives more than 30, so the cut would fall to depth 0, the
+   depth-1 children are grouped instead. They are grouped by the name before the first
+   underscore (`page.py` and `page_x.py` both go to `page`). Then, in rounds to a fixed
+   point, each one-file group joins the multi-file group it shares the most X1 import
+   edges with, in plus out, when that maximum is unique; a tie is left alone. A group
+   of several children is named by its prefix (a reserved one gets a `*`), a child left
+   alone keeps its id, globs are the children's (exact paths for files), and the map
+   carries the warning `grouped_by_prefix_and_imports`,
+   plus `above_30_after_grouping` when it is still above 30. Freeze refuses any map with
+   fewer than 5 or more than 30 product components and prints a mechanical map's draft
+   in the owner's toml format (section 2.4), which `praxis components derive --write`
+   saves once for the owner to merge. Measured at HEAD (E03 addendum): telltale 72
+   children give 21 components; systemap 163 give 40, with purity 0.80 against the
+   owner's own 16-component map; praxis is not grouped. The pre-registered bound of 34
+   failed on systemap (38 module groups), mostly through ties.
 
 Measured here: the product root is `src/praxis`, and depth 1 makes each module a product
 component (`.` for the non-empty `__init__.py`). The count is the tree's, so it is

@@ -8,6 +8,7 @@ written before each run; PFSIM's are worked by hand in the test's comments.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import io
 import json
 import os
@@ -130,6 +131,12 @@ def administer(repo: Path, home: Path, kind: str, typed: str, now: str = NOW) ->
     code = probe.administer(repo, home, io.StringIO(typed), out, now, kind)
     assert code == 0, out.getvalue()
     return out.getvalue()
+
+
+def head_tree(repo: Path) -> str:
+    done = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD^{tree}"],
+                          capture_output=True, text=True, check=True)  # fmt: skip
+    return done.stdout.strip()
 
 
 def rows(home: Path, sql: str) -> list[sqlite3.Row]:
@@ -381,18 +388,20 @@ def test_knockout_shows_failing_scenarios_and_scores_the_named_components(
 ) -> None:
     repo_id, version = freeze(repo, home)
     plant = {f"run-{m}": [m] for m in MODULES}  # each scenario enters one component
+    tree = head_tree(repo)
     with ledger(home) as s:
         for n, (sid, comps) in enumerate(plant.items()):
             s.scenario_run(components=comps, call_edges={}, ev=EV, repo_id=repo_id,
                            map_version=version, ts=ago(5), scenario_id=sid,
                            command_hash=f"{n:016x}", outcome="ok", exit_code=0,
-                           duration_ms=1.0, extractor_version="x2-v1")  # fmt: skip
+                           duration_ms=1.0, extractor_version="x2-v1",
+                           tree_hash=tree)  # fmt: skip
         # Latest run failed: not a baseline a knockout can be read against.
         s.scenario_run(components=list(MODULES), call_edges={}, ev=EV,
                        repo_id=repo_id, map_version=version, ts=ago(1),
                        scenario_id="run-a", command_hash="f" * 16,
                        outcome="failed", exit_code=1, duration_ms=1.0,
-                       extractor_version="x2-v1")  # fmt: skip
+                       extractor_version="x2-v1", tree_hash=tree)  # fmt: skip
 
     def knocked(now: str) -> str:
         """The draw for ``now``, read from what is shown: one failing scenario, or
@@ -458,3 +467,130 @@ def test_refusals_outside_a_repository_and_without_a_frozen_map(
     found = locate(repo)
     assert found is not None
     assert probe.due(home, found.repo_id, NOW, 7.0) == []
+
+
+# -- never-drawn validation items -----------------------------------------------------
+
+POOL = [  # (src, dst, X1 truth); a->b is exposed, the other five are never drawn
+    ("a", "b", True), ("b", "a", False), ("c", "d", False), ("d", "c", False),
+    ("e", "a", True), ("a", "e", False),
+]  # fmt: skip
+
+
+def week_draw(repo_id: str, week: str, ids: list[str]) -> list[str]:
+    """The rule written out: rank by sha256 of [seed, repository, week, item]."""
+    from praxis.task import SEED
+
+    def rank(i: str) -> str:
+        key = json.dumps([SEED, repo_id, week, i]).encode()
+        return hashlib.sha256(key).hexdigest()
+
+    return sorted(ids, key=rank)
+
+
+def asked(home: Path, since: int) -> list[tuple[str, str | None, float | None]]:
+    got = rows(home, "SELECT * FROM probe_responses ORDER BY id")[since:]
+    return [(r["item_id"], r["task_id"], r["lag_days"]) for r in got]
+
+
+def test_structural_asks_never_drawn_items_once_a_week_then_retests_them(
+    repo: Path, home: Path
+) -> None:
+    repo_id, version = freeze(repo, home)
+    with ledger(home) as s:
+        ids = s.probe_items_put(
+            rows=[("D1", a, b, t, 0, None, None) for a, b, t in POOL], ev=EV,
+            repo_id=repo_id, map_version=version, truth_ts=ago(40),
+            extractor_version="x1-v1",
+        )  # fmt: skip
+        s.task_register(
+            region=[], bound=[ids[0]], related=[], drawn=[], task_id="task1",
+            repo_id=repo_id, map_version=version, ordinal=1, ts=ago(8),
+            arm="control", seed_hash=SEED_HASH, stratum="uniform",
+        )  # fmt: skip
+    never = ids[1:]
+    w02 = week_draw(repo_id, "2026-W02", never)  # NOW is Monday 2026-01-05
+    # Week 2: the due item first, then the first validation item; end of input.
+    shown = administer(repo, home, "structural", "9\n7\n")
+    assert "3 items due" in shown
+    assert "validation" not in shown
+    assert "never" not in shown
+    first = asked(home, 0)
+    assert [(i, t) for i, t, _ in first] == [(ids[0], "task1"), (w02[0], None)]
+    assert first[0][2] is not None
+    assert 8.0 <= first[0][2] < 8.01
+    assert first[1][2] is None
+    # Later the same week: the same draw, so only the item not yet answered.
+    administer(repo, home, "structural", "1\n", ago(-1))
+    assert asked(home, 2) == [(w02[1], None, None)]
+    again = administer(repo, home, "structural", "5\n5\n5\n", ago(-2))
+    assert "no structural item is due" in again
+    # Week 3: a new draw from the three never asked, then the two retests, in the
+    # order they were first asked (8.1 and 7.1 days ago, inside the 7 to 28 days).
+    w03 = week_draw(repo_id, "2026-W03", [i for i in never if i not in w02[:2]])
+    administer(repo, home, "structural", "3\n3\n9\n1\n", ago(-8.1))
+    assert asked(home, 3) == [(w03[0], None, None), (w03[1], None, None),
+                              (w02[0], None, None), (w02[1], None, None)]  # fmt: skip
+    # Week 4: the one item left, the week-3 retests, and no third ask of week 2's.
+    administer(repo, home, "structural", "5\n5\n5\n", ago(-15.2))
+    assert asked(home, 7) == [(w03[2], None, None), (w03[0], None, None),
+                              (w03[1], None, None)]  # fmt: skip
+    truth = dict(zip(ids, [t for _, _, t in POOL], strict=True))
+    got = rows(home, "SELECT * FROM probe_responses ORDER BY id")
+    assert [r["truth_at_probe"] for r in got] == [truth[r["item_id"]] for r in got]
+    assert {r["truth_changed"] for r in got} == {0}
+    with ledger(home) as s:
+        assert s.probe_items_unprobed(repo_id, version) == []
+        assert len(s.probe_items_unexposed(repo_id, version)) == 5
+    assert len(rows(home, "SELECT * FROM exposures")) == 1
+
+
+# wave 3: pins
+
+
+def test_drift_reads_only_the_frozen_maps_scans(repo: Path, home: Path) -> None:
+    repo_id, version = freeze(repo, home)
+    other = derive(repo, repo_id, [f"src/pkg/{m}.py" for m in (*MODULES, "g")])
+    assert other.version != version
+    with ledger(home) as s:
+        s.component_map_put(to_json(other), ago(40))
+    scan(home, repo_id, version, ago(20), {"c": []})
+    scan(home, repo_id, version, ago(3), {"a": ["b"]})  # a: first scan, unknown
+    scan(home, repo_id, other.version, ago(2), {"c": ["d"]})  # not this map's
+    administer(repo, home, "drift", "n\n" * 6)
+    got = rows(home, "SELECT * FROM drift_responses ORDER BY id")
+    assert [(r["component"], r["did_change"]) for r in got] == [
+        ("a", None), ("b", 0), ("c", 0), ("d", 0), ("e", 0), ("f", 0)]  # fmt: skip
+    assert json.loads(got[0]["sources"]) == [
+        f"edge_history:{ago(7)}/{NOW}", f"sess-{ago(3)[:10]}"]  # fmt: skip
+
+
+# wave 3: integration
+
+
+def test_knockout_refuses_stale_traces_and_reads_those_of_heads_tree(
+    repo: Path, home: Path
+) -> None:
+    repo_id, version = freeze(repo, home)
+
+    def plant(sid: str, tree: str, ts: str) -> None:
+        with ledger(home) as s:
+            s.scenario_run(components=["b"], call_edges={}, ev=EV, repo_id=repo_id,
+                           map_version=version, ts=ts, scenario_id=sid,
+                           command_hash="c" * 16, outcome="ok", exit_code=0,
+                           duration_ms=1.0, extractor_version="x2-v1",
+                           tree_hash=tree)  # fmt: skip
+
+    plant("run-old", "e" * 40, ago(1))  # the latest run traced another tree
+    out = io.StringIO()
+    code = probe.administer(repo, home, io.StringIO("2\n"), out, NOW, "knockout")
+    assert (code, out.getvalue()) == (2, "no scenario run traced HEAD's tree; the "
+                                      "traces are stale: run `praxis scenarios "
+                                      "run`\n")  # fmt: skip
+    assert rows(home, "SELECT * FROM knockouts") == []
+    assert flags(home) == []
+    plant("run-b", head_tree(repo), ago(2))
+    shown = administer(repo, home, "knockout", "2\n")
+    assert "(of 1)" in shown  # run-old is not read against this tree
+    (got,) = rows(home, "SELECT * FROM knockouts")
+    assert json.loads(got["sources"]) == ["scenario_run:2"]

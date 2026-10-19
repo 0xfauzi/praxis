@@ -12,6 +12,16 @@ component unparsed or without Python files, a relation with no reader yet) is no
 asked: a response row needs a truth and a guessed one is worse than a late probe.
 Structural answers get no feedback (P1 is the criterion, 4.1 c); drift and decision
 answers do (4.2, 4.6). Pathfinder ratings live in memory until PFSIM is computed.
+
+After the due items, `structural` asks never-drawn validation items, indistinguishable
+to the owner, with task and lag NULL: the pipeline placebo's comparison set (6.3) and
+V1's test-retest set (8). Each ISO week draws up to N_VALIDATION of them from the items
+no task exposed and no probe asked, ranked by a hash of the committed seed, the
+repository, the week and the item, so a re-run that week re-draws the same items and
+never asks one twice, and an item leaving the pool mid-week moves no other. A
+validation item answered in an earlier week is asked once more inside the P1 window,
+which is the retest. An asked item is not blind, so the binding pool must leave it out
+(store.probe_items_unprobed).
 """
 
 from __future__ import annotations
@@ -44,6 +54,8 @@ L_DAYS, L_MAX_DAYS, DEADLINE_S = 7.0, 28.0, 60.0
 # Claude Code deletes transcripts after cleanupPeriodDays, default 30 (design 4.6).
 DECISION_MAX_DAYS = 30.0
 DRIFT_DAYS = 7
+# A design choice: its cost in owner time and in pool supply needs measuring (E07).
+N_VALIDATION = 2
 REDUCER_VERSION = "probe-v1"
 SKIP = "s"
 GRID_KEYS = {"1": 0.1, "3": 0.3, "5": 0.5, "7": 0.7, "9": 0.9}
@@ -63,6 +75,8 @@ STRUCTURAL_ASSUMPTIONS = (
     "a lookup during the probe cannot be detected",
     "seconds run from the question to the accepted answer, re-asks included",
     "typed 1 3 5 7 9 is read as 0.1 0.3 0.5 0.7 0.9; s is a skip",
+    "task_id and lag NULL is a never-drawn validation item, drawn per ISO week by a "
+    "hash of the committed seed, repository, week and item; never confirmatory",
 )
 DRIFT_ASSUMPTIONS = (
     "changed means a file of the component gained or lost an import of another "
@@ -81,7 +95,7 @@ DECISION_ASSUMPTIONS = (
 KNOCKOUT_ASSUMPTIONS = (
     "simulated: a scenario fails when its latest ok X2 run entered the knocked "
     "component; design 4.7 executes the knockout in a scratch clone",
-    "scenario runs carry no tree hash and may predate HEAD",
+    "only runs that traced HEAD's tree count: uncommitted work is not traced",
     "the knocked component is a uniform draw keyed by repository and probe time",
 )
 PATHFINDER_ASSUMPTIONS = (
@@ -216,9 +230,17 @@ def _administer(
 # -- P1 structural ------------------------------------------------------------------
 
 
+type Ask = tuple[sqlite3.Row, tuple[str, str] | None]  # item, (task_id, exposed_ts)
+
+
 def _structural(p: _Probe) -> int:
-    items = _due(p.ledger, p.repo.repo_id, p.cmap.version, p.start, L_DAYS)
-    if not items:
+    repo_id, version = p.repo.repo_id, p.cmap.version
+    asks: list[Ask] = [
+        (i, (i["task_id"], i["exposed_ts"]))
+        for i in _due(p.ledger, repo_id, version, p.start, L_DAYS)
+    ]
+    asks += [(i, None) for i in _validation(p.ledger, repo_id, version, p.start)]
+    if not asks:
         p.out.write("no structural item is due\n")
         return 0
     tree = _read_tree(p.repo.root, p.cmap)
@@ -226,24 +248,57 @@ def _structural(p: _Probe) -> int:
         p.out.write("the working tree could not be read; every item stays due\n")
         return 0
     product = product_components(p.cmap)
-    p.out.write(f"{len(items)} items due, one at a time, {DEADLINE_S:.0f} s each. "
+    p.out.write(f"{len(asks)} items due, one at a time, {DEADLINE_S:.0f} s each. "
                 "No answer is shown until the block's debrief.\n")  # fmt: skip
     asked = unread = 0
-    for item in items:
-        truth = _truth(tree, item, product)
+    for ask in asks:
+        truth = _truth(tree, ask[0], product)
         if truth is None:
             unread += 1
             continue
         try:
-            _answer(p, tree, item, truth)
+            _answer(p, tree, ask, truth)
         except _Quit:
-            return p.abandon("structural", answered=asked, due=len(items))
+            return p.abandon("structural", answered=asked, due=len(asks))
         asked += 1
     p.out.write(f"answered {asked}; {unread} could not be scored now and stay due\n")
     return 0
 
 
-def _answer(p: _Probe, tree: _Tree, item: sqlite3.Row, truth: bool) -> None:
+def _validation(
+    ledger: Store, repo_id: str, version: str, start: dt.datetime
+) -> list[sqlite3.Row]:
+    """This week's never-drawn items not asked yet, then the retests due."""
+    from praxis.task import SEED  # task imports this module
+
+    week, monday = _week(start)
+    asked: dict[str, list[sqlite3.Row]] = {}
+    for r in ledger.probe_responses_of(repo_id, version):  # by ts
+        if r["exposed_task"] is None:
+            asked.setdefault(r["item_id"], []).append(r)
+    this_week = [rs for rs in asked.values() if _when(rs[0]["ts"]) >= monday]
+
+    def rank(item: sqlite3.Row) -> str:
+        key = json.dumps([SEED, repo_id, week, item["item_id"]])
+        return hashlib.sha256(key.encode()).hexdigest()
+
+    fresh = sorted(ledger.probe_items_unprobed(repo_id, version), key=rank)
+    drawn = fresh[: max(0, N_VALIDATION - len(this_week))]
+    return drawn + _retests(ledger, asked.values(), start)
+
+
+def _retests(
+    ledger: Store, asked: Iterable[Sequence[sqlite3.Row]], start: dt.datetime
+) -> list[sqlite3.Row]:
+    """Validation items answered once, on the grid, inside the P1 window."""
+    once = [rs[0] for rs in asked if len(rs) == 1 and rs[0]["p"] is not None]
+    due = [r for r in once if L_DAYS <= _days(r["ts"], start) <= L_MAX_DAYS]
+    items = [ledger.probe_item(r["item_id"]) for r in due]
+    return [i for i in items if i is not None]
+
+
+def _answer(p: _Probe, tree: _Tree, ask: Ask, truth: bool) -> None:
+    item, exposure = ask
     shown = time.monotonic()
     prompt = f"{_question(item)} [1 3 5 7 9, s skips; {DEADLINE_S:.0f} s] "
     answer = p.ask(prompt, _grid)
@@ -255,9 +310,11 @@ def _answer(p: _Probe, tree: _Tree, item: sqlite3.Row, truth: bool) -> None:
     ev = Evidence("partial" if warnings else "full",
                   [f"probe_item:{item['item_id']}", *tree.sources()],
                   REDUCER_VERSION, STRUCTURAL_ASSUMPTIONS, warnings)  # fmt: skip
+    task_id, lag = (None, None) if exposure is None else (
+        exposure[0], _days(exposure[1], when))  # fmt: skip
     p.ledger.probe_response(
-        ev=ev, item_id=item["item_id"], task_id=item["task_id"], ts=_stamp(when),
-        p=answer, seconds=round(seconds, 3), lag_days=_days(item["exposed_ts"], when),
+        ev=ev, item_id=item["item_id"], task_id=task_id, ts=_stamp(when),
+        p=answer, seconds=round(seconds, 3), lag_days=lag,
         deadline_met=seconds <= DEADLINE_S, truth_at_probe=truth,
         truth_changed=truth != bool(item["truth"]), head_sha=tree.head_sha,
         tree_hash=tree.tree_hash, dirty=tree.dirty,
@@ -325,8 +382,7 @@ def _question(item: sqlite3.Row) -> str:
 
 def _drift(p: _Probe) -> int:
     repo_id, version = p.repo.repo_id, p.cmap.version
-    iso = p.start.astimezone(dt.UTC).isocalendar()
-    week = f"{iso.year}-W{iso.week:02d}"
+    week, _ = _week(p.start)
     if p.ledger.drift_responses_for(repo_id, version, week):
         p.out.write(f"the drift probe for {week} is already answered\n")
         return 0
@@ -474,14 +530,17 @@ def _recall(p: _Probe, d: sqlite3.Row) -> None:
 
 
 def _knockout(p: _Probe) -> int:
-    runs: dict[str, tuple[set[str], int] | None] = {}
-    for run in p.ledger.scenario_runs_for(p.repo.repo_id, p.cmap.version):
-        ok = run["outcome"] == "ok"
-        seen = (set(json.loads(run["components_json"])), run["id"])
-        runs[run["scenario_id"]] = seen if ok else None
-    traced = {s: r for s, r in sorted(runs.items()) if r is not None}
+    # Design 4.7: scored against the traces of the tree the owner is asked about.
+    head = _git(p.repo.root, "rev-parse", "--verify", "-q", "HEAD^{tree}")
+    fresh = [r for r in p.ledger.scenario_runs_for(p.repo.repo_id, p.cmap.version)
+             if head is not None and r["tree_hash"] == head]  # fmt: skip
+    if not fresh:
+        p.out.write("no scenario run traced HEAD's tree; the traces are stale: run "
+                    "`praxis scenarios run`\n")  # fmt: skip
+        return 2
+    traced = _traced(fresh)
     if not traced:
-        p.out.write("no scenario has an ok run on the frozen map; the knockout needs "
+        p.out.write("no scenario has an ok run on HEAD's tree; the knockout needs "
                     "one\n")  # fmt: skip
         return 2
     product = product_components(p.cmap)
@@ -509,6 +568,13 @@ def _knockout(p: _Probe) -> int:
                       hit=knocked in names)  # fmt: skip
     p.out.write("recorded\n")
     return 0
+
+
+def _traced(runs: Sequence[sqlite3.Row]) -> dict[str, tuple[set[str], int]]:
+    """Each scenario's components and run id, from its latest run when that was ok."""
+    latest = {r["scenario_id"]: r for r in runs}  # by ts: the last one stands
+    return {s: (set(json.loads(r["components_json"])), r["id"])
+            for s, r in sorted(latest.items()) if r["outcome"] == "ok"}  # fmt: skip
 
 
 # -- C1 Pathfinder ------------------------------------------------------------------
@@ -625,6 +691,13 @@ def _stamp(when: dt.datetime) -> str:
 
 def _days(ts: str, now: dt.datetime) -> float:
     return (now - _when(ts)).total_seconds() / 86400
+
+
+def _week(when: dt.datetime) -> tuple[str, dt.datetime]:
+    """The ISO week, 'YYYY-Www' in UTC, and its Monday 00:00 UTC."""
+    year, week, _ = when.astimezone(dt.UTC).isocalendar()
+    monday = dt.datetime.fromisocalendar(year, week, 1).replace(tzinfo=dt.UTC)
+    return f"{year}-W{week:02d}", monday
 
 
 _KINDS: dict[str, Callable[[_Probe], int]] = {

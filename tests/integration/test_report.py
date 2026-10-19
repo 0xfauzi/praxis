@@ -360,3 +360,114 @@ def test_refuses_without_a_map_or_with_too_few_components(
     store.component_map_put(to_json(small), T0)
     store.component_map_freeze(found.repo_id, small.version, T0)
     assert report.scores(store, found.repo_id).refused == "too_few_components"
+
+
+# -- never-drawn validation probes: the pipeline placebo and V1 test-retest ------------
+
+
+def validate(w: World, pair: tuple[str, str], ts: str, p: float | None) -> None:
+    """A never-drawn validation probe: no task, no lag."""
+    w.store.probe_response(
+        ev=EV, item_id=w.item[pair], task_id=None, ts=ts, p=p, seconds=5.0,
+        lag_days=None, deadline_met=True, truth_at_probe=pair in EDGES,
+        truth_changed=False, head_sha=None, tree_hash=None, dirty=None,
+        extractor_version="x1-v1",
+    )  # fmt: skip
+
+
+def sure(pair: tuple[str, str], right: bool) -> float:
+    """0.9 or 0.1 on the side of the truth when right, the other side when not."""
+    return 0.9 if (pair in EDGES) == right else 0.1
+
+
+DRAWN = [("alpha", "beta"), ("beta", "gamma"), ("gamma", "beta"), ("delta", "eps")]
+NEVER = [("gamma", "delta"), ("eps", "alpha"), ("zeta", "eps"), ("eps", "zeta")]
+
+
+@pytest.mark.parametrize("never_right", [False, True])
+def test_pipeline_placebo_suspends_the_contrasts_when_the_pipeline_leaks(
+    repo: Path, home: Path, never_right: bool
+) -> None:
+    w = World(repo, home)
+    for i, pair in enumerate(DRAWN, 1):
+        arm = "treatment" if i % 2 else "control"
+        tid = w.task(i, arm, ([], [], [pair]), (at(5, 2 * i), at(5, 2 * i + 1)),
+                     set())  # fmt: skip
+        w.respond(pair, tid, at(13, 10, i), sure(pair, right=True))
+    for i, pair in enumerate(NEVER):
+        validate(w, pair, at(13, 11, i), sure(pair, right=never_right))
+    s = report.scores(w.store, w.repo_id, seed=7, draws=500)
+    out = io.StringIO()
+    report.render(s, out)
+    text = out.getvalue()
+    (rule,) = s.rules
+    # Drawn-not-shown Brier 0.01 x 4. Never-drawn 0.81 x 4 when wrong: of the C(8, 4)
+    # = 70 labellings only the true one and its mirror reach |0.01 - 0.81|, p 2/70.
+    # When right, every labelling reaches the observed 0 difference: p 1.
+    placebo = (1.0, 70) if never_right else (2 / 70, 70)
+    assert s.tests["pipeline_placebo"] == pytest.approx(placebo)
+    assert s.counts[("P1", "not_exposed", "unexposed")] == 4
+    if never_right:
+        assert "suspended" not in text
+        assert "pipeline_placebo_differs" not in rule.reasons
+        assert "untargeted p 1.0000 over 6 allocations" in text
+    else:
+        for name in ("specific", "near", "untargeted"):
+            assert f"{name} suspended: pipeline placebo differs" in text
+        assert "pipeline_placebo p 0.0286 over 70 allocations" in text
+        assert "pipeline_placebo_differs" in rule.reasons
+    assert report.randomization(w.store, w.repo_id, 7, 500) == s.tests
+
+
+def test_v1_test_retest_pairs_never_drawn_items_across_weeks(
+    repo: Path, home: Path
+) -> None:
+    w = World(repo, home)
+    plan = [  # pair, first answer (week 3), second answer (week 4, or None)
+        (("alpha", "beta"), 0.9, 0.7),  # Brier 0.01 then 0.09
+        (("beta", "alpha"), 0.3, 0.1),  # 0.09 then 0.01
+        (("alpha", "gamma"), 0.5, 0.5),  # 0.25 then 0.25
+        (("beta", "gamma"), 0.9, None),  # second skipped: no pair
+        (("gamma", "beta"), 0.1, 0.1),  # second in the same week: no pair
+        (("gamma", "alpha"), 0.1, None),  # asked once
+    ]
+    for minute, (pair, first, _) in enumerate(plan):
+        validate(w, pair, at(13, 10, minute), first)
+    validate(w, ("gamma", "beta"), at(15, 10), 0.1)
+    assert report.scores(w.store, w.repo_id).retest == (0, None)
+    for minute, (pair, _, second) in enumerate(plan[:2]):
+        validate(w, pair, at(20, 10, minute), second)
+    validate(w, ("beta", "gamma"), at(20, 10, 3), None)
+    assert report.scores(w.store, w.repo_id).retest == (2, None)
+    validate(w, ("alpha", "gamma"), at(20, 10, 2), 0.5)
+    s = report.scores(w.store, w.repo_id)
+    # In hundredths x = (1, 9, 25), y = (9, 1, 25), mean 35/3: Sxy = 2112/9,
+    # Sxx = Syy = 2688/9, r = 2112/2688 = 11/14.
+    assert s.retest == pytest.approx((3, 11 / 14))
+    assert s.counts == {("P1", "not_exposed", "unexposed"): 6,
+                        ("P1", "repeat_probe", "unexposed"): 5}  # fmt: skip
+    assert all(b.n == 0 for b in s.blocks)
+    out = io.StringIO()
+    report.render(s, out)
+    assert "V1 test-retest: pairs 3, agreement r 0.786\n" in out.getvalue()
+
+
+# wave 3: pins
+
+
+def test_bands_keep_zero_rates_and_the_shuffle_statistic_squares() -> None:
+    # Every resample spans both values, so each gets one rate per draw; a rate of 0.0
+    # at 0.1 is a rate, not a missing one.
+    drawn = report._resampled({f"t{i}": [0.1, 0.9] for i in range(5)}, [0.1, 0.9])
+    assert [len(drawn[v]) for v in (0.1, 0.9)] == [report.BAND_DRAWS] * 2
+    assert 0.0 in drawn[0.1]
+    touched = {"t1": {"x": 1, "y": 0}, "t2": {"x": 0, "y": 1}}
+    given = {"t1": [("x", 0.9), ("y", 0.3)], "t2": [("x", 0.1), ("y", 0.7)]}
+    r1: dict[str, dict[str, float | None]] = {t: {"x": 0.5, "y": 0.5} for t in given}
+    tasks = ["t1", "t2"]
+    # In place: owner 0.01 + 0.09 + 0.01 + 0.09 = 0.2 against 4 x 0.25 = 1.0.
+    # Swapped: 0.81 + 0.49 + 0.81 + 0.49 = 2.6 against 1.0.
+    skill = report._shuffled_skill(touched, tasks, given, r1, tasks)
+    assert skill == pytest.approx(0.8)
+    swapped = report._shuffled_skill(touched, tasks, given, r1, ["t2", "t1"])
+    assert swapped == pytest.approx(-1.6)

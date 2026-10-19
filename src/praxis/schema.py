@@ -90,6 +90,10 @@ _MAP = f"map_version TEXT NOT NULL {_hex('map_version', 16)}"
 _MAP_FK = "FOREIGN KEY (repo_id, map_version) REFERENCES component_maps"
 _P = f"p REAL CHECK (p IN {_in(GRID)})"
 _SHA = _hex("head_sha", 40, 64)
+_TREE_HEX = f"TEXT {_hex('tree_hash', 40, 64)}"
+# Design 03 4.1 (b): X2 truth is for the HEAD tree its scratch clone ran, so a run
+# names that tree; only a run no Python process traced may lack it.
+_TREE = f"{_TREE_HEX} CHECK (tree_hash IS NOT NULL OR outcome = 'not_python')"
 
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS hook_events (
@@ -207,7 +211,7 @@ CREATE TABLE IF NOT EXISTS scenario_runs (
   exit_code INTEGER, duration_ms REAL NOT NULL CHECK (duration_ms >= 0),
   components_json TEXT NOT NULL {_array("components_json")},
   call_edges_json TEXT NOT NULL {_array("call_edges_json")},
-  extractor_version TEXT NOT NULL, {_evidence("scenario_runs")},
+  extractor_version TEXT NOT NULL, tree_hash {_TREE}, {_evidence("scenario_runs")},
   CHECK (CASE outcome WHEN 'ok' THEN exit_code IS 0
     WHEN 'timeout' THEN exit_code IS NULL WHEN 'not_python' THEN exit_code IS NOT NULL
     ELSE exit_code IS NOT 0 END), {_MAP_FK}
@@ -382,18 +386,23 @@ SCHEMA_VERSION = int(hashlib.sha256(SCHEMA.encode()).hexdigest()[:7], 16)
 
 
 def migrate(db: sqlite3.Connection) -> None:
-    """Add the pointer columns to a ledger created before they existed and drop the
-    rejected drill's tables (repo_config holds an owner-typed test command, which
-    invariant 5 forbids the ledger to keep). Runs inside open()'s BEGIN IMMEDIATE, so
-    two hooks cannot both add a column."""
+    """Add the pointer and tree_hash columns to a ledger created before they existed
+    and drop the rejected drill's tables (repo_config holds an owner-typed test
+    command, which invariant 5 forbids the ledger to keep). Runs inside open()'s BEGIN
+    IMMEDIATE, so two hooks cannot both add a column."""
     # secure_delete zeroes the freed pages: a DROP alone leaves the text in the file.
     db.execute("PRAGMA secure_delete = ON")
     for legacy in ("results", "items", "repo_config"):  # results references items
         db.execute(f"DROP TABLE IF EXISTS {legacy}")
     pointers = dict.fromkeys(POINTERS, "TEXT")
+    # A run stored before the column existed has no tree hash, so the not_python rule
+    # can be added only to a table that holds no run.
+    stored = db.execute("SELECT 1 FROM scenario_runs LIMIT 1").fetchone()
+    tree = _TREE_HEX if stored else _TREE
     added = {
         "hook_events": {**pointers, "head_sha": f"TEXT {_SHA}"},
         "agent_deltas": pointers,
+        "scenario_runs": {"tree_hash": tree},
     }
     for table, columns in added.items():
         have = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
@@ -504,6 +513,7 @@ class ScenarioRun(MapRow):
     exit_code: int | None
     duration_ms: float
     extractor_version: str
+    tree_hash: str | None
 
 
 class Task(MapRow):

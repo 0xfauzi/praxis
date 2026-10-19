@@ -6,9 +6,9 @@ its Evidence fields in memory. A reference is fitted only on data dated strictly
 the forecast it is compared with, and one that cannot be fitted is NULL, never another
 reference. A block below its minimum is refused with a reason code, not scored. The
 prompt text R1 needs is read from the transcript, intersected with component ids and
-dropped. The rendered text refuses the words cause, impact and would unless a
-pre-registered rule says met, and then names the rule (AGENTS.md invariant 3); no
-component id, path or prompt reaches the text, only counts, numbers and reason codes.
+dropped. The shapes returned and their text live in render.py. The pipeline placebo
+and V1's test-retest read the never-drawn validation probes, which no P1 block or arm
+contrast ever scores.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ import datetime as dt
 import json
 import math
 import random
-import re
 import statistics
 from collections import Counter
 from dataclasses import dataclass
@@ -25,11 +24,24 @@ from functools import partial
 from graphlib import CycleError, TopologicalSorter
 from itertools import pairwise, permutations
 from pathlib import Path
-from typing import TYPE_CHECKING, TextIO
+from typing import TYPE_CHECKING
 
 from praxis import components, scoring, transcript
 from praxis.components import ComponentMap, assign, from_json, product_components
 from praxis.probe import L_DAYS, L_MAX_DAYS
+from praxis.render import (
+    ALPHA,
+    BIN_MIN,
+    CONTRASTS,
+    MIN_FORECASTS,
+    MIN_PAIRS,
+    Bin,
+    suspended,
+)
+from praxis.render import Block as Block
+from praxis.render import Rule as Rule
+from praxis.render import Scores as Scores
+from praxis.render import render as render
 from praxis.store import Evidence, Store
 
 if TYPE_CHECKING:
@@ -37,11 +49,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 
 REDUCER_VERSION = "report-v1"
-ALPHA = 0.05  # docs/preregistration.md 1.4, one-sided
-# The decomposition's floor; the Stage 2 minimum from the power simulation replaces it.
-MIN_FORECASTS = 2
-# Research answers 2026-10-19: a 0.10 miscalibration to a 95 percent half-width.
-BIN_MIN = {0.1: 35, 0.3: 81, 0.5: 97, 0.7: 81, 0.9: 35}
 BAND_DRAWS, BAND_SEED, BAND_LEVEL = 1000, 0, 0.9
 # Monte Carlo draws per randomization test past exact enumeration: the committed draw
 # count of preregistration 2.4; Stage 2 restates it.
@@ -51,12 +58,8 @@ ARMS = ("treatment", "control")
 ROLES = ("bound", "related", "drawn_not_shown")
 P1_REFS = ("R_base", "R_layer", "R_fam")
 F1_REFS = ("R1", "R0", "R_last")
-CONTRASTS = {"specific": "bound", "near": "related", "untargeted": "drawn_not_shown"}
 TESTS = (*CONTRASTS, "pipeline_placebo", "f1_shuffle")
-CLAIMS = {"brier": "derived", "decomposition": "derived", "bss": "comparative",
-          "arm contrast": "comparative"}  # fmt: skip
 PR1_CLAIM = "the instrument changed delayed structural accuracy on bound items"
-_REFUSED = re.compile(r"\b(caus\w*|impact\w*|would)\b", re.IGNORECASE)
 _PAIR_TIE = 1e-12
 
 P1_ASSUMPTIONS = (
@@ -95,62 +98,9 @@ SCORE_ASSUMPTIONS = (
     "a CORP bin is read at 35 forecasts (p 0.1, 0.9), 81 (0.3, 0.7) or 97 (0.5) if "
     "independent: divide by 1 + (m - 1) ICC once the ICC is measured",
 )
-TEST_ASSUMPTIONS = (
-    "arm contrasts: control minus treatment, per-task mean Brier as the unit, "
-    "one-sided, treated task count fixed (C(n, k), exact at 70 or fewer); Stage 2 "
-    "names the rule re-drawn",
-    "the pipeline placebo needs probes of never-drawn items, which no probe asks",
-    "f1_shuffle: share of task pairings of forecasts whose BSS against R1 reaches "
-    "the true pairing's",
-)
-
 Pair = tuple[str, str]
 Refs = dict[str, float | None]
 Count = tuple[str, str, str]  # (measure, reason, arm)
-
-
-@dataclass(frozen=True)
-class Bin:
-    p: float
-    rate: float
-    n: int
-    band: tuple[float, float] | None
-    interpretable: bool
-
-
-@dataclass(frozen=True)
-class Block:
-    measure: str
-    arm: str
-    role: str
-    n: int
-    tasks: int
-    refused: str | None
-    brier: float | None
-    skill: Mapping[str, tuple[float | None, int]]  # reference -> (BSS, forecasts)
-    decomposition: tuple[float, float, float] | None
-    bins: tuple[Bin, ...]
-    ev: Evidence
-
-
-@dataclass(frozen=True)
-class Rule:
-    name: str
-    met: bool
-    reasons: tuple[str, ...]
-    claim: str
-
-
-@dataclass(frozen=True)
-class Scores:
-    repo_id: str
-    map_version: str | None
-    refused: str | None
-    blocks: tuple[Block, ...]
-    counts: Mapping[Count, int]
-    weeks: Mapping[str, int]
-    tests: Mapping[str, tuple[float, int] | None]
-    rules: tuple[Rule, ...]
 
 
 @dataclass(frozen=True)
@@ -213,6 +163,7 @@ class _View:
     flagged: frozenset[str]
     first: tuple[sqlite3.Row, ...]
     repeats: Counter[str]  # arm -> responses after an item's first
+    never: Mapping[str, tuple[sqlite3.Row, ...]]  # never-drawn item -> its responses
     graph: _Graph
     names: _Names
 
@@ -242,8 +193,17 @@ def _view(store: Store, repo_id: str) -> _View | tuple[str, str | None]:
     repeats = Counter(_arm(r, tasks) for r in rows if first[r["item_id"]] is not r)
     ordered = tuple(r for r in rows if first[r["item_id"]] is r)
     return _View(store, repo_id, cmap, tasks, tuple(closed), touched, flagged,
-                 ordered, repeats, _graph(store, cmap, rows),
+                 ordered, repeats, _never(rows), _graph(store, cmap, rows),
                  _Names(cmap, Path.home() / ".claude" / "projects"))  # fmt: skip
+
+
+def _never(rows: Sequence[sqlite3.Row]) -> dict[str, tuple[sqlite3.Row, ...]]:
+    """The responses of each item no task exposed, by ts: the validation probes."""
+    found: dict[str, list[sqlite3.Row]] = {}
+    for r in rows:
+        if r["exposed_task"] is None and r["task_id"] is None:
+            found.setdefault(r["item_id"], []).append(r)
+    return {item: tuple(rs) for item, rs in found.items()}
 
 
 def _graph(store: Store, cmap: ComponentMap, rows: Sequence[sqlite3.Row]) -> _Graph:
@@ -424,18 +384,54 @@ def _forecasts(view: _View) -> Iterator[tuple[sqlite3.Row, sqlite3.Row]]:
 
 def _p1_reason(view: _View, r: sqlite3.Row) -> str | None:
     exposed = r["exposed_task"]
-    lag = r["lag_days"]
     checks = (
         ("not_exposed", exposed is None or r["task_id"] != exposed),
         ("task_not_closed", exposed is not None
          and view.tasks[exposed]["status"] != "closed"),
+    )  # fmt: skip
+    found = next((code for code, hit in checks if hit), None)
+    return found or _unusable(r, windowed=True)
+
+
+def _unusable(r: sqlite3.Row, *, windowed: bool) -> str | None:
+    """Why an answer is out of a Brier comparison; the window binds exposed items."""
+    lag = r["lag_days"]
+    checks = (
         ("other_relation", r["relation"] != "D1"),
-        ("outside_window", lag is None or not L_DAYS <= lag <= L_MAX_DAYS),
+        ("outside_window", windowed
+         and (lag is None or not L_DAYS <= lag <= L_MAX_DAYS)),
         ("skipped", r["p"] is None),
         ("slow", not r["deadline_met"]),
         ("truth_changed", bool(r["truth_changed"])),
     )  # fmt: skip
     return next((code for code, hit in checks if hit), None)
+
+
+def _brier(r: sqlite3.Row) -> float:
+    return (float(r["p"]) - int(r["truth_at_probe"])) ** 2
+
+
+def _retest(view: _View) -> tuple[int, float | None]:
+    """V1 test-retest: (pairs, Pearson's r of their Brier scores) over never-drawn
+    items asked in two ISO weeks; r is None below MIN_PAIRS or with a constant side."""
+    pairs = [p for p in map(_pair, view.never.values()) if p is not None]
+    if len(pairs) < MIN_PAIRS:
+        return len(pairs), None
+    first, second = zip(*pairs, strict=True)
+    try:
+        return len(pairs), statistics.correlation(first, second)
+    except statistics.StatisticsError:
+        return len(pairs), None
+
+
+def _pair(responses: Sequence[sqlite3.Row]) -> tuple[float, float] | None:
+    if len(responses) < 2:
+        return None
+    a, b = responses[0], responses[1]
+    week = [_t(r["ts"]).astimezone(dt.UTC).isocalendar()[:2] for r in (a, b)]
+    usable = not _unusable(a, windowed=False) and not _unusable(b, windowed=False)
+    same = a["truth_at_probe"] == b["truth_at_probe"]
+    return (_brier(a), _brier(b)) if usable and same and week[0] != week[1] else None
 
 
 def _p1(view: _View) -> tuple[list[_Scored], Counter[Count]]:
@@ -590,6 +586,8 @@ def _pr1(tests: Mapping[str, tuple[float, int] | None], extra: Sequence[str]) ->
     reasons = [*extra, "pilot_validity_not_recorded"]
     if tests.get("pipeline_placebo") is None:
         reasons.append("pipeline_placebo_not_computable")
+    elif suspended(tests):
+        reasons.append("pipeline_placebo_differs")
     specific = tests.get("specific")
     if not tests:
         reasons.append("tests_not_run")
@@ -608,7 +606,8 @@ def scores(
     view = _view(store, repo_id)
     if isinstance(view, tuple):
         reason, version = view
-        return Scores(repo_id, version, reason, (), {}, {}, {}, (_pr1({}, [reason]),))
+        return Scores(repo_id, version, reason, (), {}, {}, {}, (_pr1({}, [reason]),),
+                      (0, None))  # fmt: skip
     p1, p1_counts = _p1(view)
     f1, f1_counts = _f1(view)
     tests: dict[str, tuple[float, int] | None] = {}
@@ -616,7 +615,7 @@ def scores(
         tests = _tests(view, (p1, f1), seed, draws)
     return Scores(repo_id, view.cmap.version, None, tuple(_blocks(view, p1, f1)),
                   dict(sorted((p1_counts + f1_counts).items())), _weeks(view), tests,
-                  (_pr1(tests, []),))  # fmt: skip
+                  (_pr1(tests, []),), _retest(view))  # fmt: skip
 
 
 # -- randomization ------------------------------------------------------------------
@@ -636,6 +635,22 @@ def _contrast(
         return None
     values = [math.fsum(per_task[t]) / len(per_task[t]) for t in tasks]
     return scoring.randomization_test(values, [arm[t] for t in tasks], seed, draws)
+
+
+def _pipeline_placebo(
+    view: _View, p1: Sequence[_Scored], seed: int, draws: int
+) -> tuple[float, int] | None:
+    """Design 6.3: first probes of drawn-not-shown items against first probes of
+    never-drawn ones, Brier per item, two-sided, the count per label fixed."""
+    drawn = [(s.p - s.o) ** 2 for s in p1 if s.role == "drawn_not_shown"]
+    never = [_brier(rs[0]) for rs in view.never.values()
+             if _unusable(rs[0], windowed=False) is None]  # fmt: skip
+    if min(len(drawn), len(never)) < MIN_FORECASTS:
+        return None
+    labels = [0] * len(drawn) + [1] * len(never)
+    return scoring.randomization_test(
+        [*drawn, *never], labels, seed, draws, one_sided=False
+    )
 
 
 def _shuffle(
@@ -706,7 +721,7 @@ def _tests(
         name: _contrast([s for s in p1 if s.role == role], seed, draws)
         for name, role in CONTRASTS.items()
     }
-    tests["pipeline_placebo"] = None
+    tests["pipeline_placebo"] = _pipeline_placebo(view, p1, seed, draws)
     tests["f1_shuffle"] = _shuffle(view, f1, seed, draws)
     return tests
 
@@ -714,82 +729,10 @@ def _tests(
 def randomization(
     store: Store, repo_id: str, seed: int, draws: int
 ) -> dict[str, tuple[float, int] | None]:
-    """(one-sided p, allocations evaluated) per test in TESTS; None where it cannot
-    be computed (an arm without data, fewer than two tasks, no probe of a never-drawn
-    item for the pipeline placebo)."""
+    """(p, allocations evaluated) per test in TESTS, one-sided but for the two-sided
+    pipeline placebo; None where it cannot be computed (an arm without data, fewer
+    than two tasks, fewer than MIN_FORECASTS items on a side of the placebo)."""
     view = _view(store, repo_id)
     if isinstance(view, tuple):
         return dict.fromkeys(TESTS)
     return _tests(view, (_p1(view)[0], _f1(view)[0]), seed, draws)
-
-
-# -- text ---------------------------------------------------------------------------
-
-
-def _num(x: float | None, digits: int = 3) -> str:
-    return "null" if x is None else f"{round(x, digits) + 0.0:.{digits}f}"
-
-
-def _block_lines(b: Block) -> list[str]:
-    head = f"{b.measure} {b.role} {b.arm}: n {b.n}, tasks {b.tasks}"
-    if b.refused is not None:
-        return [f"{head}, refused {b.refused} (needs {MIN_FORECASTS})"]
-    skill = "; ".join(f"{ref} {_num(v)} (n {n})" for ref, (v, n) in b.skill.items())
-    lines = [f"{head}, Brier {_num(b.brier)}, coverage {b.ev.coverage}",
-             f"  skill: {skill}"]  # fmt: skip
-    if b.decomposition is not None:
-        rel, res, unc = b.decomposition
-        lines.append(f"  REL {_num(rel)} RES {_num(res)} UNC {_num(unc)}")
-    for c in b.bins:
-        band = "null" if c.band is None else f"{_num(c.band[0])}-{_num(c.band[1])}"
-        read = "read" if c.interpretable else f"not read below {BIN_MIN[c.p]}"
-        lines.append(f"  CORP {c.p:g}: rate {_num(c.rate)}, n {c.n}, band {band}, "
-                     f"{read}")  # fmt: skip
-    return lines
-
-
-def _test_lines(tests: Mapping[str, tuple[float, int] | None]) -> list[str]:
-    if not tests:
-        return ["tests: not run (needs the committed seed and draw count)"]
-    return ["tests: " + "; ".join(
-        f"{name} not computable" if r is None
-        else f"{name} p {_num(r[0], 4)} over {r[1]} allocations"
-        for name, r in tests.items()
-    )]  # fmt: skip
-
-
-def _lines(s: Scores) -> list[str]:
-    lines = [f"praxis report: repository {s.repo_id}, component map "
-             f"{s.map_version or 'none'}"]  # fmt: skip
-    if s.refused is not None:
-        lines.append(f"refused: {s.refused}")
-    lines.append("claims: " + ", ".join(f"{k} {v}" for k, v in CLAIMS.items()))
-    lines.append(
-        "P1 is accuracy on structural items about components bound to "
-        "tasks, no more; F1 is calibration on forecasts of agent work"
-    )
-    weeks = ", ".join(f"{w} {n}" for w, n in s.weeks.items()) or "none"
-    lines.append(f"first probes by week: {weeks}")
-    excluded = "; ".join(" ".join((*k, str(n))) for k, n in s.counts.items())
-    lines.append(f"excluded: {excluded or 'none'}")
-    for b in s.blocks:
-        lines += _block_lines(b)
-    lines += _test_lines(s.tests)
-    for r in s.rules:
-        lines.append(f"rule {r.name} met: {r.claim}" if r.met
-                     else f"rule {r.name} not met: {', '.join(r.reasons)}")  # fmt: skip
-    notes = dict.fromkeys(a for b in s.blocks for a in b.ev.assumptions)
-    if s.tests:
-        notes.update(dict.fromkeys(TEST_ASSUMPTIONS))
-    lines += ["assumptions:", *(f"  - {a}" for a in notes)] if notes else []
-    return lines
-
-
-def render(scores: Scores, out: TextIO) -> None:
-    """Write the report, or nothing: a refused word without a met rule raises."""
-    text = "\n".join(_lines(scores)) + "\n"
-    found = _REFUSED.search(text)
-    if found is not None and not any(r.met for r in scores.rules):
-        word = found.group(0).lower()
-        raise ValueError(f"report refused: {word!r} needs a met pre-registered rule")
-    out.write(text)

@@ -1,6 +1,9 @@
 """Item supply: `praxis components freeze` fixes a repository's component map and fills
 its D1 pool; `praxis components` shows the map and what the pool has left (design 03
-sections 2.4, 3.1 and 3.5).
+sections 2.4, 3.1 and 3.5). The map frozen is the owner's toml when there is one, else
+the mechanical map; `praxis components derive` prints the mechanical map in the toml's
+format, so the owner overrides it by editing the draft. Freeze refuses fewer than 5 or
+more than 30 product components (design 2.2), printing a mechanical map's draft.
 
 A D1 item exists only for an ordered pair of product components that each have a
 Python file X1 parsed: a component it never parsed is unknown, so its pairs are counted
@@ -8,8 +11,10 @@ as not generated and never written as truth 0. An item touching a component with
 blind spot or a parse failure is `partial`. Truth is X1 over the working tree at
 freeze time, epoch 0. A pair that already has an item under the map keeps it, so a
 second freeze writes only the missing pairs and a partial first run is completed, not
-duplicated; a truth flip is a new epoch, which is not this module's to write. Git is
-only read: `--no-optional-locks` keeps `git status` from refreshing the owner's index.
+duplicated. A pair whose X1 truth differs from its current epoch's item is
+re-admitted as a new item at the next epoch (design 3.5); an unflipped item, a pair X1
+did not parse this time and every exposure are left as they are. Git is only read:
+`--no-optional-locks` keeps `git status` from refreshing the owner's index.
 """
 
 from __future__ import annotations
@@ -18,9 +23,11 @@ import sqlite3
 import subprocess
 from dataclasses import dataclass
 from functools import partial
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, TextIO
 
 from praxis.components import (
+    MAX_COMPONENTS,
     MIN_COMPONENTS,
     RESERVED,
     UNMAPPED,
@@ -30,8 +37,10 @@ from praxis.components import (
     derive,
     from_json,
     load_owner,
+    owner_path,
     product_components,
     to_json,
+    to_toml,
 )
 from praxis.extract import GIT_TIMEOUT_S, Edge, StaticGraph, reach, static_imports
 from praxis.schema import MAP_REASONS
@@ -54,6 +63,7 @@ ASSUMPTIONS = (
 )
 COUNT_KEYS = ("components", "pairs", "items", "positive", "unexposed", "tasks_left")
 FREEZE = "praxis components freeze"
+DERIVE = "praxis components derive"
 SHOW = "praxis components"
 Row = tuple[str, str, str, bool, int, int | None, bool | None]
 
@@ -121,8 +131,33 @@ def show(repo_root: Path, praxis_home: Path, stdout: TextIO) -> int:
         stdout.write(f"  {rule.id}{fixed}: {' '.join(rule.globs)}\n")
     for warning in cmap.warnings:
         stdout.write(f"warning: {warning}\n")
-    stdout.write(_unmapped(repo.root, cmap) + "\n")
+    for line in _unmapped(repo.root, cmap):
+        stdout.write(line + "\n")
     stdout.write(_supply_line(counts) + "\n")
+    return 0
+
+
+def draft(repo_root: Path, praxis_home: Path, stdout: TextIO, write: bool) -> int:
+    """`praxis components derive`: the mechanical map in the owner's toml format,
+    printed, or with ``write`` saved where load_owner reads it, never over a file."""
+    repo = locate(repo_root)
+    if repo is None:
+        return _refuse(stdout, DERIVE, "not inside a git repository")
+    try:
+        text = to_toml(derive(repo.root, repo.repo_id))
+    except TooFewComponents as exc:
+        return _refuse(stdout, DERIVE, f"{exc}: no map to draft")
+    if not write:
+        stdout.write(text)
+        return 0
+    path = owner_path(praxis_home, repo.repo_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(text)
+    except FileExistsError:
+        return _refuse(stdout, DERIVE, f"{path} exists; edit it, or move it away")
+    stdout.write(f"wrote {path}; edit it, then `{FREEZE}`\n")
     return 0
 
 
@@ -180,11 +215,19 @@ def _freeze(
         return _refuse(
             stdout, FREEZE, f"map {cmap.version} was superseded; it cannot be refrozen"
         )
+    except ValueError:  # an unedited derive draft: the mechanical map's own rules
+        return _refuse(
+            stdout,
+            FREEZE,
+            f"map {cmap.version} is stored as another source's map with the same rules",
+        )
     product = product_components(cmap)
     supply = _supply(graph, product, partial(assign, cmap))
     sources = [f"extractor:{graph.extractor_version}", f"map:{cmap.version}"]
     sources += [] if tree is None else [f"tree:{tree}"]
     notes = ["no_commit"] * (tree is None) + ["working_tree_dirty"] * dirty
+    # Epoch re-admission reads the items present before this freeze writes any.
+    flipped = readmit(ledger, repo.repo_id, cmap, supply, (now, sources, notes))
     written, present = _put(ledger, repo.repo_id, cmap, supply, (now, sources, notes))
     stdout.write(
         f"map {cmap.version} frozen ({cmap.source}),"
@@ -193,6 +236,8 @@ def _freeze(
     for line in _report(cmap, old, reason, supply, product):
         stdout.write(line + "\n")
     stdout.write(f"D1 items: {written} written at epoch 0, {present} already present\n")
+    if present:
+        stdout.write(f"D1 truth flips re-admitted at the next epoch: {flipped}\n")
     stdout.write(_supply_line(_counts(ledger, repo.repo_id)) + "\n")
     return 0
 
@@ -204,25 +249,15 @@ def _accept(
     run: tuple[TextIO, str, str | None],
 ) -> tuple[ComponentMap, str | None] | int:
     """The map to freeze and the frozen version it replaces (None when it replaces
-    nothing), or the exit code of a refusal. Too few components is flagged."""
-    stdout, now, reason = run
+    nothing), or the exit code of a refusal."""
+    stdout, _, reason = run
     try:
-        cmap = _candidate(repo, praxis_home)
+        candidate = _candidate(repo, praxis_home)
     except ValueError as exc:  # a malformed owner map, named by its path
         return _refuse(stdout, FREEZE, str(exc))
-    product = [] if cmap is None else product_components(cmap)
-    if len(set(product)) != len(product):
-        raise ValueError("a product component id is listed twice")
-    if cmap is None or len(product) < MIN_COMPONENTS:
-        detail: dict[str, object] = {"source": "mechanical"}
-        if cmap is not None:
-            detail = {"source": cmap.source, "components": len(product)}
-        ledger.flag(
-            ts=now, code="too_few_components", detail=detail, repo_id=repo.repo_id
-        )
-        return _refuse(
-            stdout, FREEZE, f"fewer than {MIN_COMPONENTS} product components"
-        )
+    cmap = _size(ledger, repo, praxis_home, candidate, run)
+    if isinstance(cmap, int):
+        return cmap
     frozen = ledger.component_map_frozen(repo.repo_id)
     old = None if frozen is None else from_json(frozen).version
     if old is None or old == cmap.version:
@@ -235,6 +270,42 @@ def _accept(
             f" one of {' '.join(MAP_REASONS)}",
         )
     return cmap, old
+
+
+def _size(
+    ledger: Store,
+    repo: Repo,
+    praxis_home: Path,
+    cmap: ComponentMap | None,
+    run: tuple[TextIO, str, str | None],
+) -> ComponentMap | int:
+    """The map when it has 5 to 30 product components, else the exit code of a
+    refusal. Too few is flagged; a mechanical map's draft is printed."""
+    stdout, now, _ = run
+    product = [] if cmap is None else product_components(cmap)
+    if len(set(product)) != len(product):
+        raise ValueError("a product component id is listed twice")
+    if cmap is not None and MIN_COMPONENTS <= len(product) <= MAX_COMPONENTS:
+        return cmap
+    source = "mechanical" if cmap is None else cmap.source
+    why = f"more than {MAX_COMPONENTS}"
+    if len(product) < MIN_COMPONENTS:
+        detail: dict[str, object] = {"source": source}
+        if cmap is not None:
+            detail["components"] = len(product)
+        ledger.flag(
+            ts=now, code="too_few_components", detail=detail, repo_id=repo.repo_id
+        )
+        why = f"fewer than {MIN_COMPONENTS}"
+    code = _refuse(stdout, FREEZE, f"{why} product components in the {source} map")
+    if cmap is not None and source == "mechanical":
+        stdout.write(to_toml(cmap))
+        stdout.write(
+            f"{FREEZE}: `{DERIVE} --write` saves this draft as"
+            f" {owner_path(praxis_home, repo.repo_id)}; merge or split"
+            " components there, then freeze again\n"
+        )
+    return code
 
 
 def _tree(root: Path) -> tuple[str | None, bool]:
@@ -283,9 +354,8 @@ def _put(
     supply: _Supply,
     run: tuple[str, list[str], list[str]],
 ) -> tuple[int, int]:
-    """Write the D1 items of every parsed pair that has none under this map, one
-    batch per distinct set of partial-coverage warnings; (written, already present)."""
-    now, sources, notes = run
+    """Write the D1 items of every parsed pair that has none under this map;
+    (written, already present)."""
     have = {
         (r[0], r[1])
         for r in ledger.db.execute(
@@ -294,14 +364,65 @@ def _put(
             (repo_id, cmap.version),
         )
     }
+    rows = [
+        _row(supply, a, b, 0)
+        for a in supply.parsed
+        for b in supply.parsed
+        if a != b and (a, b) not in have
+    ]
+    _write(ledger, repo_id, cmap, supply, run, rows)
+    return len(rows), supply.pairs - len(rows)
+
+
+_EPOCHS = (
+    "SELECT src_component, dst_component, truth, epoch FROM probe_items p"
+    " WHERE p.repo_id = ? AND p.map_version = ? AND p.relation = 'D1'"
+    " AND p.epoch = (SELECT MAX(q.epoch) FROM probe_items q"
+    "  WHERE q.repo_id = p.repo_id AND q.map_version = p.map_version"
+    "  AND q.relation = 'D1' AND q.src_component = p.src_component"
+    "  AND q.dst_component = p.dst_component)"
+)
+
+
+def readmit(
+    ledger: Store,
+    repo_id: str,
+    cmap: ComponentMap,
+    supply: _Supply,
+    run: tuple[str, list[str], list[str]],
+) -> int:
+    """Design 3.5: an item is consumed by its first exposure and re-admitted as a new
+    item only when its truth flips. Every D1 pair whose X1 truth now differs from the
+    truth of its current epoch's item gets an item at epoch + 1; returns how many. A
+    pair with a component X1 did not parse this time is unknown, so it is not compared.
+    No exposure is read or written: the older epoch stays consumed, or unexposed, as
+    it was, and the pool reads only the current epoch."""
+    parsed = set(supply.parsed)
+    # UNIQUE (repo, map, relation, src, dst, epoch): one current row per pair.
+    flipped = [
+        _row(supply, a, b, epoch + 1)
+        for a, b, truth, epoch in ledger.db.execute(_EPOCHS, (repo_id, cmap.version))
+        if a in parsed and b in parsed and bool(truth) != ((a, b) in supply.edges)
+    ]
+    _write(ledger, repo_id, cmap, supply, run, flipped)
+    return len(flipped)
+
+
+def _write(
+    ledger: Store,
+    repo_id: str,
+    cmap: ComponentMap,
+    supply: _Supply,
+    run: tuple[str, list[str], list[str]],
+    rows: list[Row],
+) -> None:
+    """One probe_items batch per distinct set of partial-coverage warnings."""
+    now, sources, notes = run
     groups: dict[tuple[str, ...], list[Row]] = {}
-    for a in supply.parsed:
-        for b in supply.parsed:
-            if a == b or (a, b) in have:
-                continue
-            key = tuple(sorted({*supply.partial[a], *supply.partial[b]}))
-            groups.setdefault(key, []).append(_row(supply, a, b))
-    for key, rows in groups.items():
+    for row in rows:
+        key = tuple(sorted({*supply.partial[row[1]], *supply.partial[row[2]]}))
+        groups.setdefault(key, []).append(row)
+    for key, batch in groups.items():
         ev = Evidence(
             "partial" if key else "full",
             sources,
@@ -310,22 +431,20 @@ def _put(
             [*key, *notes],
         )
         ledger.probe_items_put(
-            rows=rows,
+            rows=batch,
             ev=ev,
             repo_id=repo_id,
             map_version=cmap.version,
             truth_ts=now,
             extractor_version=supply.extractor_version,
         )
-    written = sum(map(len, groups.values()))
-    return written, supply.pairs - written
 
 
-def _row(supply: _Supply, a: str, b: str) -> Row:
+def _row(supply: _Supply, a: str, b: str, epoch: int) -> Row:
     if (a, b) not in supply.edges:
-        return ("D1", a, b, False, 0, None, None)
+        return ("D1", a, b, False, epoch, None, None)
     edge = supply.edges[a, b]
-    return ("D1", a, b, True, 0, edge.sites, edge.module_level)
+    return ("D1", a, b, True, epoch, edge.sites, edge.module_level)
 
 
 def _report(
@@ -395,12 +514,45 @@ def _supply_line(counts: dict[str, int | None]) -> str:
     )
 
 
-def _unmapped(root: Path, cmap: ComponentMap) -> str:
-    """G15: the share of tracked paths the frozen map no longer assigns."""
+_UNTIL = {
+    "owner": "the owner's toml assigns it",
+    "mechanical": "the mechanical map is derived again",
+}
+
+
+def _unmapped(root: Path, cmap: ComponentMap) -> list[str]:
+    """G15: the share of tracked paths the frozen map does not assign, then the
+    non-empty Python files no rule assigns in a directory that holds a mapped product
+    file: a module added since the freeze, which an owner map or a grouped mechanical
+    map leaves unmapped until it is mapped and refrozen."""
     try:
         listed = _git(root, "ls-files", "-z")
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return "unmapped tracked paths: unknown (git could not list them)"
-    paths = [p for p in listed.split("\0") if p]
-    lost = sum(assign(cmap, p) == UNMAPPED for p in paths)
-    return f"unmapped tracked paths: {lost} of {len(paths)}"
+        return ["unmapped tracked paths: unknown (git could not list them)"]
+    placed = [(p, assign(cmap, p)) for p in listed.split("\0") if p]
+    lost = [p for p, cid in placed if cid == UNMAPPED]
+    product = set(product_components(cmap))
+    mapped = {PurePosixPath(p).parent for p, cid in placed if cid in product}
+    new = [
+        p
+        for p in lost
+        if p.endswith(".py") and PurePosixPath(p).parent in mapped and _code(root / p)
+    ]
+    lines = [
+        f"unmapped tracked paths: {len(lost)} of {len(placed)}",
+        f"unmapped Python files beside mapped ones: {len(new)}",
+    ]
+    lines += [f"  {p}" for p in new]
+    if new:
+        lines.append(
+            f"  each stays unmapped until {_UNTIL[cmap.source]} and"
+            f" `{FREEZE} --reason new_module` refreezes"
+        )
+    return lines
+
+
+def _code(path: Path) -> bool:
+    try:
+        return path.stat().st_size > 0
+    except OSError:  # listed by git, gone from the working tree
+        return False

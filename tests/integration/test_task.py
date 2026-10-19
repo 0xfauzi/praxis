@@ -359,3 +359,42 @@ def test_last_rereads_bound_item_truth_from_the_working_tree(
         "  Does code in a import code in b? yes, now no",
         "  Does code in f import code in a? no, now unknown",
     ]
+
+
+def test_an_item_listed_twice_in_the_binding_pool_is_refused(
+    repo: Path, home: Path
+) -> None:
+    repo_id, version = freeze(repo, home)
+    s = ledger(home)
+    try:
+        pool = s.probe_items_unexposed(repo_id, version)
+    finally:
+        s.close()
+    assert len(task._pairs(pool)) == len(pool) == 30  # 6 modules, ordered pairs
+    with pytest.raises(ValueError, match="listed twice"):
+        task._pairs([*pool, pool[0]])
+
+
+def test_a_validation_probed_item_leaves_the_binding_pool(
+    repo: Path, home: Path
+) -> None:
+    # Two items: unprobed, both would be bound. The one a never-drawn probe asked
+    # (task_id NULL) is no longer blind, so only the other is bound.
+    planted: list[Item] = [("D1", "a", "b", True, 0, None, None),
+                           ("D1", "f", "a", False, 0, None, None)]  # fmt: skip
+    repo_id, version = freeze(repo, home, planted)
+    s = ledger(home)
+    try:
+        asked, kept = s.probe_items_unexposed(repo_id, version)
+        s.probe_response(item_id=asked["item_id"], task_id=None, ts=NOW, p=0.7,
+                         seconds=1.0, lag_days=None, deadline_met=True,
+                         truth_at_probe=True, truth_changed=False, head_sha=None,
+                         tree_hash=None, dirty=None, extractor_version="x1-test",
+                         ev=EV)  # fmt: skip
+    finally:
+        s.close()
+    assert run(repo, home, seed_for("control", repo_id, 1))[0] == 0
+    (t1,) = tasks(home, repo_id)
+    roles = exposures(home, t1["task_id"])
+    assert [r["item_id"] for r in roles["bound"]] == [kept["item_id"]]
+    assert roles["related"] == roles["drawn_not_shown"] == []

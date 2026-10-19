@@ -32,6 +32,7 @@ INVARIANTS: tuple[Invariant, ...] = (
             "Recorder",
             "HookEntry",
             "ItemPool",
+            "ScenarioRunner",
             "TaskRegistration",
             "Probe",
         ),
@@ -39,12 +40,13 @@ INVARIANTS: tuple[Invariant, ...] = (
     ),
     Invariant(
         3,
-        "The ledger stores hashes, counts, and identifiers. It never stores a line of a file, a prompt, or a tool input or response (AGENTS.md, invariant 5; src/praxis/schema.py docstring; docs/design/01-recorder.md, What is stored).",
+        "The ledger stores hashes, counts, and identifiers. It never stores a line of a file, a prompt, or a tool input or response. A scenario argv is stored only as a hash (AGENTS.md, invariant 5; src/praxis/schema.py docstring; src/praxis/scenarios.py docstring; docs/design/01-recorder.md, What is stored).",
         governs=(
             "Ledger",
             "Recorder",
             "ComponentMap",
             "Extractors",
+            "ScenarioRunner",
             "TranscriptReader",
             "TaskRegistration",
             "Probe",
@@ -54,7 +56,7 @@ INVARIANTS: tuple[Invariant, ...] = (
     ),
     Invariant(
         4,
-        "Without a baseline, the human, pre-existing, and reverted counts are NULL and the coverage is no_baseline. A CHECK constraint keeps the two together (AGENTS.md, invariant 4; src/praxis/schema.py:158-161).",
+        "Without a baseline, the human, pre-existing, and reverted counts are NULL and the coverage is no_baseline. A CHECK constraint keeps the two together (AGENTS.md, invariant 4; src/praxis/schema.py:162-165).",
         governs=("Recorder", "Ledger"),
         reason="Unknown stays unknown: a missing value is None through the model, the ledger, and the report (AGENTS.md, invariant 4; docs/design/01-recorder.md, Attribution).",
     ),
@@ -72,9 +74,9 @@ INVARIANTS: tuple[Invariant, ...] = (
     ),
     Invariant(
         7,
-        "praxis doctor never creates the ledger and counts its rows in SQLite read-only mode. It asks probe.due for probes due only when the ledger is at SCHEMA_VERSION, so the Store that probe.due opens runs no migration (src/praxis/doctor.py docstring, _ledger_state, and _due).",
-        governs=("Doctor", "Probe"),
-        reason="The doctor reports state and must not change the state that it reports (src/praxis/doctor.py docstring). Store.open runs the DDL and migrate when PRAGMA user_version differs from SCHEMA_VERSION, so the version check keeps the probes-due read from changing the ledger (src/praxis/store.py, Store.open).",
+        "praxis doctor never creates the ledger and counts its rows in SQLite read-only mode. It asks probe.due for probes due only when the ledger is at SCHEMA_VERSION, so the Store that probe.due opens runs no migration. The scenario summary that it prints opens a Store only at SCHEMA_VERSION too (src/praxis/doctor.py docstring, _ledger_state, and _due; src/praxis/scenarios.py summary and _last_runs).",
+        governs=("Doctor", "Probe", "ScenarioRunner"),
+        reason="The doctor reports state and must not change the state that it reports (src/praxis/doctor.py docstring). Store.open runs the DDL and migrate when PRAGMA user_version differs from SCHEMA_VERSION. Thus the version check keeps the probes-due read and the scenario summary from changing the ledger (src/praxis/store.py, Store.open; src/praxis/scenarios.py _last_runs).",
     ),
     Invariant(
         8,
@@ -92,6 +94,7 @@ INVARIANTS: tuple[Invariant, ...] = (
             "AgentCheck",
             "Scoring",
             "ItemPool",
+            "ScenarioRunner",
             "TaskRegistration",
             "Probe",
             "Report",
@@ -100,14 +103,14 @@ INVARIANTS: tuple[Invariant, ...] = (
     ),
     Invariant(
         9,
-        "Code that must run for a measurement runs in a scratch clone under $PRAXIS_HOME that the caller deletes. The working tree and .git of the owner are never written (AGENTS.md, invariant 5; src/praxis/extract.py scratch_clone docstring).",
-        governs=("Extractors",),
+        "Code that must run for a measurement runs in a scratch clone under $PRAXIS_HOME that the caller deletes. The working tree and .git of the owner are never written. praxis scenarios run gives each scenario its own clone and deletes it after the scenario, also on failure. PRAXIS_HOME points into the clone (AGENTS.md, invariant 5; src/praxis/extract.py scratch_clone docstring; src/praxis/scenarios.py docstring and _run_one).",
+        governs=("Extractors", "ScenarioRunner"),
         reason="A git worktree would write .git/worktrees into the repository of the owner, so the design uses git clone --local (docs/design/03-measurement.md, section 3.5).",
     ),
     Invariant(
         10,
-        "Probe items are scored by deterministic, versioned extractors. No project test is a score or an item source (AGENTS.md, invariant 9; src/praxis/extract.py EXTRACTOR_VERSION).",
-        governs=("Extractors", "ComponentMap", "ItemPool", "Probe"),
+        "Probe items are scored by deterministic, versioned extractors. No project test is a score or an item source (AGENTS.md, invariant 9; src/praxis/extract.py EXTRACTOR_VERSION and X2_VERSION).",
+        governs=("Extractors", "ComponentMap", "ItemPool", "ScenarioRunner", "Probe"),
         reason="The owner rejected the write-it instrument because the project tests are code-level, often written by the agent, and absent for most design decisions (docs/design/02-instrument.md, Status).",
     ),
     Invariant(
@@ -118,7 +121,7 @@ INVARIANTS: tuple[Invariant, ...] = (
     ),
     Invariant(
         12,
-        "praxis report writes nothing when its text holds the words cause, impact, or would and no pre-registered rule is met. The text names each rule with its result (AGENTS.md, invariant 3; src/praxis/report.py docstring, _REFUSED, and render).",
+        "praxis report writes nothing when its text holds the words cause, impact, or would and no pre-registered rule is met. The text names each rule with its result (AGENTS.md, invariant 3; src/praxis/render.py docstring, _REFUSED, and render).",
         governs=("Report",),
         reason="A claim class is never upgraded. A report may narrow a claim or drop it, and it refuses these words unless the pre-registered decision rule was met (AGENTS.md, invariant 3; docs/preregistration.md).",
     ),

@@ -1,5 +1,5 @@
 # ruff: noqa: E501
-"""The sequences of the instrument verbs: praxis task, last, probe, components, and report.
+"""The sequences of the instrument verbs: praxis task, last, probe, components, scenarios, and report.
 
 Split from journeys.py so that no map file passes the 800-line limit. journeys.py lists
 these sequences in JOURNEYS; systemap puts this folder on the import path while it loads
@@ -150,6 +150,12 @@ _PROBE: Steps = (
     ),
     Step(
         ("Probe",),
+        ("Ledger",),
+        ("TaskRegistration", "Probe"),
+        "After the due items, a structural probe ranks the unprobed items with the committed seed and adds this week's validation items and retests.",
+    ),
+    Step(
+        ("Probe",),
         (),
         ("Probe", "ComponentMap"),
         "The probe parses the map and takes its product components.",
@@ -164,7 +170,7 @@ _PROBE: Steps = (
         ("Probe",),
         (),
         ("Probe", "Git"),
-        "The probe reads HEAD, its tree hash, and whether the working tree is dirty.",
+        "The probe reads HEAD, its tree hash, and whether the working tree is dirty. A knockout counts only scenario runs of the HEAD tree.",
     ),
     Step(
         ("Probe",),
@@ -230,10 +236,16 @@ _COMPONENTS_FREEZE: Steps = (
         "Without an owner map, the component map derives one from git ls-files.",
     ),
     Step(
+        ("ComponentMap",),
+        (),
+        ("ComponentMap", "Extractors"),
+        "For a flat package, the component map groups the children by name prefix and by import edges.",
+    ),
+    Step(
         ("ItemPool",),
         ("Ledger",),
         ("Ledger", "ItemPool"),
-        "The item pool loads the frozen map. A different map needs --reason, and too few components get a flag.",
+        "The item pool loads the frozen map. A different map needs --reason. Fewer than 5 or more than 30 product components refuse the freeze.",
     ),
     Step(
         ("ItemPool",),
@@ -263,7 +275,7 @@ _COMPONENTS_FREEZE: Steps = (
         ("ItemPool",),
         ("Ledger",),
         ("ItemPool", "Ledger"),
-        "The item pool writes a D1 item at epoch 0 for each parsed pair that has none.",
+        "The item pool writes an item at the next epoch for each D1 pair whose truth flipped. Then it writes an epoch 0 item for each new pair.",
     ),
     Step(
         ("ItemPool",),
@@ -308,7 +320,7 @@ _COMPONENTS_SHOW: Steps = (
         ("ItemPool",),
         (),
         ("ItemPool", "ComponentMap"),
-        "The item pool prints the rules and the number of tracked paths that the map does not assign.",
+        "The item pool prints the rules, the number of unassigned tracked paths, and the unassigned Python files beside mapped files.",
     ),
 )
 
@@ -335,7 +347,7 @@ _REPORT: Steps = (
         ("Report",),
         ("Ledger",),
         ("Ledger", "Report"),
-        "The report reads the frozen map, the tasks, the outcomes, the forecasts, and the probe responses.",
+        "The report reads the frozen map, the tasks, the outcomes, the forecasts, and the probe responses, also those of never-drawn validation items.",
     ),
     Step(
         ("Report",),
@@ -353,13 +365,196 @@ _REPORT: Steps = (
         ("Report",),
         (),
         ("Report", "Scoring"),
-        "The report computes skill scores, decompositions, CORP bands, and randomization tests.",
+        "The report computes skill scores, decompositions, CORP bands, the randomization tests, and the pipeline placebo.",
     ),
     Step(
         ("CommandSurface",),
         (),
         ("CommandSurface", "Report"),
-        "The command surface calls render. A refused word without a met rule writes nothing and exits 1.",
+        "The command surface calls render. A placebo below ALPHA suspends the arm contrasts. A refused word without a met rule writes nothing.",
+    ),
+)
+
+_COMPONENTS_DERIVE: Steps = (
+    Step(
+        ("Owner",),
+        (),
+        ("Owner", "CommandSurface"),
+        "The owner types praxis components derive, with --write to save the draft.",
+    ),
+    Step(
+        ("CommandSurface",),
+        (),
+        ("CommandSurface", "ItemPool"),
+        "The command surface calls draft.",
+    ),
+    Step(
+        ("ItemPool",),
+        (),
+        ("ItemPool", "AgentCheck"),
+        "The item pool finds the repository and its hashed id.",
+    ),
+    Step(
+        ("ItemPool",),
+        (),
+        ("ItemPool", "ComponentMap"),
+        "The item pool derives the mechanical map and prints it in the owner's toml format.",
+    ),
+    Step(
+        ("ComponentMap",),
+        (),
+        ("ComponentMap", "Git"),
+        "The component map lists the tracked paths with git ls-files.",
+    ),
+    Step(
+        ("ComponentMap",),
+        (),
+        ("ComponentMap", "Extractors"),
+        "For a flat package, the component map groups the children by name prefix and by import edges.",
+    ),
+    Step(
+        ("ItemPool",),
+        (),
+        ("ItemPool", "PraxisHome"),
+        "With --write, the item pool saves the draft as the owner map, and it refuses when that file exists.",
+    ),
+)
+
+_SCENARIOS_RUN: Steps = (
+    Step(
+        ("Owner",),
+        (),
+        ("Owner", "PraxisHome"),
+        "The owner names each scenario id and argv in scenarios/<repo_id>.toml.",
+    ),
+    Step(
+        ("Owner",),
+        (),
+        ("Owner", "CommandSurface"),
+        "The owner types praxis scenarios run.",
+    ),
+    Step(
+        ("CommandSurface",),
+        (),
+        ("CommandSurface", "ScenarioRunner"),
+        "The command surface calls run with the clock reading of the command start.",
+    ),
+    Step(
+        ("ScenarioRunner",),
+        (),
+        ("ScenarioRunner", "AgentCheck"),
+        "The scenario runner finds the repository and its hashed id.",
+    ),
+    Step(
+        ("ScenarioRunner",),
+        (),
+        flow="scen-file",
+        say="The scenario runner loads the scenario file, and it refuses a missing file or a file of another shape.",
+    ),
+    Step(
+        ("ScenarioRunner",),
+        ("Ledger",),
+        ("Ledger", "ScenarioRunner"),
+        "The scenario runner loads the frozen map. Without a ledger or a frozen map, it refuses and writes nothing.",
+    ),
+    Step(
+        ("ScenarioRunner",),
+        (),
+        ("ScenarioRunner", "Git"),
+        "The scenario runner refuses when HEAD has no tree, because each scenario runs in a clone of HEAD.",
+    ),
+    Step(
+        ("ScenarioRunner",),
+        (),
+        ("ScenarioRunner", "Extractors"),
+        "For each scenario, the scenario runner makes a scratch clone of HEAD.",
+    ),
+    Step(
+        ("Extractors",),
+        (),
+        ("Extractors", "Git"),
+        "The extractors run git clone --local and remove the remote of the clone.",
+    ),
+    Step(
+        ("Extractors",),
+        (),
+        ("Extractors", "PraxisHome"),
+        "The clone is a new directory under $PRAXIS_HOME/scratch.",
+    ),
+    Step(
+        ("ScenarioRunner",),
+        (),
+        ("ScenarioRunner", "Git"),
+        "The scenario runner reads the tree hash of the clone and lists its tracked files.",
+    ),
+    Step(
+        ("ScenarioRunner",),
+        (),
+        ("ScenarioRunner", "ComponentMap"),
+        "The scenario runner puts the clone root and each package root of a product component first on PYTHONPATH.",
+    ),
+    Step(
+        ("ScenarioRunner",),
+        (),
+        ("ScenarioRunner", "Extractors"),
+        "With PRAXIS_HOME inside the clone, run_scenario traces the scenario and assigns each traced file to a component.",
+    ),
+    Step(
+        ("ScenarioRunner",),
+        (),
+        ("ScenarioRunner", "PraxisHome"),
+        "The scenario runner deletes the clone, also when the scenario fails.",
+    ),
+    Step(
+        ("ScenarioRunner",),
+        ("Ledger",),
+        ("ScenarioRunner", "Ledger"),
+        "The scenario runner stores the run with its outcome, components, call edges, argv hash, and the tree hash of the clone.",
+    ),
+)
+
+_SCENARIOS_SHOW: Steps = (
+    Step(
+        ("Owner",),
+        (),
+        ("Owner", "CommandSurface"),
+        "The owner types praxis scenarios.",
+    ),
+    Step(
+        ("CommandSurface",),
+        (),
+        ("CommandSurface", "ScenarioRunner"),
+        "The command surface calls show.",
+    ),
+    Step(
+        ("ScenarioRunner",),
+        (),
+        ("ScenarioRunner", "AgentCheck"),
+        "The scenario runner finds the repository and its hashed id.",
+    ),
+    Step(
+        ("ScenarioRunner",),
+        (),
+        flow="scen-file",
+        say="The scenario runner loads the scenario file. Without one, it prints that no scenario is configured.",
+    ),
+    Step(
+        ("ScenarioRunner",),
+        (),
+        flow="scen-version",
+        say="The scenario runner reads the ledger version in read-only mode, and at another version it gives unknown.",
+    ),
+    Step(
+        ("ScenarioRunner",),
+        ("Ledger",),
+        ("Ledger", "ScenarioRunner"),
+        "At the current version, the scenario runner loads the frozen map and the last run of each scenario on it.",
+    ),
+    Step(
+        ("ScenarioRunner",),
+        (),
+        ("ScenarioRunner", "Git"),
+        "The scenario runner reads the HEAD tree and prints each last run with its tree and a changed argv.",
     ),
 )
 
@@ -409,4 +604,28 @@ REPORT = Journey(
     starts="praxis report (subcommand)",
     steps=_REPORT,
     covers=('["subcommand","praxis.cli","praxis","report"]',),
+)
+
+COMPONENTS_DERIVE = Journey(
+    id="components-derive",
+    label="The owner drafts an owner map",
+    starts="praxis derive (subcommand)",
+    steps=_COMPONENTS_DERIVE,
+    covers=('["subcommand","praxis.cli","praxis","derive"]',),
+)
+
+SCENARIOS_RUN = Journey(
+    id="scenarios-run",
+    label="The owner runs the scenarios",
+    starts="praxis run (subcommand)",
+    steps=_SCENARIOS_RUN,
+    covers=('["subcommand","praxis.cli","praxis","run"]',),
+)
+
+SCENARIOS_SHOW = Journey(
+    id="scenarios-show",
+    label="The owner reads the scenario runs",
+    starts="praxis scenarios (subcommand)",
+    steps=_SCENARIOS_SHOW,
+    covers=('["subcommand","praxis.cli","praxis","scenarios"]',),
 )

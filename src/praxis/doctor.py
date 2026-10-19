@@ -163,4 +163,7 @@ def run(*, cwd: Path, home: Path, praxis_home: Path, out: TextIO) -> int:
         agents = attached_agents(repo.root)
         out.write(f"cwd: repository {repo.repo_id}; agents attached: {len(agents)}\n")
         out.write(_due(repo, praxis_home) + "\n")
+        from praxis import scenarios  # lazily, as probe: cli imports this module
+
+        out.write(scenarios.summary(praxis_home, repo.repo_id) + "\n")
     return 0
