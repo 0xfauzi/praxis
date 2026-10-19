@@ -171,14 +171,23 @@ def test_pfnet_keeps_links_no_longer_than_the_minimax_path() -> None:
         s.pfnet([[0.0, 1.0], [2.0, 0.0]])
 
 
-def test_neighbourhood_closeness() -> None:
-    # Path 0-1-2 against triangle: node 0 {1}/{1,2} = .5, node 1 = 1, node 2 = .5,
-    # mean 2/3. An isolated node 3 in both has an empty union and is left out.
+def test_pfsim_link_similarity() -> None:
+    # Path 0-1-2 has links {01, 12}; the triangle has {01, 02, 12}. C = 2, so
+    # S = 2 / (2 + 3 - 2) = 2/3, and E[C] = 2 * 3 / 3 pairs = 2.0. With an isolated
+    # fourth node the links are the same but P = 6, so E[C] = 1.0.
     path = [[False, True, False], [True, False, True], [False, True, False]]
     tri = [[i != j for j in range(3)] for i in range(3)]
-    assert s.neighbourhood_closeness(path, tri) == pytest.approx(2 / 3)
+    three = s.pfsim(path, tri)
+    assert three is not None
+    assert three[0] == pytest.approx(2 / 3)
+    assert three[1] == pytest.approx(2.0)
     path4 = [[*row, False] for row in path] + [[False] * 4]
     tri4 = [[*row, False] for row in tri] + [[False] * 4]
-    assert s.neighbourhood_closeness(path4, tri4) == pytest.approx(2 / 3)
+    four = s.pfsim(path4, tri4)
+    assert four is not None
+    assert four[0] == pytest.approx(2 / 3)
+    assert four[1] == pytest.approx(1.0)
     empty = [[False] * 3 for _ in range(3)]
-    assert s.neighbourhood_closeness(empty, empty) is None
+    assert s.pfsim(empty, empty) is None
+    with pytest.raises(ValueError, match="square"):
+        s.pfsim(path, tri4)

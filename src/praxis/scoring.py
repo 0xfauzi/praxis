@@ -3,7 +3,7 @@
 No I/O and no state: every function takes numbers and returns numbers, and refuses
 (ValueError) malformed input at the boundary rather than guessing. An answer that the
 data cannot give is None, never 0: a skill score against a perfect reference, a
-reliability with too few weeks, a closeness with no neighbourhoods.
+reliability with too few weeks, a similarity between two networks without links.
 
 Outcomes are 0 or 1. Lower Brier is better, so every test statistic is oriented so that
 a larger value favours the treatment (control minus treatment, before minus after).
@@ -278,21 +278,29 @@ def _check_distances(distances: list[list[float]]) -> None:
             raise ValueError("distances must be finite, non-negative, symmetric")
 
 
-def neighbourhood_closeness(a: list[list[bool]], b: list[list[bool]]) -> float | None:
-    """Mean over nodes v of |N_a(v) & N_b(v)| / |N_a(v) | N_b(v)|, where N_x(v) is v's
-    neighbours in network x; nodes whose union is empty are left out, and None when
-    every node is. This is the common form of Goldsmith and Davenport's closeness and
-    must be checked against their chapter before C1 is computed (design Q13).
+def pfsim(a: list[list[bool]], b: list[list[bool]]) -> tuple[float, float] | None:
+    """Schvaneveldt's network similarity S = C / (|L1| + |L2| - C): L1 and L2 are the
+    undirected link sets, C their overlap (JPathfinder manual, "Network Similarity"; the
+    PFSIM of Trumpower, Sharara and Goldsmith 2010). Returns (S, E[C]), where
+    E[C] = |L1| |L2| / P is the hypergeometric mean overlap of two random link sets over
+    the P = n(n-1)/2 pairs; the caller subtracts chance. None when neither network has a
+    link. The per-node "neighbourhood closeness" of Goldsmith and Davenport (1990) is
+    NOT this and stays unverified (design Q13).
     """
     if len(a) != len(b) or any(len(r) != len(a) for r in (*a, *b)):
         raise ValueError("both networks are square over the same nodes")
-    ratios = []
-    for v in range(len(a)):
-        na, nb = _neighbours(a, v), _neighbours(b, v)
-        if na | nb:
-            ratios.append(len(na & nb) / len(na | nb))
-    return math.fsum(ratios) / len(ratios) if ratios else None
+    la, lb = _links(a), _links(b)
+    union = len(la) + len(lb) - len(la & lb)
+    if union == 0:
+        return None
+    pairs = len(a) * (len(a) - 1) / 2
+    return len(la & lb) / union, len(la) * len(lb) / pairs
 
 
-def _neighbours(net: list[list[bool]], v: int) -> set[int]:
-    return {u for u, linked in enumerate(net[v]) if linked and u != v}
+def _links(net: list[list[bool]]) -> set[tuple[int, int]]:
+    return {
+        (u, v)
+        for u, row in enumerate(net)
+        for v, linked in enumerate(row)
+        if u < v and (linked or net[v][u])
+    }
