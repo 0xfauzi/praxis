@@ -18,6 +18,16 @@ attached and scored by deterministic extractors, never by tests. `praxis report`
 scores and the pre-registered tests, refusing a block below its minimum. The write-it drill
 is withdrawn. No scores, no claims about anyone yet.
 
+## System map
+
+The map of praxis's components, flows and sequences is written with
+[systemap](https://github.com/0xfauzi/systemap) and checked on every pull request, where the
+workflow posts the architecture delta as a comment. The published map is at
+<https://0xfauzi.github.io/praxis/map/>; the same figures are in the repository at
+[`docs/map/figures/system.svg`](docs/map/figures/system.svg) and
+[`docs/map/figures/structure.svg`](docs/map/figures/structure.svg), and the model that
+produces them is `map/model.py`, `map/journeys.py` and `map/contract.py`.
+
 ## Install, on the machine where the agents run
 
 ```
