@@ -1,13 +1,14 @@
 # Publishes docs/ (the systemap map under docs/map/, reached through docs/index.html) to
-# GitHub Pages on every push to main that touches it. Deploying from Actions instead of
-# "deploy from a branch" keeps the published map equal to the map CI checked, and needs no
-# Pages setting beyond what `enablement: true` turns on from inside the run.
+# GitHub Pages on every push to main. Deploying from Actions instead of "deploy from a
+# branch" keeps the published map equal to the map CI checked, and needs no Pages setting
+# beyond what `enablement: true` turns on from inside the run. No `paths` filter: the first
+# version had one, so the merge that added the workflow (#4, which touched no docs/ file)
+# never deployed anything, and the map stayed a 404 until the next docs change.
 name: pages
 
 on:
   push:
     branches: [main]
-    paths: ["docs/**"]
   workflow_dispatch:
 
 permissions:
