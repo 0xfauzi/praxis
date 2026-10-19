@@ -1,0 +1,48 @@
+# Publishes docs/ (the systemap map under docs/map/, reached through docs/index.html) to
+# GitHub Pages on every push to main that touches it. Deploying from Actions instead of
+# "deploy from a branch" keeps the published map equal to the map CI checked, and needs no
+# Pages setting beyond what `enablement: true` turns on from inside the run.
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["docs/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; a newer push supersedes a queued one but never cancels a running
+# deploy, which would leave Pages mid-update.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Measured: the first run sets the bound. Re-state with the measured number once a run
+    # exists.
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      # Pinned to commit SHAs, as ci.yml and systemap.yml are: a tag is a mutable pointer.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+        with:
+          # Turns Pages on for the repository from the run when it is off. If the run's
+          # token is refused for that, the owner enables Pages once under Settings, Pages,
+          # with "GitHub Actions" as the source, and the next push publishes.
+          enablement: true
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: docs
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
