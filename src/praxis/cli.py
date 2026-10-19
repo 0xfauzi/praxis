@@ -1,4 +1,9 @@
-"""The `praxis` command. A verb lands beside its integration test, never before it."""
+"""The `praxis` command. A verb lands beside its integration test, never before it.
+
+Argument parsing and dispatch only; every behaviour lives in the module that owns it.
+`praxis hook` runs inside every agent tool call, so a verb's module is imported inside
+its handler: task, probe, pool and report each cost a hook tens of milliseconds.
+"""
 
 from __future__ import annotations
 
@@ -6,11 +11,29 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from praxis import __version__, doctor, hooks, install, store
+from praxis.schema import MAP_REASONS
+from praxis.unassisted import locate
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def main(argv: list[str] | None = None) -> int:
+    # One clock reading at command start: task seconds are measured from it (E07).
+    now = hooks.now_iso()
+    parser = _parser()
+    args = parser.parse_args(argv)
+    verb = _VERBS.get(args.verb)
+    if verb is None:
+        parser.print_usage(sys.stdout)
+        return 0
+    return verb(args, now)
+
+
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="praxis",
         description=(
@@ -49,35 +72,95 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("sessions", help="sessions in the ledger with their latest totals")
 
-    args = parser.parse_args(argv)
-    if args.verb == "hook":
-        return hooks.run(sys.stdin.buffer, store.home())
-    if args.verb == "setup":
-        return _setup(args.agent, args.print_, args.apply, args.remove)
-    if args.verb == "doctor":
-        return doctor.run(
-            cwd=Path.cwd(), home=Path.home(), praxis_home=store.home(), out=sys.stdout
-        )
-    if args.verb == "attributions":
-        return _attributions(args.session, args.json)
-    if args.verb == "sessions":
-        return _sessions()
-    parser.print_usage(sys.stdout)
+    sub.add_parser("task", help="register the next task, before its prompt")
+    sub.add_parser("last", help="feedback on the last closed task")
+    probe = sub.add_parser("probe", help="an unassisted probe, with no agent attached")
+    probe.add_argument("kind", help="which probe; an unknown kind lists them")
+    comps = sub.add_parser("components", help="the frozen component map and its pool")
+    freeze = comps.add_subparsers(dest="action").add_parser(
+        "freeze", help="derive or load the map, freeze it and fill the item pool"
+    )
+    freeze.add_argument("--reason", choices=MAP_REASONS, help="why the map changed")
+    sub.add_parser("report", help="scores, references and tests from the ledger")
+    return parser
+
+
+def _hook(_args: argparse.Namespace, _now: str) -> int:
+    return hooks.run(sys.stdin.buffer, store.home())
+
+
+def _doctor(_args: argparse.Namespace, _now: str) -> int:
+    return doctor.run(
+        cwd=Path.cwd(), home=Path.home(), praxis_home=store.home(), out=sys.stdout
+    )
+
+
+def _task(_args: argparse.Namespace, now: str) -> int:
+    from praxis import task
+
+    return task.register(
+        Path.cwd(), store.home(), sys.stdin, sys.stdout, now, task.SEED
+    )
+
+
+def _last(_args: argparse.Namespace, _now: str) -> int:
+    from praxis import task
+
+    return task.last(Path.cwd(), store.home(), sys.stdout)
+
+
+def _probe(args: argparse.Namespace, now: str) -> int:
+    from praxis import probe
+
+    if args.kind not in probe.KINDS:
+        print(f"praxis probe: kinds are {', '.join(probe.KINDS)}", file=sys.stderr)
+        return 2
+    return probe.administer(
+        Path.cwd(), store.home(), sys.stdin, sys.stdout, now, args.kind
+    )
+
+
+def _components(args: argparse.Namespace, now: str) -> int:
+    from praxis import pool
+
+    if args.action == "freeze":
+        return pool.freeze(Path.cwd(), store.home(), sys.stdout, now, args.reason)
+    return pool.show(Path.cwd(), store.home(), sys.stdout)
+
+
+def _report(_args: argparse.Namespace, _now: str) -> int:
+    from praxis import report, task
+
+    repo = locate(Path.cwd())
+    if repo is None:
+        print("praxis report: not inside a git repository")
+        return 2
+    ledger = store.Store(store.home() / "ledger.db").open()
+    try:
+        scores = report.scores(ledger, repo.repo_id, seed=task.SEED, draws=report.DRAWS)
+    finally:
+        ledger.close()
+    try:
+        report.render(scores, sys.stdout)
+    except ValueError as exc:  # a refused word with no met rule: nothing was written
+        print(exc, file=sys.stderr)
+        return 1
     return 0
 
 
-def _setup(agent: str, print_: bool, apply: bool, remove: bool) -> int:
-    if apply or remove:
+def _setup(args: argparse.Namespace, _now: str) -> int:
+    agent = args.agent
+    if args.apply or args.remove:
         return install.apply(
             agent=agent,
-            remove=remove,
+            remove=args.remove,
             home=Path.home(),
             praxis_home=store.home(),
             stdin=sys.stdin,
             out=sys.stdout,
         )
     target = f"~/{install.TARGETS[agent]}"
-    if not print_:
+    if not args.print_:
         print(
             f"praxis setup {agent} --print   # the block to merge into {target}\n"
             f"praxis setup {agent} --apply   # merge it there, after your yes"
@@ -87,13 +170,13 @@ def _setup(agent: str, print_: bool, apply: bool, remove: bool) -> int:
     return 0
 
 
-def _attributions(session: str | None, as_json: bool) -> int:
+def _attributions(args: argparse.Namespace, _now: str) -> int:
     ledger = store.Store(store.home() / "ledger.db").open()
     try:
-        rows = ledger.attribution_rows(session)
+        rows = ledger.attribution_rows(args.session)
     finally:
         ledger.close()
-    if as_json:
+    if args.json:
         for r in rows:
             print(json.dumps(dict(r)))
         return 0
@@ -110,7 +193,7 @@ def _attributions(session: str | None, as_json: bool) -> int:
     return 0
 
 
-def _sessions() -> int:
+def _sessions(_args: argparse.Namespace, _now: str) -> int:
     ledger = store.Store(store.home() / "ledger.db").open()
     try:
         sessions = ledger.sessions()
@@ -149,3 +232,17 @@ def _sum_opt(values: list[int | None]) -> str:
         if any(v is None for v in values)
         else str(sum(v or 0 for v in values))
     )
+
+
+_VERBS: dict[str, Callable[[argparse.Namespace, str], int]] = {
+    "hook": _hook,
+    "setup": _setup,
+    "doctor": _doctor,
+    "attributions": _attributions,
+    "sessions": _sessions,
+    "task": _task,
+    "last": _last,
+    "probe": _probe,
+    "components": _components,
+    "report": _report,
+}

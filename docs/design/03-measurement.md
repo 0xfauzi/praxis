@@ -139,11 +139,12 @@ stamped on every derived row. A map defines nodes only: every edge comes from an
    `too_few_components`, never padded.
 4. A file directly in a directory that has components below it belongs to `<dir>/.`.
 
-Measured here (re-measured with `components.derive` once it existed; the first count of 9
-left out `__init__.py` by hand): the product root is `src/praxis`, and depth 1 gives 10
-product components (`.` for the non-empty `__init__.py`, cli, doctor, drill, gitdiff, hooks,
-install, recorder, spans, store). Taking the
-top-level package would give 1 component [MX]. In a flat package like this, depth-1
+Measured here: the product root is `src/praxis`, and depth 1 makes each module a product
+component (`.` for the non-empty `__init__.py`). The count is the tree's, so it is
+re-measured by `praxis components` on the current tree rather than written here: 10 when
+this section was first written (the first count of 9 left out `__init__.py` by hand), 14
+at e9b5e3a and 18 with wave 2's stage B (E03). Taking the top-level package would give 1
+component [MX]. In a flat package like this, depth-1
 components are single files, so the forecast in section 4.4 is close to "which files will
 the agent edit" [CR]. That is why an owner map that groups files into the owner's own
 concepts is recommended before data (section 2.4, check V3), and why the forecast is never
@@ -201,11 +202,14 @@ counts (invariant 5).
   SQL and infrastructure wiring [SE], so every row carries the assumption that an absent
   edge may be an extractor blind spot.
 
-Measured here, X1 on `src/praxis` with the 10-component map (`extract.static_imports`,
-2026-10-19): 17 edges among 90 ordered pairs (base rate 0.189); `store` is imported by 5
-components and `cli` imports 6 (`.` included). Of the 73 non-edge pairs, 7 reach their
-target through another component and 66 have no path at all. (The first figures here, 16
-edges among 72 pairs, came from a 9-component count that dropped `__init__.py`.)
+Measured here, X1 on `src/praxis` (`extract.static_imports`): the edges, the ordered
+pairs and the base rate are the tree's and are re-measured by `praxis components` on the
+current tree (`praxis components freeze` prints them). On the 10-component tree of
+2026-10-19 they were 17 edges among 90 ordered pairs (base rate 0.189), with `store`
+imported by 5 components, `cli` importing 6 (`.` included), and of the 73 non-edge pairs 7
+reaching their target through another component and 66 with no path at all; at e9b5e3a, 14
+edges among 182 pairs (0.077, E03). (The first figures here, 16 edges among 72 pairs, came
+from a 9-component count that dropped `__init__.py`.)
 
 ### 3.2 X2: runtime component traces of owner-named scenarios (candidate)
 
@@ -252,14 +256,17 @@ An **item** is (relation, A, B[, scenario or table]). Relations: D1 direct impor
 reach-through, RT runtime call or execution, TB table write. The item supply is finite and
 binding:
 
-- Measured here: 90 ordered D1 pairs. D2 has 7 positives against 66 negatives, so a
+- The D1 pairs are n(n - 1) over the product components, re-measured by `praxis
+  components` on the current tree (90 on the 10-component tree, 182 at e9b5e3a, 306 with
+  stage B). On the 10-component tree D2 had 7 positives against 66 negatives, so a
   constant 0.1 forecast nearly aces it; D2 is reported but never pooled into the primary
   outcome without the R_layer reference beside it.
 - An item is consumed by its first exposure (section 6). It is re-admitted as a new item
   only when its truth flips (a new epoch), which the recorder's edge history detects.
-- At 4 items consumed per task (section 6.2 defaults), praxis's D1 pool alone lasts 22
-  tasks (90 / 4, derived).
-- `praxis components pool` reports the supply per repository and relation. The power
+- At 4 items consumed per task (section 6.2 defaults), a D1 pool lasts its items / 4
+  tasks; `praxis components` prints the tasks left (22 on the 10-component tree, 90 / 4,
+  derived).
+- `praxis components` reports the supply per repository (its pool line). The power
   simulation (section 6.6) takes the supply as an input, and a repository whose supply
   cannot reach the simulated count over the study is declared infeasible for the
   confirmatory analysis, not run underpowered.
@@ -551,8 +558,8 @@ component is reported. The owner's working tree is never written.
 ### 4.8 C1: Pathfinder map (convergent only)
 
 Every P weeks (a design choice; cost needs measuring), the owner rates every unordered pair
-of product components for relatedness, 1 to 9 (45 pairs for praxis's 10 components,
-measured here), converted to distance d = 10 - rating. The owner's network is
+of product components for relatedness, 1 to 9 (n(n - 1) / 2 pairs over the current map's
+product components; 45 on the 10-component tree), converted to distance d = 10 - rating. The owner's network is
 PFnet(r = infinity, q = n - 1), computed by a Floyd-Warshall pass with max in place of sum
 (standard library). Similarity to referents N_imp (an undirected link wherever X1 has an
 edge) and N_co (co-change above the median pair) by Schvaneveldt's link similarity
@@ -642,8 +649,11 @@ closes a registered task's segment, in both arms, the hook may emit one notifica
 closed vocabulary ("praxis: feedback ready"), with no component id or other content. This
 needs an amendment to invariant 7 and to the no-stdout promise in `hooks.py` lines 1-8. It
 never alters agent output bytes or exit code. Before use, an integration test on 2.1.303
-asserts that the transcript holds no praxis string after such a Stop. Codex support needs
-measuring; until then Codex feedback is `praxis last` only. `systemMessage` is not used:
+asserts that no user or assistant message in the transcript holds a praxis string after
+such a Stop: 2.1.303 writes every Stop hook's command path and a hook's stdout into the
+on-disk JSONL as system and attachment entries (measured by the live test in
+`test_recorder.py`), so a praxis string elsewhere in the file is expected. Codex support
+needs measuring; until then Codex feedback is `praxis last` only. `systemMessage` is not used:
 whether it reaches model context needs verifying.
 
 ## 6. Elicitation, intervention and control
@@ -900,7 +910,7 @@ probe and forecast data before freezing [CR]. So:
 | G7 | Steering the agent toward the forecast | Primary outcome P1 does not depend on the segment's content; F1 scores the first segment only, with flags | prereg; assumptions field |
 | G8 | Backfilling | Append-only rows; `late_prediction` rejected | test: a task registered after a prompt binds to the next one |
 | G9 | Coarse map | Mechanical default, at least 5 components, frozen, file grain always reported | `praxis components freeze` refuses fewer than 5 |
-| G10 | Forecast or task leaks to the agent | No praxis path writes `additionalContext` for tasks; the Stop notice is closed vocabulary | test: hook stdout empty except the allowlisted notice, no component id in any hook output, no praxis string in the transcript |
+| G10 | Forecast or task leaks to the agent | No praxis path writes `additionalContext` for tasks; the Stop notice is closed vocabulary | test: hook stdout empty except the allowlisted notice, no component id in any hook output, no praxis string in any user or assistant message |
 | G11 | Free text leaks secrets or code | Closed vocabulary; no TEXT column for owner input | schema; test |
 | G12 | Lookup during a probe | One item at a time, clock, deadline, `slow` excluded | probe code; test |
 | G13 | Rereading transcripts before S3 | Seeded draw; labelled gameable | report label |
@@ -959,7 +969,7 @@ No computed number is labelled observed, and nothing is labelled causal.
 | Q1 | Registered tasks per week, coverage of human prompts that led to mutations, and repositories actively used | Pilot counts of `tasks` against UserPromptSubmit rows with `origin.kind = human` followed by mutating deltas; distinct repo ids per week |
 | Q2 | Seconds per `praxis task`, per probe item, per C1 administration; abandonment | Stored timestamps over the pilot (E07) |
 | Q3 | Structured decisions per month | Tool-name counts over `~/.claude/projects/*/*.jsonl` and Codex rollouts (E08) |
-| Q4 | Item supply per repository and relation | `praxis components pool` on each repository; consumption from Q1 |
+| Q4 | Item supply per repository and relation | `praxis components` on each repository; consumption from Q1 |
 | Q5 | X1 precision and recall at component level | V2 (E10) |
 | Q6 | R1 burn-in length | R1's leave-one-out Brier against earlier segment count |
 | Q7 | Footprint stability for identical prompts | V4 (E09) |

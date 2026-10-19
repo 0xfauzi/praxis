@@ -145,16 +145,6 @@ def _snap(ev: _Event, store: Store, now: str, base: str | None) -> Snap | Unobse
     return snap
 
 
-def _base(store: Store, session: str) -> str | None:
-    """HEAD when the session's baseline was taken; None without a baseline."""
-    row = store.db.execute(
-        "SELECT head_sha FROM hook_events WHERE session_id = ?"
-        " AND event = 'SessionStart' AND head_sha IS NOT NULL ORDER BY id LIMIT 1",
-        (session,),
-    ).fetchone()
-    return None if row is None else str(row[0])
-
-
 def _session_start(ev: _Event, store: Store, now: str) -> Result:
     if store.has_baseline(ev.session):
         return Result("ok", "baseline kept from an earlier SessionStart")
@@ -171,7 +161,7 @@ def _pre_tool(ev: _Event, store: Store, now: str) -> Result:
         return Result("ok", "not a mutating tool")
     if ev.tool_use_id is None:
         return Result("unobservable", "payload lacks tool_use_id")
-    snap = _snap(ev, store, now, _base(store, ev.session))
+    snap = _snap(ev, store, now, store.session_base(ev.session))
     if isinstance(snap, Unobservable):
         return Result("unobservable", snap.reason)
     store.pending_put(ev.session, ev.tool_use_id, now, snap.files)
@@ -188,7 +178,7 @@ def _post_tool(ev: _Event, store: Store, now: str) -> Result:
     pre = store.pending_take(ev.session, ev.tool_use_id)
     if pre is None:
         return Result("unobservable", "no pre snapshot for this tool_use_id")
-    snap = _snap(ev, store, now, _base(store, ev.session))
+    snap = _snap(ev, store, now, store.session_base(ev.session))
     if isinstance(snap, Unobservable):
         return Result("unobservable", snap.reason)
     changes = _delta(pre, snap.files)
@@ -291,18 +281,8 @@ def _answers(tool_input: dict[str, Any], response: object) -> dict[str, Any] | N
 # -- the scored segment ---------------------------------------------------------------
 
 
-def _segment(store: Store, session: str) -> sqlite3.Row | None:
-    """The task bound to this session whose segment is still open."""
-    row: sqlite3.Row | None = store.db.execute(
-        "SELECT * FROM tasks WHERE status = 'bound' AND bound_session_id = ?"
-        " ORDER BY bound_ts DESC LIMIT 1",
-        (session,),
-    ).fetchone()
-    return row
-
-
 def _flag_answer(ev: _Event, store: Store, now: str, detail: dict[str, object]) -> str:
-    seg = _segment(store, ev.session)
+    seg = store.task_bound_to(ev.session)
     if seg is None:
         return ""
     store.flag(
@@ -319,7 +299,7 @@ def _flag_answer(ev: _Event, store: Store, now: str, detail: dict[str, object]) 
 def _prompt(ev: _Event, store: Store, now: str) -> Result:
     result, snap = _boundary(ev, store, now, "UserPromptSubmit")
     prompt_id = ev.pointers.get("prompt_id")
-    seg = _segment(store, ev.session)
+    seg = store.task_bound_to(ev.session)
     if seg is not None:
         if seg["bound_prompt_id"] is None or seg["bound_prompt_id"] != prompt_id:
             tail = _flag_answer(ev, store, now, {"prompt_id": prompt_id})
@@ -345,7 +325,7 @@ def _earlier(registered: str, now: str) -> bool:
 
 def _stop(ev: _Event, store: Store, now: str) -> Result:
     result, snap = _boundary(ev, store, now, "Stop")
-    seg = _segment(store, ev.session)
+    seg = store.task_bound_to(ev.session)
     if snap.toplevel is None:
         return result
     repo = repo_id(snap.toplevel)
@@ -356,8 +336,8 @@ def _stop(ev: _Event, store: Store, now: str) -> Result:
             store.task_void(seg["task_id"], "head_not_descendant", now)
             return _noted(result, "task void: head_not_descendant")
         return result
-    since = _last_stop(store, ev.session)
-    scan_files = _python(_touched(store, ev.session, since))
+    since = store.last_stop_ts(ev.session)
+    scan_files = _python(store.deltas_files_since(ev.session, since))
     if not scan_files and seg is None:
         return result
     cmap = _frozen_map(store, repo)
@@ -373,24 +353,6 @@ def _stop(ev: _Event, store: Store, now: str) -> Result:
 def _noted(result: Result, note: str) -> Result:
     joined = note if not result.note else f"{result.note}; {note}"
     return Result(result.outcome, joined, result.head_sha, result.notice)
-
-
-def _last_stop(store: Store, session: str) -> str | None:
-    row = store.db.execute(
-        "SELECT MAX(ts) FROM hook_events WHERE session_id = ? AND event = 'Stop'",
-        (session,),
-    ).fetchone()
-    return None if row is None or row[0] is None else str(row[0])
-
-
-def _touched(store: Store, session: str, since: str | None) -> list[str]:
-    """Files with an agent delta in this session at or after ``since``."""
-    rows = store.db.execute(
-        "SELECT DISTINCT file FROM agent_deltas WHERE session_id = ? AND ts >= ?"
-        " ORDER BY file",
-        (session, since or ""),
-    ).fetchall()
-    return [str(r[0]) for r in rows]
 
 
 def _python(files: list[str]) -> list[str]:
@@ -519,7 +481,7 @@ def _close(
     after: dict[str, frozenset[str] | None],
     result: Result,
 ) -> Result:
-    touched = _touched(store, ev.session, str(seg["bound_ts"]))
+    touched = store.deltas_files_since(ev.session, str(seg["bound_ts"]))
     if not touched:
         return result
     task_id = str(seg["task_id"])
@@ -544,9 +506,7 @@ def _close(
         OUTCOME_ASSUMPTIONS,
         warnings,
     )
-    # Outcomes first: if they fail the task stays bound and the next Stop retries.
-    store.outcome(task_id, rows, now, ev=evidence)
-    store.task_close(task_id, now)
+    store.segment_close(task_id, rows, now, ev=evidence)
     notice = ev.pointers.get("turn_id") is None
     closed = _noted(result, "task closed")
     return Result(closed.outcome, closed.note, closed.head_sha, notice)
@@ -591,13 +551,7 @@ def _edge_change(
 def _gaps(store: Store, session: str, since: str) -> list[str]:
     """recorder_gap (design 4.4 f) when a hook row since the bind is not ok or a
     mutating PreToolUse is still waiting for its PostToolUse."""
-    bad = store.db.execute(
-        "SELECT (SELECT COUNT(*) FROM hook_events WHERE session_id = ? AND ts >= ?"
-        " AND outcome <> 'ok') + (SELECT COUNT(*) FROM pending WHERE session_id = ?"
-        " AND ts >= ?)",
-        (session, since, session, since),
-    ).fetchone()[0]
-    return ["recorder_gap"] if bad else []
+    return ["recorder_gap"] if store.recorder_gaps(session, since) else []
 
 
 # -- attribution at a boundary --------------------------------------------------------
@@ -606,7 +560,7 @@ def _gaps(store: Store, session: str, since: str) -> list[str]:
 def _boundary(
     ev: _Event, store: Store, now: str, trigger: str
 ) -> tuple[Result, Snap | Unobservable]:
-    base = _base(store, ev.session)
+    base = store.session_base(ev.session)
     snap = _snap(ev, store, now, base)
     if isinstance(snap, Unobservable):
         return Result("unobservable", snap.reason), snap
@@ -625,11 +579,7 @@ def _moved_outside_tool(store: Store, session: str, head: str) -> bool:
     """A HEAD seen in this session that neither the base nor a tool call produced.
     A tool call produces the HEAD its PostToolUse saw, when its PreToolUse was seen;
     a pull or an owner commit between tool calls produces one nothing explains."""
-    rows = store.db.execute(
-        "SELECT event, tool_use_id, head_sha FROM hook_events WHERE session_id = ?"
-        " AND head_sha IS NOT NULL ORDER BY id",
-        (session,),
-    ).fetchall()
+    rows = store.head_sequence(session)
     pre = {r["tool_use_id"] for r in rows if r["event"] == "PreToolUse"}
     explained = {r["head_sha"] for r in rows if r["event"] == "SessionStart"}
     explained |= {

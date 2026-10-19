@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, TextIO
 
 from praxis.components import assign, from_json, product_components
 from praxis.extract import static_imports
+from praxis.probe import GRID_KEYS, QUESTION, SKIP
 from praxis.store import Evidence, Store
 from praxis.unassisted import Repo, locate
 
@@ -35,14 +36,10 @@ if TYPE_CHECKING:
 # Design choices fixed in docs/preregistration.md 1.4; Stage 2 may restate them.
 H, K_E, K_R, K_P, R = 3, 2, 1, 1, 5
 P_TREATMENT = 0.5
-GRID_KEYS = {"1": 0.1, "3": 0.3, "5": 0.5, "7": 0.7, "9": 0.9}
-SKIP = "s"
+# The committed seed `praxis task` draws arms with: derive.py's default, cited in
+# preregistration 1.7 (Rules derive.py applies); Stage 2 restates it (1.2).
+SEED = 20261019
 REDUCER_VERSION = "task-v1"
-QUESTION = {
-    "D1": "Does code in {} import code in {}?",
-    "D2": "Does code in {} reach code in {} through other components' imports?",
-    "reach": "When it runs, does {} call into {}?",
-}
 ASSUMPTIONS = (
     "typed 1 3 5 7 9 is read as 0.1 0.3 0.5 0.7 0.9; s or end of input is unanswered",
     "ts is the clock after the last answer, not the registration time",
@@ -293,16 +290,12 @@ def _touched(outcomes: Sequence[sqlite3.Row], out: TextIO) -> None:
 
 
 def _divergences(ledger: Store, task_id: str, out: TextIO) -> None:
-    # Store has no divergences reader yet; this read is the one the integrator moves.
-    rows = ledger.db.execute(
-        "SELECT src_component, dst_component, rule_allowed FROM divergences"
-        " WHERE task_id = ? ORDER BY id",
-        (task_id,),
-    ).fetchall()
+    rows = ledger.divergences_of(task_id)
     out.write("boundary divergences:" + ("\n" if rows else " none\n"))
-    for src, dst, allowed in rows:
-        rule = "allowed" if allowed else "forbidden"
-        out.write(f"  {src} -> {dst} ({rule} by the boundary rules)\n")
+    for r in rows:
+        rule = "allowed" if r["rule_allowed"] else "forbidden"
+        out.write(f"  {r['src_component']} -> {r['dst_component']} ({rule} by the "
+                  "boundary rules)\n")  # fmt: skip
 
 
 def _misses(

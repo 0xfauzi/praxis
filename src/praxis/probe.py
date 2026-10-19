@@ -91,14 +91,6 @@ PATHFINDER_ASSUMPTIONS = (
     "chance is the S of E[C] shared links: E[C] / (|L1| + |L2| - E[C])",
     "a code-derived referent standing in for an expert's is unvalidated (design 4.8)",
 )
-_DUE = (
-    "SELECT e.item_id, e.task_id, e.role, e.ts AS exposed_ts, p.relation,"
-    " p.src_component, p.dst_component, p.truth, p.epoch, p.map_version"
-    " FROM exposures e JOIN probe_items p USING (item_id)"
-    " WHERE p.repo_id = ? AND p.map_version = ? AND NOT EXISTS"
-    " (SELECT 1 FROM probe_responses r WHERE r.item_id = e.item_id)"
-    " ORDER BY e.ts, e.id"
-)
 
 
 class _Quit(Exception):
@@ -319,8 +311,7 @@ def _git(root: Path, *args: str) -> str | None:
 def _due(
     ledger: Store, repo_id: str, version: str, now: dt.datetime, lag_days: float
 ) -> list[sqlite3.Row]:
-    # Store has no reader for this join yet; the integrator moves it there.
-    rows = ledger.db.execute(_DUE, (repo_id, version)).fetchall()
+    rows = ledger.exposures_unanswered(repo_id, version)
     return [r for r in rows if lag_days <= _days(r["exposed_ts"], now) <= L_MAX_DAYS]
 
 
@@ -336,12 +327,7 @@ def _drift(p: _Probe) -> int:
     repo_id, version = p.repo.repo_id, p.cmap.version
     iso = p.start.astimezone(dt.UTC).isocalendar()
     week = f"{iso.year}-W{iso.week:02d}"
-    done = p.ledger.db.execute(
-        "SELECT 1 FROM drift_responses WHERE repo_id = ? AND map_version = ?"
-        " AND week = ? LIMIT 1",
-        (repo_id, version, week),
-    ).fetchone()
-    if done is not None:
+    if p.ledger.drift_responses_for(repo_id, version, week):
         p.out.write(f"the drift probe for {week} is already answered\n")
         return 0
     since = p.start - dt.timedelta(days=DRIFT_DAYS)
@@ -412,14 +398,7 @@ def _either(a: bool | None, b: bool | None) -> bool | None:
 
 
 def _decision(p: _Probe) -> int:
-    voided = {
-        r[0]
-        for r in p.ledger.db.execute(
-            "SELECT json_extract(detail_json, '$.decision_id') FROM flags"
-            " WHERE code IN (SELECT value FROM json_each(?))",
-            (json.dumps(DECISION_VOIDS),),
-        )
-    }
+    voided = p.ledger.decisions_flagged(DECISION_VOIDS)
     rows = [
         d
         for d in p.ledger.decisions_unprobed(p.repo.repo_id)
@@ -484,11 +463,7 @@ def _recall(p: _Probe, d: sqlite3.Row) -> None:
 
 def _knockout(p: _Probe) -> int:
     runs: dict[str, tuple[set[str], int] | None] = {}
-    for run in p.ledger.db.execute(
-        "SELECT id, scenario_id, outcome, components_json FROM scenario_runs"
-        " WHERE repo_id = ? AND map_version = ? ORDER BY ts, id",
-        (p.repo.repo_id, p.cmap.version),
-    ):
+    for run in p.ledger.scenario_runs_for(p.repo.repo_id, p.cmap.version):
         ok = run["outcome"] == "ok"
         seen = (set(json.loads(run["components_json"])), run["id"])
         runs[run["scenario_id"]] = seen if ok else None

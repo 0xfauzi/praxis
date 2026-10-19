@@ -54,8 +54,8 @@ component map:
 
 - Recorder rows: snapshots, agent deltas, attributions, edge history at Stop, decision
   pointers, hook latency.
-- Component maps and pool supply: `praxis components freeze` and `praxis components pool`
-  per repository.
+- Component maps and pool supply: `praxis components freeze` and `praxis components` per
+  repository.
 - Tasks: registration time, sampled components, F1 forecasts, prequestion answers, the
   bound, related-untested and drawn-not-shown items, flags, seconds spent, abandonment.
 - P1 probes: every first probe of an exposed item, with response time, deadline result,
@@ -63,8 +63,10 @@ component map:
   days apart (V1); a validation-only comparison of L = 2 against L = 7 days (Q9 of the
   design).
 - S1 drift probes weekly, S2 boundary rules and divergences, S4 removals, S3 decision
-  pointers and responses where structured decisions occur, K knockouts for V7. C1 is not
-  computed until the closeness formula is checked (design Q13).
+  pointers and responses where structured decisions occur, K knockouts for V7. C1
+  Pathfinder runs are stored as PFSIM and PFSIM minus chance against the X1 referent,
+  with the component count (`scoring.pfsim`, which replaced the unchecked closeness
+  formula of design Q13); the ratings themselves are discarded.
 - V3: one pilot week of the owner's real changes labelled by hand at their own grain.
 - Owner-machine measurements, reported by `praxis doctor` and the pilot: repositories
   active per week, structured-decision supply, empty-segment rate, Codex payloads. Nothing
@@ -292,3 +294,5 @@ same pilot and confirmatory study on their own machine and produce comparable ro
 |---|---|---|---|
 | 2026-10-18 | all | Skeleton created, before any data. | Phase 0. |
 | 2026-10-19 | all | Rewritten for docs/design/03-measurement.md before any data, as Stage 1 (pilot) and the Stage 2 frame | The owner rejected write-it drills and test scoring; Glicko-2 is unidentifiable at n = 1. |
+| 2026-10-19 | 1.7 | Interval level for V5/V8 and the derive.py rules proposed, each [proposed, needs owner decision] | derive.py committed with its rules (invariant 11); no data exists |
+| 2026-10-19 | 1.3 | C1 stated as PFSIM (`scoring.pfsim`) in place of the unchecked closeness formula; pool supply read with `praxis components` | The wording follows the instrument as built; no data exists |

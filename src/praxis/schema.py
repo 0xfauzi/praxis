@@ -105,6 +105,9 @@ CREATE TABLE IF NOT EXISTS hook_events (
   prompt_id TEXT, turn_id TEXT, permission_mode TEXT, agent_id TEXT, cli_version TEXT,
   head_sha    TEXT {_SHA}
 ) STRICT;
+-- Every snapshot event reads its session's rows: E04 measured 30 to 57 ms added per
+-- event at 200k rows without this index.
+CREATE INDEX IF NOT EXISTS hook_events_session ON hook_events (session_id);
 CREATE TABLE IF NOT EXISTS baselines (
   session_id TEXT NOT NULL,
   file       TEXT NOT NULL,

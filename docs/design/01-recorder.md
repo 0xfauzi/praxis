@@ -3,7 +3,7 @@
 ## What it answers
 
 For every file in the working tree, at every prompt boundary of a session: how many
-changed lines (relative to HEAD) did the agent produce, how many did the owner produce,
+changed lines (relative to the session's base commit) did the agent produce, how many did the owner produce,
 how many were already there before the session started, how many agent lines are no longer
 present, and how many pre-session lines are no longer present. Counts, per file, per
 boundary, as Evidence rows with claim class `derived`.
@@ -24,7 +24,9 @@ tool, and a tool the recorder has never heard of is still counted if its hook fi
 ## The snapshot
 
 `git diff --no-color --no-ext-diff --no-renames --no-prefix --unified=0 --diff-algorithm=myers
-HEAD`, plus every untracked, non-ignored file read as added lines. The result is, per
+<base>`, where `<base>` is the HEAD recorded at the session's SessionStart (the current
+HEAD when no baseline was taken), plus every untracked, non-ignored file read as added
+lines. The result is, per
 repo-relative path, a multiset of line hashes, where a hash covers the diff kind (`+` or
 `-`) and the exact bytes of the line: `sha256(kind || 0x00 || line)[:32]`.
 
@@ -74,8 +76,10 @@ The `assumptions` field carries these verbatim:
   them by count, not by author.
 - A change the owner makes between a PreToolUse and its PostToolUse is attributed to the
   agent. The window is the tool's own duration.
-- Lines are compared relative to HEAD. A commit during the session moves HEAD, and lines
-  committed stop being changed lines; attribution is of the uncommitted tree only.
+- Lines are compared with the session's base commit; a commit moves no line, and a HEAD
+  outside the base's history makes the boundary unobservable. The base is the HEAD
+  recorded at SessionStart; a session with no baseline is compared with the current HEAD
+  and its rows say `no_baseline`.
 
 ## What is stored, and what is not
 

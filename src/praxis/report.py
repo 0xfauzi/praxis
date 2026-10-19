@@ -42,6 +42,9 @@ MIN_FORECASTS = 2
 # Research answers 2026-10-19: a 0.10 miscalibration to a 95 percent half-width.
 BIN_MIN = {0.1: 35, 0.3: 81, 0.5: 97, 0.7: 81, 0.9: 35}
 BAND_DRAWS, BAND_SEED, BAND_LEVEL = 1000, 0, 0.9
+# Monte Carlo draws per randomization test past exact enumeration: the committed draw
+# count of preregistration 2.4; Stage 2 restates it.
+DRAWS = 2000
 F1_EXCLUDING = ("agent_previewed", "late_prediction", "version_change")
 ARMS = ("treatment", "control")
 ROLES = ("bound", "related", "drawn_not_shown")
@@ -213,20 +216,6 @@ class _View:
     names: _Names
 
 
-_RESPONSES = (
-    "SELECT r.id, r.item_id, r.task_id, r.ts, r.p, r.deadline_met, r.truth_at_probe,"
-    " r.truth_changed, r.lag_days, r.coverage, r.warnings, p.relation,"
-    " p.src_component, p.dst_component, e.role, e.task_id AS exposed_task"
-    " FROM probe_responses r JOIN probe_items p USING (item_id)"
-    " LEFT JOIN exposures e USING (item_id)"
-    " WHERE p.repo_id = ? AND p.map_version = ? ORDER BY r.ts, r.id"
-)
-_ITEMS = (
-    "SELECT src_component, dst_component, truth, truth_ts FROM probe_items"
-    " WHERE repo_id = ? AND map_version = ? AND relation = 'D1'"
-)
-
-
 def _view(store: Store, repo_id: str) -> _View | tuple[str, str | None]:
     frozen = store.component_map_frozen(repo_id)
     if frozen is None:
@@ -246,16 +235,8 @@ def _view(store: Store, repo_id: str) -> _View | tuple[str, str | None]:
         }
         for r in closed
     }
-    # Store has no flags reader yet; reads outside store.py are allowed, writes not.
-    flagged = frozenset(
-        row[0]
-        for row in store.db.execute(
-            "SELECT task_id FROM flags WHERE task_id IS NOT NULL AND code IN"
-            " (SELECT value FROM json_each(?))",
-            (json.dumps(F1_EXCLUDING),),
-        )
-    )
-    rows = store.db.execute(_RESPONSES, (repo_id, cmap.version)).fetchall()
+    flagged = store.tasks_flagged(F1_EXCLUDING)
+    rows = store.probe_responses_of(repo_id, cmap.version)
     first = {r["item_id"]: r for r in reversed(rows)}  # the earliest per item wins
     repeats = Counter(_arm(r, tasks) for r in rows if first[r["item_id"]] is not r)
     ordered = tuple(r for r in rows if first[r["item_id"]] is r)
@@ -267,7 +248,7 @@ def _view(store: Store, repo_id: str) -> _View | tuple[str, str | None]:
 def _graph(store: Store, cmap: ComponentMap, rows: Sequence[sqlite3.Row]) -> _Graph:
     product = product_components(cmap)
     pairs = frozenset(permutations(product, 2))
-    items = store.db.execute(_ITEMS, (cmap.repo_id, cmap.version)).fetchall()
+    items = store.probe_items_d1(cmap.repo_id, cmap.version)
     reads = [(_t(i["truth_ts"]), (i[0], i[1]), bool(i["truth"])) for i in items]
     reads += [
         (_t(r["ts"]), (r["src_component"], r["dst_component"]),

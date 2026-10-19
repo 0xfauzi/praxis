@@ -43,13 +43,15 @@ def _alarm(_signum: int, _frame: object) -> None:
     raise _Watchdog
 
 
+def now_iso() -> str:
+    """The ledger's timestamp: UTC, milliseconds, a trailing Z."""
+    stamp = dt.datetime.now(dt.UTC).isoformat(timespec="milliseconds")
+    return stamp.replace("+00:00", "Z")
+
+
 def run(stdin: BinaryIO, praxis_home: Path) -> int:
     started = time.perf_counter()
-    now = (
-        dt.datetime.now(dt.UTC)
-        .isoformat(timespec="milliseconds")
-        .replace("+00:00", "Z")
-    )
+    now = now_iso()
     session: str | None = None
     event: str | None = None
     tool: str | None = None
