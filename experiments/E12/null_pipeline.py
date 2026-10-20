@@ -201,8 +201,10 @@ def _converse(proc: subprocess.Popen[bytes], answer: Callable[[str], str]) -> st
         buf += chunk
         text = buf.decode(errors="replace")
         if len(text) > seen and text.endswith(PROMPT_END):
-            seen = len(text)
-            proc.stdin.write((answer(text.rsplit("\n", 1)[-1]) + "\n").encode())
+            # Only the text after the last answered prompt: the prompts end with no
+            # newline, so one output line holds every prompt of a session.
+            new, seen = text[seen:], len(text)
+            proc.stdin.write((answer(new) + "\n").encode())
             proc.stdin.flush()
 
 
