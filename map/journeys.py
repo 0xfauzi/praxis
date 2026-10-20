@@ -406,6 +406,57 @@ SHOW_LINES: Steps = (
     ),
 )
 
+SHOW_SUPPLY: Steps = (
+    Step(
+        ("Owner",),
+        (),
+        ("Owner", "CommandSurface"),
+        "The owner types praxis show supply, with --weeks N and --json as options.",
+    ),
+    Step(
+        ("CommandSurface",),
+        (),
+        ("CommandSurface", "Supply"),
+        "The command surface calls show with the home directory, the --weeks value, and the --json flag.",
+    ),
+    Step(
+        ("Supply",),
+        (),
+        ("CommandSurface", "Supply"),
+        "The supply count refuses a --weeks value that is not a whole number of 1 or more, and the command exits 2. Without --weeks, it counts 4 weeks.",
+    ),
+    Step(
+        ("Supply",),
+        (),
+        ("CodingAgent", "Supply"),
+        "The supply count lists the transcript files under ~/.claude/projects. It counts the Codex rollout files and does not read them.",
+    ),
+    Step(
+        ("TranscriptReader",),
+        ("Supply",),
+        ("TranscriptReader", "Supply"),
+        "For each file, the reader returns the prompts and the tool calls with their file suffixes. An unreadable file is counted and skipped.",
+    ),
+    Step(
+        ("Supply",),
+        (),
+        ("CodingAgent", "Supply"),
+        "The supply count reads the cwd of each prompt line in the file, and keeps it only in memory.",
+    ),
+    Step(
+        ("Supply",),
+        (),
+        ("Supply", "Recorder"),
+        "For each new cwd, the supply count gets the git root and its hashed id. A cwd outside a repository is counted apart.",
+    ),
+    Step(
+        ("Supply",),
+        (),
+        ("CommandSurface", "Supply"),
+        "The supply count prints one column for each ISO week and a total, or one JSON object with --json. An unknown value prints as unknown, not 0.",
+    ),
+)
+
 JOURNEYS: tuple[Journey, ...] = (
     Journey(
         id="hook-delta",
@@ -468,4 +519,11 @@ JOURNEYS: tuple[Journey, ...] = (
     journeys_instrument.RUN_SCENARIOS,
     journeys_instrument.SHOW_SCENARIOS,
     journeys_instrument.SHOW_REPORT,
+    Journey(
+        id="show-supply",
+        label="The owner shows the transcript supply",
+        starts="praxis (console script)",
+        steps=SHOW_SUPPLY,
+        covers=('["console_script","praxis.cli","main","praxis"]',),
+    ),
 )

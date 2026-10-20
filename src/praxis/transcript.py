@@ -23,6 +23,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -71,6 +72,9 @@ class ToolUse:
     option_count: int | None
     chosen_index: int | None
     options_hash: str | None
+    # The lowercased suffix of the file the call names ("" for a name with none);
+    # None when its input names no file. The path itself is not kept.
+    suffix: str | None = None
 
 
 @dataclass(frozen=True)
@@ -242,7 +246,8 @@ class _Reader:
                 if decided is None:
                     self.warnings.append(f"decision_unscorable:{index}")
             k, chosen, digest = decided or (None, None, None)
-            tools.append(ToolUse(index, tid, name, pid, ts, k, chosen, digest))
+            suffix = _suffix(tool_input)
+            tools.append(ToolUse(index, tid, name, pid, ts, k, chosen, digest, suffix))
         return Session(
             path.stem,
             str(path),
@@ -251,6 +256,13 @@ class _Reader:
             tuple(tools),
             tuple(self.warnings),
         )
+
+
+def _suffix(tool_input: object) -> str | None:
+    if not isinstance(tool_input, dict):
+        return None
+    path = tool_input.get("file_path", tool_input.get("notebook_path"))
+    return PurePosixPath(path).suffix.lower() if isinstance(path, str) else None
 
 
 def _decision(

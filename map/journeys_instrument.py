@@ -395,7 +395,19 @@ _SHOW_REPORT: Steps = (
         ("CommandSurface",),
         (),
         ("CommandSurface", "Report"),
-        "The command surface calls render, which adds the general-effect line. A placebo below ALPHA suspends the arm contrasts. A refused word without a met rule writes nothing.",
+        "Without --json, the command surface calls render, which adds the general-effect line. A placebo below ALPHA suspends the arm contrasts in the text.",
+    ),
+    Step(
+        ("CommandSurface",),
+        (),
+        ("CommandSurface", "Report"),
+        "With --json, the command surface calls to_json and prints one JSON object with the unrounded numbers, the suspension, and the assumptions of the text.",
+    ),
+    Step(
+        ("Report",),
+        (),
+        ("CommandSurface", "Report"),
+        "In both forms, a refused word without a met rule writes nothing to stdout. The command prints the refusal on stderr and exits 1.",
     ),
 )
 

@@ -10,8 +10,9 @@ and the text prints the suspension in their place.
 
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, TextIO
 
 if TYPE_CHECKING:
@@ -202,6 +203,12 @@ def _lines(s: Scores) -> list[str]:
     for r in s.rules:
         lines.append(f"rule {r.name} met: {r.claim}" if r.met
                      else f"rule {r.name} not met: {', '.join(r.reasons)}")  # fmt: skip
+    notes = _notes(s)
+    lines += ["assumptions:", *(f"  - {a}" for a in notes)] if notes else []
+    return lines
+
+
+def _notes(s: Scores) -> list[str]:
     notes = dict.fromkeys(a for b in s.blocks for a in b.ev.assumptions)
     if s.tests:
         notes.update(dict.fromkeys(TEST_ASSUMPTIONS))
@@ -209,15 +216,64 @@ def _lines(s: Scores) -> list[str]:
         notes.update(dict.fromkeys(RETEST_ASSUMPTIONS))
     if s.general.run:
         notes.update(dict.fromkeys(GENERAL_ASSUMPTIONS))
-    lines += ["assumptions:", *(f"  - {a}" for a in notes)] if notes else []
-    return lines
+    return list(notes)
 
 
-def render(scores: Scores, out: TextIO) -> None:
-    """Write the report, or nothing: a refused word without a met rule raises."""
-    text = "\n".join(_lines(scores)) + "\n"
+def _guard(text: str, scores: Scores) -> str:
     found = _REFUSED.search(text)
     if found is not None and not any(r.met for r in scores.rules):
         word = found.group(0).lower()
         raise ValueError(f"report refused: {word!r} needs a met pre-registered rule")
-    out.write(text)
+    return text
+
+
+def render(scores: Scores, out: TextIO) -> None:
+    """Write the report, or nothing: a refused word without a met rule raises."""
+    out.write(_guard("\n".join(_lines(scores)) + "\n", scores))
+
+
+def to_json(scores: Scores) -> str:
+    """The report as one JSON object, for scripts: the numbers, reason codes and
+    assumptions of the text, unrounded, with the same refusal. A test that cannot be
+    computed is null; `suspended` keeps the contrasts' numbers beside the suspension."""
+    s = scores
+    doc = {
+        "repo_id": s.repo_id,
+        "map_version": s.map_version,
+        "refused": s.refused,
+        "claims": CLAIMS,
+        "blocks": [_block_json(b) for b in s.blocks],
+        "excluded": [
+            {"measure": m, "reason": r, "arm": a, "n": n}
+            for (m, r, a), n in s.counts.items()
+        ],
+        "weeks": dict(s.weeks),
+        "tests": {
+            name: None if r is None else {"p": r[0], "allocations": r[1]}
+            for name, r in s.tests.items()
+        },
+        "suspended": suspended(s.tests),
+        "retest": {"pairs": s.retest[0], "r": s.retest[1]},
+        "general": {
+            "run": s.general.run,
+            "p": s.general.p,
+            "repositories": s.general.repositories,
+            "left_out": dict(s.general.left_out),
+        },
+        "rules": [asdict(r) for r in s.rules],
+        "assumptions": _notes(s),
+    }
+    return _guard(json.dumps(doc, sort_keys=True), s)
+
+
+def _block_json(b: Block) -> dict[str, object]:
+    rel_res_unc = None if b.decomposition is None else dict(
+        zip(("rel", "res", "unc"), b.decomposition, strict=True))  # fmt: skip
+    return {
+        "measure": b.measure, "arm": b.arm, "role": b.role, "n": b.n,
+        "tasks": b.tasks, "refused": b.refused, "brier": b.brier,
+        "skill": {ref: {"bss": v, "n": n} for ref, (v, n) in b.skill.items()},
+        "decomposition": rel_res_unc,
+        "bins": [asdict(c) for c in b.bins],
+        "coverage": b.ev.coverage, "warnings": list(b.ev.warnings),
+    }  # fmt: skip
