@@ -47,10 +47,12 @@ jobs:
       - name: Source facts match
         run: |
           code=0
-          # main, not the release: the map is written and reviewed with systemap main (see
-          # [tool.uv.sources] in pyproject.toml), and the 2.0.0 release computed different
-          # review digests, so it reported current reviews as missing (PR #2, 2026-10-19).
-          uvx --from "git+https://github.com/0xfauzi/systemap@main" systemap extract --check || code=$?
+          # The systemap commit in uv.lock, the one the map is written and reviewed with.
+          # Not the 2.0.0 release: it computed different review digests (PR #2). Not
+          # `uvx --from ...@main`: uv reused a cached build of an older main, so the delta
+          # job called a current review stale (PRs #7 and #9). Upgrade with
+          # `uv lock --upgrade-package systemap`.
+          uv run --frozen systemap extract --check || code=$?
           if [ "$code" = "1" ]; then
             level=warning
             if [ "$SYSTEMAP_CI" = "strict" ]; then level=error; fi
@@ -64,7 +66,7 @@ jobs:
       - name: Map consistency checks
         run: |
           code=0
-          uvx --from "git+https://github.com/0xfauzi/systemap@main" systemap check || code=$?
+          uv run --frozen systemap check || code=$?
           if [ "$code" = "1" ]; then
             level=warning
             if [ "$SYSTEMAP_CI" = "strict" ]; then level=error; fi
@@ -78,7 +80,7 @@ jobs:
       - name: Judgement answers
         run: |
           code=0
-          uvx --from "git+https://github.com/0xfauzi/systemap@main" systemap judgement --strict || code=$?
+          uv run --frozen systemap judgement --strict || code=$?
           if [ "$code" = "1" ]; then
             level=warning
             if [ "$SYSTEMAP_CI" = "strict" ]; then level=error; fi
@@ -92,7 +94,7 @@ jobs:
       - name: Rendered page matches
         run: |
           code=0
-          uvx --from "git+https://github.com/0xfauzi/systemap@main" systemap render --check || code=$?
+          uv run --frozen systemap render --check || code=$?
           if [ "$code" = "1" ]; then
             level=warning
             if [ "$SYSTEMAP_CI" = "strict" ]; then level=error; fi
@@ -129,7 +131,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           code=0
-          uvx --from "git+https://github.com/0xfauzi/systemap@main" systemap delta --base "$BASE" --head "$HEAD" --pr "$PR" --comment comment.md || code=$?
+          uv run --frozen systemap delta --base "$BASE" --head "$HEAD" --pr "$PR" --comment comment.md || code=$?
           echo "$code" > delta.code
           if [ -s comment.md ]; then
             cat comment.md >> "$GITHUB_STEP_SUMMARY"
