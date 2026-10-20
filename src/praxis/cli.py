@@ -109,7 +109,7 @@ def _refuse(group: Sequence[Command], prog: str, message: str) -> int:
 
 def _usage(commands: Sequence[Command]) -> str:
     width = max(len(c.words) for c in commands) + 2
-    lines = [f"  {c.words:<{width}}{c.help}" for c in commands]
+    lines = [f"  {c.words.ljust(width)}{c.help}" for c in commands]
     if any("AGENT" in c.args for c in commands):
         lines.append("  AGENT is claude or codex.")
     return "\n".join(["praxis VERB OBJECT [OPTIONS]", "", *lines])
