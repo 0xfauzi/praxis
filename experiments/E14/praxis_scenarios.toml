@@ -1,0 +1,26 @@
+# The four praxis scenarios of docs/design/03-measurement.md section 3.2, verbatim, so
+# that E14 can label L2 items on praxis. telltale and systemap have no scenario file.
+
+[[scenario]]
+id = "version"
+argv = ["praxis", "--version"]
+
+[[scenario]]
+id = "status"
+argv = ["praxis", "show", "status"]
+
+[[scenario]]
+id = "hook-session-start"
+argv = ["sh", "-c", '''sed "s#<repo>#$PWD#g; s#<home>#$HOME#g" fixtures/claude/2.1.303/session_start.json | praxis hook''']
+
+[[scenario]]
+id = "hook-edit"
+argv = ["sh", "-c", '''
+f=fixtures/claude/2.1.303
+fill() { sed "s#<repo>#$PWD#g; s#<home>#$HOME#g" "$f/$1.json"; }
+fill session_start | praxis hook
+fill pre_tool_use_edit | praxis hook
+printf 'one more line\n' >> README.md
+fill post_tool_use_edit | praxis hook
+fill stop | praxis hook
+''']
