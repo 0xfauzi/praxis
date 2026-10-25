@@ -1,0 +1,31 @@
+{
+ "added_stop_wall_p95_ms": 725.4,
+ "components": 28,
+ "duty": {
+  "closed_ok": 20,
+  "stop_inner_p50": 768.3,
+  "stop_inner_p95": 884.0,
+  "stop_notes": [
+   "1 files attributed at Stop; edges: 0 in 1 files; task closed"
+  ],
+  "stop_wall_p50": 850.9,
+  "stop_wall_p95": 980.1,
+  "stops": 20
+ },
+ "file": "schemas/WebpackOptions.check.js",
+ "file_bytes": 421848,
+ "map_version": "512392e0d0e46687",
+ "plain": {
+  "closed_ok": 0,
+  "stop_inner_p50": 115.5,
+  "stop_inner_p95": 142.2,
+  "stop_notes": [
+   "1 files attributed at Stop; edges: no_frozen_map"
+  ],
+  "stop_wall_p50": 199.3,
+  "stop_wall_p95": 254.7,
+  "stops": 20
+ },
+ "repo": "webpack",
+ "verdict": "fail"
+}

@@ -383,8 +383,9 @@ def _frozen_map(store: Store, repo: str) -> ComponentMap | None:
 
 @dataclass
 class _Scan:
-    """One Stop's X1 at file grain. ``after`` maps a touched Python file to the
-    component ids it imports, or to None when it could not be parsed."""
+    """One Stop's X1 at file grain. ``after`` maps a touched file a registered
+    language reads to the component ids it imports, or to None when it could not be
+    parsed."""
 
     scanned: dict[str, str]
     edges: list[tuple[str, str, int, bool]]
@@ -409,23 +410,37 @@ def _edges(
             EDGE_ASSUMPTIONS,
             scan.warnings,
         )
-        store.file_edges(
-            scanned=scan.scanned,
-            edges=scan.edges,
-            ev=evidence,
-            session_id=ev.session,
-            repo_id=cmap.repo_id,
-            map_version=cmap.version,
-            ts=now,
-            extractor_version=_extractor_version(),
-        )
+        for version, scanned, edges in _by_version(scan):
+            store.file_edges(
+                scanned=scanned,
+                edges=edges,
+                ev=evidence,
+                session_id=ev.session,
+                repo_id=cmap.repo_id,
+                map_version=cmap.version,
+                ts=now,
+                extractor_version=version,
+            )
     return scan.after, f"edges: {len(scan.edges)} in {len(scan.scanned)} files"
 
 
-def _extractor_version() -> str:
-    from praxis.extract import EXTRACTOR_VERSION
+def _by_version(
+    scan: _Scan,
+) -> list[tuple[str, dict[str, str], list[tuple[str, str, int, bool]]]]:
+    """The scan split by the extractor version of each source file's language: a
+    file_edges row carries its own file's version (design 04 section 6)."""
+    from praxis.lang import claimant
 
-    return EXTRACTOR_VERSION
+    groups: dict[str, dict[str, str]] = {}
+    for path, component in scan.scanned.items():
+        entry = claimant(path)
+        if entry is None:  # _claimed passed only files a language claims
+            raise ValueError(f"no registered language reads {path}")
+        groups.setdefault(entry.version, {})[path] = component
+    return [
+        (version, files, [e for e in scan.edges if e[0] in files])
+        for version, files in sorted(groups.items())
+    ]
 
 
 def scan_files(root: Path, cmap: ComponentMap, files: list[str]) -> _Scan:

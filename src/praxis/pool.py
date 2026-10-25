@@ -7,10 +7,11 @@ toml's format, so the owner overrides it by editing the draft. Freeze refuses fe
 The first freeze of a repository also draws its start week (task.draw_start, design
 6.4), silently: the owner must not learn the schedule.
 
-A D1 item exists only for an ordered pair of product components that each have a
-Python file X1 parsed: a component it never parsed is unknown, so its pairs are counted
-as not generated and never written as truth 0. An item touching a component with a
-blind spot or a parse failure is `partial`. Truth is X1 over the working tree at
+A D1 item exists only for an ordered pair of product components that each have a file
+X1 parsed: a component it never parsed is unknown, so its pairs are counted as not
+generated and never written as truth 0. An item touching a component with a blind spot,
+a parse failure or a file in a programming language no registered reader covers is
+`partial` (design 04 section 6). Truth is X1 over the working tree at
 freeze time, epoch 0. A pair that already has an item under the map keeps it, so a
 second freeze writes only the missing pairs and a partial first run is completed, not
 duplicated. A pair whose X1 truth differs from its current epoch's item is
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import sqlite3
 import subprocess
+from collections import Counter
 from dataclasses import dataclass
 from functools import partial
 from pathlib import PurePosixPath
@@ -45,6 +47,7 @@ from praxis.components import (
     to_toml,
 )
 from praxis.extract import GIT_TIMEOUT_S, Edge, StaticGraph, reach, static_imports
+from praxis.lang import PYTHON, UNMAPPED_LANGUAGE
 from praxis.schema import MAP_REASONS
 from praxis.store import Evidence, Store
 from praxis.task import K_E, K_P, K_R, draw_start
@@ -63,6 +66,16 @@ ASSUMPTIONS = (
     " registries, configuration and SQL wiring are not seen",
     "a pair is an item only when both components have a Python file X1 parsed",
 )
+# A repository where a reader other than Python's claims a file (design 04 section 6).
+POLYGLOT_ASSUMPTIONS = (
+    "truth is X1 static imports over the working tree at truth_ts: tracked and"
+    " untracked-not-ignored files of each registered language, each resolved by its"
+    " own reader against the whole tree",
+    ASSUMPTIONS[1],
+    "a pair is an item only when both components have a file X1 parsed",
+    "an import from one language into another (an HTTP call, FFI, a subprocess) is"
+    " not seen",
+)
 COUNT_KEYS = ("components", "pairs", "items", "positive", "unexposed", "tasks_left")
 FREEZE = "praxis set components"
 DERIVE = "praxis make components"
@@ -80,6 +93,8 @@ class _Supply:
     reach: set[tuple[str, str]]
     partial: dict[str, list[str]]
     extractor_version: str
+    assumptions: tuple[str, ...] = ASSUMPTIONS
+    languages: tuple[str, ...] = ()
 
     @property
     def pairs(self) -> int:
@@ -352,12 +367,40 @@ def _supply(
     for path in graph.parse_failures:
         if place(path) in inside:
             failed[place(path)] += 1
+    classes = graph.file_classes or {}
+    unmapped = {c: classes.get(c, {}).get(UNMAPPED_LANGUAGE, 0) for c in parsed}
     notes = {
         c: [f"blind_spots:{c}:{graph.blind_spots[c]}"] * (graph.blind_spots[c] > 0)
         + [f"parse_failures:{c}:{failed[c]}"] * (failed[c] > 0)
+        + [f"{UNMAPPED_LANGUAGE}:{c}:{unmapped[c]}"] * (unmapped[c] > 0)
         for c in parsed
     }
-    return _Supply(parsed, edges, reach(graph, parsed), notes, graph.extractor_version)
+    names = {c.language for c in graph.languages}
+    return _Supply(
+        parsed,
+        edges,
+        reach(graph, parsed),
+        notes,
+        graph.extractor_version,
+        ASSUMPTIONS if names <= {PYTHON.name} else POLYGLOT_ASSUMPTIONS,
+        tuple(_languages(graph, product)),
+    )
+
+
+def _languages(graph: StaticGraph, product: list[str]) -> list[str]:
+    """Design 04 section 6: the product files by class, with files and share."""
+    if graph.file_classes is None:
+        return []
+    totals: Counter[str] = Counter()
+    for c in product:
+        totals.update(graph.file_classes.get(c, {}))
+    versions = {c.language: c.extractor_version for c in graph.languages}
+    count = sum(totals.values())
+    lines = [f"Product files by language: {count}"]
+    for kind, n in sorted(totals.items(), key=lambda kv: (-kv[1], kv[0])):
+        label = f"{kind} ({versions[kind]})" if kind in versions else kind
+        lines.append(f"  {label.replace('_', ' ')}: {n} ({100 * n / count:.1f}%)")
+    return lines
 
 
 def _put(
@@ -440,7 +483,7 @@ def _write(
             "partial" if key else "full",
             sources,
             REDUCER_VERSION,
-            ASSUMPTIONS,
+            supply.assumptions,
             [*key, *notes],
         )
         ledger.probe_items_put(
@@ -480,16 +523,28 @@ def _report(
         f" of components, base rate {rate}",
         f"  pairs with no direct import: {through} connect through a different"
         f" component, {pairs - edges - through} have no path",
-        "  pairs with no item, because a component has no parsed Python file:"
+        "  pairs with no item, because a component has no parsed source file:"
         f" {unknown}",
     ]
-    partial_ids = [c for c in supply.parsed if supply.partial[c]]
-    if partial_ids:
+    gaps = _partial(supply, ("blind_spots:", "parse_failures:"))
+    if gaps:
         lines.append(
             "  components with partial coverage (a blind spot or a parse failure):"
-            f" {' '.join(partial_ids)}"
+            f" {' '.join(gaps)}"
         )
-    return lines
+    unmapped = _partial(supply, (f"{UNMAPPED_LANGUAGE}:",))
+    if unmapped:
+        lines.append(
+            "  components with partial coverage (a file in an unmapped language):"
+            f" {' '.join(unmapped)}"
+        )
+    return [*lines, *supply.languages]
+
+
+def _partial(supply: _Supply, kinds: tuple[str, ...]) -> list[str]:
+    return [
+        c for c in supply.parsed if any(n.startswith(kinds) for n in supply.partial[c])
+    ]
 
 
 _CURRENT = (

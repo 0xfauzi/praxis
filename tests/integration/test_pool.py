@@ -139,8 +139,11 @@ def test_freeze_writes_the_d1_pool(repo: Path, home: Path) -> None:
         f"X1 {X1}: imports in 6 of 30 ordered pairs of components, base rate 0.200",
         "  pairs with no direct import: 4 connect through a different component,"
         " 20 have no path",
-        "  pairs with no item, because a component has no parsed Python file: 12",
+        "  pairs with no item, because a component has no parsed source file: 12",
         "  components with partial coverage (a blind spot or a parse failure): sub",
+        "Product files by language: 9",
+        "  python (x1-v2): 8 (88.9%)",
+        "  non code: 1 (11.1%)",
         "D1 items: 30 written at epoch 0, 0 already present",
         "Items: 30 (6 true), 30 not used by a task, enough for 7 tasks at 4 items each",
     ]
@@ -383,7 +386,7 @@ def test_praxis_itself(home: Path) -> None:
     assert f"D1 items: {k * (k - 1)} written at epoch 0, 0 already present" in lines
     unknown = len(product) * (len(product) - 1) - k * (k - 1)
     assert (
-        "  pairs with no item, because a component has no parsed Python file:"
+        "  pairs with no item, because a component has no parsed source file:"
         f" {unknown}" in lines
     )
     assert pool.pool_counts(home, repo_id)["items"] == k * (k - 1)

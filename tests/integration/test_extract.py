@@ -311,7 +311,7 @@ def test_a_reader_loads_only_when_its_suffix_is_scanned(cases: Path) -> None:
     run = [sys.executable, "-c", probe]
     done = subprocess.run([*run, str(bare)], capture_output=True, text=True, check=True)
     assert done.stdout.splitlines() == [
-        "['praxis.lang']", "['praxis.lang'] x1-v2 () {}"]  # fmt: skip
+        "['praxis.lang']", "['praxis.lang'] x1-ts-v1+x1-v2 () {}"]  # fmt: skip
     done = subprocess.run(
         [*run, str(cases)], capture_output=True, text=True, check=True
     )

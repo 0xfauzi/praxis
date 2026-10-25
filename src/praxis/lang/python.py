@@ -167,7 +167,7 @@ class _Python(Language[_Index]):
 
     @override
     def roots(self, repo_root: Path, listed: list[str]) -> _Index:
-        return _Index.build(listed)
+        return _Index.build([p for p in listed if p.endswith(self.SUFFIXES)])
 
     @override
     def imports(self, path: str, source: bytes) -> list[ImportSite]:

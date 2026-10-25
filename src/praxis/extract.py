@@ -32,14 +32,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from praxis.lang import BLIND, PYTHON, REGISTERED, Unparsed, claimant
+from praxis.lang import BLIND, PYTHON, REGISTERED, Unparsed, claimant, file_class
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from praxis.lang import ImportSite, Language
 
-# Python's X1 version: the recorder's file_edges rows are Python files only.
+# Python's X1 version. A file_edges row carries its source file's language version.
 EXTRACTOR_VERSION = PYTHON.version
 # The runtime tracer's version (X2, run_scenario); scenario_runs rows carry it.
 X2_VERSION = "x2-v1"
@@ -76,6 +76,9 @@ class StaticGraph:
     parse_failures: tuple[str, ...]
     extractor_version: str
     languages: tuple[Coverage, ...] = ()
+    # Whole-tree scans only, else None: per component, its working-tree files by class
+    # (a registered language's name, unmapped_language, non_code or unknown; design 6).
+    file_classes: dict[str, dict[str, int]] | None = None
 
 
 @dataclass(frozen=True)
@@ -195,12 +198,13 @@ def _readers(
     """A reader for every registered language that claims a file in the scan, loaded
     only then; each resolves against all of its files in the tree."""
     wanted = {r.name: r for p in (listed if whole else parse) if (r := claimant(p))}
+    unclaimed = [p for p in listed if claimant(p) is None]
     readers: dict[str, _Reader] = {}
     for name, entry in sorted(wanted.items()):
         language = entry.load()
         present = language.files(repo_root, listed)
         mine = [p for p in parse if claimant(p) is entry]
-        roots = language.roots(repo_root, [*present, *mine])
+        roots = language.roots(repo_root, [*present, *mine, *unclaimed])
         readers[name] = _Reader(language, roots, present)
     return readers
 
@@ -255,7 +259,25 @@ def static_imports(
             Coverage(name, r.language.VERSION, len(r.present), r.parsed, r.failed)
             for name, r in readers.items()
         ),
+        _classes(repo_root, listed, readers, assign) if files is None else None,
     )
+
+
+def _classes(
+    repo_root: Path,
+    listed: list[str],
+    readers: dict[str, _Reader],
+    assign: Callable[[str], str],
+) -> dict[str, dict[str, int]]:
+    """Each working-tree file's class by suffix, counted per component."""
+    present = {p for r in readers.values() for p in r.present}
+    found: dict[str, Counter[str]] = {}
+    for path in listed:
+        kind = file_class(path)
+        here = path in present if claimant(path) else (repo_root / path).is_file()
+        if here:
+            found.setdefault(assign(path), Counter())[kind] += 1
+    return {c: dict(sorted(n.items())) for c, n in sorted(found.items())}
 
 
 def _read(repo_root: Path, path: str, readers: dict[str, _Reader], lift: _Lift) -> bool:
