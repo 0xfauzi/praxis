@@ -135,7 +135,7 @@ COMPONENTS: tuple[Component, ...] = (
         region="record",
         x=888,
         y=784,
-        source_review="072e04d7b1f0690328840c863a68abf00a25f6f26a722dbc46945fa1d41533d7",
+        source_review="9f9cf7dfc7c63da20569211120c3451ad76c8a7a169969c270ce58150dd072a9",
     ),
     Component(
         id="Recorder",
@@ -147,7 +147,7 @@ COMPONENTS: tuple[Component, ...] = (
         note="A HEAD that is not a descendant of the base commit makes the snapshot unobservable and voids a bound task. The notice flag is set only at the Stop that closes a segment, for a payload without turn_id. The recorder imports components, extract, and transcript inside the functions that use them.",
         x=888,
         y=692,
-        source_review="3c0cb25ce2ded9ae6238005ac9fa502e9a4c6dfa2234aaaa26a5b88e5ce3ff19",
+        source_review="99f57985ed8fe954b9c61eb065dd662e0f837524e51021848d1940816b332d8a",
     ),
     Component(
         id="Ledger",
@@ -160,7 +160,7 @@ COMPONENTS: tuple[Component, ...] = (
         note="Each table in schema.CLAIMS has a CHECK that fixes its one claim class and refuses an empty source list. The attributions table accepts any claim class, and hook_events has none. Triggers make the measurement tables and repository_starts append-only, and a task or a map sets each transition column once. repository_starts has one row per repository, and its start week must be one of its candidate weeks. A task fixes forced_control at registration. segment_close writes the outcomes and the task close in one transaction. A scenario run must name the HEAD tree it traced, unless its outcome is not_python. On a ledger that already held runs, migrate adds tree_hash without that CHECK. migrate also adds forced_control and makes the trigger for the fixed task columns again. probe_items_unprobed leaves out an item that a probe asked, so the binding pool and the validation draw hold blind items only. The survival lookup intersects agent line-hash multisets with a probe multiset, so two identical lines count as two. When PRAGMA user_version differs from SCHEMA_VERSION, Store.open runs the DDL and then migrate.",
         x=888,
         y=360,
-        source_review="511fc5ff9c599738af6fdba7dc73940453a06defefcd1894e351487779c06b17",
+        source_review="35e6f53055cd32505c93bf4a76cb8bba4147e55781abddae3c45d09ee6cbc6ff",
     ),
     Component(
         id="ConsentedInstall",
@@ -195,19 +195,19 @@ COMPONENTS: tuple[Component, ...] = (
         note="A flat package has more than 30 children at depth 1. Its children are grouped by the name before the first underscore. Then each one-file group joins the multi-file group with the most import edges, when that maximum is unique. The edges come from static_imports. The ledger calls from_json before it stores a map. The recorder, the item pool, the scenario runner, the task registration, the probe, and the report parse the frozen map and assign paths with it.",
         x=460,
         y=544,
-        source_review="cea32bd6afa49eb223146e245a6bfa41561ca9f944f4a0761318a23e9a319918",
+        source_review="b1e4d2dcb09b4e0277e7c4a25895611c1897844fb4dca6431d0bac7621cc5084",
     ),
     Component(
         id="Extractors",
         does="Extracts ground truth at component grain: static imports, runtime call traces in a scratch clone, and SQLite table references. It returns identifiers and counts only.",
         interface="static_imports(repo_root, assign, files) -> StaticGraph",
-        implemented_by=("praxis.extract",),
+        implemented_by=("praxis.extract", "praxis.lang", "praxis.lang.python"),
         entry="static_imports",
         region="measure",
-        note="The recorder, the component map, the item pool, the task registration, and the probe call static_imports. A resolved TYPE_CHECKING import is an edge that is not module-level, and type_only counts it, not blind_spots (EXTRACTOR_VERSION x1-v2). The scenario runner calls scratch_clone and run_scenario, and its rows carry X2_VERSION.",
+        note="The recorder, the component map, the item pool, the task registration, and the probe call static_imports. A resolved TYPE_CHECKING import is an edge that is not module-level, and type_only counts it, not blind_spots (EXTRACTOR_VERSION x1-v2). The scenario runner calls scratch_clone and run_scenario, and its rows carry X2_VERSION. praxis.lang holds the reader protocol and a registry. The registry imports a reader only when the scan has a file with its suffix. praxis.lang.python is the only reader, at x1-v2.",
         x=270,
         y=544,
-        source_review="c26438563293e6de1775ccbf5efb1cdd0b9694ed0e6ef34f45ed900d1f207537",
+        source_review="75140ee227bded174df70707dc93ea06999f678d67b977a2a71c494805abdd75",
     ),
     Component(
         id="ItemPool",
@@ -219,7 +219,7 @@ COMPONENTS: tuple[Component, ...] = (
         note="A change to a frozen map needs a --reason from MAP_REASONS. Freeze refuses fewer than 5 or more than 30 product components and prints the draft of a mechanical map. A second freeze writes only the missing pairs, and a pair whose truth flipped gets a new item at the next epoch. A component without a parsed Python file gives no items, not items with truth 0. After each freeze, it calls draw_start, which draws the start week at the first freeze only and prints nothing. praxis make components --write never writes over an existing owner file.",
         x=650,
         y=360,
-        source_review="653da8df59ab33f6de366eb561de0aae46ec8d2b6867b6c75e9da8aff8af8b89",
+        source_review="1085f95e2659fe6b3cd727f5ce531074c2f1847ac0b989967de4e34a9a0c96db",
     ),
     Component(
         id="TaskRegistration",
@@ -231,7 +231,7 @@ COMPONENTS: tuple[Component, ...] = (
         note="A task before the start week is control with forced_control set, and its text is the text of any control task. From the start week, the arm generator reads only the seed, the repository id, and the task ordinal. The region touch rate counts closed tasks in TOUCH_WINDOW_WEEKS, where None counts all. The binding pool holds only items that no task exposed and no probe asked. The recorder binds the task and closes its segment. praxis show task calls last, which prints only the result.",
         x=650,
         y=452,
-        source_review="47aed58ff39603c275a56c864a5e055a46422fc3d466d130dfe0253669c7a328",
+        source_review="f11ee165cb4080ee9c8ade5e6ba999ea8e95f12c374a145be5fd99daac09e689",
     ),
     Component(
         id="Probe",
@@ -243,7 +243,7 @@ COMPONENTS: tuple[Component, ...] = (
         note="A structural item without a truth from the extractors now is not asked and stays due. After the due items, a structural probe asks up to N_VALIDATION never-drawn validation items each ISO week, ranked by a hash of task.SEED. It asks an item answered on the grid once more inside the P1 window, as a retest. The knockout reads only scenario runs of the HEAD tree. Pathfinder ratings stay in memory and only the scores are stored.",
         x=460,
         y=452,
-        source_review="59208d61fbbae82bddb366aa049fc54545a292fabd6573a6da918bba945e8877",
+        source_review="031c32e1fd9a80fe92bbd04128f0b7f89ba9548de963b13e5078184a30573554",
     ),
     Component(
         id="ScenarioRunner",
@@ -255,7 +255,7 @@ COMPONENTS: tuple[Component, ...] = (
         note="The scenario file is a closed shape. A scenario id is stored as an identifier, and the argv is stored only as a hash. PRAXIS_HOME points into the clone, so a scenario cannot write the owner's ledger. The clone is deleted after each scenario, also when it fails.",
         x=270,
         y=360,
-        source_review="caf95602fffe14e472b5d155015d9a9a31691ec1311b8e2c0c4fd8638d6b1950",
+        source_review="6302a0769f713e4cca8d8c90bc0a99e2566438ea1708dbfa220e4948ed1cc12c",
     ),
     Component(
         id="TranscriptReader",
@@ -267,7 +267,7 @@ COMPONENTS: tuple[Component, ...] = (
         note="The probe and the report call locate and read. The supply count calls read, and the recorder calls options_hash. The name sets that it returns must never be stored.",
         x=270,
         y=692,
-        source_review="437fcad1074a763520f3d6cab2dd571e972774ec75583a73bc3afff07b8376b1",
+        source_review="1534099de89bb2519721a2dd097e4b5294b20730b2b29609fbe5340eafe4340d",
     ),
     Component(
         id="AgentCheck",
@@ -315,7 +315,7 @@ COMPONENTS: tuple[Component, ...] = (
         note="This is not part of the transcript reader, which reads one transcript. The supply count reads all transcripts, groups prompts and tool calls by ISO week, gets repository ids through git, and prints a table or JSON. A week before the first prompt on disk is unobservable, not zero. A session in which no prompt has origin gives prompts of unknown kind and no segments. Codex rollout files are counted and not read. EDIT_TOOLS is recorder.MUTATING_TOOLS without Bash.",
         x=270,
         y=784,
-        source_review="26fe8160e43705682db0e9f16daf5831066e63f3b7e0b56776d9584eb60a7c54",
+        source_review="f671c802b3d85a24f9c2294e962ca490aebeead36edb4b23a3a24d31bc9b2bf7",
     ),
 )
 

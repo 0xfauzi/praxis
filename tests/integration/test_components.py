@@ -302,8 +302,10 @@ def test_praxis_itself_still_cuts_at_depth_one() -> None:
         capture_output=True,
         text=True,
     ).stdout.split("\0")
-    modules = [p for p in listed if p.count("/") == 2 and (root / p).stat().st_size]
+    # A depth-1 child is a module or a subpackage (src/praxis/lang, design 04 2.1).
+    files = [p for p in listed if p.count("/") >= 2 and (root / p).stat().st_size]
+    children = {"/".join(p.split("/")[:3]) for p in files}
     cmap = c.derive(root, "r12")
     assert cmap.warnings == ()
-    assert len(c.product_components(cmap)) == len(modules)
-    assert {c.assign(cmap, p) for p in modules} == set(c.product_components(cmap))
+    assert len(c.product_components(cmap)) == len(children)
+    assert {c.assign(cmap, p) for p in files} == set(c.product_components(cmap))

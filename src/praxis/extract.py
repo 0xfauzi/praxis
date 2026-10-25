@@ -10,12 +10,13 @@ edge may be a blind spot, which is why blind spots are counted rather than assum
 An import under ``if TYPE_CHECKING:`` that resolves is an edge and not a blind spot: X1
 resolves it statically, so the owner can be asked about it (design 3.1).
 
-Design: docs/design/03-measurement.md, sections 3.1 to 3.3 and 3.5.
+Design: docs/design/03-measurement.md, sections 3.1 to 3.3 and 3.5. Each language's
+import reader lives in praxis.lang; the listing, the lift to components and the counts
+stay here (docs/design/04-languages.md section 2.3).
 """
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
 import os
@@ -25,26 +26,26 @@ import sqlite3
 import subprocess
 import tempfile
 import time
-import warnings
 from collections import Counter
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from praxis.lang import BLIND, PYTHON, REGISTERED, Unparsed, claimant
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-# x1-v2: a resolved TYPE_CHECKING import stopped counting as a blind spot.
-EXTRACTOR_VERSION = "x1-v2"
+    from praxis.lang import ImportSite, Language
+
+# Python's X1 version: the recorder's file_edges rows are Python files only.
+EXTRACTOR_VERSION = PYTHON.version
 # The runtime tracer's version (X2, run_scenario); scenario_runs rows carry it.
 X2_VERSION = "x2-v1"
 # A cap against a hung git, not a measured bound: clone time on the owner's largest
 # repository needs measuring (E05).
 GIT_TIMEOUT_S = 60.0
-_DYNAMIC = frozenset({"__import__", "import_module"})
-
-Import = ast.Import | ast.ImportFrom
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,19 @@ class StaticGraph:
     type_only: dict[str, int]
     parse_failures: tuple[str, ...]
     extractor_version: str
+    languages: tuple[Coverage, ...] = ()
+
+
+@dataclass(frozen=True)
+class Coverage:
+    """One language's files in a scan: ``listed`` in the working tree, and of the files
+    read, ``parsed`` and ``failed``."""
+
+    language: str
+    extractor_version: str
+    listed: int
+    parsed: int
+    failed: int
 
 
 @dataclass(frozen=True)
@@ -104,50 +118,6 @@ class Trace:
     outcome: str
 
 
-class _Sites(ast.NodeVisitor):
-    """Import statements as (node, runs at import time, under TYPE_CHECKING)."""
-
-    def __init__(self) -> None:
-        self.imports: list[tuple[Import, bool, bool]] = []
-        self.dynamic = 0
-        self._depth = 0
-        self._typing = False
-
-    def _scope(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        self._depth += 1
-        self.generic_visit(node)
-        self._depth -= 1
-
-    visit_FunctionDef = visit_AsyncFunctionDef = _scope
-
-    def visit_If(self, node: ast.If) -> None:
-        if _name(node.test) != "TYPE_CHECKING":
-            self.generic_visit(node)
-            return
-        outer, self._typing = self._typing, True
-        for stmt in node.body:
-            self.visit(stmt)
-        self._typing = outer
-        for stmt in node.orelse:
-            self.visit(stmt)
-
-    def visit_Import(self, node: Import) -> None:
-        runs = self._depth == 0 and not self._typing
-        self.imports.append((node, runs, self._typing))
-
-    visit_ImportFrom = visit_Import
-
-    def visit_Call(self, node: ast.Call) -> None:
-        self.dynamic += _name(node.func) in _DYNAMIC
-        self.generic_visit(node)
-
-
-def _name(node: ast.expr) -> str | None:
-    if isinstance(node, ast.Name):
-        return node.id
-    return node.attr if isinstance(node, ast.Attribute) else None
-
-
 def _git(cwd: Path | None, *args: str) -> str:
     done = subprocess.run(
         ["git", *args], cwd=cwd, capture_output=True, check=True, timeout=GIT_TIMEOUT_S
@@ -155,140 +125,122 @@ def _git(cwd: Path | None, *args: str) -> str:
     return done.stdout.decode("utf-8", "surrogateescape")
 
 
-def _python_files(repo_root: Path) -> list[str]:
+def _listed(repo_root: Path) -> list[str]:
     listed = _git(
         repo_root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"
     )
     # --cached lists an unmerged path once per stage; a path is an identifier here.
-    paths = dict.fromkeys(p for p in listed.split("\0") if p.endswith(".py"))
-    return [p for p in paths if (repo_root / p).is_file()]
-
-
-def _module_names(path: str, paths: set[str]) -> list[str]:
-    """Package-rooted name first (how sys.path sees it), then the repo-root dotted
-    name (how a namespace package run from the root sees it)."""
-    parts = path[:-3].split("/")
-    dirs = parts[:-1]
-    if parts[-1] == "__init__":
-        parts = dirs
-    top = len(dirs)
-    while top > 0 and "/".join([*dirs[:top], "__init__.py"]) in paths:
-        top -= 1
-    return [n for n in dict.fromkeys([".".join(parts[top:]), ".".join(parts)]) if n]
-
-
-def _prefixes(dotted: str) -> list[str]:
-    parts = dotted.split(".")
-    return [".".join(parts[:k]) for k in range(len(parts), 0, -1)]
-
-
-def _relative_base(name: str, is_init: bool, node: ast.ImportFrom) -> str | None:
-    package = name.split(".") if is_init else name.split(".")[:-1]
-    keep = len(package) - (node.level - 1)
-    if keep <= 0:
-        return None
-    return ".".join([*package[:keep], *([node.module] if node.module else [])])
-
-
-def _bases(node: ast.ImportFrom, names: list[str], is_init: bool) -> list[str]:
-    if node.level == 0:
-        return [node.module or ""]
-    found = (_relative_base(n, is_init, node) for n in names)
-    return [b for b in found if b is not None]
-
-
-def _candidates(node: Import, names: list[str], is_init: bool) -> list[list[str]]:
-    """Per alias, the module names to try in order; the first one indexed wins."""
-    if isinstance(node, ast.Import):
-        return [_prefixes(alias.name) for alias in node.names]
-    bases = _bases(node, names, is_init)
-    return [
-        [c for base in bases for c in _prefixes(f"{base}.{alias.name}")]
-        for alias in node.names
-    ]
-
-
-@dataclass(frozen=True)
-class _Index:
-    modules: dict[str, list[str]]
-    names: dict[str, list[str]]
-
-    @classmethod
-    def build(cls, paths: list[str]) -> _Index:
-        known = set(paths)
-        names = {p: _module_names(p, known) for p in known}
-        modules: dict[str, list[str]] = {}
-        for path in sorted(known):
-            for name in names[path]:
-                modules.setdefault(name, []).append(path)
-        return cls(modules, names)
-
-    def targets(self, path: str, node: Import) -> tuple[list[str], bool]:
-        """The files one statement resolves to, and whether a name matched two."""
-        is_init = path.rsplit("/", 1)[-1] == "__init__.py"
-        found: list[str] = []
-        ambiguous = False
-        for tries in _candidates(node, self.names[path], is_init):
-            hits = next((self.modules[c] for c in tries if c in self.modules), [])
-            found += hits if len(hits) == 1 else []
-            ambiguous |= len(hits) > 1
-        return found, ambiguous
+    return list(dict.fromkeys(p for p in listed.split("\0") if p))
 
 
 @dataclass
 class _Lift:
     """File-level import sites lifted to component edges, one site per statement."""
 
-    index: _Index
     assign: Callable[[str], str]
     sites: Counter[tuple[str, str]] = field(default_factory=Counter)
     at_import: set[tuple[str, str]] = field(default_factory=set)
     blind: Counter[str] = field(default_factory=Counter)
     typed: Counter[str] = field(default_factory=Counter)
 
-    def add(self, path: str, tree: ast.Module) -> None:
-        src, visitor = self.assign(path), _Sites()
-        visitor.visit(tree)
-        self.blind[src] += visitor.dynamic
+    def add(self, path: str, statements: list[_Statement]) -> None:
+        src = self.assign(path)
+        self.blind[src] += 0
         self.typed[src] += 0
-        for node, runs, typing_only in visitor.imports:
-            found, ambiguous = self.index.targets(path, node)
+        for found, blind, deferred, type_only in statements:
             dsts = {self.assign(f) for f in found} - {src}
-            self.blind[src] += ambiguous
-            self.typed[src] += typing_only and bool(dsts)
+            self.blind[src] += blind
+            self.typed[src] += type_only and bool(dsts)
             for dst in dsts:
                 self.sites[src, dst] += 1
-                if runs:
+                if not deferred:
                     self.at_import.add((src, dst))
 
 
-def _parse(path: Path) -> ast.Module | None:
-    try:
-        source = path.read_bytes()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            return ast.parse(source)
-    except (OSError, SyntaxError, ValueError, RecursionError):
-        return None
+# Per statement: the files it resolves to, whether it is a blind spot, deferred, and
+# type-only. A statement is the sites one reader gave the same offsets.
+_Statement = tuple[list[str], bool, bool, bool]
+
+
+def _statements(
+    language: Language[Any], roots: object, path: str, sites: list[ImportSite]
+) -> list[_Statement]:
+    spans: dict[tuple[int, int], list[ImportSite]] = {}
+    for site in sites:
+        spans.setdefault((site.start, site.end), []).append(site)
+    out: list[_Statement] = []
+    for group in spans.values():
+        blind = any(s.blind is not None for s in group)
+        done = [language.resolve(s, path, roots) for s in group if s.blind is None]
+        found = [r.target for r in done if r.target is not None]
+        blind |= any(r.reason in BLIND for r in done)
+        out.append((found, blind, group[0].deferred, group[0].type_only))
+    return out
+
+
+@dataclass
+class _Reader:
+    """One language's share of a scan: its reader, its roots and its counts."""
+
+    language: Language[Any]
+    roots: object
+    present: list[str]
+    parsed: int = 0
+    failed: int = 0
+
+
+def _readers(
+    repo_root: Path, listed: list[str], parse: list[str], whole: bool
+) -> dict[str, _Reader]:
+    """A reader for every registered language that claims a file in the scan, loaded
+    only then; each resolves against all of its files in the tree."""
+    wanted = {r.name: r for p in (listed if whole else parse) if (r := claimant(p))}
+    readers: dict[str, _Reader] = {}
+    for name, entry in sorted(wanted.items()):
+        language = entry.load()
+        present = language.files(repo_root, listed)
+        mine = [p for p in parse if claimant(p) is entry]
+        roots = language.roots(repo_root, [*present, *mine])
+        readers[name] = _Reader(language, roots, present)
+    return readers
+
+
+def _language_of(path: str) -> str:
+    entry = claimant(path)
+    if entry is None:
+        raise ValueError(f"no registered language reads {path}")
+    return entry.name
+
+
+def _whole(listed: list[str], readers: dict[str, _Reader]) -> list[str]:
+    present = {p for r in readers.values() for p in r.present}
+    return [p for p in listed if p in present]
+
+
+def _version(readers: dict[str, _Reader]) -> str:
+    """The sorted join of the versions that read a file; with none, every registered
+    version, because each found nothing to read."""
+    used = [r.language.VERSION for r in readers.values()]
+    return "+".join(sorted(used or [r.version for r in REGISTERED]))
 
 
 def static_imports(
     repo_root: Path, assign: Callable[[str], str], files: list[str] | None = None
 ) -> StaticGraph:
-    """X1 over the working tree's Python files, or over ``files`` only. Either way,
-    imports resolve against every Python file in the working tree."""
-    present = _python_files(repo_root)
-    parse = present if files is None else files
+    """X1 over the working tree's files that a registered language reads, or over
+    ``files`` only. Either way, imports resolve against every file of that language in
+    the working tree. A path in ``files`` that no language reads is refused."""
+    listed = _listed(repo_root)
+    parse = [] if files is None else files
     if len(set(parse)) != len(parse):
         raise ValueError("files names a path twice")
-    lift = _Lift(_Index.build([*present, *parse]), assign)
-    failures: list[str] = []
     for path in parse:
-        tree = _parse(repo_root / path)
-        if tree is None:
-            failures.append(path)
-        else:
-            lift.add(path, tree)
+        _language_of(path)
+    readers = _readers(repo_root, listed, parse, files is None)
+    if files is None:
+        parse = _whole(listed, readers)
+    lift = _Lift(assign)
+    failures = [p for p in parse if not _read(repo_root, p, readers, lift)]
     edges = tuple(
         Edge(s, d, n, (s, d) in lift.at_import)
         for (s, d), n in sorted(lift.sites.items())
@@ -298,8 +250,25 @@ def static_imports(
         dict(sorted(lift.blind.items())),
         dict(sorted(lift.typed.items())),
         tuple(failures),
-        EXTRACTOR_VERSION,
+        _version(readers),
+        tuple(
+            Coverage(name, r.language.VERSION, len(r.present), r.parsed, r.failed)
+            for name, r in readers.items()
+        ),
     )
+
+
+def _read(repo_root: Path, path: str, readers: dict[str, _Reader], lift: _Lift) -> bool:
+    """Lift one file's sites; False when it could not be read or parsed."""
+    reader = readers[_language_of(path)]
+    try:
+        sites = reader.language.imports(path, (repo_root / path).read_bytes())
+    except (OSError, Unparsed):
+        reader.failed += 1
+        return False
+    reader.parsed += 1
+    lift.add(path, _statements(reader.language, reader.roots, path, sites))
+    return True
 
 
 def reach(graph: StaticGraph, nodes: list[str]) -> set[tuple[str, str]]:

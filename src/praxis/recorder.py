@@ -347,7 +347,7 @@ def _stop(ev: _Event, store: Store, now: str) -> Result:
             return _noted(result, "task void: head_not_descendant")
         return result
     since = store.last_stop_ts(ev.session)
-    scan_files = _python(store.deltas_files_since(ev.session, since))
+    scan_files = _claimed(store.deltas_files_since(ev.session, since))
     if not scan_files and seg is None:
         return result
     cmap = _frozen_map(store, repo)
@@ -365,8 +365,11 @@ def _noted(result: Result, note: str) -> Result:
     return Result(result.outcome, joined, result.head_sha, result.notice)
 
 
-def _python(files: list[str]) -> list[str]:
-    return [f for f in files if f.endswith(".py")]
+def _claimed(files: list[str]) -> list[str]:
+    """The files a registered language reads, chosen by suffix with no reader loaded."""
+    from praxis.lang import claimant  # off the path of every other hook
+
+    return [f for f in files if claimant(f) is not None]
 
 
 def _frozen_map(store: Store, repo: str) -> ComponentMap | None:
@@ -500,12 +503,12 @@ def _close(
         return _noted(result, "task void: map_changed")
     from praxis.components import assign, product_components
 
-    before = _history(store, cmap, _python(touched), now)
+    before = _history(store, cmap, _claimed(touched), now)
     rows = []
     warnings = _gaps(store, ev.session, str(seg["bound_ts"]))
     for c in product_components(cmap):
         mine = [f for f in touched if assign(cmap, f) == c]
-        added, removed = _edge_change(_python(mine), before, after)
+        added, removed = _edge_change(_claimed(mine), before, after)
         rows.append((c, bool(mine), None, added, removed))
         if added is None:
             warnings.append(f"edges_unknown:{c}")
