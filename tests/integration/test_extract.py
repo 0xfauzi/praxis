@@ -20,6 +20,7 @@ import pytest
 
 from praxis import store
 from praxis.extract import (
+    Coverage,
     Edge,
     Scenario,
     StaticGraph,
@@ -196,6 +197,127 @@ def test_x1_type_checking_imports_are_edges_not_blind_spots(tmp_path: Path) -> N
     assert graph.type_only == {
         "__init__": 0, "base": 0, "elsewhere": 0, "model": 2, "view": 1,
     }  # fmt: skip
+
+
+# Relative imports at every level, several names per statement, nested importlib calls,
+# a latin-1 cookie, a BOM, CR and CRLF line ends, a class body, an async def, a name two
+# files share and a namespace package: what moving the reader into lang/python.py must
+# keep (design 04 section 2.1).
+LANGUAGE_CASES = {
+    "lib/__init__.py": (
+        b"from . import a, b\nfrom .a import x, y\nfrom .. import beyond\n"
+    ),
+    "lib/a.py": (
+        b"import lib.b, lib.sub.c\nfrom lib.sub import c as k, d\nimport importlib\n"
+        b"M = importlib.import_module(__import__('x').y)\n"
+    ),
+    "lib/b.py": b'# -*- coding: latin-1 -*-\ns = "\xe9\xe9"; from . import a\n',
+    "lib/sub/__init__.py": b"\xef\xbb\xbffrom .. import a\nfrom ... import far\n",
+    "lib/sub/c.py": b"import lib.a\rfrom . import d\r",
+    "lib/sub/d.py": (
+        b"from typing import TYPE_CHECKING\r\nif TYPE_CHECKING:\r\n"
+        b"    from lib import a, b\r\nclass K:\r\n    from lib.sub import c\r\n"
+        b"async def f():\r\n    from lib import b\r\n"
+    ),
+    "lib/broken.py": b"def f(:\n",
+    "one/dup.py": b"",
+    "two/dup.py": b"",
+    "top.py": b"import dup\nfrom lib import *\nimport lib.missing\n",
+    "ns/pkg/mod.py": b"from . import other\nfrom .other import z\n",
+    "ns/pkg/other.py": b"",
+}
+
+
+@pytest.fixture
+def cases(tmp_path: Path) -> Path:
+    repo = tmp_path / "cases"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    for rel, data in LANGUAGE_CASES.items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_bytes(data)
+    return repo
+
+
+def test_x1_python_reader_keeps_x1_v2_at_file_grain(cases: Path) -> None:
+    """Every expectation here was printed by x1-v2 at 844a207, before the reader moved
+    to lang/python.py; only ``languages`` is new, and it was written by hand."""
+    graph = static_imports(cases, lambda p: p)
+    assert graph.edges == (
+        Edge("lib/__init__.py", "lib/a.py", 2, True),
+        Edge("lib/__init__.py", "lib/b.py", 1, True),
+        Edge("lib/a.py", "lib/b.py", 1, True),
+        Edge("lib/a.py", "lib/sub/c.py", 2, True),
+        Edge("lib/a.py", "lib/sub/d.py", 1, True),
+        Edge("lib/b.py", "lib/a.py", 1, True),
+        Edge("lib/sub/__init__.py", "lib/a.py", 1, True),
+        Edge("lib/sub/c.py", "lib/a.py", 1, True),
+        Edge("lib/sub/c.py", "lib/sub/d.py", 1, True),
+        Edge("lib/sub/d.py", "lib/a.py", 1, False),
+        Edge("lib/sub/d.py", "lib/b.py", 2, False),
+        Edge("lib/sub/d.py", "lib/sub/c.py", 1, True),
+        Edge("ns/pkg/mod.py", "ns/pkg/other.py", 2, True),
+        Edge("top.py", "lib/__init__.py", 2, True),
+    )
+    parsed = [p for p in sorted(LANGUAGE_CASES) if p != "lib/broken.py"]
+    assert graph.blind_spots == {
+        **dict.fromkeys(parsed, 0), "lib/a.py": 2, "top.py": 1}  # fmt: skip
+    assert graph.type_only == {**dict.fromkeys(parsed, 0), "lib/sub/d.py": 1}
+    assert graph.parse_failures == ("lib/broken.py",)
+    assert graph.extractor_version == "x1-v2"
+    assert graph.languages == (Coverage("python", "x1-v2", 12, 11, 1),)
+
+
+def test_x1_python_reader_keeps_x1_v2_per_statement(cases: Path) -> None:
+    """One statement naming two files of one component is one site (printed by x1-v2
+    at 844a207, like the test above)."""
+    graph = static_imports(cases, lambda p: p.rsplit("/", 1)[0] if "/" in p else ".")
+    assert graph.edges == (
+        Edge(".", "lib", 2, True),
+        Edge("lib", "lib/sub", 2, True),
+        Edge("lib/sub", "lib", 4, True),
+    )
+    assert graph.blind_spots == {
+        ".": 1, "lib": 2, "lib/sub": 0, "ns/pkg": 0, "one": 0, "two": 0}  # fmt: skip
+    assert graph.type_only == {
+        ".": 0, "lib": 0, "lib/sub": 1, "ns/pkg": 0, "one": 0, "two": 0}  # fmt: skip
+    only = ["lib/sub/c.py", "top.py", "lib/broken.py"]
+    some = static_imports(cases, lambda p: p, only)
+    assert some.edges == (
+        Edge("lib/sub/c.py", "lib/a.py", 1, True),
+        Edge("lib/sub/c.py", "lib/sub/d.py", 1, True),
+        Edge("top.py", "lib/__init__.py", 2, True),
+    )
+    assert (some.blind_spots, some.parse_failures) == (
+        {"lib/sub/c.py": 0, "top.py": 1}, ("lib/broken.py",))  # fmt: skip
+    assert some.languages == (Coverage("python", "x1-v2", 12, 2, 1),)
+    with pytest.raises(ValueError, match=r"no registered language reads README\.md"):
+        static_imports(cases, lambda p: p, ["README.md"])
+
+
+def test_a_reader_loads_only_when_its_suffix_is_scanned(cases: Path) -> None:
+    """The hook pays for every import (design 04 section 2.1): importing the extractor
+    loads no reader, and a scan with no Python file never loads Python's."""
+    bare = cases.parent / "bare"
+    bare.mkdir()
+    git(bare, "init", "-q")
+    (bare / "README.md").write_text("no code\n")
+    probe = (
+        "import sys\nfrom pathlib import Path\nfrom praxis import extract"
+        "\nloaded = lambda: sorted(m for m in sys.modules if 'praxis.lang' in m)"
+        "\nprint(loaded())\ng = extract.static_imports(Path(sys.argv[1]), str)"
+        "\nprint(loaded(), g.extractor_version, g.languages, g.blind_spots)"
+    )
+    run = [sys.executable, "-c", probe]
+    done = subprocess.run([*run, str(bare)], capture_output=True, text=True, check=True)
+    assert done.stdout.splitlines() == [
+        "['praxis.lang']", "['praxis.lang'] x1-v2 () {}"]  # fmt: skip
+    done = subprocess.run(
+        [*run, str(cases)], capture_output=True, text=True, check=True
+    )
+    assert done.stdout.splitlines()[1].startswith(
+        "['praxis.lang', 'praxis.lang.python'] x1-v2 (Coverage(language='python',"
+    )
 
 
 def test_reach_excludes_self_pairs_on_a_cycle() -> None:
